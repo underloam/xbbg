@@ -1011,6 +1011,191 @@ class TestTickModeWarning:
         assert captured["flush_threshold"] == 1
 
 
+class TestExplicitOutputSelector:
+    """Explicit output modes determine both iteration and drain values."""
+
+    @staticmethod
+    def _install_fake_engine(
+        monkeypatch,
+        *,
+        live_batch,
+        drained_batches,
+        live_tick,
+        drained_ticks,
+    ):
+        from xbbg import blp as blp_module
+
+        class FakePySubscription:
+            def __init__(self):
+                self.batch_reads = 0
+                self.tick_reads = 0
+
+            async def __anext__(self):
+                self.batch_reads += 1
+                return live_batch
+
+            async def __anext_tick_dict__(self):
+                self.tick_reads += 1
+                return live_tick
+
+            async def unsubscribe(self, drain, tick_mode):
+                assert drain is True
+                return list(drained_ticks if tick_mode else drained_batches)
+
+        native_sub = FakePySubscription()
+
+        class FakeEngine:
+            async def subscribe(self, _tickers, _fields, *, all_fields):
+                assert all_fields is False
+                return native_sub
+
+        monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
+        return blp_module, native_sub
+
+    def test_record_batch_overrides_legacy_tick_mode_for_iteration_and_drain(self, monkeypatch):
+        from xbbg.blp import Backend
+
+        live_batch = object()
+        drained_batch = object()
+        blp_module, native_sub = self._install_fake_engine(
+            monkeypatch,
+            live_batch=live_batch,
+            drained_batches=[drained_batch],
+            live_tick={"representation": "tick"},
+            drained_ticks=[{"representation": "drained tick"}],
+        )
+
+        async def exercise():
+            sub = await blp_module.asubscribe(
+                "IBM US Equity",
+                "LAST_PRICE",
+                raw=False,
+                backend=Backend.NATIVE,
+                tick_mode=True,
+                output="record_batch",
+            )
+            return await anext(sub), await sub.unsubscribe(drain=True)
+
+        current, drained = asyncio.run(exercise())
+
+        assert current is live_batch
+        assert drained == [drained_batch]
+        assert native_sub.batch_reads == 1
+        assert native_sub.tick_reads == 0
+
+    def test_backend_overrides_legacy_raw_and_tick_modes_for_iteration_and_drain(self, monkeypatch):
+        from xbbg.blp import Backend
+
+        live_table = object()
+        drained_table = object()
+
+        class FakeBatch:
+            def __init__(self, table):
+                self.table = table
+
+            def to_table(self):
+                return self.table
+
+        live_batch = FakeBatch(live_table)
+        drained_batch = FakeBatch(drained_table)
+        blp_module, native_sub = self._install_fake_engine(
+            monkeypatch,
+            live_batch=live_batch,
+            drained_batches=[drained_batch],
+            live_tick={"representation": "tick"},
+            drained_ticks=[{"representation": "drained tick"}],
+        )
+        monkeypatch.setattr(
+            blp_module,
+            "convert_backend_frame",
+            lambda table, backend: ("backend", table, backend),
+        )
+
+        async def exercise():
+            sub = await blp_module.asubscribe(
+                "IBM US Equity",
+                "LAST_PRICE",
+                raw=True,
+                backend=Backend.NATIVE,
+                tick_mode=True,
+                output="backend",
+            )
+            return await anext(sub), await sub.unsubscribe(drain=True)
+
+        current, drained = asyncio.run(exercise())
+
+        assert current == ("backend", live_table, Backend.NATIVE)
+        assert drained == [("backend", drained_table, Backend.NATIVE)]
+        assert native_sub.batch_reads == 1
+        assert native_sub.tick_reads == 0
+
+    @pytest.mark.parametrize("output", ["dict", "tick"])
+    def test_dict_outputs_override_legacy_batch_modes_for_iteration_and_drain(self, monkeypatch, output):
+        from xbbg.blp import Backend
+
+        live_tick = {"topic": "IBM US Equity", "LAST_PRICE": 123.45}
+        drained_tick = {"topic": "IBM US Equity", "LAST_PRICE": None}
+        blp_module, native_sub = self._install_fake_engine(
+            monkeypatch,
+            live_batch=object(),
+            drained_batches=[object()],
+            live_tick=live_tick,
+            drained_ticks=[drained_tick],
+        )
+        monkeypatch.setattr(
+            blp_module,
+            "convert_backend_frame",
+            lambda *_args: (_ for _ in ()).throw(AssertionError("dict output must not use batch conversion")),
+        )
+
+        async def exercise():
+            sub = await blp_module.asubscribe(
+                "IBM US Equity",
+                "LAST_PRICE",
+                raw=False,
+                backend=Backend.NATIVE,
+                tick_mode=False,
+                output=output,
+            )
+            return await anext(sub), await sub.unsubscribe(drain=True)
+
+        current, drained = asyncio.run(exercise())
+
+        assert current is live_tick
+        assert drained == [drained_tick]
+        assert native_sub.batch_reads == 0
+        assert native_sub.tick_reads == 1
+
+
+class TestPublicStreamingTyping:
+    """The package stub exposes the same streaming and exception surface as runtime."""
+
+    def test_top_level_stub_declares_streaming_and_exception_exports(self):
+        from pathlib import Path
+
+        import xbbg
+        from xbbg import blp as blp_module, exceptions as exception_module
+        from xbbg._exports import EXCEPTION_EXPORTS, PACKAGE_STREAMING_EXPORTS
+
+        stub = Path(xbbg.__file__).with_name("__init__.pyi").read_text()
+        for name in PACKAGE_STREAMING_EXPORTS:
+            assert f"{name} as {name}" in stub
+            assert f'    "{name}",' in stub
+            assert getattr(xbbg, name) is getattr(blp_module, name)
+        for name in EXCEPTION_EXPORTS:
+            assert f"{name} as {name}" in stub
+            assert f'    "{name}",' in stub
+            assert getattr(xbbg, name) is getattr(exception_module, name)
+
+    def test_subscription_and_asubscribe_annotations_survive_root_reexport(self):
+        from typing import Any, get_type_hints
+
+        import xbbg
+
+        assert get_type_hints(xbbg.asubscribe)["return"] is xbbg.Subscription
+        assert get_type_hints(xbbg.Subscription.unsubscribe)["return"] == list[Any] | None
+
+
 class TestSubscriptionConversion:
     """Subscription iteration converts batches through the constructor-bound path."""
 
@@ -1078,6 +1263,125 @@ class TestSubscriptionConversion:
 
         assert result is converted
         assert calls == ["to_table", (table, Backend.NATIVE)]
+
+    def test_raw_drain_returns_native_batches_unchanged(self):
+        from xbbg.blp import Subscription
+
+        batches = [object(), object()]
+        calls = []
+
+        class FakePySubscription:
+            async def unsubscribe(self, drain, tick_mode):
+                calls.append((drain, tick_mode))
+                return batches
+
+        sub = Subscription(FakePySubscription(), raw=True, backend=None)
+
+        result = asyncio.run(sub.unsubscribe(drain=True))
+
+        assert result == batches
+        assert calls == [(True, False)]
+
+    def test_table_drain_uses_the_iteration_conversion(self):
+        from xbbg.blp import Subscription
+
+        tables = [object(), object()]
+        calls = []
+
+        class FakeBatch:
+            def __init__(self, table):
+                self.table = table
+
+            def to_table(self):
+                calls.append(self.table)
+                return self.table
+
+        class FakePySubscription:
+            async def unsubscribe(self, drain, tick_mode):
+                assert (drain, tick_mode) == (True, False)
+                return [FakeBatch(table) for table in tables]
+
+        sub = Subscription(FakePySubscription(), raw=False, backend=None)
+
+        result = asyncio.run(sub.unsubscribe(drain=True))
+
+        assert result == tables
+        assert calls == tables
+
+    def test_backend_drain_uses_the_bound_iteration_converter(self, monkeypatch):
+        from xbbg import blp as blp_module
+        from xbbg.blp import Backend, Subscription
+
+        table = object()
+        converted = object()
+        calls = []
+
+        class FakeBatch:
+            def to_table(self):
+                calls.append("to_table")
+                return table
+
+        class FakePySubscription:
+            async def unsubscribe(self, drain, tick_mode):
+                assert (drain, tick_mode) == (True, False)
+                return [FakeBatch()]
+
+        def bound_converter(frame, backend):
+            calls.append((frame, backend))
+            return converted
+
+        monkeypatch.setattr(blp_module, "convert_backend_frame", bound_converter)
+        sub = Subscription(FakePySubscription(), raw=False, backend=Backend.NATIVE)
+
+        result = asyncio.run(sub.unsubscribe(drain=True))
+
+        assert result == [converted]
+        assert calls == ["to_table", (table, Backend.NATIVE)]
+
+    def test_tick_drain_returns_native_sparse_dicts_without_arrow_conversion(self):
+        from xbbg.blp import Subscription
+
+        ticks = [{"topic": "IBM US Equity", "PX_LAST": None}, {"topic": "IBM US Equity"}]
+        calls = []
+
+        class FakePySubscription:
+            async def unsubscribe(self, drain, tick_mode):
+                calls.append((drain, tick_mode))
+                return ticks
+
+        sub = Subscription(FakePySubscription(), raw=True, backend=None, tick_mode=True)
+        sub._convert_batch = lambda _value: (_ for _ in ()).throw(
+            AssertionError("dict drain must not convert through Arrow")
+        )
+
+        result = asyncio.run(sub.unsubscribe(drain=True))
+
+        assert result == ticks
+        assert "PX_LAST" in result[0]
+        assert "PX_LAST" not in result[1]
+        assert calls == [(True, True)]
+
+    def test_drain_normalizes_unread_gap_error_with_context(self):
+        from xbbg import _core
+        from xbbg.blp import Subscription
+        from xbbg.exceptions import BlpSubscriptionDataLossError
+
+        native_error = _core.BlpSubscriptionDataLossError("subscription gap")
+        native_error.topic = "IBM US Equity"
+        native_error.detail = "consumer queue overflow"
+
+        class FakePySubscription:
+            async def unsubscribe(self, drain, tick_mode):
+                assert (drain, tick_mode) == (True, False)
+                raise native_error
+
+        sub = Subscription(FakePySubscription(), raw=True, backend=None)
+
+        with pytest.raises(BlpSubscriptionDataLossError) as raised:
+            asyncio.run(sub.unsubscribe(drain=True))
+
+        assert raised.value.topic == "IBM US Equity"
+        assert raised.value.detail == "consumer queue overflow"
 
 
 class TestSubscriptionStats:

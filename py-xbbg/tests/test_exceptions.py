@@ -37,6 +37,17 @@ class TestPythonExceptionHierarchy:
 
         assert issubclass(BlpRequestError, BlpError)
 
+    def test_subscription_data_loss_inherits_from_request_error(self):
+        from xbbg.exceptions import BlpRequestError, BlpSubscriptionDataLossError
+
+        assert issubclass(BlpSubscriptionDataLossError, BlpRequestError)
+
+    def test_subscription_data_loss_is_exported_at_package_root(self):
+        import xbbg
+        from xbbg.exceptions import BlpSubscriptionDataLossError
+
+        assert xbbg.BlpSubscriptionDataLossError is BlpSubscriptionDataLossError
+
     def test_blp_limit_error_inherits_from_blp_request_error(self):
         """BlpLimitError should inherit from BlpRequestError."""
         from xbbg.exceptions import BlpLimitError, BlpRequestError
@@ -91,6 +102,19 @@ class TestPythonExceptionHierarchy:
         assert err.request_id == "req-123"
         assert err.code == 42
 
+    def test_subscription_data_loss_preserves_gap_context(self):
+        from xbbg.exceptions import BlpSubscriptionDataLossError
+
+        err = BlpSubscriptionDataLossError(
+            "subscription gap",
+            topic="IBM US Equity",
+            detail="consumer queue overflow",
+        )
+
+        assert str(err) == "subscription gap"
+        assert err.topic == "IBM US Equity"
+        assert err.detail == "consumer queue overflow"
+
     def test_catching_by_base_class(self):
         """Should be able to catch any xbbg exception with BlpError."""
         from xbbg.exceptions import (
@@ -101,6 +125,7 @@ class TestPythonExceptionHierarchy:
             BlpRequestError,
             BlpSecurityError,
             BlpSessionError,
+            BlpSubscriptionDataLossError,
             BlpTimeoutError,
             BlpValidationError,
         )
@@ -108,6 +133,11 @@ class TestPythonExceptionHierarchy:
         exceptions = [
             BlpSessionError("session error"),
             BlpRequestError("request error"),
+            BlpSubscriptionDataLossError(
+                "subscription gap",
+                topic="IBM US Equity",
+                detail="consumer queue overflow",
+            ),
             BlpSecurityError("security error"),
             BlpFieldError("field error"),
             BlpLimitError("limit error"),
@@ -142,6 +172,7 @@ class TestRustCoreExceptions:
         assert hasattr(_core, "BlpRequestError")
         assert hasattr(_core, "BlpSecurityError")
         assert hasattr(_core, "BlpFieldError")
+        assert hasattr(_core, "BlpSubscriptionDataLossError")
         assert hasattr(_core, "BlpValidationError")
         assert hasattr(_core, "BlpTimeoutError")
         assert hasattr(_core, "BlpInternalError")
@@ -157,6 +188,7 @@ class TestRustCoreExceptions:
         assert issubclass(_core.BlpError, BaseException)
         assert issubclass(_core.BlpSessionError, BaseException)
         assert issubclass(_core.BlpRequestError, BaseException)
+        assert issubclass(_core.BlpSubscriptionDataLossError, BaseException)
         assert issubclass(_core.BlpValidationError, BaseException)
         assert issubclass(_core.BlpTimeoutError, BaseException)
         assert issubclass(_core.BlpInternalError, BaseException)
@@ -176,6 +208,13 @@ class TestRustCoreExceptions:
         _core = xbbg._core
 
         assert issubclass(_core.BlpRequestError, _core.BlpError)
+
+    def test_core_subscription_data_loss_inherits_from_request_error(self):
+        import xbbg
+
+        _core = xbbg._core
+
+        assert issubclass(_core.BlpSubscriptionDataLossError, _core.BlpRequestError)
 
     def test_core_validation_error_inherits_from_blp_error(self):
         """Rust BlpValidationError should inherit from BlpError."""
@@ -568,6 +607,7 @@ class TestExceptionHierarchyComplete:
             BlpRequestError,
             BlpSecurityError,
             BlpSessionError,
+            BlpSubscriptionDataLossError,
             BlpTimeoutError,
             BlpValidationError,
         )
@@ -578,6 +618,7 @@ class TestExceptionHierarchyComplete:
             BlpLimitError,
             BlpSecurityError,
             BlpFieldError,
+            BlpSubscriptionDataLossError,
             BlpValidationError,
             BlpTimeoutError,
             BlpInternalError,
@@ -588,11 +629,18 @@ class TestExceptionHierarchyComplete:
 
     def test_request_family_errors_inherit_from_request_error(self):
         """Request-family exceptions should inherit from BlpRequestError."""
-        from xbbg.exceptions import BlpFieldError, BlpLimitError, BlpRequestError, BlpSecurityError
+        from xbbg.exceptions import (
+            BlpFieldError,
+            BlpLimitError,
+            BlpRequestError,
+            BlpSecurityError,
+            BlpSubscriptionDataLossError,
+        )
 
         assert issubclass(BlpLimitError, BlpRequestError)
         assert issubclass(BlpSecurityError, BlpRequestError)
         assert issubclass(BlpFieldError, BlpRequestError)
+        assert issubclass(BlpSubscriptionDataLossError, BlpRequestError)
 
     def test_exception_chain_catching(self):
         """Exception hierarchy should allow proper chain catching."""

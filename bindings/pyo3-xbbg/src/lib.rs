@@ -18,7 +18,8 @@
 //! - `BlpError::RequestFailure` → `BlpRequestError`
 //! - `BlpError::Timeout` → `BlpTimeoutError`
 //! - `BlpError::InvalidArgument` → `BlpValidationError`
-//! - Other errors → `BlpInternalError`
+//! - `BlpError::SubscriptionDataLoss` → `BlpSubscriptionDataLossError`
+//! - `BlpError::Internal` → `BlpInternalError`
 //!
 //! # Logging
 //!
@@ -58,7 +59,8 @@ use tokio::sync::{watch, Mutex};
 use xbbg_log::{debug, info, warn};
 
 use xbbg_async::engine::state::{
-    FieldLayout, SubscriptionArrowBatcher, SubscriptionMetrics, SubscriptionUpdate, UpdateValue,
+    FieldLayout, SubscriptionArrowBatcher, SubscriptionMetrics, SubscriptionReceiver,
+    SubscriptionSender, SubscriptionUpdate, UpdateValue,
 };
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
@@ -77,11 +79,9 @@ mod request;
 
 use request::dict_to_request_params;
 
-type StreamBatchResult = Result<SubscriptionUpdate, BlpError>;
-type StreamSender = tokio::sync::mpsc::Sender<StreamBatchResult>;
-type StreamReceiver = tokio::sync::mpsc::Receiver<StreamBatchResult>;
-type SharedStreamReceiver = Arc<Mutex<Option<StreamReceiver>>>;
-type SharedPendingStreamItems = Arc<StdMutex<VecDeque<StreamBatchResult>>>;
+type StreamItem = Result<SubscriptionUpdate, BlpError>;
+type SharedStreamReceiver = Arc<Mutex<Option<SubscriptionReceiver>>>;
+type SharedPendingStreamItems = Arc<StdMutex<VecDeque<StreamItem>>>;
 type SubscriptionMetricsMap = HashMap<usize, Arc<SubscriptionMetrics>>;
 type SubscriptionEventTuple = (i64, String, String, String, Option<String>, Option<String>);
 const MAX_SUBSCRIPTION_BATCH_CAPACITY_HINT: usize = 4096;
@@ -151,13 +151,12 @@ enum SubscriptionRead {
 }
 
 async fn receive_subscription_updates(
-    rx: &mut StreamReceiver,
-    pending: &StdMutex<VecDeque<StreamBatchResult>>,
+    rx: &mut SubscriptionReceiver,
+    pending: &StdMutex<VecDeque<StreamItem>>,
     close_rx: &mut watch::Receiver<bool>,
-    engine_shutdown_rx: &mut watch::Receiver<bool>,
     limit: usize,
 ) -> SubscriptionRead {
-    if *close_rx.borrow() || *engine_shutdown_rx.borrow() {
+    if *close_rx.borrow() {
         return SubscriptionRead::Closed;
     }
 
@@ -171,9 +170,6 @@ async fn receive_subscription_updates(
             tokio::select! {
                 biased;
                 _ = wait_for_subscription_close(close_rx) => return SubscriptionRead::Closed,
-                _ = wait_for_subscription_close(engine_shutdown_rx) => {
-                    return SubscriptionRead::Closed;
-                }
                 item = rx.recv() => item,
             }
         }
@@ -219,8 +215,8 @@ async fn receive_subscription_updates(
 
 async fn drain_forwarder_into_pending(
     claim: &xbbg_async::engine::SessionClaim,
-    rx: &mut StreamReceiver,
-    pending: &StdMutex<VecDeque<StreamBatchResult>>,
+    rx: &mut SubscriptionReceiver,
+    pending: &StdMutex<VecDeque<StreamItem>>,
 ) -> Result<(), BlpAsyncError> {
     let barrier = claim.drain_forwarder();
     tokio::pin!(barrier);
@@ -239,14 +235,42 @@ async fn drain_forwarder_into_pending(
             result = &mut barrier => break result,
         }
     };
-    barrier_result?;
     while let Ok(item) = rx.try_recv() {
         pending
             .lock()
             .expect("subscription pending queue poisoned")
             .push_back(item);
     }
-    Ok(())
+    barrier_result
+}
+fn collect_drained_stream_items(
+    pending: &StdMutex<VecDeque<StreamItem>>,
+    mut rx: Option<SubscriptionReceiver>,
+) -> Result<Vec<SubscriptionUpdate>, Box<BlpError>> {
+    let mut updates = Vec::new();
+    let mut first_error = None;
+    let mut collect = |item| match item {
+        Ok(update) => updates.push(update),
+        Err(error) if first_error.is_none() => first_error = Some(error),
+        Err(_) => {}
+    };
+
+    {
+        let mut pending = pending.lock().expect("subscription pending queue poisoned");
+        while let Some(item) = pending.pop_front() {
+            collect(item);
+        }
+    }
+    if let Some(rx) = rx.as_mut() {
+        while let Ok(item) = rx.try_recv() {
+            collect(item);
+        }
+    }
+
+    match first_error {
+        Some(error) => Err(Box::new(error)),
+        None => Ok(updates),
+    }
 }
 
 /// Interpreter-finalization-safe wrapper for [`future_into_py`].
@@ -345,6 +369,7 @@ pyo3::create_exception!(xbbg._core, BlpRequestError, BlpErrorBase);
 pyo3::create_exception!(xbbg._core, BlpLimitError, BlpRequestError);
 pyo3::create_exception!(xbbg._core, BlpSecurityError, BlpRequestError);
 pyo3::create_exception!(xbbg._core, BlpFieldError, BlpRequestError);
+pyo3::create_exception!(xbbg._core, BlpSubscriptionDataLossError, BlpRequestError);
 pyo3::create_exception!(xbbg._core, BlpValidationError, BlpErrorBase);
 pyo3::create_exception!(xbbg._core, BlpTimeoutError, BlpErrorBase);
 pyo3::create_exception!(xbbg._core, BlpInternalError, BlpErrorBase);
@@ -359,6 +384,16 @@ fn request_failure_is_limit(label: Option<&str>) -> bool {
             || label.contains("DAILY_CAPACITY_REACHED")
             || label.contains("subcategory=DAILY_CAPACITY_REACHED")
     })
+}
+fn subscription_data_loss_to_pyerr(topic: String, detail: String) -> PyErr {
+    let message = format!("Subscription data loss for '{topic}': {detail}");
+    let error = BlpSubscriptionDataLossError::new_err(message);
+    let _ = Python::try_attach(|py| {
+        let value = error.value(py);
+        value.setattr("topic", &topic)?;
+        value.setattr("detail", &detail)
+    });
+    error
 }
 
 fn blp_error_to_pyerr(e: BlpError) -> PyErr {
@@ -429,6 +464,9 @@ fn blp_error_to_pyerr(e: BlpError) -> PyErr {
                 msg.push_str(&format!(": {}", l));
             }
             BlpRequestError::new_err(msg)
+        }
+        BlpError::SubscriptionDataLoss { topic, detail } => {
+            subscription_data_loss_to_pyerr(topic, detail)
         }
         BlpError::Internal { detail } => {
             BlpInternalError::new_err(format!("Internal error: {}", detail))
@@ -2064,13 +2102,14 @@ pub struct PySubscription {
     ops: Arc<Mutex<()>>,
     /// Signal used to wake pending iteration during unsubscribe/close.
     close_signal: watch::Sender<bool>,
-    /// Engine-level shutdown signal — wakes pending iteration when the engine shuts down.
+    /// Engine shutdown is not iteration EOF; this only prevents close commands
+    /// from being sent after global engine teardown has already cleaned up.
     engine_shutdown: watch::Receiver<bool>,
 }
 
 /// Internal handle for subscription metadata and operations (without the receiver)
 struct SubscriptionStreamHandle {
-    tx: StreamSender,
+    tx: SubscriptionSender,
     claim: Option<xbbg_async::engine::SessionClaim>,
     fields: Vec<String>,
     all_fields: bool,
@@ -2091,7 +2130,7 @@ struct PendingAdd {
     options: Vec<String>,
     flush_threshold: Option<usize>,
     overflow_policy: Option<OverflowPolicy>,
-    tx: StreamSender,
+    tx: SubscriptionSender,
     status: xbbg_async::engine::SharedSubscriptionStatus,
 }
 
@@ -2103,6 +2142,9 @@ struct PendingRemove {
 
 impl SubscriptionStreamHandle {
     fn prepare_add(&self, tickers: Vec<String>) -> PyResult<Option<PendingAdd>> {
+        if self.tx.is_closed() {
+            return Err(PyRuntimeError::new_err("subscription already closed"));
+        }
         let claim = self
             .claim
             .as_ref()
@@ -2135,6 +2177,9 @@ impl SubscriptionStreamHandle {
     }
 
     fn prepare_remove(&self, tickers: Vec<String>) -> PyResult<Option<PendingRemove>> {
+        if self.tx.is_closed() {
+            return Err(PyRuntimeError::new_err("subscription already closed"));
+        }
         let claim = self
             .claim
             .as_ref()
@@ -2227,7 +2272,9 @@ impl PySubscription {
                     present: true,
                     topics: snapshot.topics().to_vec(),
                     fields: handle.fields.clone(),
-                    is_active: snapshot.has_active_topics() && handle.claim.is_some(),
+                    is_active: snapshot.has_active_topics()
+                        && handle.claim.is_some()
+                        && !handle.tx.is_closed(),
                     all_failed: !snapshot.has_active_topics() && !snapshot.failures().is_empty(),
                     messages_received,
                     dropped_batches,
@@ -2282,11 +2329,10 @@ impl PySubscription {
         let arrow_ready = self.arrow_ready.clone();
         let batch_items = self.batch_items;
         let close_signal = self.close_signal.clone();
-        let mut engine_shutdown_rx = self.engine_shutdown.clone();
 
         shutdown_safe_future(py, async move {
             let mut close_rx = close_signal.subscribe();
-            if *close_rx.borrow() || *engine_shutdown_rx.borrow() {
+            if *close_rx.borrow() {
                 return Err(PyStopAsyncIteration::new_err("subscription closed"));
             }
             let ready_batch = arrow_ready
@@ -2303,14 +2349,9 @@ impl PySubscription {
             let rx_ref = guard
                 .as_mut()
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
-            let read = receive_subscription_updates(
-                rx_ref,
-                pending.as_ref(),
-                &mut close_rx,
-                &mut engine_shutdown_rx,
-                batch_items,
-            )
-            .await;
+            let read =
+                receive_subscription_updates(rx_ref, pending.as_ref(), &mut close_rx, batch_items)
+                    .await;
 
             match read {
                 SubscriptionRead::Updates(updates) => {
@@ -2358,7 +2399,6 @@ impl PySubscription {
         let rx = self.rx.clone();
         let pending = self.pending.clone();
         let close_signal = self.close_signal.clone();
-        let mut engine_shutdown_rx = self.engine_shutdown.clone();
 
         shutdown_safe_future(py, async move {
             let mut close_rx = close_signal.subscribe();
@@ -2366,14 +2406,8 @@ impl PySubscription {
             let rx_ref = guard
                 .as_mut()
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
-            let read = receive_subscription_updates(
-                rx_ref,
-                pending.as_ref(),
-                &mut close_rx,
-                &mut engine_shutdown_rx,
-                1,
-            )
-            .await;
+            let read =
+                receive_subscription_updates(rx_ref, pending.as_ref(), &mut close_rx, 1).await;
 
             match read {
                 SubscriptionRead::Updates(mut updates) => {
@@ -2399,13 +2433,12 @@ impl PySubscription {
         let stream = self.stream.clone();
         let ops = self.ops.clone();
         let close_signal = self.close_signal.clone();
-        let engine_shutdown = self.engine_shutdown.clone();
 
         debug!(tickers = ?tickers, "PySubscription: adding tickers");
 
         shutdown_safe_future(py, async move {
             let _op_guard = ops.lock().await;
-            if *close_signal.subscribe().borrow() || *engine_shutdown.borrow() {
+            if *close_signal.subscribe().borrow() {
                 return Err(PyRuntimeError::new_err("subscription closed"));
             }
 
@@ -2448,13 +2481,12 @@ impl PySubscription {
         let stream = self.stream.clone();
         let ops = self.ops.clone();
         let close_signal = self.close_signal.clone();
-        let engine_shutdown = self.engine_shutdown.clone();
 
         debug!(tickers = ?tickers, "PySubscription: removing tickers");
 
         shutdown_safe_future(py, async move {
             let _op_guard = ops.lock().await;
-            if *close_signal.subscribe().borrow() || *engine_shutdown.borrow() {
+            if *close_signal.subscribe().borrow() {
                 return Err(PyRuntimeError::new_err("subscription closed"));
             }
 
@@ -2500,9 +2532,7 @@ impl PySubscription {
     /// Check if the subscription is still active.
     #[getter]
     fn is_active(&self, py: Python<'_>) -> bool {
-        !*self.close_signal.subscribe().borrow()
-            && !*self.engine_shutdown.borrow()
-            && self.snapshot(py).is_active
+        !*self.close_signal.subscribe().borrow() && self.snapshot(py).is_active
     }
 
     #[getter]
@@ -2637,9 +2667,14 @@ impl PySubscription {
 
     /// Unsubscribe and close the stream.
     ///
-    /// If drain=True, returns remaining buffered batches before closing.
-    #[pyo3(signature = (drain = false))]
-    fn unsubscribe<'py>(&self, py: Python<'py>, drain: bool) -> PyResult<Bound<'py, PyAny>> {
+    /// If drain=True, returns all unread values in the selected iteration mode.
+    #[pyo3(signature = (drain = false, tick_mode = false))]
+    fn unsubscribe<'py>(
+        &self,
+        py: Python<'py>,
+        drain: bool,
+        tick_mode: bool,
+    ) -> PyResult<Bound<'py, PyAny>> {
         let stream_arc = self.stream.clone();
         let rx_arc = self.rx.clone();
         let pending = self.pending.clone();
@@ -2650,20 +2685,20 @@ impl PySubscription {
         let close_signal = self.close_signal.clone();
         let engine_shutdown = self.engine_shutdown.clone();
 
-        debug!(drain = drain, "PySubscription: unsubscribing");
+        debug!(drain, tick_mode, "PySubscription: unsubscribing");
 
         shutdown_safe_future(py, async move {
             // Wake an in-flight read before waiting behind a subscription mutation.
             // The watch value is monotonic, so a read cannot miss this close.
             close_signal.send_replace(true);
             let _op_guard = ops.lock().await;
-            let engine_is_shutting_down = *engine_shutdown.borrow();
 
             // Keep the claim in the shared handle until every started close
             // await completes. Cancellation therefore retains the claim and
             // receiver so a later close can resume cleanup.
             let mut stream_guard = stream_arc.lock().await;
-            let mut close_result = if engine_is_shutting_down {
+            let mut engine_is_shutting_down = *engine_shutdown.borrow();
+            let unsubscribe_result = if engine_is_shutting_down {
                 Ok(())
             } else if let Some(handle) = stream_guard.as_ref() {
                 if let Some(claim) = handle.claim.as_ref() {
@@ -2683,75 +2718,112 @@ impl PySubscription {
                 Ok(())
             };
 
-            if close_result.is_ok() {
+            engine_is_shutting_down |= *engine_shutdown.borrow();
+            if unsubscribe_result.is_ok() || engine_is_shutting_down {
                 if let Some(handle) = stream_guard.as_mut() {
                     handle.status.update(|state| state.clear_active());
                 }
             }
-            if close_result.is_ok() && drain && !engine_is_shutting_down {
+            let mut cleanup_error = if engine_is_shutting_down {
+                None
+            } else {
+                unsubscribe_result.err()
+            };
+
+            // Drain accepted forwarding work before spending the claim.
+            // Global teardown synchronizes terminal publication below instead.
+            if drain && !engine_is_shutting_down {
                 if let Some(claim) = stream_guard
                     .as_ref()
                     .and_then(|handle| handle.claim.as_ref())
                 {
                     let mut rx_guard = rx_arc.lock().await;
-                    close_result = match rx_guard.as_mut() {
-                        Some(rx) => drain_forwarder_into_pending(claim, rx, pending.as_ref())
-                            .await
-                            .map_err(blp_async_error_to_pyerr),
-                        None => claim
-                            .drain_forwarder()
-                            .await
-                            .map_err(blp_async_error_to_pyerr),
+                    let forwarder_result = match rx_guard.as_mut() {
+                        Some(rx) => drain_forwarder_into_pending(claim, rx, pending.as_ref()).await,
+                        None => claim.drain_forwarder().await,
                     };
+                    if cleanup_error.is_none() {
+                        cleanup_error = forwarder_result.err().map(blp_async_error_to_pyerr);
+                    }
                 }
             }
 
-            // A completed error spends the broken claim too; only cancellation
-            // before an await completes keeps it for a retry.
+            // Keep ownership in the shared handle until every await completes.
+            let mut rx_guard = rx_arc.lock().await;
+            if *engine_shutdown.borrow() {
+                // The watch signals a request, not completion. Quarantining the
+                // worker synchronizes its terminal publication even if another
+                // thread already started shutdown, including remove-all handles.
+                if let Some(handle) = stream_guard.as_mut() {
+                    if let Some(claim) = handle.claim.take() {
+                        claim.close_without_reuse(Vec::new());
+                    }
+                }
+            }
+            if let Some(rx) = rx_guard.as_mut() {
+                // Preserve existing errors, but reject shutdown errors created
+                // only by disposing a successfully cancelled, still-dirty claim.
+                rx.close();
+            }
             stream_guard.take();
             drop(stream_guard);
-            close_result?;
-
-            // Closing always takes the receiver. Holding it in the mutex until
-            // this point makes cancellation of a pending drain ownership-safe.
-            let mut rx_guard = rx_arc.lock().await;
             let rx = rx_guard.take();
             drop(rx_guard);
-            let queued_batches: Vec<RecordBatch> = {
-                let mut ready = arrow_ready
+
+            if !drain {
+                pending
                     .lock()
-                    .expect("subscription Arrow output queue poisoned");
-                if drain {
-                    ready.drain(..).collect()
-                } else {
-                    ready.clear();
-                    Vec::new()
+                    .expect("subscription pending queue poisoned")
+                    .clear();
+                arrow_ready
+                    .lock()
+                    .expect("subscription Arrow output queue poisoned")
+                    .clear();
+                if let Some(error) = cleanup_error {
+                    return Err(error);
+                }
+                return try_attach_or_suspend(|py| Ok(py.None())).await;
+            }
+
+            let remaining = match collect_drained_stream_items(pending.as_ref(), rx) {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    arrow_ready
+                        .lock()
+                        .expect("subscription Arrow output queue poisoned")
+                        .clear();
+                    return Err(blp_error_to_pyerr(*error));
                 }
             };
-
-            let mut remaining = Vec::new();
-            {
-                let mut pending = pending.lock().expect("subscription pending queue poisoned");
-                if drain {
-                    while let Some(item) = pending.pop_front() {
-                        if let Ok(update) = item {
-                            remaining.push(update);
-                        }
-                    }
-                } else {
-                    pending.clear();
-                }
+            if let Some(error) = cleanup_error {
+                arrow_ready
+                    .lock()
+                    .expect("subscription Arrow output queue poisoned")
+                    .clear();
+                return Err(error);
             }
-            if drain {
-                if let Some(mut rx) = rx {
-                    while let Ok(item) = rx.try_recv() {
-                        if let Ok(update) = item {
-                            remaining.push(update);
-                        }
+            if tick_mode {
+                // Dict mode never round-trips through Arrow: sparse update
+                // presence is preserved directly from the native stream.
+                arrow_ready
+                    .lock()
+                    .expect("subscription Arrow output queue poisoned")
+                    .clear();
+                return try_attach_or_suspend(|py| {
+                    let list = pyo3::types::PyList::empty(py);
+                    for update in remaining {
+                        list.append(subscription_update_to_pydict(py, update)?)?;
                     }
-                }
+                    Ok(list.into_any().unbind())
+                })
+                .await;
             }
 
+            let queued_batches: Vec<RecordBatch> = arrow_ready
+                .lock()
+                .expect("subscription Arrow output queue poisoned")
+                .drain(..)
+                .collect();
             // Build Arrow arrays before attaching to Python. The attachment only
             // creates Python wrappers around already-finished Rust-owned buffers.
             let remaining = {
@@ -2775,19 +2847,15 @@ impl PySubscription {
                 batches
             };
 
-            if !remaining.is_empty() {
-                try_attach_or_suspend(|py| {
-                    let list = pyo3::types::PyList::empty(py);
-                    for batch in remaining {
-                        let py_batch = native_arrow::record_batch_to_arrow_record_batch(py, batch)?;
-                        list.append(py_batch)?;
-                    }
-                    Ok(list.into_any().unbind())
-                })
-                .await
-            } else {
-                try_attach_or_suspend(|py| Ok(py.None())).await
-            }
+            try_attach_or_suspend(|py| {
+                let list = pyo3::types::PyList::empty(py);
+                for batch in remaining {
+                    let py_batch = native_arrow::record_batch_to_arrow_record_batch(py, batch)?;
+                    list.append(py_batch)?;
+                }
+                Ok(list.into_any().unbind())
+            })
+            .await
         })
     }
 
@@ -2805,7 +2873,7 @@ impl PySubscription {
         _exc_val: Option<Bound<'py, PyAny>>,
         _exc_tb: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
-        self.unsubscribe(py, false)
+        self.unsubscribe(py, false, false)
     }
 
     fn __repr__(&self, py: Python<'_>) -> String {
@@ -3004,6 +3072,10 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add("BlpLimitError", _py.get_type::<BlpLimitError>())?;
     m.add("BlpSecurityError", _py.get_type::<BlpSecurityError>())?;
     m.add("BlpFieldError", _py.get_type::<BlpFieldError>())?;
+    m.add(
+        "BlpSubscriptionDataLossError",
+        _py.get_type::<BlpSubscriptionDataLossError>(),
+    )?;
     m.add("BlpValidationError", _py.get_type::<BlpValidationError>())?;
     m.add("BlpTimeoutError", _py.get_type::<BlpTimeoutError>())?;
     m.add("BlpInternalError", _py.get_type::<BlpInternalError>())?;
@@ -3079,7 +3151,9 @@ define_stub_info_gatherer!(stub_info);
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
-    use xbbg_async::engine::state::{FieldKind, FieldLayout, FieldMeta};
+    use xbbg_async::engine::state::{
+        subscription_channel, FieldKind, FieldLayout, FieldMeta, UpdateField,
+    };
     use xbbg_async::engine::ExtractorType;
 
     fn metrics(
@@ -3401,6 +3475,7 @@ mod tests {
                 "BlpLimitError",
                 "BlpSecurityError",
                 "BlpFieldError",
+                "BlpSubscriptionDataLossError",
                 "BlpValidationError",
                 "BlpTimeoutError",
                 "BlpInternalError",
@@ -3410,6 +3485,35 @@ mod tests {
             ] {
                 assert!(module.hasattr(name).expect("hasattr"), "missing {name}");
             }
+        });
+    }
+    #[test]
+    fn subscription_data_loss_error_preserves_structured_context() {
+        Python::initialize();
+        Python::attach(|py| {
+            let error = blp_error_to_pyerr(BlpError::SubscriptionDataLoss {
+                topic: "IBM US Equity".to_string(),
+                detail: "consumer queue overflow".to_string(),
+            });
+
+            assert!(error.is_instance_of::<BlpSubscriptionDataLossError>(py));
+            let value = error.value(py);
+            assert_eq!(
+                value
+                    .getattr("topic")
+                    .expect("topic")
+                    .extract::<String>()
+                    .expect("topic string"),
+                "IBM US Equity"
+            );
+            assert_eq!(
+                value
+                    .getattr("detail")
+                    .expect("detail")
+                    .extract::<String>()
+                    .expect("detail string"),
+                "consumer queue overflow"
+            );
         });
     }
 
@@ -3563,6 +3667,34 @@ mod tests {
                 .expect("tz equality"));
         });
     }
+    #[test]
+    fn tick_dict_preserves_present_null_and_omits_absent_fields() {
+        Python::initialize();
+        Python::attach(|py| {
+            let layout = Arc::new(FieldLayout::new(
+                1,
+                vec![
+                    FieldMeta::new("PX_LAST", 0, FieldKind::F64),
+                    FieldMeta::new("BID", 1, FieldKind::F64),
+                ],
+            ));
+            let mut update = subscription_update_with_layout(layout, 10);
+            update.values.push(UpdateField {
+                index: 0,
+                value: UpdateValue::Null,
+            });
+
+            let value = subscription_update_to_pydict(py, update).expect("tick dict");
+            let dict = value.bind(py).cast::<PyDict>().expect("dict");
+            assert!(dict.contains("PX_LAST").expect("present field"));
+            assert!(dict
+                .get_item("PX_LAST")
+                .expect("lookup")
+                .expect("present value")
+                .is_none());
+            assert!(!dict.contains("BID").expect("absent field"));
+        });
+    }
 
     #[test]
     fn python_subscription_batch_limits_preserve_default_one_update() {
@@ -3571,26 +3703,21 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update(10))).await.expect("first");
             tx.send(Ok(subscription_update(20))).await.expect("second");
             tx.send(Ok(subscription_update(30))).await.expect("third");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let first =
-                receive_subscription_updates(&mut rx, &pending, &mut close_rx, &mut shutdown_rx, 1)
-                    .await;
+            let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1).await;
             let SubscriptionRead::Updates(first) = first else {
                 panic!("expected first update");
             };
             assert_eq!(first.len(), 1);
             assert_eq!(first[0].timestamp_us, 10);
 
-            let second =
-                receive_subscription_updates(&mut rx, &pending, &mut close_rx, &mut shutdown_rx, 2)
-                    .await;
+            let second = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2).await;
             let SubscriptionRead::Updates(second) = second else {
                 panic!("expected batched updates");
             };
@@ -3619,7 +3746,7 @@ mod tests {
                 1,
                 vec![FieldMeta::new("BID", 0, FieldKind::F64)],
             ));
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update_with_layout(first_layout, 10)))
                 .await
                 .expect("first");
@@ -3628,14 +3755,9 @@ mod tests {
                 .expect("second");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let first =
-                receive_subscription_updates(&mut rx, &pending, &mut close_rx, &mut shutdown_rx, 2)
-                    .await;
-            let second =
-                receive_subscription_updates(&mut rx, &pending, &mut close_rx, &mut shutdown_rx, 2)
-                    .await;
+            let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2).await;
+            let second = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2).await;
             let SubscriptionRead::Updates(first) = first else {
                 panic!("expected first schema batch");
             };
@@ -3649,6 +3771,64 @@ mod tests {
             assert_eq!(second[0].layout.fields[0].name.as_ref(), "BID");
         });
     }
+    #[test]
+    fn draining_rejects_partial_success_when_an_unread_failure_exists() {
+        let (tx, rx) = subscription_channel(2);
+        tx.try_send(Ok(subscription_update(10)))
+            .expect("queued update");
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "IBM US Equity".to_string(),
+            detail: "consumer queue overflow".to_string(),
+        });
+
+        let error = collect_drained_stream_items(&StdMutex::new(VecDeque::new()), Some(rx))
+            .expect_err("unread stream failure must reject the drain");
+        match *error {
+            BlpError::SubscriptionDataLoss { topic, detail } => {
+                assert_eq!(topic, "IBM US Equity");
+                assert_eq!(detail, "consumer queue overflow");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+    #[test]
+    fn draining_surfaces_an_errors_only_stream() {
+        let (tx, rx) = subscription_channel(1);
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "IBM US Equity".to_string(),
+            detail: "Bloomberg DATALOSS".to_string(),
+        });
+
+        let error = collect_drained_stream_items(&StdMutex::new(VecDeque::new()), Some(rx))
+            .expect_err("terminal failure must reject an empty drain");
+        assert!(matches!(*error, BlpError::SubscriptionDataLoss { .. }));
+    }
+
+    #[test]
+    fn subscription_failure_is_delivered_once_before_eof() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, mut rx) = subscription_channel(1);
+            tx.fail(BlpError::SubscriptionDataLoss {
+                topic: "IBM US Equity".to_string(),
+                detail: "Bloomberg DATALOSS".to_string(),
+            });
+            let pending = StdMutex::new(VecDeque::new());
+            let (_close_tx, mut close_rx) = watch::channel(false);
+
+            let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1).await;
+            assert!(matches!(
+                first,
+                SubscriptionRead::Error(BlpError::SubscriptionDataLoss { .. })
+            ));
+            let second = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1).await;
+            assert!(matches!(second, SubscriptionRead::Ended));
+            assert!(tx.is_closed());
+        });
+    }
 
     #[test]
     fn cancelled_subscription_read_releases_receiver_lock() {
@@ -3657,7 +3837,7 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (_tx, rx) = tokio::sync::mpsc::channel::<StreamBatchResult>(1);
+            let (_tx, rx) = subscription_channel(1);
             let shared = Arc::new(Mutex::new(Some(rx)));
             let reader_shared = shared.clone();
             let reader = tokio::spawn(async move {

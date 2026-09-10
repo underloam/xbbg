@@ -36,6 +36,15 @@ class BlpRequestError(_core.BlpRequestError):
         self.code = code
 
 
+class BlpSubscriptionDataLossError(BlpRequestError):
+    """Subscription stream became incomplete and must be resubscribed."""
+
+    def __init__(self, message: str, *, topic: str, detail: str) -> None:
+        super().__init__(message)
+        self.topic = topic
+        self.detail = detail
+
+
 class BlpLimitError(BlpRequestError):
     """Bloomberg request limit error."""
 
@@ -112,6 +121,7 @@ __all__ = [
     "BlpError",
     "BlpSessionError",
     "BlpRequestError",
+    "BlpSubscriptionDataLossError",
     "BlpLimitError",
     "BlpSecurityError",
     "BlpFieldError",

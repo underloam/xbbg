@@ -28,7 +28,7 @@ async def run_scenario(scenario: str) -> None:
     from xbbg import blp
 
     engine = blp.Engine(
-        pool_size=1,
+        request_pool_size=1,
         subscription_pool_size=1,
         max_subscription_sessions=1,
         runtime_worker_threads=2,
@@ -43,16 +43,22 @@ async def run_scenario(scenario: str) -> None:
         # An empty removal completes without waiting on SDK acknowledgements.
         await asyncio.wait_for(sub.remove([]), timeout=2)
         if scenario == "engine-shutdown":
+            from xbbg.exceptions import BlpError
+
             engine.shutdown()
-            drained = await asyncio.wait_for(sub.unsubscribe(drain=True), timeout=5)
-            assert isinstance(drained, list)
+            try:
+                await asyncio.wait_for(sub.unsubscribe(drain=True), timeout=5)
+            except BlpError as error:
+                terminal_error = type(error).__name__
+            else:
+                raise AssertionError("ordinary engine shutdown must surface its terminal stream error")
             try:
                 await asyncio.wait_for(anext(sub), timeout=2)
             except StopAsyncIteration:
                 pass
             else:
                 raise AssertionError("closed subscription yielded after engine shutdown")
-            print(json.dumps({"scenario": scenario, "drained_batches": len(drained), "closed": True}))
+            print(json.dumps({"scenario": scenario, "terminal_error": terminal_error, "closed": True}))
         else:
             # Exercise the actual atexit entry point while Python is still alive
             # so suppression is observable, rather than relying on a timing race.

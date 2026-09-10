@@ -4,6 +4,16 @@
 import builtins
 import typing
 __all__ = [
+    "BlpError",
+    "BlpSessionError",
+    "BlpRequestError",
+    "BlpLimitError",
+    "BlpSecurityError",
+    "BlpFieldError",
+    "BlpSubscriptionDataLossError",
+    "BlpValidationError",
+    "BlpTimeoutError",
+    "BlpInternalError",
     "ArrowColumn",
     "ArrowField",
     "ArrowRecordBatch",
@@ -84,6 +94,28 @@ __all__ = [
     "set_log_level",
     "version",
 ]
+
+class BlpError(builtins.Exception): ...
+
+class BlpSessionError(BlpError): ...
+
+class BlpRequestError(BlpError): ...
+
+class BlpLimitError(BlpRequestError): ...
+
+class BlpSecurityError(BlpRequestError): ...
+
+class BlpFieldError(BlpRequestError): ...
+
+class BlpSubscriptionDataLossError(BlpRequestError):
+    topic: builtins.str
+    detail: builtins.str
+
+class BlpValidationError(BlpError): ...
+
+class BlpTimeoutError(BlpError): ...
+
+class BlpInternalError(BlpError): ...
 
 @typing.final
 class ArrowColumn:
@@ -1000,11 +1032,11 @@ class PySubscription:
         Remove tickers from the subscription dynamically.
         Iteration can continue while Bloomberg work is in flight.
         """
-    def unsubscribe(self, drain: builtins.bool = False) -> typing.Any:
+    def unsubscribe(self, drain: builtins.bool = False, tick_mode: builtins.bool = False) -> typing.Any:
         r"""
         Unsubscribe and close the stream.
         
-        If drain=True, returns remaining buffered batches before closing.
+        If drain=True, returns all unread values in the selected iteration mode.
         """
     def __aenter__(self) -> PySubscription:
         r"""

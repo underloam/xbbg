@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use slab::Slab;
-use tokio::sync::{mpsc, oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
 use tokio::task::JoinHandle;
 
 use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionList};
@@ -22,7 +22,7 @@ const SERVICE_OPEN_TIMEOUT_MS: u64 = 10_000;
 use super::dispatch::{DispatchKey, SERVICE_OPEN_CID_TAG};
 use super::state::{
     subscription_forwarder_channel, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics,
-    SubscriptionState, SubscriptionUpdate,
+    SubscriptionSender, SubscriptionState, SubscriptionTerminator,
 };
 use super::{
     attach_auth_context, build_session_options, BlpAsyncError, EngineConfig, OverflowPolicy,
@@ -136,7 +136,7 @@ struct SubscriptionRegistrationRequest {
     options: Vec<String>,
     flush_threshold: Option<usize>,
     overflow_policy: Option<OverflowPolicy>,
-    stream: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+    stream: SubscriptionSender,
     forwarder: Option<SubscriptionForwarder>,
 }
 
@@ -222,7 +222,7 @@ impl StatusMutation {
                     .topic_statuses()
                     .get(&topic)
                     .map(|info| info.streams_active);
-                status.set_topic_streams_active(&topic, active);
+                let _ = status.set_topic_streams_active(&topic, active);
                 if (active && previous == Some(false)) || (!active && previous != Some(false)) {
                     status.record_subscription_event(
                         if active {
@@ -253,6 +253,9 @@ struct StartupLatch {
 struct SubscriptionWorkerState {
     id: usize,
     subs: Slab<SubscriptionState>,
+    /// Weak fail capability for the claim's channel, retained after its final
+    /// per-topic state is removed and cleared before the worker is pooled.
+    stream_terminator: Option<SubscriptionTerminator>,
     config: Arc<EngineConfig>,
     open_services: HashSet<String>,
     pending_cancel: HashSet<SlabKey>,
@@ -564,6 +567,10 @@ impl SubscriptionWorkerShared {
     fn reusable(&self) -> bool {
         !self.shutdown_requested() && self.state.lock().is_clean()
     }
+
+    fn prepare_for_reuse(&self) -> bool {
+        self.state.lock().prepare_for_reuse()
+    }
 }
 
 impl SubscriptionWorkerState {
@@ -571,6 +578,7 @@ impl SubscriptionWorkerState {
         Self {
             id,
             subs: Slab::new(),
+            stream_terminator: None,
             config,
             open_services: HashSet::new(),
             pending_cancel: HashSet::new(),
@@ -586,7 +594,20 @@ impl SubscriptionWorkerState {
             && self.pending_service_opens.is_empty()
     }
 
+    fn prepare_for_reuse(&mut self) -> bool {
+        if !self.is_clean() {
+            return false;
+        }
+        self.stream_terminator = None;
+        true
+    }
+
     fn drain_for_shutdown(&mut self, detail: &str) {
+        if let Some(terminator) = self.stream_terminator.take() {
+            terminator.fail(BlpError::Internal {
+                detail: detail.to_string(),
+            });
+        }
         let keys: Vec<SlabKey> = self.subs.iter().map(|(key, _)| key).collect();
         for key in keys {
             let mut state = self.subs.remove(key);
@@ -668,6 +689,13 @@ impl SubscriptionWorkerState {
             stream,
             forwarder,
         } = request;
+        if stream.is_closed() {
+            return Err(BlpError::SubscriptionFailure {
+                cid: None,
+                label: Some("cannot subscribe with a terminal subscription stream".to_string()),
+            });
+        }
+        let stream_terminator = stream.terminator();
         let mut sub_list = SubscriptionList::new();
         let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
         let options_str = options.join(",");
@@ -710,6 +738,7 @@ impl SubscriptionWorkerState {
                 label: Some("failed to build any subscription entries".to_string()),
             });
         }
+        self.stream_terminator = Some(stream_terminator);
         Ok((sub_list, keys, metrics, registered_topics))
     }
 
@@ -777,11 +806,34 @@ impl SubscriptionWorkerState {
         if et == EventType::SubscriptionData {
             let mut data_loss_topics = Vec::new();
             let mut streaming_topics = Vec::new();
+            let mut channel_closed = false;
             for msg in ev.iter() {
-                self.collect_subscription_data(&msg, &mut data_loss_topics, &mut streaming_topics);
+                self.collect_subscription_data(
+                    &msg,
+                    &mut data_loss_topics,
+                    &mut streaming_topics,
+                    &mut channel_closed,
+                );
             }
+            streaming_topics.retain(|(key, _)| {
+                self.subs
+                    .get(*key)
+                    .is_some_and(|state| !state.stream.is_closed())
+            });
+            let inactive_topics = if channel_closed {
+                self.subs
+                    .iter()
+                    .filter(|(_, state)| state.stream.is_closed())
+                    .map(|(_, state)| state.topic.to_string())
+                    .collect::<Vec<_>>()
+            } else {
+                Vec::new()
+            };
             if let Some(status) = &self.status {
-                if !data_loss_topics.is_empty() || !streaming_topics.is_empty() {
+                if !data_loss_topics.is_empty()
+                    || !streaming_topics.is_empty()
+                    || !inactive_topics.is_empty()
+                {
                     status.update(|next| {
                         for topic in data_loss_topics {
                             next.record_admin_data_loss(
@@ -798,6 +850,9 @@ impl SubscriptionWorkerState {
                                 SubscriptionEventLevel::Info,
                             );
                         }
+                        for topic in inactive_topics {
+                            let _ = next.set_topic_streams_active(&topic, false);
+                        }
                     });
                 }
             }
@@ -805,7 +860,9 @@ impl SubscriptionWorkerState {
         }
         for msg in ev.iter() {
             match et {
-                EventType::SessionStatus => self.handle_session_status(&msg, shared),
+                EventType::SessionStatus | EventType::AuthorizationStatus => {
+                    self.handle_session_status(&msg, shared);
+                }
                 EventType::ServiceStatus => self.handle_service_status(&msg),
                 EventType::Admin => self.handle_admin_event(&msg),
                 _ => {}
@@ -818,6 +875,7 @@ impl SubscriptionWorkerState {
         msg: &xbbg_core::Message<'_>,
         data_loss_topics: &mut Vec<String>,
         streaming_topics: &mut Vec<(SlabKey, String)>,
+        channel_closed: &mut bool,
     ) {
         for correlation_id in msg.correlation_ids() {
             let Some(dispatch_key) = DispatchKey::from_correlation_id(&correlation_id) else {
@@ -831,6 +889,10 @@ impl SubscriptionWorkerState {
                 match state.on_message(msg) {
                     MessageOutcome::DataLoss => {
                         data_loss_topics.push(state.topic.to_string());
+                        *channel_closed = true;
+                    }
+                    MessageOutcome::Closed => {
+                        *channel_closed = true;
                     }
                     MessageOutcome::Normal { first_message } => {
                         if first_message {
@@ -870,16 +932,22 @@ impl SubscriptionWorkerState {
             let key = dispatch_key.to_slab_key();
             match msg_type {
                 "SubscriptionStarted" => {
-                    xbbg_log::debug!(
-                        worker_id = self.id,
-                        key,
-                        reason = %reason.as_deref().unwrap_or(""),
-                        "subscription started"
-                    );
-                    mutations.push(StatusMutation::Started {
-                        key,
-                        reason: reason.clone(),
-                    });
+                    if self
+                        .subs
+                        .get(key)
+                        .is_some_and(|state| !state.stream.is_closed())
+                    {
+                        xbbg_log::debug!(
+                            worker_id = self.id,
+                            key,
+                            reason = %reason.as_deref().unwrap_or(""),
+                            "subscription started"
+                        );
+                        mutations.push(StatusMutation::Started {
+                            key,
+                            reason: reason.clone(),
+                        });
+                    }
                 }
                 "SubscriptionFailure" => {
                     if self.pending_cancel.remove(&key) {
@@ -982,15 +1050,23 @@ impl SubscriptionWorkerState {
                     }
                 }
                 "SubscriptionStreamsActivated" => {
-                    self.last_streams_warn_us.remove(&key);
-                    if self.subs.contains(key) {
+                    if self
+                        .subs
+                        .get(key)
+                        .is_some_and(|state| !state.stream.is_closed())
+                    {
+                        self.last_streams_warn_us.remove(&key);
                         mutations.push(StatusMutation::StreamsActive {
                             key,
                             active: true,
                             reason: reason.clone(),
                         });
+                        xbbg_log::debug!(
+                            worker_id = self.id,
+                            key,
+                            "subscription streams activated"
+                        );
                     }
-                    xbbg_log::debug!(worker_id = self.id, key, "subscription streams activated");
                 }
                 "SubscriptionStreamsDeactivated" => {
                     if self.subs.contains(key) {
@@ -1010,6 +1086,15 @@ impl SubscriptionWorkerState {
                 _ => {
                     xbbg_log::trace!(worker_id = self.id, key, msg_type, "subscription status");
                 }
+            }
+        }
+        for (key, state) in self.subs.iter() {
+            if state.stream.is_closed() {
+                mutations.push(StatusMutation::StreamsActive {
+                    key,
+                    active: false,
+                    reason: None,
+                });
             }
         }
     }
@@ -1086,23 +1171,16 @@ impl SubscriptionWorkerState {
                     reason = %reason.as_deref().unwrap_or(""),
                     "AuthorizationRevoked — identity gone; closing subscriptions"
                 );
-                let keys: Vec<usize> = self.subs.iter().map(|(k, _)| k).collect();
-                for key in keys {
-                    let mut state = self.subs.remove(key);
-                    state.mark_closing();
-                    state.fail(BlpError::Internal {
-                        detail: format!(
-                            "Bloomberg session identity revoked (worker={}){}. \
-                             Subscription closed. Please re-authenticate and resubscribe.",
-                            self.id,
-                            reason
-                                .as_deref()
-                                .map(|r| format!(": {}", r))
-                                .unwrap_or_default(),
-                        ),
-                    });
-                }
-                self.clear_active_status();
+                let detail = format!(
+                    "Bloomberg session identity revoked (worker={}){}. \
+                     Subscription closed. Please re-authenticate and resubscribe.",
+                    self.id,
+                    reason
+                        .as_deref()
+                        .map(|value| format!(": {value}"))
+                        .unwrap_or_default(),
+                );
+                self.drain_for_shutdown(&detail);
                 shared.mark_shutdown_requested();
                 shared.stop_forwarder();
                 shared
@@ -1145,23 +1223,16 @@ impl SubscriptionWorkerState {
                     reason.as_deref(),
                 );
                 // Session is dead. Send error to all consumers and remove all subs.
-                let keys: Vec<usize> = self.subs.iter().map(|(k, _)| k).collect();
-                for key in keys {
-                    let mut state = self.subs.remove(key);
-                    state.mark_closing();
-                    state.fail(BlpError::Internal {
-                        detail: format!(
-                            "Bloomberg session terminated (worker={}){}. \
-                             Subscription closed. Please resubscribe.",
-                            self.id,
-                            reason
-                                .as_deref()
-                                .map(|r| format!(": {}", r))
-                                .unwrap_or_default(),
-                        ),
-                    });
-                }
-                self.clear_active_status();
+                let detail = format!(
+                    "Bloomberg session terminated (worker={}){}. \
+                     Subscription closed. Please resubscribe.",
+                    self.id,
+                    reason
+                        .as_deref()
+                        .map(|value| format!(": {value}"))
+                        .unwrap_or_default(),
+                );
+                self.drain_for_shutdown(&detail);
                 shared.mark_shutdown_requested();
                 shared.stop_forwarder();
                 // Mark the worker Dead so the pool refuses to hand it out to
@@ -1346,32 +1417,30 @@ impl SubscriptionWorkerState {
                 xbbg_log::info!(worker_id = self.id, "slow consumer warning cleared");
             }
             "DataLoss" => {
-                let timestamp_us = msg.time_received_us();
                 let correlation_count = msg.num_correlation_ids();
-                let mut topics = Vec::with_capacity(correlation_count);
+                let mut resolved_keys = Vec::with_capacity(correlation_count);
+                let mut seen_keys = HashSet::with_capacity(correlation_count);
+                let mut unattributable = correlation_count == 0;
                 for index in 0..correlation_count {
-                    if let Some(correlation_id) = msg.correlation_id(index) {
-                        let Some(dispatch_key) = DispatchKey::from_correlation_id(&correlation_id)
-                        else {
-                            continue;
-                        };
-                        if let Some(state) = self.subs.get_mut(dispatch_key.to_slab_key()) {
-                            topics.push(state.topic.to_string());
-                            state.on_dataloss(timestamp_us);
-                        }
+                    let Some(correlation_id) = msg.correlation_id(index) else {
+                        unattributable = true;
+                        continue;
+                    };
+                    let Some(dispatch_key) = DispatchKey::from_correlation_id(&correlation_id)
+                    else {
+                        unattributable = true;
+                        continue;
+                    };
+                    let key = dispatch_key.to_slab_key();
+                    if !self.subs.contains(key) {
+                        unattributable = true;
+                        continue;
+                    }
+                    if seen_keys.insert(key) {
+                        resolved_keys.push(key);
                     }
                 }
-                if let Some(status) = &self.status {
-                    status.update(|next| {
-                        if correlation_count == 0 {
-                            next.record_admin_data_loss(None, None);
-                        } else {
-                            for topic in topics {
-                                next.record_admin_data_loss(Some(topic), None);
-                            }
-                        }
-                    });
-                }
+                self.apply_admin_data_loss(msg.time_received_us(), resolved_keys, unattributable);
                 xbbg_log::warn!(worker_id = self.id, "data loss event received");
             }
             _ => {
@@ -1391,10 +1460,84 @@ impl SubscriptionWorkerState {
         }
     }
 
+    fn apply_admin_data_loss(
+        &mut self,
+        timestamp_us: Option<i64>,
+        resolved_keys: Vec<SlabKey>,
+        unattributable: bool,
+    ) {
+        let mut topics = Vec::new();
+        if unattributable {
+            if let Some(terminator) = &self.stream_terminator {
+                terminator.fail(BlpError::SubscriptionDataLoss {
+                    topic: "*".to_string(),
+                    detail:
+                        "Bloomberg reported unattributable DATALOSS; resubscribe for a fresh image"
+                            .to_string(),
+                });
+            }
+            topics.reserve(self.subs.len());
+            for (_, state) in self.subs.iter_mut() {
+                topics.push(state.topic.to_string());
+                state.on_dataloss(timestamp_us);
+            }
+        } else {
+            topics.reserve(resolved_keys.len());
+            for key in resolved_keys {
+                if let Some(state) = self.subs.get_mut(key) {
+                    topics.push(state.topic.to_string());
+                    state.on_dataloss(timestamp_us);
+                }
+            }
+        }
+
+        let inactive_topics = self
+            .subs
+            .iter()
+            .filter(|(_, state)| state.stream.is_closed())
+            .map(|(_, state)| state.topic.to_string())
+            .collect::<Vec<_>>();
+        if let Some(status) = &self.status {
+            status.update(|next| {
+                if unattributable || topics.is_empty() {
+                    next.record_admin_data_loss(None, None);
+                } else {
+                    for topic in topics {
+                        next.record_admin_data_loss(Some(topic), None);
+                    }
+                }
+                for topic in inactive_topics {
+                    let _ = next.set_topic_streams_active(&topic, false);
+                }
+            });
+        }
+    }
+
     /// Check if any topics are in streams-deactivated state longer than the configured
     /// warn threshold and emit a one-shot Warning event so callers polling status
     /// see "your data is quiet, not broken — SDK is still trying to recover".
     fn check_streams_deactivated(&mut self) {
+        if self.subs.iter().any(|(_, state)| state.stream.is_closed()) {
+            if let Some(status) = &self.status {
+                let topics = {
+                    let snapshot = status.load();
+                    snapshot
+                        .topic_statuses()
+                        .iter()
+                        .filter(|(_, info)| info.streams_active)
+                        .map(|(topic, _)| topic.clone())
+                        .collect::<Vec<_>>()
+                };
+                if !topics.is_empty() {
+                    status.update(|next| {
+                        for topic in topics {
+                            let _ = next.set_topic_streams_active(&topic, false);
+                        }
+                    });
+                }
+            }
+            return;
+        }
         let warn_ms = self.config.streams_deactivated_warn_ms;
         if warn_ms == 0 {
             return;
@@ -1525,10 +1668,10 @@ impl SubscriptionWorkerHandleInner {
     }
 
     fn signal_shutdown(&self) {
+        let _lifecycle = self.shared.lifecycle.write();
         if self.stop_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        let _lifecycle = self.shared.lifecycle.write();
         let first_request = self.shared.mark_shutdown_requested();
         if first_request {
             xbbg_log::info!(
@@ -1661,9 +1804,14 @@ impl SubscriptionCommandHandle {
         options: Vec<String>,
         flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
-        stream: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+        stream: SubscriptionSender,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
+        if stream.is_closed() {
+            return Err(BlpAsyncError::ConfigError {
+                detail: "cannot subscribe with a terminal subscription stream".to_string(),
+            });
+        }
         self.lease.validate()?;
         {
             let _lifecycle = self.inner.shared.lifecycle.read();
@@ -1685,6 +1833,7 @@ impl SubscriptionCommandHandle {
             );
             return Err(BlpAsyncError::BlpError(error));
         }
+        let stream_status = stream.clone();
 
         let (keys, metrics, registered_topics, subscribe_result) = {
             self.lease.validate()?;
@@ -1739,6 +1888,16 @@ impl SubscriptionCommandHandle {
             self.inner.signal_shutdown();
             return Err(BlpAsyncError::BlpError(error));
         }
+        if stream_status.is_closed() {
+            xbbg_log::warn!(
+                worker_id = self.worker_id(),
+                "subscription stream terminated during subscribe; quarantining worker"
+            );
+            self.inner.signal_shutdown();
+            return Err(BlpAsyncError::ConfigError {
+                detail: "subscription stream terminated during subscribe".to_string(),
+            });
+        }
         Ok((keys, metrics))
     }
 
@@ -1752,7 +1911,7 @@ impl SubscriptionCommandHandle {
         options: Vec<String>,
         flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
-        stream: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+        stream: SubscriptionSender,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
         self.subscribe(
@@ -2173,7 +2332,10 @@ impl SubscriptionSessionPool {
             return;
         }
         let mut available = self.available.lock();
-        if self.shutdown.load(Ordering::Acquire) || !handle.inner.reusable() {
+        if self.shutdown.load(Ordering::Acquire)
+            || !handle.inner.reusable()
+            || !handle.inner.shared.prepare_for_reuse()
+        {
             drop(available);
             handle.signal_shutdown();
             drop(handle);
@@ -2285,7 +2447,7 @@ impl SessionClaim {
         options: Vec<String>,
         flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
-        stream: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+        stream: SubscriptionSender,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
         self.command_handle()?
@@ -2313,7 +2475,7 @@ impl SessionClaim {
         options: Vec<String>,
         flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
-        stream: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+        stream: SubscriptionSender,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
         self.command_handle()?
@@ -2392,7 +2554,65 @@ impl Drop for SessionClaim {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::engine::state::subscription_channel;
+    use xbbg_core::test_support::TestEvent;
 
+    fn register_topics(
+        worker: &mut SubscriptionWorkerState,
+        stream: &SubscriptionSender,
+        topics: &[&str],
+    ) -> (Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>, Vec<String>) {
+        let (_, keys, metrics, topics) = worker
+            .register_subscriptions(SubscriptionRegistrationRequest {
+                topics: topics.iter().map(|topic| (*topic).to_string()).collect(),
+                fields: vec!["PX_LAST".to_string()],
+                all_fields: false,
+                options: Vec::new(),
+                flush_threshold: None,
+                overflow_policy: None,
+                stream: stream.clone(),
+                forwarder: None,
+            })
+            .expect("register test subscriptions");
+        (keys, metrics, topics)
+    }
+
+    fn remove_registered_topics(worker: &mut SubscriptionWorkerState, keys: &[SlabKey]) {
+        for &key in keys {
+            let mut state = worker.subs.remove(key);
+            state.mark_closing();
+        }
+    }
+
+    fn attach_active_status(
+        worker: &mut SubscriptionWorkerState,
+        topics: &[String],
+        keys: &[SlabKey],
+        metrics: &[Arc<SubscriptionMetrics>],
+    ) -> SharedSubscriptionStatus {
+        let metrics_by_key = keys.iter().copied().zip(metrics.iter().cloned()).collect();
+        let status = Arc::new(crate::engine::SubscriptionStatusHandle::new(
+            crate::engine::SubscriptionStatusState::from_active(
+                topics.to_vec(),
+                keys.to_vec(),
+                metrics_by_key,
+            ),
+        ));
+        status.update(|next| {
+            for topic in topics {
+                let _ = next.set_topic_streams_active(topic, true);
+            }
+        });
+        worker.status = Some(status.clone());
+        status
+    }
+
+    fn correlation_id_for_key(key: SlabKey) -> i64 {
+        match DispatchKey::from_slab_key(key).to_correlation_id() {
+            CorrelationId::Int(value) => value,
+            _ => panic!("slab dispatch key must use an integer correlation id"),
+        }
+    }
     #[test]
     fn shutdown_state_is_monotonic_and_callback_visible() {
         let health = Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8));
@@ -2468,7 +2688,7 @@ mod tests {
             Err(error) => error,
         };
 
-        assert!(error.to_string().contains("pool is shut down"));
+        assert!(matches!(error, BlpAsyncError::ConfigError { .. }));
         assert_eq!(pool.available_count(), 0);
         assert_eq!(pool.next_id.load(Ordering::Relaxed), 0);
     }
@@ -2477,7 +2697,7 @@ mod tests {
     fn shutdown_drain_removes_dirty_subscription_state_and_closes_sender() {
         let config = Arc::new(EngineConfig::default());
         let mut worker = SubscriptionWorkerState::new(7, config);
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = subscription_channel(1);
         worker.subs.insert(SubscriptionState::new(
             "TEST US Equity".to_string(),
             vec!["PX_LAST".to_string()],
@@ -2490,15 +2710,354 @@ mod tests {
         worker.drain_for_shutdown("test shutdown");
 
         assert!(worker.is_clean());
-        let error = rx
-            .try_recv()
-            .expect("shutdown error")
-            .expect_err("shutdown must fail the subscription");
-        assert!(error.to_string().contains("test shutdown"));
+        assert!(matches!(rx.try_recv(), Ok(Err(BlpError::Internal { .. }))));
         assert!(matches!(
             rx.try_recv(),
-            Err(mpsc::error::TryRecvError::Disconnected)
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn remove_all_then_shutdown_fails_the_retained_channel() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (tx, mut rx) = subscription_channel(1);
+        let (keys, _, _) = register_topics(&mut worker, &tx, &["TEST US Equity"]);
+        remove_registered_topics(&mut worker, &keys);
+        assert!(worker.subs.is_empty());
+
+        worker.drain_for_shutdown("shutdown");
+
+        assert!(matches!(rx.try_recv(), Ok(Err(BlpError::Internal { .. }))));
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn worker_reuse_replaces_the_previous_channel_terminator() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (old_tx, mut old_rx) = subscription_channel(1);
+        let (old_keys, _, _) = register_topics(&mut worker, &old_tx, &["OLD US Equity"]);
+        remove_registered_topics(&mut worker, &old_keys);
+        assert!(worker.prepare_for_reuse());
+
+        let (new_tx, mut new_rx) = subscription_channel(1);
+        let (new_keys, _, _) = register_topics(&mut worker, &new_tx, &["NEW US Equity"]);
+        remove_registered_topics(&mut worker, &new_keys);
+        worker.drain_for_shutdown("shutdown");
+
+        assert!(!old_tx.is_closed());
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+        assert!(matches!(
+            new_rx.try_recv(),
+            Ok(Err(BlpError::Internal { .. }))
+        ));
+        drop(old_tx);
+        assert!(matches!(
+            old_rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ));
+    }
+
+    #[test]
+    fn terminal_session_events_fail_an_empty_registered_channel() {
+        for (event_type, message_type) in [
+            (EventType::SessionStatus, "SessionTerminated"),
+            (EventType::AuthorizationStatus, "AuthorizationRevoked"),
+        ] {
+            let shared = SubscriptionWorkerShared::new(
+                7,
+                Arc::new(EngineConfig::default()),
+                Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
+            );
+            let (tx, mut rx) = subscription_channel(1);
+            let event = if message_type == "AuthorizationRevoked" {
+                // TestUtil's built-in definitions omit authorization messages.
+                let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+                    <service name="//xbbg/test" version="1.0.0.0">
+                        <event name="AuthorizationRevoked" eventType="Revoked"/>
+                    </service>
+                    <schema><sequenceType name="Revoked"/></schema>
+                </ServiceDefinition>"#;
+                TestEvent::with_schema(schema, event_type, message_type, &[], |_| {})
+            } else {
+                TestEvent::admin(event_type, message_type, &[], |_| {})
+            };
+            {
+                let mut worker = shared.state.lock();
+                let (keys, _, _) = register_topics(&mut worker, &tx, &["TEST US Equity"]);
+                remove_registered_topics(&mut worker, &keys);
+                let message = event.event().messages().next().expect("terminal message");
+                worker.handle_session_status(&message, &shared);
+            }
+
+            assert!(shared.shutdown_requested());
+            assert_eq!(
+                shared.health.load(Ordering::Acquire),
+                WorkerHealth::Dead as u8
+            );
+            assert!(matches!(rx.try_recv(), Ok(Err(BlpError::Internal { .. }))));
+        }
+    }
+
+    #[test]
+    fn zero_cid_admin_data_loss_fails_an_empty_registered_channel() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (tx, mut rx) = subscription_channel(1);
+        let (keys, _, _) = register_topics(&mut worker, &tx, &["TEST US Equity"]);
+        remove_registered_topics(&mut worker, &keys);
+        let event = TestEvent::admin(EventType::Admin, "DataLoss", &[], |formatter| {
+            formatter.json("{}");
+        });
+        let message = event.event().messages().next().expect("data loss message");
+
+        worker.handle_admin_event(&message);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Err(BlpError::SubscriptionDataLoss { topic, .. })) if topic == "*"
+        ));
+    }
+
+    #[test]
+    fn unresolved_admin_data_loss_fails_all_topics_and_preserves_cleanup() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (tx, mut rx) = subscription_channel(1);
+        let (keys, metrics, topics) =
+            register_topics(&mut worker, &tx, &["FIRST US Equity", "SECOND US Equity"]);
+        let status = attach_active_status(&mut worker, &topics, &keys, &metrics);
+        let unknown_cid = correlation_id_for_key(keys.iter().copied().max().unwrap() + 1);
+        let event = TestEvent::admin(EventType::Admin, "DataLoss", &[unknown_cid], |formatter| {
+            formatter.json("{}")
+        });
+        let message = event.event().messages().next().expect("data loss message");
+
+        worker.handle_admin_event(&message);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Err(BlpError::SubscriptionDataLoss { topic, .. })) if topic == "*"
+        ));
+        assert_eq!(worker.subs.len(), keys.len());
+        for metric in &metrics {
+            assert_eq!(metric.data_loss_events.load(Ordering::Relaxed), 1);
+            assert!(metric.slow_consumer.load(Ordering::Relaxed));
+        }
+        let snapshot = status.load();
+        assert_eq!(snapshot.admin().data_loss_count, 1);
+        assert!(topics
+            .iter()
+            .all(|topic| !snapshot.topic_statuses()[topic].streams_active));
+    }
+
+    #[test]
+    fn correlated_admin_data_loss_deactivates_every_topic_on_the_channel() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (tx, mut rx) = subscription_channel(1);
+        let (keys, metrics, topics) =
+            register_topics(&mut worker, &tx, &["FIRST US Equity", "SECOND US Equity"]);
+        let status = attach_active_status(&mut worker, &topics, &keys, &metrics);
+        let cid = correlation_id_for_key(keys[0]);
+        let event = TestEvent::admin(EventType::Admin, "DataLoss", &[cid], |formatter| {
+            formatter.json("{}");
+        });
+        let message = event.event().messages().next().expect("data loss message");
+
+        worker.handle_admin_event(&message);
+
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(Err(BlpError::SubscriptionDataLoss { topic, .. }))
+                if topic == "FIRST US Equity"
+        ));
+        assert_eq!(metrics[0].data_loss_events.load(Ordering::Relaxed), 1);
+        assert_eq!(metrics[1].data_loss_events.load(Ordering::Relaxed), 0);
+        let snapshot = status.load();
+        assert!(topics
+            .iter()
+            .all(|topic| !snapshot.topic_statuses()[topic].streams_active));
+        assert_eq!(worker.subs.len(), keys.len());
+    }
+
+    #[test]
+    fn partial_subscription_terminal_status_preserves_healthy_siblings() {
+        for (message_type, expected_state) in [
+            (
+                "SubscriptionFailure",
+                crate::engine::TopicLifecycleState::Failed,
+            ),
+            (
+                "SubscriptionTerminated",
+                crate::engine::TopicLifecycleState::Terminated,
+            ),
+        ] {
+            let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+            let (tx, mut rx) = subscription_channel(1);
+            let (keys, metrics, topics) =
+                register_topics(&mut worker, &tx, &["FIRST US Equity", "SECOND US Equity"]);
+            let status = attach_active_status(&mut worker, &topics, &keys, &metrics);
+
+            let first_cid = correlation_id_for_key(keys[0]);
+            let first_event = TestEvent::admin(
+                EventType::SubscriptionStatus,
+                message_type,
+                &[first_cid],
+                |formatter| formatter.json("{}"),
+            );
+            let first_message = first_event
+                .event()
+                .messages()
+                .next()
+                .expect("first status message");
+            let mut mutations = Vec::new();
+            worker.collect_subscription_status(&first_message, &mut mutations);
+            status.update(|next| {
+                for mutation in mutations {
+                    mutation.apply(next);
+                }
+            });
+
+            assert!(!tx.is_closed());
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+            ));
+            assert!(!worker.subs.contains(keys[0]));
+            assert!(worker.subs.contains(keys[1]));
+            {
+                let snapshot = status.load();
+                assert_eq!(snapshot.keys(), &[keys[1]]);
+                assert_eq!(snapshot.topic_statuses()[&topics[0]].state, expected_state);
+                assert!(!snapshot.topic_statuses()[&topics[0]].streams_active);
+                assert!(snapshot.topic_statuses()[&topics[1]].streams_active);
+            }
+
+            let last_cid = correlation_id_for_key(keys[1]);
+            let last_event = TestEvent::admin(
+                EventType::SubscriptionStatus,
+                message_type,
+                &[last_cid],
+                |formatter| formatter.json("{}"),
+            );
+            let last_message = last_event
+                .event()
+                .messages()
+                .next()
+                .expect("last status message");
+            let mut mutations = Vec::new();
+            worker.collect_subscription_status(&last_message, &mut mutations);
+            status.update(|next| {
+                for mutation in mutations {
+                    mutation.apply(next);
+                }
+            });
+
+            assert!(matches!(
+                rx.try_recv(),
+                Ok(Err(BlpError::SubscriptionFailure { .. }))
+            ));
+            assert!(matches!(
+                rx.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ));
+            assert!(worker.subs.is_empty());
+            let snapshot = status.load();
+            assert!(snapshot.keys().is_empty());
+            assert_eq!(snapshot.topic_statuses()[&topics[1]].state, expected_state);
+            assert!(!snapshot.topic_statuses()[&topics[1]].streams_active);
+        }
+    }
+
+    #[test]
+    fn late_positive_status_events_do_not_reactivate_a_terminal_channel() {
+        let mut worker = SubscriptionWorkerState::new(7, Arc::new(EngineConfig::default()));
+        let (tx, _rx) = subscription_channel(1);
+        let (keys, metrics, topics) = register_topics(&mut worker, &tx, &["TEST US Equity"]);
+        let status = Arc::new(crate::engine::SubscriptionStatusHandle::new(
+            crate::engine::SubscriptionStatusState::from_active(
+                topics.clone(),
+                keys.clone(),
+                keys.iter().copied().zip(metrics.iter().cloned()).collect(),
+            ),
+        ));
+        worker.status = Some(status.clone());
+        tx.fail(BlpError::Timeout);
+        let cid = correlation_id_for_key(keys[0]);
+
+        for message_type in ["SubscriptionStarted", "SubscriptionStreamsActivated"] {
+            let event =
+                TestEvent::admin(EventType::SubscriptionStatus, message_type, &[cid], |_| {});
+            let message = event.event().messages().next().expect("status message");
+            let mut mutations = Vec::new();
+            worker.collect_subscription_status(&message, &mut mutations);
+            status.update(|next| {
+                for mutation in mutations {
+                    mutation.apply(next);
+                }
+            });
+        }
+
+        let snapshot = status.load();
+        let topic = &snapshot.topic_statuses()["TEST US Equity"];
+        assert_eq!(topic.state, crate::engine::TopicLifecycleState::Pending);
+        assert!(!topic.streams_active);
+    }
+
+    #[test]
+    fn terminal_stream_rejects_add_without_removing_cleanup_keys() {
+        let config = Arc::new(EngineConfig::default());
+        let mut worker = SubscriptionWorkerState::new(7, config);
+        let (tx, _rx) = subscription_channel(1);
+        let existing_key = worker.subs.insert(SubscriptionState::new(
+            "EXISTING US Equity".to_string(),
+            vec!["PX_LAST".to_string()],
+            tx.clone(),
+            1,
+            false,
+        ));
+        let status = Arc::new(crate::engine::SubscriptionStatusHandle::new(
+            crate::engine::SubscriptionStatusState::from_active(
+                vec!["EXISTING US Equity".to_string()],
+                vec![existing_key],
+                HashMap::new(),
+            ),
+        ));
+        status.update(|next| {
+            assert_eq!(
+                next.set_topic_streams_active("EXISTING US Equity", true),
+                Some(false)
+            );
+        });
+        worker.status = Some(status.clone());
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "EXISTING US Equity".to_string(),
+            detail: "test gap".to_string(),
+        });
+        worker.check_streams_deactivated();
+
+        let error = match worker.register_subscriptions(SubscriptionRegistrationRequest {
+            topics: vec!["NEW US Equity".to_string()],
+            fields: vec!["PX_LAST".to_string()],
+            all_fields: false,
+            options: Vec::new(),
+            flush_threshold: None,
+            overflow_policy: None,
+            stream: tx,
+            forwarder: None,
+        }) {
+            Ok(_) => panic!("terminal stream must reject add"),
+            Err(error) => error,
+        };
+
+        assert!(matches!(error, BlpError::SubscriptionFailure { .. }));
+        assert!(worker.subs.contains(existing_key));
+        assert_eq!(status.load().keys(), &[existing_key]);
+        assert!(!status.load().topic_statuses()["EXISTING US Equity"].streams_active);
+        assert!(!worker.is_clean());
     }
 
     #[tokio::test]

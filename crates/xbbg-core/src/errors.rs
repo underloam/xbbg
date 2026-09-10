@@ -70,6 +70,9 @@ pub enum BlpError {
         label: Option<String>,
     },
 
+    #[error("subscription data loss for {topic}: {detail}")]
+    SubscriptionDataLoss { topic: String, detail: String },
+
     #[error("internal error: {detail}")]
     Internal { detail: String },
 

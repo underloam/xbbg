@@ -10,6 +10,11 @@ export interface BlpValidationErrorOptions {
   readonly suggestion?: string;
 }
 
+export interface BlpSubscriptionDataLossErrorOptions {
+  readonly topic?: string;
+  readonly detail?: string;
+}
+
 export class BlpError extends Error {
   public constructor(message: string) {
     super(message);
@@ -36,6 +41,18 @@ export class BlpRequestError extends BlpError {
 
 export class BlpLimitError extends BlpRequestError {}
 
+export class BlpSubscriptionDataLossError extends BlpError {
+  public readonly code = 'DATALOSS' as const;
+  public readonly topic?: string;
+  public readonly detail?: string;
+
+  public constructor(message: string, options: BlpSubscriptionDataLossErrorOptions = {}) {
+    super(message);
+    this.topic = options.topic;
+    this.detail = options.detail;
+  }
+}
+
 export class BlpValidationError extends BlpError {
   public readonly element?: string;
   public readonly suggestion?: string;
@@ -58,6 +75,15 @@ export class BlpInternalError extends BlpError {}
  */
 const CODE_PREFIX = /^\[XBBG:([A-Z]+)\]\s*/u;
 
+const wrappedNativeErrors = new WeakMap<Error, BlpError>();
+
+function cacheWrappedError(source: unknown, wrapped: BlpError): BlpError {
+  if (source instanceof Error) {
+    wrappedNativeErrors.set(source, wrapped);
+  }
+  return wrapped;
+}
+
 function fromCode(code: string, msg: string): BlpError {
   switch (code) {
     case 'SESSION':
@@ -66,6 +92,8 @@ function fromCode(code: string, msg: string): BlpError {
       return new BlpRequestError(msg, parseRequestOptions(msg));
     case 'LIMIT':
       return new BlpLimitError(msg, parseRequestOptions(msg));
+    case 'DATALOSS':
+      return new BlpSubscriptionDataLossError(msg, parseSubscriptionDataLossOptions(msg));
     case 'VALIDATION':
       return new BlpValidationError(msg, parseValidationOptions(msg));
     case 'TIMEOUT':
@@ -82,6 +110,12 @@ export function wrapError(napiError: unknown): BlpError {
   if (napiError instanceof BlpError) {
     return napiError;
   }
+  if (napiError instanceof Error) {
+    const cached = wrappedNativeErrors.get(napiError);
+    if (cached !== undefined) {
+      return cached;
+    }
+  }
   const msg =
     napiError instanceof Error ? napiError.message : typeof napiError === 'string' ? napiError : '';
 
@@ -89,7 +123,7 @@ export function wrapError(napiError: unknown): BlpError {
   const nativeCode = codeMatch?.[1];
   const matchedPrefix = codeMatch?.[0];
   if (nativeCode !== undefined && matchedPrefix !== undefined) {
-    return fromCode(nativeCode, msg.slice(matchedPrefix.length));
+    return cacheWrappedError(napiError, fromCode(nativeCode, msg.slice(matchedPrefix.length)));
   }
 
   // Session errors
@@ -101,13 +135,20 @@ export function wrapError(napiError: unknown): BlpError {
     msg.includes('failed to spawn worker') ||
     msg.includes('connect event failed')
   ) {
-    return new BlpSessionError(msg);
+    return cacheWrappedError(napiError, new BlpSessionError(msg));
   }
 
   // Request errors
   if (msg.includes('Request failed') || msg.includes('Subscription failed')) {
     const options: BlpRequestErrorOptions = parseRequestOptions(msg);
-    return new BlpRequestError(msg, options);
+    return cacheWrappedError(napiError, new BlpRequestError(msg, options));
+  }
+
+  if (msg.includes('Subscription data loss')) {
+    return cacheWrappedError(
+      napiError,
+      new BlpSubscriptionDataLossError(msg, parseSubscriptionDataLossOptions(msg)),
+    );
   }
 
   // Validation errors
@@ -122,12 +163,12 @@ export function wrapError(napiError: unknown): BlpError {
     msg.includes('(did you mean')
   ) {
     const options: BlpValidationErrorOptions = parseValidationOptions(msg);
-    return new BlpValidationError(msg, options);
+    return cacheWrappedError(napiError, new BlpValidationError(msg, options));
   }
 
   // Timeout errors
   if (msg.includes('Request timed out')) {
-    return new BlpTimeoutError(msg);
+    return cacheWrappedError(napiError, new BlpTimeoutError(msg));
   }
 
   // Internal errors
@@ -137,10 +178,10 @@ export function wrapError(napiError: unknown): BlpError {
     msg.includes('Stream buffer full') ||
     msg.includes('Request was cancelled')
   ) {
-    return new BlpInternalError(msg);
+    return cacheWrappedError(napiError, new BlpInternalError(msg));
   }
 
-  return new BlpError(msg);
+  return cacheWrappedError(napiError, new BlpError(msg));
 }
 
 function parseRequestOptions(msg: string): BlpRequestErrorOptions {
@@ -160,6 +201,14 @@ function parseRequestOptions(msg: string): BlpRequestErrorOptions {
     options.request_id = requestIdMatch[1];
   }
   return options;
+}
+
+function parseSubscriptionDataLossOptions(msg: string): BlpSubscriptionDataLossErrorOptions {
+  const match = /^Subscription data loss \[topic=(.*)\]: ([\s\S]*)$/u.exec(msg);
+  if (match === null) {
+    return {};
+  }
+  return { detail: match[2], topic: match[1] };
 }
 
 function parseValidationOptions(msg: string): BlpValidationErrorOptions {

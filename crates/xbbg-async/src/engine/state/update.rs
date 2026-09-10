@@ -40,6 +40,7 @@ pub struct SubscriptionUpdate {
     pub topic_id: TopicId,
     pub topic: Arc<str>,
     pub layout: Arc<FieldLayout>,
+    /// Sparse delta entries: no entry means unchanged; Null means an explicit clear.
     pub values: SmallVec<[UpdateField; 8]>,
 }
 
@@ -51,6 +52,7 @@ pub struct UpdateField {
 
 #[derive(Clone, Debug)]
 pub enum UpdateValue {
+    /// An explicitly present Bloomberg null, never an absent or unreadable field.
     Null,
     Bool(bool),
     I32(i32),
@@ -100,14 +102,18 @@ impl FieldKind {
     pub fn from_blp_datatype(datatype: BlpDataType) -> Self {
         match datatype {
             BlpDataType::Bool => Self::Bool,
-            BlpDataType::Char | BlpDataType::Byte | BlpDataType::Int32 => Self::I32,
+            BlpDataType::Int32 => Self::I32,
             BlpDataType::Int64 => Self::I64,
             BlpDataType::Float32 | BlpDataType::Float64 | BlpDataType::Decimal => Self::F64,
             BlpDataType::String | BlpDataType::Enumeration => Self::Str,
             BlpDataType::Date => Self::Date32,
             BlpDataType::Time => Self::Time64Micros,
-            BlpDataType::Datetime => Self::TimestampMicros,
-            BlpDataType::Sequence
+            // Char/Byte may decode as bool or integer; Datetime may be time-only.
+            // A null value cannot establish either of those concrete kinds.
+            BlpDataType::Char
+            | BlpDataType::Byte
+            | BlpDataType::Datetime
+            | BlpDataType::Sequence
             | BlpDataType::Choice
             | BlpDataType::ByteArray
             | BlpDataType::CorrelationId => Self::Unknown,
@@ -127,28 +133,26 @@ impl FieldKind {
 }
 
 impl UpdateValue {
-    pub fn from_blp(value: Option<Value<'_>>) -> Self {
+    pub fn from_blp(value: Value<'_>) -> Self {
         Self::from_blp_with_str_cache(value, None)
     }
 
     pub fn from_blp_with_str_cache(
-        value: Option<Value<'_>>,
+        value: Value<'_>,
         str_cache: Option<&mut StringValueCache>,
     ) -> Self {
         match value {
-            None | Some(Value::Null) => Self::Null,
-            Some(Value::Bool(v)) => Self::Bool(v),
-            Some(Value::Int32(v)) => Self::I32(v),
-            Some(Value::Int64(v)) => Self::I64(v),
-            Some(Value::Float64(v)) => Self::F64(v),
-            Some(Value::String(v)) | Some(Value::Enum(v)) => {
-                Self::Str(Self::cached_str(v, str_cache))
-            }
-            Some(Value::Date32(v)) => Self::Date32(v),
-            Some(Value::TimestampMicros(v)) => Self::TimestampMicros(v),
-            Some(Value::Datetime(v)) => Self::TimestampMicros(v.to_micros()),
-            Some(Value::Time64Micros(v)) => Self::Time64Micros(v),
-            Some(Value::Byte(v)) => Self::I32(v as i32),
+            Value::Null => Self::Null,
+            Value::Bool(v) => Self::Bool(v),
+            Value::Int32(v) => Self::I32(v),
+            Value::Int64(v) => Self::I64(v),
+            Value::Float64(v) => Self::F64(v),
+            Value::String(v) | Value::Enum(v) => Self::Str(Self::cached_str(v, str_cache)),
+            Value::Date32(v) => Self::Date32(v),
+            Value::TimestampMicros(v) => Self::TimestampMicros(v),
+            Value::Datetime(v) => Self::TimestampMicros(v.to_micros()),
+            Value::Time64Micros(v) => Self::Time64Micros(v),
+            Value::Byte(v) => Self::I32(v as i32),
         }
     }
 
@@ -181,38 +185,5 @@ impl UpdateValue {
             Self::Time64Micros(v) => Some(v.to_string()),
             Self::TimestampMicros(v) => Some(v.to_string()),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn field_kind_uses_bloomberg_datatype_for_null_fields() {
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Float64),
-            FieldKind::F64
-        );
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Decimal),
-            FieldKind::F64
-        );
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Int32),
-            FieldKind::I32
-        );
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Int64),
-            FieldKind::I64
-        );
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Date),
-            FieldKind::Date32
-        );
-        assert_eq!(
-            FieldKind::from_blp_datatype(BlpDataType::Datetime),
-            FieldKind::TimestampMicros
-        );
     }
 }

@@ -1,8 +1,8 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arrow_array::builder::{
-    BooleanBuilder, Date32Builder, Float64Builder, Int32Builder, Int64Builder, StringBuilder,
-    Time64MicrosecondBuilder, TimestampMicrosecondBuilder,
+    BinaryBuilder, BooleanBuilder, Date32Builder, Float64Builder, Int32Builder, Int64Builder,
+    StringBuilder, Time64MicrosecondBuilder, TimestampMicrosecondBuilder,
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
@@ -10,11 +10,17 @@ use xbbg_core::BlpError;
 
 use super::update::{FieldKind, FieldLayout, SubscriptionUpdate, UpdateValue};
 
+const PRESENCE_COLUMN_NAME: &str = "__xbbg_present";
+const PRESENCE_METADATA_KEY: &str = "xbbg.subscription_presence";
+const PRESENCE_METADATA_VALUE: &str =
+    "column=__xbbg_present;encoding=binary-lsb-first;mapping=bit-i-to-schema-field-(i+2)";
+
 pub struct SubscriptionArrowBatcher {
     layout: Option<Arc<FieldLayout>>,
     schema: Option<SchemaRef>,
     builders: Vec<SubscriptionColumnBuilder>,
     scratch: Vec<Option<usize>>,
+    presence_scratch: Vec<u8>,
     rows: usize,
     capacity: usize,
 }
@@ -32,6 +38,7 @@ impl SubscriptionArrowBatcher {
             schema: None,
             builders: Vec::new(),
             scratch: Vec::new(),
+            presence_scratch: Vec::new(),
             rows: 0,
             capacity,
         }
@@ -103,7 +110,7 @@ impl SubscriptionArrowBatcher {
     }
 
     fn rebuild_for_layout(&mut self, layout: Arc<FieldLayout>) {
-        let mut fields = Vec::with_capacity(layout.fields.len() + 2);
+        let mut fields = Vec::with_capacity(layout.fields.len() + 3);
         fields.push(Field::new(
             "timestamp",
             DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
@@ -116,13 +123,21 @@ impl SubscriptionArrowBatcher {
                 .iter()
                 .map(|meta| Field::new(meta.name.as_ref(), arrow_datatype(meta.kind), true)),
         );
+        fields.push(Field::new(PRESENCE_COLUMN_NAME, DataType::Binary, false));
 
         let builders = subscription_builders(&layout, self.capacity);
 
         self.layout = Some(layout);
-        self.schema = Some(Arc::new(Schema::new(fields)));
+        self.schema = Some(Arc::new(Schema::new_with_metadata(
+            fields,
+            HashMap::from([(
+                PRESENCE_METADATA_KEY.to_string(),
+                PRESENCE_METADATA_VALUE.to_string(),
+            )]),
+        )));
         self.builders = builders;
         self.scratch.clear();
+        self.presence_scratch.clear();
     }
 
     fn append_current_layout(&mut self, update: &SubscriptionUpdate) {
@@ -138,6 +153,9 @@ impl SubscriptionArrowBatcher {
 
         self.scratch.clear();
         self.scratch.resize(layout.fields.len(), None);
+        self.presence_scratch.clear();
+        self.presence_scratch
+            .resize(layout.fields.len().div_ceil(8), 0);
         for (position, field) in update.values.iter().enumerate() {
             if let Some(slot) = self.scratch.get_mut(field.index as usize) {
                 *slot = Some(position);
@@ -152,15 +170,19 @@ impl SubscriptionArrowBatcher {
                 .scratch
                 .get(meta.index as usize)
                 .and_then(|slot| slot.map(|value_position| &update.values[value_position].value));
+            if value.is_some() {
+                self.presence_scratch[position / 8] |= 1u8 << (position % 8);
+            }
             self.builders[position + 2].append_update(value);
         }
+        self.builders[layout.fields.len() + 2].append_presence(&self.presence_scratch);
 
         self.rows += 1;
     }
 }
 
 fn subscription_builders(layout: &FieldLayout, capacity: usize) -> Vec<SubscriptionColumnBuilder> {
-    let mut builders = Vec::with_capacity(layout.fields.len() + 2);
+    let mut builders = Vec::with_capacity(layout.fields.len() + 3);
     builders.push(SubscriptionColumnBuilder::Timestamp(
         TimestampMicrosecondBuilder::with_capacity(capacity),
     ));
@@ -173,6 +195,10 @@ fn subscription_builders(layout: &FieldLayout, capacity: usize) -> Vec<Subscript
             .iter()
             .map(|meta| SubscriptionColumnBuilder::for_kind(meta.kind, capacity)),
     );
+    let bitmap_bytes = layout.fields.len().div_ceil(8);
+    builders.push(SubscriptionColumnBuilder::Presence(
+        BinaryBuilder::with_capacity(capacity, capacity.saturating_mul(bitmap_bytes)),
+    ));
     builders
 }
 
@@ -210,6 +236,7 @@ fn arrow_datatype(kind: FieldKind) -> DataType {
 enum SubscriptionColumnBuilder {
     Timestamp(TimestampMicrosecondBuilder),
     Topic(StringBuilder),
+    Presence(BinaryBuilder),
     Bool(BooleanBuilder),
     I32(Int32Builder),
     I64(Int64Builder),
@@ -254,9 +281,16 @@ impl SubscriptionColumnBuilder {
         }
     }
 
+    fn append_presence(&mut self, value: &[u8]) {
+        match self {
+            Self::Presence(builder) => builder.append_value(value),
+            _ => unreachable!("presence append used with non-presence builder"),
+        }
+    }
+
     fn append_update(&mut self, value: Option<&UpdateValue>) {
         match self {
-            Self::Timestamp(_) | Self::Topic(_) => {
+            Self::Timestamp(_) | Self::Topic(_) | Self::Presence(_) => {
                 unreachable!("fixed subscription columns are appended separately")
             }
             Self::Bool(builder) => match value {
@@ -298,6 +332,7 @@ impl SubscriptionColumnBuilder {
         match self {
             Self::Timestamp(builder) => Arc::new(builder.finish().with_timezone("UTC")),
             Self::Topic(builder) => Arc::new(builder.finish()),
+            Self::Presence(builder) => Arc::new(builder.finish()),
             Self::Bool(builder) => Arc::new(builder.finish()),
             Self::I32(builder) => Arc::new(builder.finish()),
             Self::I64(builder) => Arc::new(builder.finish()),
@@ -352,7 +387,9 @@ fn append_string_value(builder: &mut StringBuilder, value: Option<&UpdateValue>)
 mod tests {
     use super::*;
     use crate::engine::state::update::{FieldMeta, UpdateField};
-    use arrow_array::{Array, Float64Array, Int32Array, StringArray, TimestampMicrosecondArray};
+    use arrow_array::{
+        Array, BinaryArray, Float64Array, Int32Array, StringArray, TimestampMicrosecondArray,
+    };
 
     fn layout(version: u32, fields: Vec<FieldMeta>) -> Arc<FieldLayout> {
         Arc::new(FieldLayout::new(version, fields))
@@ -377,8 +414,16 @@ mod tests {
         UpdateField { index, value }
     }
 
+    fn presence_bitmap(batch: &RecordBatch) -> &BinaryArray {
+        batch
+            .column(batch.num_columns() - 1)
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .expect("trailing presence bitmap")
+    }
+
     #[test]
-    fn wrapper_schema_matches_legacy_shape() {
+    fn schema_declares_trailing_non_null_presence_bitmap() {
         let layout = layout(
             1,
             vec![
@@ -403,25 +448,19 @@ mod tests {
         );
 
         let batch = subscription_update_to_record_batch(&update).unwrap();
-        let expected = Schema::new(vec![
-            Field::new(
-                "timestamp",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                false,
-            ),
-            Field::new("topic", DataType::Utf8, false),
-            Field::new("BID", DataType::Float64, true),
-            Field::new("ASK_SIZE", DataType::Int32, true),
-            Field::new("OPEN", DataType::Date32, true),
-            Field::new("ACTIVE", DataType::Boolean, true),
-            Field::new(
-                "LAST_UPDATE",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                true,
-            ),
-        ]);
+        let schema = batch.schema();
+        let presence = schema.field(schema.fields().len() - 1);
 
-        assert_eq!(batch.schema().as_ref(), &expected);
+        assert_eq!(presence.name(), PRESENCE_COLUMN_NAME);
+        assert_eq!(presence.data_type(), &DataType::Binary);
+        assert!(!presence.is_nullable());
+        assert_eq!(
+            schema
+                .metadata()
+                .get(PRESENCE_METADATA_KEY)
+                .map(String::as_str),
+            Some(PRESENCE_METADATA_VALUE)
+        );
     }
 
     #[test]
@@ -493,6 +532,79 @@ mod tests {
             .unwrap();
         assert_eq!(status.value(0), "OK");
         assert!(status.is_null(1));
+        let presence = presence_bitmap(&batch);
+        assert_eq!(presence.value(0), &[0b0000_0101]);
+        assert_eq!(presence.value(1), &[0b0000_0010]);
+    }
+
+    #[test]
+    fn explicit_null_and_absence_have_distinct_presence_bits() {
+        let layout = layout(
+            1,
+            vec![
+                FieldMeta::new("BID", 0, FieldKind::F64),
+                FieldMeta::new("ASK", 1, FieldKind::F64),
+            ],
+        );
+        let mut batcher = SubscriptionArrowBatcher::with_capacity(2);
+        batcher.append(&update(
+            10,
+            "IBM US Equity",
+            layout.clone(),
+            [update_field(0, UpdateValue::Null)],
+        ));
+        batcher.append(&update(
+            20,
+            "IBM US Equity",
+            layout,
+            [update_field(1, UpdateValue::Null)],
+        ));
+
+        let batch = batcher.flush().unwrap();
+        for column in 2..=3 {
+            let values = batch
+                .column(column)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert!(values.is_null(0));
+            assert!(values.is_null(1));
+        }
+        let presence = presence_bitmap(&batch);
+        assert_eq!(presence.null_count(), 0);
+        assert_eq!(presence.value(0), &[0b0000_0001]);
+        assert_eq!(presence.value(1), &[0b0000_0010]);
+    }
+
+    #[test]
+    fn presence_bitmap_spans_bytes_by_layout_ordinal() {
+        let fields = (0..10)
+            .map(|ordinal| {
+                FieldMeta::new(
+                    format!("FIELD_{ordinal}"),
+                    (9 - ordinal) as u16,
+                    FieldKind::F64,
+                )
+            })
+            .collect();
+        let layout = layout(1, fields);
+        let update = update(
+            10,
+            "IBM US Equity",
+            layout,
+            [
+                update_field(9, UpdateValue::Null),
+                update_field(2, UpdateValue::Null),
+                update_field(1, UpdateValue::Null),
+                update_field(0, UpdateValue::Null),
+            ],
+        );
+
+        let batch = subscription_update_to_record_batch(&update).unwrap();
+        assert_eq!(
+            presence_bitmap(&batch).value(0),
+            &[0b1000_0001, 0b0000_0011]
+        );
     }
 
     #[test]
@@ -546,7 +658,44 @@ mod tests {
     }
 
     #[test]
-    fn same_version_different_topic_layout_flushes_without_type_corruption() {
+    fn presence_bitmap_resets_width_and_bits_after_layout_change() {
+        let first_layout = layout(
+            1,
+            (0..9)
+                .map(|index| FieldMeta::new(format!("OLD_{index}"), index as u16, FieldKind::F64))
+                .collect(),
+        );
+        let second_layout = layout(
+            2,
+            vec![
+                FieldMeta::new("NEW_0", 0, FieldKind::F64),
+                FieldMeta::new("NEW_1", 1, FieldKind::F64),
+            ],
+        );
+        let mut batcher = SubscriptionArrowBatcher::new();
+        batcher.append(&update(
+            10,
+            "IBM US Equity",
+            first_layout,
+            [update_field(8, UpdateValue::Null)],
+        ));
+
+        let old_batch = batcher
+            .append(&update(
+                20,
+                "IBM US Equity",
+                second_layout,
+                [update_field(1, UpdateValue::Null)],
+            ))
+            .expect("layout change flushes old bitmap width");
+        assert_eq!(presence_bitmap(&old_batch).value(0), &[0, 1]);
+
+        let new_batch = batcher.flush().unwrap();
+        assert_eq!(presence_bitmap(&new_batch).value(0), &[0b0000_0010]);
+    }
+
+    #[test]
+    fn same_version_layout_change_flushes_and_preserves_string_promotion() {
         let bid_layout = layout(2, vec![FieldMeta::new("BID", 0, FieldKind::F64)]);
         let text_bid_layout = layout(2, vec![FieldMeta::new("BID", 0, FieldKind::Str)]);
         let mut batcher = SubscriptionArrowBatcher::with_capacity(2);
@@ -564,7 +713,7 @@ mod tests {
                 20,
                 "MSFT US Equity",
                 text_bid_layout,
-                [update_field(0, UpdateValue::Str(Arc::from("OPEN")))],
+                [update_field(0, UpdateValue::Bool(true))],
             ))
             .expect("a structurally different layout must flush pending rows");
 
@@ -589,7 +738,7 @@ mod tests {
                 .downcast_ref::<StringArray>()
                 .unwrap()
                 .value(0),
-            "OPEN"
+            "true"
         );
     }
 
@@ -676,6 +825,12 @@ mod tests {
 
         assert!(batch.column(0).get_buffer_memory_size() < 1024);
         assert!(batch.column(2).get_buffer_memory_size() < 1024);
+        assert!(
+            batch
+                .column(batch.num_columns() - 1)
+                .get_buffer_memory_size()
+                < 1024
+        );
     }
 
     #[test]
@@ -696,7 +851,7 @@ mod tests {
 
         let batch = subscription_update_to_record_batch(&update).unwrap();
         assert_eq!(batch.num_rows(), 1);
-        assert_eq!(batch.num_columns(), 4);
+        assert_eq!(batch.num_columns(), 5);
         assert_eq!(batch.schema().field(2).name(), "BID");
         assert_eq!(batch.schema().field(3).name(), "ASK");
         let ask = batch
@@ -705,5 +860,6 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert!(ask.is_null(0));
+        assert_eq!(presence_bitmap(&batch).value(0), &[0b0000_0001]);
     }
 }

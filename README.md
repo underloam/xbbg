@@ -449,15 +449,19 @@ await raw_sub.unsubscribe()
 
 Key behaviors:
 
-- `output` accepts exactly `record_batch`, `backend`, `dict`, or `tick` (case-insensitive); omitting it keeps whatever `raw` and `tick_mode` select
+- `output` accepts exactly `record_batch`, `backend`, `dict`, or `tick` (case-insensitive); an explicit selector overrides both `raw` and `tick_mode`
 - `raw=True` or `output="record_batch"` yields raw xbbg `ArrowRecordBatch` values for max-performance consumers
 - `tick_mode=True`, `output="dict"`, or `output="tick"` returns native dict ticks and implies raw subscription mode
 - `output="backend"` returns the configured backend output, the same as default iteration without `raw=True`
-- `all_fields=True` exposes all top-level scalar Bloomberg subscription fields
+- `all_fields=True` exposes all top-level scalar Bloomberg subscription fields; unrequested arrays/complex fields are omitted, while explicitly requested unsupported shapes fail rather than being truncated
 - filtered mode keeps requested fields plus `MKTDATA_EVENT_TYPE` and `MKTDATA_EVENT_SUBTYPE`
 - `conflate=True` requests Bloomberg-conflated quote updates on `//blp/mktdata`; trades are still delivered as received
 - `sub.add(...)`, `sub.remove(...)`, `sub.status`, `sub.events`, `sub.failed_tickers`, and `sub.stats` expose runtime control and diagnostics
-- use `async with` on an acquired subscription or `try`/`finally` with `await sub.unsubscribe()` for deterministic cleanup; `unsubscribe(drain=True)` closes the subscription and returns remaining buffered native Arrow batches rather than discarding them
+- use `async with` on an acquired subscription or `try`/`finally` with `await sub.unsubscribe()` for deterministic cleanup; `unsubscribe(drain=True)` returns a list in the same dict/raw/backend representation as iteration (an empty drain is `[]`). An unread stream failure is raised after cleanup, never hidden by a successful partial drain.
+
+Subscription rows are **deltas, not complete images**. In dict ticks, a missing key means unchanged; a present `None` means an explicit Bloomberg clear. Arrow batches retain nullable data columns and append non-null binary `__xbbg_present`: bit `i` (least-significant bit first) marks whether schema column `i + 2` is present, after `timestamp` and `topic`. A set bit plus a null cell is a clear; an unset bit is unchanged. Use each batch's current schema because all-fields layouts can grow or promote types. Schema metadata key `xbbg.subscription_presence` documents the encoding and mapping.
+
+Native queues fail closed on any continuity gap: Bloomberg `DATALOSS`, a full `drop_newest` buffer, or overflow/timeout of the bounded `block` forwarder. Already committed queue data is followed by one `BlpSubscriptionDataLossError`, then EOF; no post-gap deltas are delivered. Its `topic` and `detail` identify the gap (`topic="*"` denotes unattributed/session-wide loss). **Resubscribe for a fresh image** before applying further deltas. Terminal session errors also wake pending reads, including handles whose topics were all removed. Ordinary connection-down notifications remain nonterminal, and a single rejected topic does not terminate healthy siblings.
 
 Python `stream()` producers share one managed background event-loop thread, not a thread per stream. Each sync bridge has a bounded queue (`stream_capacity`, default **256**, minimum **1**) and asynchronously waits for consumer space; native overflow policy remains separate. Active sync producers are admitted per global/scoped engine up to `max_subscription_sessions`; excess producers raise `RuntimeError` rather than creating more tasks. Callbacks run on the consuming thread. Close the generator explicitly when stopping early: close cancels and waits for producer cleanup, and a cleanup timeout is reported while the producer remains tracked against its admission limit. In async applications use `astream()` directly and close it explicitly when retaining the generator after an early exit.
 

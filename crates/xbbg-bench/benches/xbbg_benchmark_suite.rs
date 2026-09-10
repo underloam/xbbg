@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use arrow_array::builder::{Float64Builder, StringBuilder, TimestampMicrosecondBuilder};
+use arrow_array::builder::{StringBuilder, TimestampMicrosecondBuilder};
 use arrow_array::{
     ArrayRef, Float64Array, Int64Array, RecordBatch, StringArray, TimestampMicrosecondArray,
 };
@@ -24,7 +24,10 @@ use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 use xbbg_async::engine::state::typed_builder::{ArrowType, TypedBuilder};
-use xbbg_async::engine::state::SubscriptionUpdate;
+use xbbg_async::engine::state::{
+    subscription_channel, FieldKind, FieldLayout, FieldMeta, MessageOutcome,
+    SubscriptionArrowBatcher, SubscriptionUpdate, UpdateField, UpdateValue,
+};
 use xbbg_async::engine::{
     BqlState, BulkDataState, Engine, EngineConfig, ExtractorType, HistDataState, IntradayTickState,
     LongMode, OutputFormat, RefDataState, RequestParams, ServerAddr, SubscriptionState, Transport,
@@ -37,7 +40,7 @@ use xbbg_core::{
 };
 
 fn subscription_update_shape(update: &SubscriptionUpdate) -> (usize, usize) {
-    (1, update.layout.fields.len() + 2)
+    (1, update.layout.fields.len() + 3)
 }
 struct TrackingAllocator;
 
@@ -2505,6 +2508,10 @@ fn component_should_capture_datatype(datatype: BlpDataType) -> bool {
     )
 }
 
+fn component_should_capture_field(element: &Element<'_>) -> bool {
+    !element.is_array() && component_should_capture_datatype(element.datatype())
+}
+
 fn estimate_all_field_count(events: &[Event]) -> usize {
     events
         .iter()
@@ -2516,7 +2523,7 @@ fn estimate_all_field_count(events: &[Event]) -> usize {
                 let Some(child) = elem.get_at(child_idx) else {
                     continue;
                 };
-                if component_should_capture_datatype(child.datatype()) {
+                if component_should_capture_field(&child) {
                     count += 1;
                 }
             }
@@ -2525,40 +2532,59 @@ fn estimate_all_field_count(events: &[Event]) -> usize {
         .unwrap_or(1)
 }
 
+fn component_layout(field_count: usize) -> Arc<FieldLayout> {
+    Arc::new(FieldLayout::new(
+        1,
+        (0..field_count)
+            .map(|idx| FieldMeta::new(format!("field_{idx}"), idx as _, FieldKind::F64))
+            .collect(),
+    ))
+}
+
 fn component_schema(field_count: usize) -> Arc<Schema> {
-    let mut fields = Vec::with_capacity(field_count + 2);
-    fields.push(Field::new(
-        "timestamp",
-        DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-        false,
-    ));
-    fields.push(Field::new("topic", DataType::Utf8, false));
-    for idx in 0..field_count {
-        fields.push(Field::new(format!("field_{idx}"), DataType::Float64, true));
-    }
-    Arc::new(Schema::new(fields))
+    component_record_batch(1, field_count).schema()
 }
 
 fn component_record_batch(rows: usize, field_count: usize) -> RecordBatch {
-    let schema = component_schema(field_count);
-    let mut timestamp_builder = TimestampMicrosecondBuilder::new();
-    let mut topic_builder = StringBuilder::new();
+    component_record_batch_with_values(rows, field_count, true)
+}
+
+fn component_null_record_batch(rows: usize, field_count: usize) -> RecordBatch {
+    component_record_batch_with_values(rows, field_count, false)
+}
+
+fn component_record_batch_with_values(
+    rows: usize,
+    field_count: usize,
+    include_values: bool,
+) -> RecordBatch {
+    let layout = component_layout(field_count);
+    let mut update = SubscriptionUpdate {
+        timestamp_us: 0,
+        topic_id: 0,
+        topic: Arc::from("SYN00000 US Equity"),
+        layout,
+        values: Default::default(),
+    };
+    if include_values {
+        update
+            .values
+            .extend((0..field_count).map(|field_idx| UpdateField {
+                index: field_idx as _,
+                value: UpdateValue::F64(field_idx as f64),
+            }));
+    }
+    let mut batcher = SubscriptionArrowBatcher::with_capacity(rows);
     for row in 0..rows {
-        timestamp_builder.append_value(row as i64);
-        topic_builder.append_value("SYN00000 US Equity");
-    }
-    let mut columns: Vec<ArrayRef> = vec![
-        Arc::new(timestamp_builder.finish().with_timezone("UTC")),
-        Arc::new(topic_builder.finish()),
-    ];
-    for field_idx in 0..field_count {
-        let mut builder = Float64Builder::new();
-        for row in 0..rows {
-            builder.append_value((row + field_idx) as f64);
+        update.timestamp_us = row as i64;
+        for field in &mut update.values {
+            field.value = UpdateValue::F64((row + field.index as usize) as f64);
         }
-        columns.push(Arc::new(builder.finish()) as ArrayRef);
+        assert!(batcher.append(&update).is_none());
     }
-    RecordBatch::try_new(schema, columns).expect("component profile batch")
+    batcher
+        .flush()
+        .expect("component profile batch must contain at least one row")
 }
 
 fn run_bql_json_suite(config: &SuiteConfig) -> Vec<BenchRecord> {
@@ -2695,8 +2721,6 @@ fn profile_subscription_components(
         .iter()
         .map(|field| Name::get_or_intern(field))
         .collect::<Vec<_>>();
-    let invalid_dateortime_key =
-        Name::get_or_intern("LAST_UPDATE_ALL_SESSIONS_RT").as_ptr() as usize;
 
     let repeats_per_message = subscription_repeats_per_message(events, target_messages);
     let message_iteration_start = Instant::now();
@@ -2765,7 +2789,7 @@ fn profile_subscription_components(
                 let Some(child) = elem.get_at(child_idx) else {
                     continue;
                 };
-                black_box(component_should_capture_datatype(child.datatype()));
+                black_box(component_should_capture_field(&child));
             }
         });
     }
@@ -2773,7 +2797,11 @@ fn profile_subscription_components(
 
     let all_fields_name_cache_start = Instant::now();
     if all_fields {
-        let mut slots: Vec<Option<(usize, bool)>> = Vec::new();
+        let requested_name_keys = names
+            .iter()
+            .map(|name| name.as_ptr() as usize)
+            .collect::<HashSet<_>>();
+        let mut slots: Vec<Option<(usize, BlpDataType, bool)>> = Vec::new();
         for_each_subscription_component_message(events, target_messages, |msg| {
             let elem = msg.elements();
             for child_idx in 0..elem.num_children() {
@@ -2781,17 +2809,31 @@ fn profile_subscription_components(
                     continue;
                 };
                 let key = child.name_key();
-                if let Some(Some((cached_key, captured))) = slots.get(child_idx).copied() {
-                    if cached_key == key {
+                if child.is_array() {
+                    black_box(requested_name_keys.contains(&key));
+                    continue;
+                }
+                let datatype = child.datatype();
+                if let Some(Some((cached_key, cached_datatype, captured))) =
+                    slots.get(child_idx).copied()
+                {
+                    if cached_key == key && cached_datatype == datatype {
                         black_box(captured);
                         continue;
                     }
                 }
-                let captured = component_should_capture_datatype(child.datatype());
+                let captured = component_should_capture_datatype(datatype);
+                if !captured {
+                    let requested = requested_name_keys.contains(&key);
+                    black_box(requested);
+                    if requested {
+                        continue;
+                    }
+                }
                 if child_idx >= slots.len() {
                     slots.resize(child_idx + 1, None);
                 }
-                slots[child_idx] = Some((key, captured));
+                slots[child_idx] = Some((key, datatype, captured));
                 black_box(captured);
             }
         });
@@ -2806,10 +2848,11 @@ fn profile_subscription_components(
                 let Some(child) = elem.get_at(child_idx) else {
                     continue;
                 };
+                if child.is_array() {
+                    continue;
+                }
                 let datatype = child.datatype();
-                if !component_should_capture_datatype(datatype)
-                    || child.name_key() == invalid_dateortime_key
-                {
+                if !component_should_capture_datatype(datatype) {
                     continue;
                 }
                 black_box(child.get_value_fast_with_datatype(0, datatype));
@@ -2820,7 +2863,12 @@ fn profile_subscription_components(
             let elem = msg.elements();
             for name in &names {
                 if let Some(field) = elem.get(name) {
-                    black_box(field.get_value_fast(0));
+                    let datatype = field.datatype();
+                    if field.is_array() || !component_should_capture_datatype(datatype) {
+                        black_box(false);
+                    } else {
+                        black_box(field.get_value_fast_with_datatype(0, datatype));
+                    }
                 }
             }
         });
@@ -2828,37 +2876,11 @@ fn profile_subscription_components(
     let value_getter_elapsed = value_getter_start.elapsed();
 
     let arrow_append_start = Instant::now();
-    let mut arrow_builders = (0..field_count)
-        .map(|_| Float64Builder::new())
-        .collect::<Vec<_>>();
-    for row in 0..target_messages {
-        for (field_idx, builder) in arrow_builders.iter_mut().enumerate() {
-            builder.append_value((row + field_idx) as f64);
-        }
-    }
-    black_box(
-        arrow_builders
-            .iter_mut()
-            .map(|builder| builder.finish())
-            .collect::<Vec<_>>(),
-    );
+    black_box(component_record_batch(target_messages, field_count));
     let arrow_append_elapsed = arrow_append_start.elapsed();
 
     let null_padding_start = Instant::now();
-    let mut null_builders = (0..field_count)
-        .map(|_| Float64Builder::new())
-        .collect::<Vec<_>>();
-    for _ in 0..target_messages {
-        for builder in &mut null_builders {
-            builder.append_null();
-        }
-    }
-    black_box(
-        null_builders
-            .iter_mut()
-            .map(|builder| builder.finish())
-            .collect::<Vec<_>>(),
-    );
+    black_box(component_null_record_batch(target_messages, field_count));
     let null_padding_elapsed = null_padding_start.elapsed();
 
     let flush_schema_start = Instant::now();
@@ -2888,11 +2910,12 @@ fn profile_subscription_components(
         scenario,
         start.elapsed(),
         target_messages,
-        field_count + 2,
+        field_count + 3,
         target_messages * field_count,
         "field_ops",
         format!(
-            "target_messages={target_messages}, all_fields={all_fields}, field_count={field_count}, cached_events={}, component phases are independent microbenchmarks",
+            "target_messages={target_messages}, all_fields={all_fields}, field_count={field_count}, output_columns={}, presence=production_non_null_binary_lsb_first, cached_events={}, component phases are independent microbenchmarks",
+            field_count + 3,
             events.len()
         ),
     );
@@ -2902,8 +2925,8 @@ fn profile_subscription_components(
         phase("timestamp_topic_append", timestamp_topic_elapsed),
         phase("requested_field_lookup", requested_lookup_elapsed),
         phase("all_fields_get_at", all_fields_get_at_elapsed),
-        phase("all_fields_datatype_filter", all_fields_datatype_elapsed),
-        phase("all_fields_name_key_cache", all_fields_name_cache_elapsed),
+        phase("all_fields_scalar_filter", all_fields_datatype_elapsed),
+        phase("all_fields_shape_type_cache", all_fields_name_cache_elapsed),
         phase("value_getter", value_getter_elapsed),
         phase("arrow_append", arrow_append_elapsed),
         phase("null_padding", null_padding_elapsed),
@@ -2913,6 +2936,63 @@ fn profile_subscription_components(
         phase("total", Duration::from_micros(record.elapsed_us as u64)),
     ];
     record
+}
+
+#[derive(Default)]
+struct SubscriptionReplayDrain {
+    accepted_rows: usize,
+    accepted_batches: usize,
+    columns: usize,
+    terminal_error_count: usize,
+    data_loss_error_count: usize,
+    unexpected_error_count: usize,
+    terminal_error_details: Vec<String>,
+    terminal_eof_observed: bool,
+}
+
+impl SubscriptionReplayDrain {
+    fn observe_error(&mut self, error: BlpError) {
+        self.terminal_error_count += 1;
+        match error {
+            BlpError::SubscriptionDataLoss { topic, detail } => {
+                self.data_loss_error_count += 1;
+                self.terminal_error_details
+                    .push(format!("subscription_data_loss({topic}): {detail}"));
+            }
+            error => {
+                self.unexpected_error_count += 1;
+                self.terminal_error_details.push(error.to_string());
+            }
+        }
+    }
+}
+
+fn drain_subscription_updates(
+    rx: &mut xbbg_async::engine::state::SubscriptionReceiver,
+    limit: usize,
+    drain: &mut SubscriptionReplayDrain,
+) -> bool {
+    let initial_terminal_errors = drain.terminal_error_count;
+    let mut accepted = 0usize;
+    while accepted < limit {
+        match rx.try_recv() {
+            Ok(Ok(update)) => {
+                let (update_rows, update_columns) = subscription_update_shape(&update);
+                drain.accepted_rows += update_rows;
+                drain.columns = drain.columns.max(update_columns);
+                drain.accepted_batches += 1;
+                accepted += 1;
+                black_box(update);
+            }
+            Ok(Err(error)) => drain.observe_error(error),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                drain.terminal_eof_observed = true;
+                break;
+            }
+        }
+    }
+    drain.terminal_error_count > initial_terminal_errors
 }
 
 fn replay_subscription_events(
@@ -2936,12 +3016,19 @@ fn replay_subscription_events(
     let cached_messages = events
         .iter()
         .map(|event| event.messages().count())
-        .sum::<usize>()
-        .max(1);
+        .sum::<usize>();
+    if cached_messages == 0 {
+        return BenchRecord::error(
+            "subscription_replay",
+            scenario,
+            Duration::ZERO,
+            "cached subscription events contain no messages",
+        );
+    }
     let repeats_per_message = (target_messages / cached_messages).max(1);
 
     let topic_count = topic_count.max(1);
-    let (tx, mut rx) = mpsc::channel(topic_count.saturating_mul(4).max(16));
+    let (tx, mut rx) = subscription_channel(topic_count.saturating_mul(4).max(16));
     let field_vec = fields
         .iter()
         .map(|field| (*field).to_string())
@@ -2959,32 +3046,38 @@ fn replay_subscription_events(
         .collect::<Vec<_>>();
     drop(tx);
 
-    let mut rows = 0usize;
-    let mut columns = 0usize;
-    let mut batches = 0usize;
     let process_start = Instant::now();
     let mut processed = 0usize;
-    while processed < target_messages {
+    let mut stop_reason = "completed";
+    let mut fatal_stream = false;
+    let mut drain = SubscriptionReplayDrain::default();
+    'produce: while processed < target_messages {
         for event in events {
             for msg in event.messages() {
                 for _ in 0..repeats_per_message {
                     let idx = processed % topic_count;
-                    states[idx].on_message(&msg);
-                    if let Ok(Ok(update)) = rx.try_recv() {
-                        let (update_rows, update_columns) = subscription_update_shape(&update);
-                        rows += update_rows;
-                        columns = columns.max(update_columns);
-                        batches += 1;
-                        black_box(update);
-                    }
+                    let outcome = states[idx].on_message(&msg);
                     processed += 1;
-                    if processed >= target_messages {
-                        break;
+
+                    if drain_subscription_updates(&mut rx, 1, &mut drain) {
+                        fatal_stream = true;
+                        stop_reason = "consumer_error";
+                    }
+                    match outcome {
+                        MessageOutcome::Normal { .. } => {}
+                        MessageOutcome::DataLoss => {
+                            fatal_stream = true;
+                            stop_reason = "message_data_loss";
+                        }
+                        MessageOutcome::Closed => {
+                            fatal_stream = true;
+                            stop_reason = "message_closed";
+                        }
+                    }
+                    if fatal_stream || processed >= target_messages {
+                        break 'produce;
                     }
                 }
-            }
-            if processed >= target_messages {
-                break;
             }
         }
     }
@@ -2995,37 +3088,55 @@ fn replay_subscription_events(
         state.flush();
     }
     let flush_elapsed = flush_start.elapsed();
-
-    let drain_start = Instant::now();
-    while let Ok(item) = rx.try_recv() {
-        if let Ok(update) = item {
-            let (update_rows, update_columns) = subscription_update_shape(&update);
-            rows += update_rows;
-            columns = columns.max(update_columns);
-            batches += 1;
-            black_box(update);
-        }
-    }
-    let drain_elapsed = drain_start.elapsed();
     let dropped_batches = states
         .iter()
         .map(|state| state.dropped_batches)
         .sum::<u64>();
+    drop(states);
+
+    let drain_start = Instant::now();
+    drain_subscription_updates(&mut rx, usize::MAX, &mut drain);
+    let drain_elapsed = drain_start.elapsed();
+
+    let expected_data_loss = dropped_batches > 0 || stop_reason == "message_data_loss";
+    let gap_outcome = if expected_data_loss
+        && drain.terminal_error_count == 1
+        && drain.data_loss_error_count == 1
+        && drain.unexpected_error_count == 0
+        && drain.terminal_eof_observed
+    {
+        "expected_data_loss_observed"
+    } else if expected_data_loss {
+        "expected_data_loss_mismatch"
+    } else if drain.terminal_error_count > 0 {
+        "unexpected_terminal_error"
+    } else if stop_reason == "message_closed" {
+        "closed_without_terminal_error"
+    } else {
+        "no_gap"
+    };
+    let error_detail = drain.terminal_error_details.join(" | ");
 
     let mut record = BenchRecord::ok(
         "subscription_replay",
         scenario,
         start.elapsed(),
-        rows,
-        columns,
+        drain.accepted_rows,
+        drain.columns,
         processed,
         "messages",
         format!(
-            "target_messages={target_messages}, topics={topic_count}, batches={batches}, dropped_batches={dropped_batches}, all_fields={all_fields}, cached_events={}, cached_messages={cached_messages}, repeats_per_message={repeats_per_message}, compatibility_flush_threshold=1 (does not batch output), queue_capacity_units=SubscriptionUpdate batches, producer interleaved with consumer dequeue",
+            "target_messages={target_messages}, processed_messages={processed}, accepted_rows={}, topics={topic_count}, batches={}, dropped_batches={dropped_batches}, stop_reason={stop_reason}, expected_data_loss={expected_data_loss}, gap_outcome={gap_outcome}, terminal_errors={}, data_loss_errors={}, unexpected_errors={}, terminal_eof={}, error_detail={error_detail:?}, all_fields={all_fields}, cached_events={}, cached_messages={cached_messages}, repeats_per_message={repeats_per_message}, compatibility_flush_threshold=1 (does not batch output), queue_capacity_units=SubscriptionUpdate batches, producer interleaved with consumer dequeue",
+            drain.accepted_rows,
+            drain.accepted_batches,
+            drain.terminal_error_count,
+            drain.data_loss_error_count,
+            drain.unexpected_error_count,
+            drain.terminal_eof_observed,
             events.len()
         ),
     );
-    if dropped_batches > 0 {
+    if !matches!(gap_outcome, "no_gap" | "expected_data_loss_observed") {
         record.status = "error".to_string();
     }
     record.phases = vec![
@@ -3034,7 +3145,10 @@ fn replay_subscription_events(
             process_elapsed,
         ),
         phase("compatibility_flush_call", flush_elapsed),
-        phase("final_queue_drain", drain_elapsed),
+        phase(
+            "final_queue_drain_and_terminal_classification",
+            drain_elapsed,
+        ),
         phase("total", Duration::from_micros(record.elapsed_us as u64)),
     ];
     record

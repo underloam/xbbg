@@ -19,7 +19,8 @@ use napi_derive::napi;
 use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use xbbg_async::engine::state::{
-    FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionUpdate, UpdateValue,
+    FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionReceiver, SubscriptionSender,
+    SubscriptionUpdate, UpdateValue,
 };
 use xbbg_async::engine::{
     Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr, SharedSubscriptionStatus,
@@ -29,8 +30,7 @@ use xbbg_async::{BlpAsyncError, ValidationMode};
 use xbbg_core::{AuthConfig, BlpError};
 
 type StreamBatchResult = std::result::Result<SubscriptionUpdate, BlpError>;
-type StreamReceiver = tokio::sync::mpsc::Receiver<StreamBatchResult>;
-type SharedStreamReceiver = Arc<Mutex<Option<StreamReceiver>>>;
+type SharedStreamReceiver = Arc<Mutex<Option<SubscriptionReceiver>>>;
 type SharedPendingStreamItems = Arc<StdMutex<VecDeque<StreamBatchResult>>>;
 const MAX_SUBSCRIPTION_BATCH_CAPACITY_HINT: usize = 4096;
 
@@ -64,7 +64,7 @@ fn init_async_runtime() {
 }
 
 struct SubscriptionStreamHandle {
-    tx: tokio::sync::mpsc::Sender<StreamBatchResult>,
+    tx: SubscriptionSender,
     claim: Option<xbbg_async::engine::SessionClaim>,
     fields: Vec<String>,
     all_fields: bool,
@@ -695,6 +695,21 @@ fn to_native_row(update: SubscriptionUpdate) -> NativeSubscriptionRow {
 
     for field in update.values.iter() {
         field_indices.push(u32::from(field.index));
+        let effective_kind = update
+            .layout
+            .fields
+            .get(usize::from(field.index))
+            .map_or(FieldKind::Unknown, |meta| meta.kind);
+        if matches!(effective_kind, FieldKind::Unknown | FieldKind::Str)
+            && !matches!(field.value, UpdateValue::Null)
+        {
+            bool_values.push(None);
+            i32_values.push(None);
+            f64_values.push(None);
+            string_values.push(field.value.as_string_lossy());
+            i64_values.push(None);
+            continue;
+        }
         match &field.value {
             UpdateValue::Null => {
                 bool_values.push(None);
@@ -809,12 +824,11 @@ async fn wait_for_subscription_close(close_rx: &mut watch::Receiver<bool>) {
 }
 
 async fn receive_stream_item(
-    rx: &mut StreamReceiver,
+    rx: &mut SubscriptionReceiver,
     close_rx: &mut watch::Receiver<bool>,
-    engine_shutdown_rx: &mut watch::Receiver<bool>,
     deadline: Option<Instant>,
 ) -> Option<StreamBatchResult> {
-    if *close_rx.borrow() || *engine_shutdown_rx.borrow() {
+    if *close_rx.borrow() {
         return None;
     }
     if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
@@ -825,7 +839,6 @@ async fn receive_stream_item(
         tokio::select! {
             biased;
             _ = wait_for_subscription_close(close_rx) => None,
-            _ = wait_for_subscription_close(engine_shutdown_rx) => None,
             item = rx.recv() => item,
         }
     };
@@ -874,14 +887,13 @@ impl Drop for PendingUpdateBatch<'_> {
 }
 
 async fn receive_subscription_updates(
-    rx: &mut StreamReceiver,
+    rx: &mut SubscriptionReceiver,
     pending: &StdMutex<VecDeque<StreamBatchResult>>,
     close_rx: &mut watch::Receiver<bool>,
-    engine_shutdown_rx: &mut watch::Receiver<bool>,
     limit: usize,
     max_wait_ms: Option<u32>,
 ) -> Result<Option<Vec<SubscriptionUpdate>>, BlpError> {
-    if *close_rx.borrow() || *engine_shutdown_rx.borrow() {
+    if *close_rx.borrow() {
         return Ok(None);
     }
     let deadline =
@@ -896,7 +908,7 @@ async fn receive_subscription_updates(
         let item = match queued {
             Some(item) => Some(item),
             None if batch.updates.is_empty() || deadline.is_some() => {
-                receive_stream_item(rx, close_rx, engine_shutdown_rx, deadline).await
+                receive_stream_item(rx, close_rx, deadline).await
             }
             None => rx.try_recv().ok(),
         };
@@ -940,7 +952,7 @@ async fn receive_subscription_updates(
 
 async fn drain_forwarder_into_pending(
     claim: &xbbg_async::engine::SessionClaim,
-    rx: &mut StreamReceiver,
+    rx: &mut SubscriptionReceiver,
     pending: &StdMutex<VecDeque<StreamBatchResult>>,
 ) -> Result<(), BlpAsyncError> {
     let barrier = claim.drain_forwarder();
@@ -960,20 +972,20 @@ async fn drain_forwarder_into_pending(
             result = &mut barrier => break result,
         }
     };
-    barrier_result?;
     while let Ok(item) = rx.try_recv() {
         pending
             .lock()
             .expect("subscription pending queue poisoned")
             .push_back(item);
     }
+    barrier_result?;
     Ok(())
 }
 
 /// Stable machine-readable error code embedded in every native error message
 /// as a `[XBBG:<CODE>] ` prefix. The js-xbbg wrapper parses this prefix to
 /// construct typed error classes; the human-readable message follows it.
-/// Codes: SESSION, REQUEST, VALIDATION, TIMEOUT, CANCELLED, INTERNAL.
+/// Codes: SESSION, REQUEST, LIMIT, DATALOSS, VALIDATION, TIMEOUT, CANCELLED, INTERNAL.
 fn coded(status: Status, code: &str, msg: impl AsRef<str>) -> Error {
     Error::new(status, format!("[XBBG:{code}] {}", msg.as_ref()))
 }
@@ -1048,6 +1060,11 @@ fn blp_error_to_napi(e: BlpError) -> Error {
             };
             coded(Status::GenericFailure, "REQUEST", msg)
         }
+        BlpError::SubscriptionDataLoss { topic, detail } => coded(
+            Status::GenericFailure,
+            "DATALOSS",
+            format!("Subscription data loss [topic={topic}]: {detail}"),
+        ),
         BlpError::SubscriptionFailure { cid, label } => {
             let mut msg = "Subscription failed".to_string();
             if let Some(c) = cid {
@@ -1575,13 +1592,7 @@ impl JsEngine {
             .await
             .map_err(blp_async_error_to_napi)?;
 
-        JsSubscription::from_stream(
-            stream,
-            tickers,
-            fields,
-            self.subscription_batch_items,
-            self.engine.shutdown_receiver(),
-        )
+        JsSubscription::from_stream(stream, tickers, fields, self.subscription_batch_items)
     }
 
     #[napi]
@@ -1637,13 +1648,7 @@ impl JsEngine {
             .await
             .map_err(blp_async_error_to_napi)?;
 
-        JsSubscription::from_stream(
-            stream,
-            tickers,
-            fields,
-            consumer_batch_items,
-            self.engine.shutdown_receiver(),
-        )
+        JsSubscription::from_stream(stream, tickers, fields, consumer_batch_items)
     }
 
     #[napi]
@@ -2064,9 +2069,9 @@ pub struct JsSubscription {
     rx: SharedStreamReceiver,
     close_signal: watch::Sender<bool>,
     closed: Arc<AtomicBool>,
-    engine_shutdown: watch::Receiver<bool>,
     mutation: Arc<Mutex<()>>,
     stream: Arc<Mutex<Option<SubscriptionStreamHandle>>>,
+    stream_sender: SubscriptionSender,
     pending: SharedPendingStreamItems,
     scalar_layout: Arc<StdMutex<Option<Arc<FieldLayout>>>>,
     arrow_batcher: Arc<StdMutex<(usize, SubscriptionArrowBatcher)>>,
@@ -2083,12 +2088,12 @@ impl JsSubscription {
         _tickers: Vec<String>,
         fields: Vec<String>,
         batch_items: usize,
-        engine_shutdown: watch::Receiver<bool>,
     ) -> napi::Result<Self> {
         let (rx, tx, claim, status, ft, op_policy, service, options, all_fields) =
             stream.into_parts().map_err(blp_error_to_napi)?;
         let fields_snapshot = Arc::new(fields.clone());
         let status_snapshot = status.clone();
+        let stream_sender = tx.clone();
         let handle = SubscriptionStreamHandle {
             tx,
             claim: Some(claim),
@@ -2104,10 +2109,10 @@ impl JsSubscription {
         Ok(Self {
             rx: Arc::new(Mutex::new(Some(rx))),
             close_signal,
-            engine_shutdown,
             closed: Arc::new(AtomicBool::new(false)),
             mutation: Arc::new(Mutex::new(())),
             stream: Arc::new(Mutex::new(Some(handle))),
+            stream_sender,
             pending: Arc::new(StdMutex::new(VecDeque::new())),
             scalar_layout: Arc::new(StdMutex::new(None)),
             arrow_batcher: Arc::new(StdMutex::new((
@@ -2129,12 +2134,11 @@ impl JsSubscription {
         max_items: Option<u32>,
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeSubscriptionUpdateBatch>> {
-        if self.closed.load(Ordering::Acquire) || *self.engine_shutdown.borrow() {
+        if self.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
         let limit = subscription_limit(max_items, "maxItems", self.batch_items)?;
         let mut close_rx = self.close_signal.subscribe();
-        let mut engine_shutdown_rx = self.engine_shutdown.clone();
         let mut rx_guard = self.rx.lock().await;
         let Some(rx) = rx_guard.as_mut() else {
             return Ok(None);
@@ -2143,7 +2147,6 @@ impl JsSubscription {
             rx,
             self.pending.as_ref(),
             &mut close_rx,
-            &mut engine_shutdown_rx,
             limit,
             max_wait_ms,
         )
@@ -2170,7 +2173,7 @@ impl JsSubscription {
         max_rows: Option<u32>,
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeArrowBatch>> {
-        if self.closed.load(Ordering::Acquire) || *self.engine_shutdown.borrow() {
+        if self.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
         let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
@@ -2183,7 +2186,6 @@ impl JsSubscription {
             return Ok(Some(to_native_record_batch(batch)?));
         }
         let mut close_rx = self.close_signal.subscribe();
-        let mut engine_shutdown_rx = self.engine_shutdown.clone();
         let mut rx_guard = self.rx.lock().await;
         let Some(rx) = rx_guard.as_mut() else {
             return Ok(None);
@@ -2192,7 +2194,6 @@ impl JsSubscription {
             rx,
             self.pending.as_ref(),
             &mut close_rx,
-            &mut engine_shutdown_rx,
             limit,
             max_wait_ms,
         )
@@ -2247,7 +2248,7 @@ impl JsSubscription {
     #[napi]
     pub async fn add(&self, tickers: Vec<String>) -> napi::Result<()> {
         let _mutation = self.mutation.lock().await;
-        if self.closed.load(Ordering::Acquire) || *self.engine_shutdown.borrow() {
+        if self.closed.load(Ordering::Acquire) {
             return Err(Error::new(Status::GenericFailure, "subscription closed"));
         }
         let (
@@ -2266,6 +2267,13 @@ impl JsSubscription {
             let handle = guard
                 .as_ref()
                 .ok_or_else(|| Error::new(Status::GenericFailure, "subscription closed"))?;
+            if handle.tx.is_closed() {
+                return Err(coded(
+                    Status::GenericFailure,
+                    "INTERNAL",
+                    "subscription stream is closed",
+                ));
+            }
 
             let new_topics: Vec<String> = {
                 let snapshot = handle.status.load();
@@ -2322,7 +2330,7 @@ impl JsSubscription {
     #[napi]
     pub async fn remove(&self, tickers: Vec<String>) -> napi::Result<()> {
         let _mutation = self.mutation.lock().await;
-        if self.closed.load(Ordering::Acquire) || *self.engine_shutdown.borrow() {
+        if self.closed.load(Ordering::Acquire) {
             return Err(Error::new(Status::GenericFailure, "subscription closed"));
         }
         let (command, status) = {
@@ -2387,7 +2395,7 @@ impl JsSubscription {
     #[napi(getter)]
     pub fn is_active(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
-            && !*self.engine_shutdown.borrow()
+            && !self.stream_sender.is_closed()
             && self.status.load().has_active_topics()
     }
 
@@ -2427,15 +2435,16 @@ impl JsSubscription {
     ) -> napi::Result<Option<Vec<NativeSubscriptionUpdateBatch>>> {
         let drain = drain.unwrap_or(false);
         let (_mutation, close_result) = self.close_for_unsubscribe(drain).await;
-        close_result?;
         let mut rx_guard = self.rx.lock().await;
         let rx = rx_guard.take();
         drop(rx_guard);
-        let drained_updates = self.take_drained_updates(rx, drain);
+        let drained_updates = Self::take_drained_updates(self.pending.as_ref(), rx, drain);
         self.arrow_ready
             .lock()
             .expect("subscription Arrow output queue poisoned")
             .clear();
+        let drained_updates = drained_updates.map_err(|error| blp_error_to_napi(*error))?;
+        close_result?;
 
         let mut remaining = Vec::new();
         if !drained_updates.is_empty() {
@@ -2481,11 +2490,10 @@ impl JsSubscription {
     ) -> napi::Result<Option<Vec<NativeArrowBatch>>> {
         let drain = drain.unwrap_or(false);
         let (_mutation, close_result) = self.close_for_unsubscribe(drain).await;
-        close_result?;
         let mut rx_guard = self.rx.lock().await;
         let rx = rx_guard.take();
         drop(rx_guard);
-        let drained_updates = self.take_drained_updates(rx, drain);
+        let drained_updates = Self::take_drained_updates(self.pending.as_ref(), rx, drain);
 
         let queued_batches: Vec<RecordBatch> = {
             let mut ready = self
@@ -2499,6 +2507,8 @@ impl JsSubscription {
                 Vec::new()
             }
         };
+        let drained_updates = drained_updates.map_err(|error| blp_error_to_napi(*error))?;
+        close_result?;
         let mut remaining = queued_batches
             .into_iter()
             .map(to_native_record_batch)
@@ -2552,11 +2562,7 @@ impl JsSubscription {
         self.close_signal.send_replace(true);
         let mutation = self.mutation.clone().lock_owned().await;
         let mut stream_guard = self.stream.lock().await;
-        let engine_is_shutting_down = *self.engine_shutdown.borrow();
-
-        let mut close_result = if engine_is_shutting_down {
-            Ok(())
-        } else if let Some(handle) = stream_guard.as_ref() {
+        let mut close_result = if let Some(handle) = stream_guard.as_ref() {
             if let Some(claim) = handle.claim.as_ref() {
                 let keys = handle.status.load().keys().to_vec();
                 if keys.is_empty() {
@@ -2579,21 +2585,28 @@ impl JsSubscription {
                 handle.status.update(|state| state.clear_active());
             }
         }
-        if close_result.is_ok() && drain && !engine_is_shutting_down {
+        if drain {
             if let Some(claim) = stream_guard
                 .as_ref()
                 .and_then(|handle| handle.claim.as_ref())
             {
                 let mut rx_guard = self.rx.lock().await;
-                close_result = match rx_guard.as_mut() {
-                    Some(rx) => drain_forwarder_into_pending(claim, rx, self.pending.as_ref())
-                        .await
-                        .map_err(blp_async_error_to_napi),
+                let forwarding_result = match rx_guard.as_mut() {
+                    Some(rx) => {
+                        let result = drain_forwarder_into_pending(claim, rx, self.pending.as_ref())
+                            .await
+                            .map_err(blp_async_error_to_napi);
+                        rx.close();
+                        result
+                    }
                     None => claim
                         .drain_forwarder()
                         .await
                         .map_err(blp_async_error_to_napi),
                 };
+                if close_result.is_ok() {
+                    close_result = forwarding_result;
+                }
             }
         }
 
@@ -2607,19 +2620,20 @@ impl JsSubscription {
     }
 
     fn take_drained_updates(
-        &self,
-        rx: Option<StreamReceiver>,
+        pending: &StdMutex<VecDeque<StreamBatchResult>>,
+        rx: Option<SubscriptionReceiver>,
         drain: bool,
-    ) -> Vec<SubscriptionUpdate> {
+    ) -> Result<Vec<SubscriptionUpdate>, Box<BlpError>> {
         let mut updates = Vec::new();
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("subscription pending queue poisoned");
+        let mut terminal_error = None;
+        let mut pending = pending.lock().expect("subscription pending queue poisoned");
         if drain {
             while let Some(item) = pending.pop_front() {
-                if let Ok(update) = item {
-                    updates.push(update);
+                match item {
+                    Ok(update) => updates.push(update),
+                    Err(error) => {
+                        terminal_error.get_or_insert(error);
+                    }
                 }
             }
         } else {
@@ -2630,20 +2644,26 @@ impl JsSubscription {
         if drain {
             if let Some(mut rx) = rx {
                 while let Ok(item) = rx.try_recv() {
-                    if let Ok(update) = item {
-                        updates.push(update);
+                    match item {
+                        Ok(update) => updates.push(update),
+                        Err(error) => {
+                            terminal_error.get_or_insert(error);
+                        }
                     }
                 }
             }
         }
-        updates
+        match terminal_error {
+            Some(error) => Err(Box::new(error)),
+            None => Ok(updates),
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use xbbg_async::engine::state::{FieldLayout, FieldMeta};
+    use xbbg_async::engine::state::{subscription_channel, FieldLayout, FieldMeta, UpdateField};
     use xbbg_async::services::ExtractorType;
 
     fn minimal_input() -> EngineConfigInput {
@@ -2716,6 +2736,80 @@ mod tests {
             layout,
             values: Default::default(),
         }
+    }
+
+    #[test]
+    fn promoted_string_layout_serializes_every_concrete_scalar_into_the_string_slot() {
+        let layout = Arc::new(FieldLayout::new(
+            7,
+            vec![
+                FieldMeta::new("BOOL", 0, FieldKind::Str),
+                FieldMeta::new("I32", 1, FieldKind::Str),
+                FieldMeta::new("I64", 2, FieldKind::Str),
+                FieldMeta::new("F64", 3, FieldKind::Str),
+                FieldMeta::new("DATE", 4, FieldKind::Str),
+            ],
+        ));
+        let update = SubscriptionUpdate {
+            timestamp_us: 1,
+            topic_id: 1,
+            topic: Arc::from("IBM US Equity"),
+            layout,
+            values: [
+                UpdateField {
+                    index: 0,
+                    value: UpdateValue::Bool(true),
+                },
+                UpdateField {
+                    index: 1,
+                    value: UpdateValue::I32(42),
+                },
+                UpdateField {
+                    index: 2,
+                    value: UpdateValue::I64(4_000_000_000),
+                },
+                UpdateField {
+                    index: 3,
+                    value: UpdateValue::F64(1.25),
+                },
+                UpdateField {
+                    index: 4,
+                    value: UpdateValue::Date32(20_000),
+                },
+            ]
+            .into_iter()
+            .collect(),
+        };
+
+        let row = to_native_row(update);
+
+        assert_eq!(
+            row.string_values,
+            vec![
+                Some("true".to_string()),
+                Some("42".to_string()),
+                Some("4000000000".to_string()),
+                Some("1.25".to_string()),
+                Some("20000".to_string()),
+            ]
+        );
+        assert_eq!(row.bool_values, vec![None; 5]);
+        assert_eq!(row.i32_values, vec![None; 5]);
+        assert_eq!(row.i64_values, vec![None; 5]);
+        assert_eq!(row.f64_values, vec![None; 5]);
+    }
+
+    #[test]
+    fn subscription_data_loss_uses_the_structured_native_error_code() {
+        let error = blp_error_to_napi(BlpError::SubscriptionDataLoss {
+            topic: "IBM US Equity".to_string(),
+            detail: "stream queue reached capacity".to_string(),
+        });
+
+        assert_eq!(
+            error.reason,
+            "[XBBG:DATALOSS] Subscription data loss [topic=IBM US Equity]: stream queue reached capacity"
+        );
     }
 
     #[test]
@@ -3099,7 +3193,7 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("first");
@@ -3108,19 +3202,11 @@ mod tests {
                 .expect("second");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let updates = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                1,
-                None,
-            )
-            .await
-            .expect("read")
-            .expect("updates");
+            let updates = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1, None)
+                .await
+                .expect("read")
+                .expect("updates");
 
             assert_eq!(updates.len(), 1);
             assert_eq!(updates[0].timestamp_us, 10);
@@ -3141,25 +3227,18 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("update");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let updates = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                4,
-                Some(5),
-            )
-            .await
-            .expect("read")
-            .expect("partial batch");
+            let updates =
+                receive_subscription_updates(&mut rx, &pending, &mut close_rx, 4, Some(5))
+                    .await
+                    .expect("read")
+                    .expect("partial batch");
 
             assert_eq!(updates.len(), 1);
             assert_eq!(updates[0].timestamp_us, 10);
@@ -3173,7 +3252,7 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("first");
@@ -3182,30 +3261,15 @@ mod tests {
                 .expect("second");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let first = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                2,
-                None,
-            )
-            .await
-            .expect("first read")
-            .expect("first batch");
-            let second = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                2,
-                Some(0),
-            )
-            .await
-            .expect("second read")
-            .expect("second batch");
+            let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
+                .await
+                .expect("first read")
+                .expect("first batch");
+            let second = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, Some(0))
+                .await
+                .expect("second read")
+                .expect("second batch");
 
             assert_eq!(first[0].layout.version, 1);
             assert_eq!(second[0].layout.version, 2);
@@ -3227,7 +3291,7 @@ mod tests {
                 1,
                 vec![FieldMeta::new("BID", 0, FieldKind::F64)],
             ));
-            let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(4);
             tx.send(Ok(subscription_update_with_layout(first_layout, 10)))
                 .await
                 .expect("first");
@@ -3236,30 +3300,15 @@ mod tests {
                 .expect("second");
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let first = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                2,
-                None,
-            )
-            .await
-            .expect("first read")
-            .expect("first batch");
-            let second = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                2,
-                Some(0),
-            )
-            .await
-            .expect("second read")
-            .expect("second batch");
+            let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
+                .await
+                .expect("first read")
+                .expect("first batch");
+            let second = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, Some(0))
+                .await
+                .expect("second read")
+                .expect("second batch");
             let mut last_layout = None;
             let first = to_native_update_batch(first, &mut last_layout).expect("first output");
             let second = to_native_update_batch(second, &mut last_layout).expect("second output");
@@ -3273,53 +3322,50 @@ mod tests {
 
     #[test]
     fn cancelled_partial_read_restores_consumed_updates() {
+        use std::future::Future;
+
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, rx) = tokio::sync::mpsc::channel(4);
+            let (tx, mut rx) = subscription_channel(1);
             tx.send(Ok(subscription_update(1, 10)))
                 .await
-                .expect("update");
-            let shared_rx = Arc::new(Mutex::new(Some(rx)));
-            let pending = Arc::new(StdMutex::new(VecDeque::new()));
-            let (close_tx, _) = watch::channel(false);
-            let (shutdown_tx, _) = watch::channel(false);
-            let reader_rx = shared_rx.clone();
-            let reader_pending = pending.clone();
-            let reader_close = close_tx.clone();
-            let reader_shutdown = shutdown_tx.clone();
-            let reader = tokio::spawn(async move {
-                let mut guard = reader_rx.lock().await;
-                let rx = guard.as_mut().expect("receiver");
-                let mut close_rx = reader_close.subscribe();
-                let mut shutdown_rx = reader_shutdown.subscribe();
-                receive_subscription_updates(
-                    rx,
-                    reader_pending.as_ref(),
-                    &mut close_rx,
-                    &mut shutdown_rx,
-                    2,
-                    Some(60_000),
-                )
+                .expect("first update");
+            let pending = StdMutex::new(VecDeque::new());
+            let (_close_tx, mut close_rx) = watch::channel(false);
+            let mut reader = Box::pin(receive_subscription_updates(
+                &mut rx,
+                &pending,
+                &mut close_rx,
+                2,
+                Some(60_000),
+            ));
+            // Stop deterministically while the partial batch awaits its second
+            // update, rather than racing abort against a completed read.
+            std::future::poll_fn(|cx| {
+                assert!(reader.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            drop(reader);
+
+            tx.send(Ok(subscription_update(1, 20)))
                 .await
-            });
-
-            while tx.capacity() != 4 {
-                tokio::task::yield_now().await;
-            }
-            reader.abort();
-            let _ = reader.await;
-
-            let restored = pending
-                .lock()
-                .expect("pending")
-                .pop_front()
-                .expect("restored update")
-                .expect("successful update");
-            assert_eq!(restored.timestamp_us, 10);
-            assert!(shared_rx.lock().await.is_some());
+                .expect("second update");
+            let restored =
+                receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, Some(0))
+                    .await
+                    .expect("resumed read")
+                    .expect("restored batch");
+            assert_eq!(
+                restored
+                    .iter()
+                    .map(|update| update.timestamp_us)
+                    .collect::<Vec<_>>(),
+                [10, 20],
+            );
         });
     }
 
@@ -3330,65 +3376,80 @@ mod tests {
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (_tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let (_tx, mut rx) = subscription_channel(1);
             let pending = StdMutex::new(VecDeque::new());
             let (close_tx, initial_rx) = watch::channel(false);
             drop(initial_rx);
             close_tx.send_replace(true);
             let mut close_rx = close_tx.subscribe();
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
 
-            let updates = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                1,
-                None,
-            )
-            .await
-            .expect("read");
+            let updates = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1, None)
+                .await
+                .expect("read");
             assert!(updates.is_none());
         });
     }
 
     #[test]
-    fn engine_shutdown_before_read_preserves_buffered_update_for_drain() {
+    fn full_queue_terminal_error_is_delivered_after_buffered_data_and_before_end() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .expect("runtime");
         runtime.block_on(async {
-            let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+            let (tx, mut rx) = subscription_channel(1);
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("update");
+            tx.fail(BlpError::SubscriptionDataLoss {
+                topic: "IBM US Equity".to_string(),
+                detail: "stream queue reached capacity".to_string(),
+            });
             let pending = StdMutex::new(VecDeque::new());
             let (_close_tx, mut close_rx) = watch::channel(false);
-            let (shutdown_tx, initial_rx) = watch::channel(false);
-            drop(initial_rx);
-            shutdown_tx.send_replace(true);
-            let mut shutdown_rx = shutdown_tx.subscribe();
 
-            let updates = receive_subscription_updates(
-                &mut rx,
-                &pending,
-                &mut close_rx,
-                &mut shutdown_rx,
-                1,
-                None,
-            )
-            .await
-            .expect("read");
+            let updates = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
+                .await
+                .expect("buffered update")
+                .expect("batch");
+            assert_eq!(updates[0].timestamp_us, 10);
 
-            assert!(updates.is_none());
-            assert_eq!(
-                rx.try_recv()
-                    .expect("buffered item")
-                    .expect("update")
-                    .timestamp_us,
-                10
-            );
+            let error = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1, None)
+                .await
+                .expect_err("terminal data-loss error");
+            assert!(matches!(
+                error,
+                BlpError::SubscriptionDataLoss {
+                    ref topic,
+                    ref detail,
+                } if topic == "IBM US Equity" && detail == "stream queue reached capacity"
+            ));
+
+            let end = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1, None)
+                .await
+                .expect("end");
+            assert!(end.is_none());
         });
+    }
+
+    #[test]
+    fn errors_only_drain_returns_the_terminal_failure() {
+        let (tx, rx) = subscription_channel(1);
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "ES1 Index".to_string(),
+            detail: "Bloomberg reported DATALOSS".to_string(),
+        });
+        let pending = StdMutex::new(VecDeque::new());
+
+        let error = JsSubscription::take_drained_updates(&pending, Some(rx), true)
+            .expect_err("errors-only drain must fail");
+
+        assert!(matches!(
+            *error,
+            BlpError::SubscriptionDataLoss {
+                ref topic,
+                ref detail,
+            } if topic == "ES1 Index" && detail == "Bloomberg reported DATALOSS"
+        ));
     }
 }

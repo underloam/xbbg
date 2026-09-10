@@ -78,7 +78,11 @@ await bdtick('AAPL US Equity', new Date('2024-12-01T09:30Z'), Date.UTC(2024, 11,
 ```
 
 Subscriptions yield scalar `Tick` objects by default. Choose `sub.arrow()` to construct Apache Arrow JS tables directly from native descriptors without Arrow IPC for supported primitive, binary/string, date/time, timestamp, and null columns. The exposed mutable buffers are JS-owned snapshots: exclusive, bounded native allocations can transfer ownership, while shared, sliced, or oversized storage is copied or canonicalized before exposure. JS mutation therefore cannot change a retained Rust Arrow source. No-IPC construction does **not** imply a universal zero-copy Rust/JS boundary. Unsupported types fail with column-level diagnostics rather than silently changing transport.
-Pass `{ allFields: true }` to `stream()` / `subscribe()` / service stream helpers to expose every top-level scalar field Bloomberg sends, matching Python's `all_fields=True`. The default remains filtered mode: requested fields plus `MKTDATA_EVENT_TYPE` and `MKTDATA_EVENT_SUBTYPE`.
+Pass `{ allFields: true }` to `stream()` / `subscribe()` / service stream helpers to expose every top-level scalar field Bloomberg sends, matching Python's `all_fields=True`. Unrequested arrays and complex fields are omitted; explicitly requested unsupported shapes fail instead of being truncated. The default remains filtered mode: requested fields plus `MKTDATA_EVENT_TYPE` and `MKTDATA_EVENT_SUBTYPE`.
+
+Ticks are sparse deltas: `tick.has(field)` distinguishes a present value/clear from an absent field. `get()` and typed accessors preserve `undefined` for absence versus `null` for an explicit clear; `toObject()` omits absent keys. Values in a promoted string layout are strings, not fabricated nulls.
+
+Arrow tables append non-null binary `__xbbg_present`. Bit `i`, least-significant bit first, marks schema field `i + 2` after `timestamp` and `topic`: set bit plus null means clear; unset bit means unchanged. Interpret each row against its current table schema, not cached ordinals from a previous layout. Metadata key `xbbg.subscription_presence` records the encoding and mapping.
 
 ### Subscription lifecycle
 
@@ -87,6 +91,8 @@ Pass `{ allFields: true }` to `stream()` / `subscribe()` / service stream helper
 - Close is shared across scalar/Arrow views and wakes pending reads. Concurrent closes share cleanup rather than unsubscribing twice; repeated closes do not replay drained values. Consumed and discarded pending values are released.
 - `return()` and an early `for await` exit await non-draining cleanup. For manual reads, close in `finally`. `next({ signal })` accepts an `AbortSignal`; abort closes the whole subscription, not just that read, and waits for cleanup before rejecting.
 - Read/conversion failures trigger cleanup. If cleanup also fails, an `AggregateError` preserves both failures instead of silently hiding the cleanup error.
+- Bloomberg `DATALOSS`, `drop_newest` overflow, or bounded `block` forwarding overflow/timeout fail closed with `BlpSubscriptionDataLossError`. Committed queue data precedes the error, then EOF; resubscribe for a fresh image. `topic="*"` identifies unattributed/session-wide loss. The SDK callback never waits for consumers.
+- A draining close propagates unread failures after cleanup instead of returning a successful partial result. Terminal session errors wake pending reads even after remove-all; ordinary connection-down events and failures of only some topics remain nonterminal.
 
 ### Subscription replay benchmark
 

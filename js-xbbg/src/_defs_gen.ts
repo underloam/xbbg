@@ -49,9 +49,9 @@ export const OVERFLOW_POLICY_VALUES = 'block, drop_newest';
 /** Per-value documentation, keyed by canonical spelling. */
 export const OVERFLOW_POLICY_DOCS: Readonly<Record<OverflowPolicy, string>> = {
   block:
-    "Retry within a short bounded window on Bloomberg's callback thread, then flag a slow consumer and drop the update.",
+    "Wait briefly on a bounded forwarding task, never on Bloomberg's callback thread; queue overflow or timeout closes with a data-loss error. Resubscribe for a fresh image.",
   drop_newest:
-    "Drop the newest update as soon as the buffer is full; never stalls Bloomberg's callback thread.",
+    "Close with a data-loss error when the consumer buffer is full; never waits on Bloomberg's callback thread. Resubscribe for a fresh image.",
 };
 
 /** Canonical values keyed by their defs name. */

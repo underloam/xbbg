@@ -117,6 +117,7 @@ describe('@xbbg/core surface', () => {
       'BlpError',
       'BlpSessionError',
       'BlpRequestError',
+      'BlpSubscriptionDataLossError',
       'BlpValidationError',
       'BlpTimeoutError',
       'BlpInternalError',
@@ -220,6 +221,7 @@ describe('@xbbg/core surface', () => {
     expect(api.BlpError.prototype).toBeInstanceOf(Error);
     expect(api.BlpSessionError.prototype).toBeInstanceOf(api.BlpError);
     expect(api.BlpRequestError.prototype).toBeInstanceOf(api.BlpError);
+    expect(api.BlpSubscriptionDataLossError.prototype).toBeInstanceOf(api.BlpError);
     expect(api.BlpValidationError.prototype).toBeInstanceOf(api.BlpError);
     expect(api.BlpTimeoutError.prototype).toBeInstanceOf(api.BlpError);
     expect(api.BlpInternalError.prototype).toBeInstanceOf(api.BlpError);
@@ -229,6 +231,7 @@ describe('@xbbg/core surface', () => {
     expect(new api.BlpError('test').name).toBe('BlpError');
     expect(new api.BlpSessionError('test').name).toBe('BlpSessionError');
     expect(new api.BlpRequestError('test').name).toBe('BlpRequestError');
+    expect(new api.BlpSubscriptionDataLossError('test').name).toBe('BlpSubscriptionDataLossError');
     expect(new api.BlpValidationError('test').name).toBe('BlpValidationError');
     expect(new api.BlpTimeoutError('test').name).toBe('BlpTimeoutError');
     expect(new api.BlpInternalError('test').name).toBe('BlpInternalError');
@@ -268,6 +271,20 @@ describe('@xbbg/core surface', () => {
     for (const [msg, Cls] of wrapCases) {
       expect(api.wrapError(new Error(msg))).toBeInstanceOf(Cls);
     }
+  });
+
+  it('wrapError exposes structured subscription data-loss details', () => {
+    const dataLoss = api.wrapError(
+      new Error(
+        '[XBBG:DATALOSS] Subscription data loss [topic=IBM US Equity]: stream queue reached capacity',
+      ),
+    );
+    expect(dataLoss).toBeInstanceOf(api.BlpSubscriptionDataLossError);
+    expect(dataLoss).toMatchObject({
+      code: 'DATALOSS',
+      detail: 'stream queue reached capacity',
+      topic: 'IBM US Equity',
+    });
   });
 
   it('wrapError preserves typed errors', () => {
@@ -791,55 +808,6 @@ describe('native Arrow zero-copy table construction', () => {
 });
 
 describe('engine wrapper request plumbing', () => {
-  it('forwards allFields to native subscriptions', async () => {
-    const calls: { method: string; args: unknown[] }[] = [];
-    const nativeSub = {
-      add: async () => {},
-      fields: [],
-      isActive: true,
-      nextArrowBatch: async () => Promise.resolve(null),
-      remove: async () => {},
-      stats: { batchesSent: 0, droppedBatches: 0, messagesReceived: 0, slowConsumer: false },
-      tickers: [],
-      unsubscribeArrow: async () => Promise.resolve(null),
-      unsubscribe: async () => Promise.resolve(null),
-    };
-    const engine = Object.create(api.Engine.prototype) as api.Engine;
-    (engine as unknown as { inner: unknown }).inner = {
-      subscribe: async (...args: unknown[]) => {
-        calls.push({ args, method: 'subscribe' });
-        return Promise.resolve(nativeSub);
-      },
-      subscribeWithOptions: async (...args: unknown[]) => {
-        calls.push({ args, method: 'subscribeWithOptions' });
-        return Promise.resolve(nativeSub);
-      },
-    };
-
-    await engine.subscribe(['XETUSD Curncy'], ['LAST_PRICE'], { allFields: true });
-    await engine.stream(['XETUSD Curncy'], ['LAST_PRICE'], { allFields: true });
-    await engine.vwap(['XETUSD Curncy'], ['LAST_PRICE'], { allFields: false });
-
-    expect(calls[0]).toStrictEqual({
-      args: [['XETUSD Curncy'], ['LAST_PRICE'], true],
-      method: 'subscribe',
-    });
-    expect(calls[1]).toStrictEqual({
-      args: [
-        '//blp/mktdata',
-        ['XETUSD Curncy'],
-        ['LAST_PRICE'],
-        undefined,
-        undefined,
-        undefined,
-        undefined,
-        true,
-      ],
-      method: 'subscribeWithOptions',
-    });
-    expect(calls[2]?.args.at(-1)).toBeFalsy();
-  });
-
   it('forwards per-request validation toggles for reference and history wrappers', async () => {
     const engine = captureRequests();
 

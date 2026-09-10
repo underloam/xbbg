@@ -45,6 +45,10 @@ pub mod subscription;
 pub mod tls;
 pub mod zfp;
 
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod test_support;
+
 // Re-exports for convenience
 pub use async_session::AsyncSession;
 pub use auth::{

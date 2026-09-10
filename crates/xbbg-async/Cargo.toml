@@ -49,6 +49,7 @@ bench-internals = []
 normal = ["xbbg-log"]
 
 [dev-dependencies]
+xbbg_core = { workspace = true, features = ["test-support"] }
 blpapi-sys = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }

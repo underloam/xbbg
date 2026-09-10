@@ -27,6 +27,8 @@ default = ["live"]
 # explicit compile_error! so that failure is legible instead of surfacing as a
 # wall of unresolved imports.
 live = ["dep:blpapi-sys"]
+# SDK-created events for downstream regression tests; not enabled in production.
+test-support = ["live"]
 
 [dependencies]
 thiserror = { workspace = true }

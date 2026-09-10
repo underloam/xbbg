@@ -1564,8 +1564,16 @@ def _normalize_engine_exception(exc: Exception) -> Exception:
         BlpLimitError,
         BlpRequestError,
         BlpSecurityError,
+        BlpSubscriptionDataLossError,
         BlpValidationError,
     )
+
+    if isinstance(exc, _core.BlpSubscriptionDataLossError) and not isinstance(exc, BlpSubscriptionDataLossError):
+        return BlpSubscriptionDataLossError(
+            str(exc),
+            topic=getattr(exc, "topic", ""),
+            detail=getattr(exc, "detail", ""),
+        )
 
     if isinstance(exc, _core.BlpValidationError) and not isinstance(exc, BlpValidationError):
         return BlpValidationError.from_rust_error(str(exc))
@@ -2658,10 +2666,16 @@ class Subscription:
         return self
 
     async def __anext__(self) -> Any:
-        if self._tick_mode:
-            return await self._sub.__anext_tick_dict__()
+        try:
+            if self._tick_mode:
+                return await self._sub.__anext_tick_dict__()
 
-        batch = await self._sub.__anext__()
+            batch = await self._sub.__anext__()
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
         return self._convert_batch(batch)
 
@@ -2673,7 +2687,13 @@ class Subscription:
         """
         ticker_list = self._topic_normalizer(tickers)
         logger.debug("subscription add: %s", ticker_list)
-        await self._sub.add(ticker_list)
+        try:
+            await self._sub.add(ticker_list)
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
     async def remove(self, tickers: str | list[str]) -> None:
         """Remove tickers from subscription dynamically.
@@ -2683,7 +2703,13 @@ class Subscription:
         """
         ticker_list = self._topic_normalizer(tickers)
         logger.debug("subscription remove: %s", ticker_list)
-        await self._sub.remove(ticker_list)
+        try:
+            await self._sub.remove(ticker_list)
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
 
     @property
     def tickers(self) -> list[str]:
@@ -2797,13 +2823,29 @@ class Subscription:
         """Close subscription and optionally drain remaining data.
 
         Args:
-            drain: If True, return any remaining buffered batches
+            drain: If True, return all unread values using the same
+                representation selected for iteration.
 
         Returns:
-            List of remaining batches if drain=True, else None
+            List of remaining values if drain=True, else None.
+
+        Raises:
+            BlpError: An unread stream failure or cleanup failure. Buffered
+                partial results are not returned when draining fails.
         """
         logger.debug("unsubscribe: drain=%s", drain)
-        return await self._sub.unsubscribe(drain)
+        try:
+            remaining = await self._sub.unsubscribe(drain, self._tick_mode)
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        if not drain:
+            return None
+        if self._tick_mode:
+            return remaining
+        return [self._convert_batch(batch) for batch in remaining]
 
     async def __aenter__(self):
         return self
@@ -2841,11 +2883,19 @@ async def asubscribe(
     as ``SubscriptionStreamsActivated`` / ``SubscriptionStreamsDeactivated``
     events which are reflected in ``sub.topic_states`` (``streams_active``).
 
+    Dict ticks are sparse deltas: missing keys are unchanged, while present
+    ``None`` values explicitly clear fields. Arrow batches append the binary
+    ``__xbbg_present`` bitset (LSB-first; bit i maps to schema field i + 2).
+    Bloomberg DATALOSS or local queue loss raises
+    ``BlpSubscriptionDataLossError`` and ends the stream; resubscribe for a
+    fresh image. Connection-down notifications alone remain nonterminal.
+
     Args:
         tickers: Securities to subscribe to
         fields: Fields to subscribe to (e.g., 'LAST_PRICE', 'BID', 'ASK')
         raw: If True, yield raw ArrowRecordBatch wrappers for max performance
-        all_fields: If True, expose all top-level scalar Bloomberg subscription fields
+        all_fields: Expose all top-level scalar Bloomberg fields. Unrequested
+            arrays/complex fields are omitted; requested unsupported shapes fail.
         backend: Explicit backend for batch conversion. ``None`` (the default)
             yields native ArrowTable wrappers; pass e.g. "narwhals", "pandas",
             or "pyarrow" to opt into conversion. Ignored if raw=True.
@@ -2858,11 +2908,12 @@ async def asubscribe(
         tick_mode: If True, return native dict ticks without building Arrow (implies raw=True)
         flush_threshold: Number of ticks to buffer before emitting a batch.
         stream_capacity: Backpressure capacity of the native subscription stream.
-        overflow_policy: Overflow policy for the stream: ``"drop_newest"``
-            (default) or ``"block"``.
+        overflow_policy: ``"drop_newest"`` (default) fails on a full consumer
+            buffer; ``"block"`` waits briefly on a bounded forwarder and fails
+            on overflow/timeout. Neither waits on Bloomberg's callback thread.
         output: Output selector: ``"record_batch"``, ``"backend"``, ``"dict"``,
-            or ``"tick"`` (case-insensitive). ``None`` (default) retains the
-            behavior selected by ``raw`` and ``tick_mode``.
+            or ``"tick"`` (case-insensitive). When provided, it takes precedence
+            over ``raw`` and ``tick_mode``; ``None`` retains their behavior.
 
     Returns:
         Subscription handle for iteration and control
@@ -2902,9 +2953,14 @@ async def asubscribe(
         if normalized_output not in ("record_batch", "backend", "dict", "tick"):
             raise ValueError(f"output must be one of 'record_batch', 'backend', 'dict', 'tick', got {output!r}")
         if normalized_output in ("dict", "tick"):
+            raw = True
             tick_mode = True
         elif normalized_output == "record_batch":
             raw = True
+            tick_mode = False
+        else:
+            raw = False
+            tick_mode = False
 
     if flush_threshold is not None and flush_threshold < 1:
         raise ValueError("flush_threshold must be >= 1")

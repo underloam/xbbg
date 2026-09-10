@@ -171,6 +171,100 @@ describe('subscription iterator lifecycle', () => {
     await expect(subscription.next()).resolves.toStrictEqual({ done: true, value: undefined });
   });
 
+  it('preserves absent fields separately from explicit clears in canonical and typed accessors', async () => {
+    const native = fakeNativeSubscription({
+      nextUpdates: async () => ({
+        kind: 'batch',
+        layout: {
+          fields: ['present', 'cleared', 'absent'],
+          kinds: ['i32', 'i32', 'i32'],
+          version: 1,
+        },
+        updates: [
+          {
+            boolValues: [null, null],
+            f64Values: [null, null],
+            fieldIndices: [0, 1],
+            i32Values: [7, null],
+            i64Values: [null, null],
+            layoutVersion: 1,
+            stringValues: [null, null],
+            timestampUs: 123,
+            topic: 'topic-1',
+            topicId: 1,
+          },
+        ],
+      }),
+    });
+    const subscription = new api.Subscription(native);
+    const tick = (await subscription.next()).value;
+    if (tick === undefined) {
+      throw new Error('expected tick');
+    }
+
+    expect(tick.has('present')).toBeTruthy();
+    expect(tick.has('cleared')).toBeTruthy();
+    expect(tick.has('absent')).toBeFalsy();
+    expect(tick.has('unknown')).toBeFalsy();
+    expect(tick.has(new api.FieldHandle('present'))).toBeTruthy();
+    expect(tick.get('present')).toBe(7);
+    expect(tick.get('cleared')).toBeNull();
+    expect(tick.get('absent')).toBeUndefined();
+    expect(tick.get('unknown')).toBeUndefined();
+    expect(tick.f64('cleared')).toBeNull();
+    expect(tick.f64('absent')).toBeUndefined();
+    expect(tick.i64('cleared')).toBeNull();
+    expect(tick.i64('absent')).toBeUndefined();
+    expect(tick.str('cleared')).toBeNull();
+    expect(tick.str('absent')).toBeUndefined();
+    expect(tick.toObject()).toStrictEqual({
+      cleared: null,
+      present: 7,
+      timestampUs: 123,
+      topic: 'topic-1',
+    });
+    await subscription.unsubscribe(false);
+  });
+
+  it('decodes promoted boolean and numeric values from native string slots', async () => {
+    const native = fakeNativeSubscription({
+      nextUpdates: async () => ({
+        kind: 'batch',
+        layout: {
+          fields: ['flag', 'count', 'price'],
+          kinds: ['str', 'str', 'str'],
+          version: 1,
+        },
+        updates: [
+          {
+            boolValues: [null, null, null],
+            f64Values: [null, null, null],
+            fieldIndices: [0, 1, 2],
+            i32Values: [null, null, null],
+            i64Values: [null, null, null],
+            layoutVersion: 1,
+            stringValues: ['true', '42', '1.25'],
+            timestampUs: 123,
+            topic: 'topic-1',
+            topicId: 1,
+          },
+        ],
+      }),
+    });
+    const subscription = new api.Subscription(native);
+    const tick = (await subscription.next()).value;
+    if (tick === undefined) {
+      throw new Error('expected tick');
+    }
+
+    expect(tick.get('flag')).toBe('true');
+    expect(tick.get('count')).toBe('42');
+    expect(tick.get('price')).toBe('1.25');
+    expect(tick.f64('price')).toBe(1.25);
+    expect(tick.i64('count')).toBe(42n);
+    await subscription.unsubscribe(false);
+  });
+
   it('includes an in-flight batch in drain without delivering it after close', async () => {
     const started = deferredSignal();
     const pendingRead = deferred<NativeSubscriptionUpdateBatch | null>();
@@ -611,6 +705,63 @@ describe('subscription iterator lifecycle', () => {
     expect(error).toBeInstanceOf(api.BlpError);
     expect(error).toMatchObject({ message: 'shared native failure' });
     await expect(next).resolves.toStrictEqual({ done: true, value: undefined });
+  });
+
+  it('rejects an errors-only scalar drain with structured subscription data-loss details', async () => {
+    const native = fakeNativeSubscription({
+      unsubscribe: async () => {
+        throw new Error(
+          '[XBBG:DATALOSS] Subscription data loss [topic=IBM US Equity]: stream queue reached capacity',
+        );
+      },
+    });
+    const subscription = new api.Subscription(native);
+
+    const error = await subscription.unsubscribe(true).then(
+      () => null,
+      (raised: unknown) => raised,
+    );
+
+    expect(error).toBeInstanceOf(api.BlpSubscriptionDataLossError);
+    expect(error).toMatchObject({
+      code: 'DATALOSS',
+      detail: 'stream queue reached capacity',
+      topic: 'IBM US Equity',
+    });
+  });
+
+  it('uses the Arrow native close path when an unread Arrow drain fails', async () => {
+    const scalarClose = vi.fn<NativeSubscription['unsubscribe']>();
+    const arrowClose = vi
+      .fn<NativeSubscription['unsubscribeArrow']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:DATALOSS] Subscription data loss [topic=ES1 Index]: Bloomberg reported DATALOSS',
+        ),
+      );
+    const native = fakeNativeSubscription({
+      unsubscribe: scalarClose,
+      unsubscribeArrow: arrowClose,
+    });
+    const subscription = new api.Subscription(native);
+
+    const error = await subscription
+      .arrow()
+      .unsubscribe(true)
+      .then(
+        () => null,
+        (raised: unknown) => raised,
+      );
+
+    expect(error).toBeInstanceOf(api.BlpSubscriptionDataLossError);
+    expect(error).toMatchObject({
+      code: 'DATALOSS',
+      detail: 'Bloomberg reported DATALOSS',
+      topic: 'ES1 Index',
+    });
+    expect(arrowClose).toHaveBeenCalledTimes(1);
+    expect(arrowClose).toHaveBeenCalledWith(true);
+    expect(scalarClose).not.toHaveBeenCalled();
   });
 });
 

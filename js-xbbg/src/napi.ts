@@ -65,9 +65,10 @@ export interface NativeArrowZeroCopyBatch {
 }
 
 // Scalar subscription rows use columnar, per-row typed option arrays instead of
-// Serde_json values. At each value position exactly one typed array carries a
-// Non-null payload; int64/time64/timestamp values are decimal strings so JS can
-// Materialize BigInt lazily without losing precision.
+// Serde_json values. Each fieldIndices entry marks a field as present. Exactly
+// One typed array carries a concrete payload at that position; all-null slots
+// Mean an explicit clear, while absent fields have no position. Int64/time64/
+// Timestamp values are decimal strings so JS can materialize BigInt lazily.
 export type NativeSubscriptionFieldKind =
   | 'unknown'
   | 'bool'

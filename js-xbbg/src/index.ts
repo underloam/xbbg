@@ -15,6 +15,7 @@ import {
   BlpLimitError,
   BlpInternalError,
   BlpRequestError,
+  BlpSubscriptionDataLossError,
   BlpSessionError,
   BlpTimeoutError,
   BlpValidationError,
@@ -1256,7 +1257,7 @@ function createTickLayout(layout: NativeSubscriptionLayout): TickLayout {
 
 export class Tick {
   private readonly decodedSet: boolean[] = [];
-  private readonly decodedValues: TickValue[] = [];
+  private readonly decodedValues: (TickValue | undefined)[] = [];
   private rowPositions: number[] | undefined;
 
   public constructor(
@@ -1276,21 +1277,27 @@ export class Tick {
     return this.update.layoutVersion;
   }
 
-  public get(field: string | FieldHandle): TickValue {
+  public has(field: string | FieldHandle): boolean {
     const name = typeof field === 'string' ? field : field.name;
     const fieldIndex = this.layout.positions.get(name);
-    return fieldIndex === undefined ? null : this.getByFieldIndex(fieldIndex);
+    return fieldIndex !== undefined && this.valuePosition(fieldIndex) !== undefined;
   }
 
-  private getByFieldIndex(fieldIndex: number): TickValue {
+  public get(field: string | FieldHandle): TickValue | undefined {
+    const name = typeof field === 'string' ? field : field.name;
+    const fieldIndex = this.layout.positions.get(name);
+    return fieldIndex === undefined ? undefined : this.getByFieldIndex(fieldIndex);
+  }
+
+  private getByFieldIndex(fieldIndex: number): TickValue | undefined {
     if (this.decodedSet[fieldIndex] === true) {
-      return this.decodedValues[fieldIndex] ?? null;
+      return this.decodedValues[fieldIndex];
     }
     const position = this.valuePosition(fieldIndex);
     if (position === undefined) {
       this.decodedSet[fieldIndex] = true;
-      this.decodedValues[fieldIndex] = null;
-      return null;
+      this.decodedValues[fieldIndex] = undefined;
+      return undefined;
     }
 
     const kind = this.layout.kinds[fieldIndex] ?? 'unknown';
@@ -1336,19 +1343,19 @@ export class Tick {
     return positions[fieldIndex];
   }
 
-  public f64(field: string | FieldHandle): number | null {
+  public f64(field: string | FieldHandle): number | null | undefined {
     const value = this.get(field);
-    if (value === null) {
-      return null;
+    if (value === null || value === undefined) {
+      return value;
     }
     const parsed = Number(value);
     return Number.isFinite(parsed) ? parsed : null;
   }
 
-  public i64(field: string | FieldHandle): bigint | null {
+  public i64(field: string | FieldHandle): bigint | null | undefined {
     const value = this.get(field);
-    if (value === null) {
-      return null;
+    if (value === null || value === undefined) {
+      return value;
     }
     if (typeof value === 'bigint') {
       return value;
@@ -1360,9 +1367,9 @@ export class Tick {
     }
   }
 
-  public str(field: string | FieldHandle): string | null {
+  public str(field: string | FieldHandle): string | null | undefined {
     const value = this.get(field);
-    return value === null ? null : String(value);
+    return value === null || value === undefined ? value : String(value);
   }
 
   public toObject(): Record<string, unknown> {
@@ -1434,7 +1441,7 @@ class SubscriptionCoordinator {
   }
 
   public recordCloseReadError(error: unknown): void {
-    this.lateReadError ??= error instanceof Error ? error : wrapError(error);
+    this.lateReadError ??= wrapError(error);
   }
 
   public claimReadMode(mode: SubscriptionReadMode): void {
@@ -1771,7 +1778,7 @@ class SubscriptionIterator<TBatch, TValue> {
     try {
       nativeClose = this.closeNative(drain);
     } catch (error) {
-      nativeClose = Promise.reject(error instanceof Error ? error : wrapError(error));
+      nativeClose = Promise.reject(wrapError(error));
     }
     const closePromise = (async (): Promise<TValue[]> => {
       let nativeBatches: readonly TBatch[] | null = null;
@@ -1781,7 +1788,7 @@ class SubscriptionIterator<TBatch, TValue> {
         try {
           nativeBatches = await nativeClose;
         } catch (error) {
-          nativeError = error instanceof Error ? error : wrapError(error);
+          nativeError = wrapError(error);
         }
         await readBarrier;
 
@@ -3319,6 +3326,7 @@ export {
   BlpSessionError,
   BlpLimitError,
   BlpRequestError,
+  BlpSubscriptionDataLossError,
   BlpValidationError,
   BlpTimeoutError,
   BlpInternalError,

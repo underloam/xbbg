@@ -21,6 +21,7 @@ mod worker;
 pub use transport::{ServerAddr, Socks5Proxy, TlsConfig, Transport};
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -30,7 +31,7 @@ use arrow_array::{Array, ArrayRef, RecordBatch};
 use arrow_schema::{DataType, SchemaRef, TimeUnit};
 use futures_util::stream::{self, StreamExt};
 use parking_lot::Mutex as ParkingMutex;
-use tokio::sync::{mpsc, watch};
+use tokio::sync::watch;
 
 use xbbg_core::{apply_session_identity_options, AuthConfig, BlpError, SessionOptions};
 
@@ -45,7 +46,7 @@ pub use crate::services::ExtractorType;
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
 use state::typed_builder::{ArrowType, TypedBuilder};
-use state::SubscriptionMetrics;
+use state::{subscription_channel, SubscriptionMetrics, SubscriptionReceiver, SubscriptionSender};
 pub use state::{
     BqlState, BulkDataState, HistDataState, IntradayTickState, LongMode, OutputFormat,
     RefDataState, SubscriptionState, SubscriptionUpdate,
@@ -183,12 +184,11 @@ pub type SlabKey = usize;
 /// Overflow policy for slow consumers.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum OverflowPolicy {
-    /// Drop the newest data when buffer is full (default, non-blocking)
+    /// Close with a data-loss error when the buffer is full (default, non-blocking).
     #[default]
     DropNewest,
-    /// Wait up to a short fixed window on a bounded forwarding task before
-    /// recording a slow-consumer drop. The Bloomberg SDK callback only enqueues
-    /// and never waits on the downstream consumer.
+    /// Wait briefly on a bounded forwarding task. Queue overflow or timeout
+    /// closes with a data-loss error; the Bloomberg SDK callback never waits.
     Block,
 }
 
@@ -688,6 +688,7 @@ impl SubscriptionStatusState {
     pub fn mark_topic_unsubscribed(&mut self, key: SlabKey) -> Option<String> {
         let topic = self.finalize_key(key)?;
         self.update_topic_state(&topic, TopicLifecycleState::Unsubscribed);
+        let _ = self.set_topic_streams_active(&topic, false);
         Some(topic)
     }
 
@@ -703,6 +704,7 @@ impl SubscriptionStatusState {
             SubscriptionFailureKind::Terminated => TopicLifecycleState::Terminated,
         };
         self.update_topic_state(&topic, state);
+        let _ = self.set_topic_streams_active(&topic, false);
         self.failures.push(SubscriptionFailureInfo {
             topic: topic.clone(),
             reason,
@@ -713,6 +715,13 @@ impl SubscriptionStatusState {
     }
 
     pub fn clear_active(&mut self) {
+        let now = timestamp_now_us();
+        for topic in self.topic_states.values_mut() {
+            if topic.streams_active {
+                topic.streams_active = false;
+                topic.streams_changed_us = now;
+            }
+        }
         self.keys.clear();
         self.topics.clear();
         self.topic_to_key.clear();
@@ -1957,7 +1966,7 @@ impl Engine {
                 detail: "subscription stream capacity must be greater than zero".to_string(),
             });
         }
-        let (tx, rx) = mpsc::channel(capacity);
+        let (tx, rx) = subscription_channel(capacity);
         let status = Arc::new(SubscriptionStatusHandle::new(
             SubscriptionStatusState::default(),
         ));
@@ -2350,8 +2359,8 @@ impl Engine {
 
     /// Get a receiver that fires when shutdown is signaled.
     ///
-    /// Data-path consumers (e.g. `PySubscription.__anext__`) select on this
-    /// to break out of their recv loop promptly after `signal_shutdown()`.
+    /// This signals a request, not completed terminal publication. Subscription
+    /// reads observe their channel's queued data, terminal error, and EOF instead.
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown_signal.subscribe()
     }
@@ -2487,10 +2496,23 @@ mod release_runtime_tests {
     }
 }
 
-async fn collect_subscription_updates_until_drained(
-    rx: &mut mpsc::Receiver<Result<SubscriptionUpdate, BlpError>>,
-    barrier: impl std::future::Future<Output = Result<(), BlpAsyncError>>,
+fn record_drained_subscription_item(
+    item: Result<SubscriptionUpdate, BlpError>,
     remaining: &mut Vec<SubscriptionUpdate>,
+    first_error: &mut Option<BlpError>,
+) {
+    match item {
+        Ok(update) => remaining.push(update),
+        Err(error) if first_error.is_none() => *first_error = Some(error),
+        Err(_) => {}
+    }
+}
+
+async fn collect_subscription_updates_until_drained(
+    rx: &mut SubscriptionReceiver,
+    barrier: impl Future<Output = Result<(), BlpAsyncError>>,
+    remaining: &mut Vec<SubscriptionUpdate>,
+    first_error: &mut Option<BlpError>,
 ) -> Result<(), BlpAsyncError> {
     tokio::pin!(barrier);
     loop {
@@ -2498,8 +2520,9 @@ async fn collect_subscription_updates_until_drained(
             biased;
             item = rx.recv() => {
                 match item {
-                    Some(Ok(update)) => remaining.push(update),
-                    Some(Err(_)) => {}
+                    Some(item) => {
+                        record_drained_subscription_item(item, remaining, first_error);
+                    }
                     None => return barrier.await,
                 }
             }
@@ -2520,9 +2543,9 @@ async fn collect_subscription_updates_until_drained(
 /// The underlying session is released back to the pool on drop.
 pub struct SubscriptionStream {
     /// Receiver for incoming data batches (or errors).
-    rx: mpsc::Receiver<Result<SubscriptionUpdate, BlpError>>,
+    rx: SubscriptionReceiver,
     /// Sender for adding new topics (shares channel with existing subs).
-    tx: mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+    tx: SubscriptionSender,
     /// Session claim (released on drop).
     claim: Option<SessionClaim>,
     /// Subscribed fields.
@@ -2569,18 +2592,31 @@ impl SubscriptionStream {
     /// - `Some(Err(error))` — subscription failure, session death, etc.
     /// - `None` — subscription is closed
     pub async fn next(&mut self) -> Option<Result<SubscriptionUpdate, BlpError>> {
-        self.rx.recv().await
+        let item = self.rx.recv().await;
+        if matches!(&item, Some(Err(_))) {
+            self.cleanup_without_reuse_if_active();
+        }
+        item
     }
 
     /// Try to receive data without blocking.
     pub fn try_next(&mut self) -> Option<Result<SubscriptionUpdate, BlpError>> {
-        self.rx.try_recv().ok()
+        let item = self.rx.try_recv().ok();
+        if matches!(&item, Some(Err(_))) {
+            self.cleanup_without_reuse_if_active();
+        }
+        item
     }
 
     /// Add tickers to the subscription dynamically.
     ///
     /// New tickers will start receiving data on the same stream.
     pub async fn add(&mut self, topics: Vec<String>) -> Result<(), BlpAsyncError> {
+        if self.tx.is_closed() {
+            return Err(BlpAsyncError::ConfigError {
+                detail: "cannot add topics to a terminal subscription stream".to_string(),
+            });
+        }
         let command = self.command_handle()?;
         let mut seen_topics = HashSet::new();
 
@@ -2670,48 +2706,67 @@ impl SubscriptionStream {
 
     /// Check if any topics are still subscribed.
     pub fn is_active(&self) -> bool {
-        self.claim.is_some() && self.status.load().has_active_topics()
+        self.claim.is_some() && !self.tx.is_closed() && self.status.load().has_active_topics()
     }
 
     /// Unsubscribe from all topics and close the stream.
     ///
     /// If `drain` is true, returns remaining buffered updates before closing.
-    /// Errors in the drain are silently discarded — only successful updates are returned.
+    /// An unread stream failure is returned after forwarding and cleanup complete.
     pub async fn unsubscribe(
         mut self,
         drain: bool,
     ) -> Result<Vec<SubscriptionUpdate>, BlpAsyncError> {
         let mut remaining = Vec::new();
+        let mut first_stream_error = None;
+        let mut cleanup_error = None;
 
         if let Some(claim) = self.claim.take() {
             let keys = self.status.load().keys().to_vec();
             if !keys.is_empty() {
-                claim.unsubscribe(keys).await?;
+                if let Err(error) = claim.unsubscribe(keys).await {
+                    cleanup_error = Some(error);
+                }
             }
             if drain {
                 // Consume the receiver while the ordered forwarding barrier
-                // advances. Otherwise a full receiver makes every already-
+                // advances. Otherwise a full receiver makes an already-
                 // accepted Block-policy update wait for its timeout before the
-                // barrier can run. The barrier bounds this to callback-side
-                // queue entries accepted before unsubscribe closed the topics.
-                collect_subscription_updates_until_drained(
+                // barrier can run.
+                if let Err(error) = collect_subscription_updates_until_drained(
                     &mut self.rx,
                     claim.drain_forwarder(),
                     &mut remaining,
+                    &mut first_stream_error,
                 )
-                .await?;
+                .await
+                {
+                    cleanup_error.get_or_insert(error);
+                }
+                // The forwarding barrier has accounted for all accepted work.
+                // Closing now distinguishes deliberate cancellation from a
+                // worker-shutdown failure while retaining buffered data and any
+                // earlier terminal error.
+                self.rx.close();
             }
+            // SessionClaim::drop completes cleanup or quarantines a worker that
+            // still has pending Bloomberg state before an error is reported.
+            drop(claim);
         }
 
         if drain {
             while let Ok(item) = self.rx.try_recv() {
-                if let Ok(batch) = item {
-                    remaining.push(batch);
-                }
+                record_drained_subscription_item(item, &mut remaining, &mut first_stream_error);
             }
         }
         self.status.update(|next| next.clear_active());
 
+        if let Some(error) = first_stream_error {
+            return Err(error.into());
+        }
+        if let Some(error) = cleanup_error {
+            return Err(error);
+        }
         Ok(remaining)
     }
 
@@ -2737,8 +2792,8 @@ impl SubscriptionStream {
         self,
     ) -> Result<
         (
-            mpsc::Receiver<Result<SubscriptionUpdate, BlpError>>,
-            mpsc::Sender<Result<SubscriptionUpdate, BlpError>>,
+            SubscriptionReceiver,
+            SubscriptionSender,
             SessionClaim,
             SharedSubscriptionStatus,
             Option<usize>,          // flush_threshold
@@ -3568,6 +3623,10 @@ mod tests {
             vec![10, 11],
             HashMap::from([(10, metric.clone()), (11, metric)]),
         );
+        assert_eq!(
+            status.set_topic_streams_active("/isin/BMG8192H1557", true),
+            Some(false)
+        );
 
         let topic = status.record_failure(
             11,
@@ -3585,6 +3644,7 @@ mod tests {
             status.topic_statuses()["/isin/BMG8192H1557"].state,
             TopicLifecycleState::Failed,
         );
+        assert!(!status.topic_statuses()["/isin/BMG8192H1557"].streams_active);
     }
 
     #[test]
@@ -3688,6 +3748,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn clearing_active_topics_marks_sdk_streams_inactive() {
+        let mut status = SubscriptionStatusState::from_active(
+            vec!["IBM US Equity".to_string()],
+            vec![11],
+            HashMap::new(),
+        );
+        assert_eq!(
+            status.set_topic_streams_active("IBM US Equity", true),
+            Some(false)
+        );
+
+        status.clear_active();
+
+        assert!(status.keys().is_empty());
+        assert!(!status.topic_statuses()["IBM US Equity"].streams_active);
+    }
+
     #[tokio::test]
     async fn drain_barrier_consumes_receiver_while_forwarding_is_blocked() {
         let update = |topic_id| SubscriptionUpdate {
@@ -3699,7 +3777,7 @@ mod tests {
         };
         let first = update(1);
         let second = update(2);
-        let (tx, mut rx) = mpsc::channel(1);
+        let (tx, mut rx) = subscription_channel(1);
         let barrier = async move {
             tx.send(Ok(first))
                 .await
@@ -3710,14 +3788,18 @@ mod tests {
             Ok(())
         };
         let mut remaining = Vec::new();
+        let mut first_error = None;
 
-        collect_subscription_updates_until_drained(&mut rx, barrier, &mut remaining)
-            .await
-            .expect("forwarding barrier");
+        collect_subscription_updates_until_drained(
+            &mut rx,
+            barrier,
+            &mut remaining,
+            &mut first_error,
+        )
+        .await
+        .expect("forwarding barrier");
         while let Ok(item) = rx.try_recv() {
-            if let Ok(update) = item {
-                remaining.push(update);
-            }
+            record_drained_subscription_item(item, &mut remaining, &mut first_error);
         }
 
         assert_eq!(
@@ -3727,5 +3809,53 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![1, 2]
         );
+    }
+
+    #[tokio::test]
+    async fn drain_waits_for_barrier_before_propagating_terminal_error() {
+        let (tx, mut rx) = subscription_channel(1);
+        tx.try_send(Ok(SubscriptionUpdate {
+            timestamp_us: 1,
+            topic_id: 1,
+            topic: Arc::from("TEST"),
+            layout: Arc::new(state::FieldLayout::new(1, Vec::new())),
+            values: Default::default(),
+        }))
+        .expect("queued update");
+        tx.fail(BlpError::Internal {
+            detail: "terminal before cleanup".to_string(),
+        });
+        let (release_barrier, barrier) = tokio::sync::oneshot::channel();
+        let (barrier_started, wait_for_barrier) = tokio::sync::oneshot::channel();
+
+        let task = tokio::spawn(async move {
+            let mut remaining = Vec::new();
+            let mut first_error = None;
+            collect_subscription_updates_until_drained(
+                &mut rx,
+                async move {
+                    barrier_started
+                        .send(())
+                        .map_err(|_| BlpAsyncError::ChannelClosed)?;
+                    barrier.await.map_err(|_| BlpAsyncError::ChannelClosed)?;
+                    Ok(())
+                },
+                &mut remaining,
+                &mut first_error,
+            )
+            .await
+            .expect("forwarding barrier");
+            (remaining, first_error)
+        });
+        wait_for_barrier.await.expect("barrier was polled");
+        assert!(!task.is_finished());
+
+        release_barrier.send(()).expect("release cleanup barrier");
+        let (remaining, error) = task.await.expect("drain task");
+        assert_eq!(remaining.len(), 1);
+        assert!(error
+            .expect("terminal error")
+            .to_string()
+            .contains("terminal before cleanup"));
     }
 }

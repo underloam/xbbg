@@ -11,7 +11,7 @@ Engine
 │       └── 12 state machines: RefData, HistData, BulkData, IntradayBar,
 │           IntradayTick, HistDataStream, IntradayBarStream,
 │           IntradayTickStream, Generic, Bql, Bsrch, FieldInfo
-├── SubscriptionSessionPool  (claim/release, default 4 sessions)
+├── SubscriptionSessionPool  (1 pre-warmed session, 32-session cap by default)
 │   └── Sub-worker threads   each owns a Session + Slab<SubscriptionState>
 ├── SchemaCache              (in-memory + disk-persisted service schemas)
 ├── FieldCache               (global, disk-persisted field type resolution)
@@ -28,7 +28,7 @@ subscriptions are claimed from a separate session pool.
 |--------|---------|
 | `engine/` | Engine startup, shutdown, command dispatch |
 | `engine/worker/` | Per-worker event loop and request lifecycle |
-| `engine/sub_worker/` | Per-session subscription event loop |
+| `engine/subscription_pool.rs` | Per-session subscription lifecycle and callbacks |
 | `engine/state/` | 12 state machines for different Bloomberg operations |
 | `schema/` | Service schema introspection + disk cache |
 | `field_cache.rs` | Global field-type resolver with disk persistence |
@@ -43,3 +43,27 @@ subscriptions are claimed from a separate session pool.
   giving O(1) insert/remove and compact memory layout.
 - **Schema + field caching** — Service schemas and field metadata are cached to
   disk, avoiding repeated introspection on startup.
+
+## Subscription deltas and termination
+
+`SubscriptionStream::next()` yields sparse `SubscriptionUpdate` values. Missing
+`UpdateField` entries mean unchanged; `UpdateValue::Null` is an explicit SDK
+clear. Requested arrays/complex values and non-null decode failures are errors.
+All-fields mode omits unrequested nonscalars without suppressing a later scalar.
+
+Arrow conversion appends non-null binary `__xbbg_present`. Bit `i`, LSB-first,
+maps to schema field `i + 2` after `timestamp` and `topic`. A present-null field
+sets its bit; absence does not. Interpret against each batch's current schema;
+`xbbg.subscription_presence` metadata records the encoding and mapping.
+
+The bounded subscription channel reserves terminal errors outside data capacity.
+It yields committed data, one terminal error, then EOF even when sender handles
+remain. Bloomberg `DATALOSS`, `DropNewest` overflow, and `Block` forwarding
+overflow/timeout terminate with `BlpError::SubscriptionDataLoss`; resubscribe for
+a fresh image. Unattributed/session-wide loss uses `topic="*"`. The SDK callback
+never waits for consumer space.
+
+Draining unsubscribe propagates unread failures after cleanup rather than
+returning a successful partial result. Removing every topic does not detach the
+handle from engine/session termination. Partial-topic failures and ordinary
+connection-down notifications retain their nonterminal behavior.

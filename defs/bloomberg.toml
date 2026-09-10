@@ -299,12 +299,12 @@ rust_name = "DropNewest"
 value = "drop_newest"
 aliases = ["dropnewest"]
 default = true
-doc = "Drop the newest update as soon as the buffer is full; never stalls Bloomberg's callback thread."
+doc = "Close with a data-loss error when the consumer buffer is full; never waits on Bloomberg's callback thread. Resubscribe for a fresh image."
 
 [overflow_policies.BLOCK]
 rust_name = "Block"
 value = "block"
-doc = "Retry within a short bounded window on Bloomberg's callback thread, then flag a slow consumer and drop the update."
+doc = "Wait briefly on a bounded forwarding task, never on Bloomberg's callback thread; queue overflow or timeout closes with a data-loss error. Resubscribe for a fresh image."
 
 
 # ============================================================================
