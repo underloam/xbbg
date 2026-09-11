@@ -650,8 +650,10 @@ mod tests {
     fn read_i32_offsets(buffer: &MutableBuffer) -> Vec<i32> {
         buffer
             .as_slice()
-            .chunks_exact(std::mem::size_of::<i32>())
-            .map(|bytes| i32::from_ne_bytes(bytes.try_into().unwrap()))
+            .as_chunks::<{ std::mem::size_of::<i32>() }>()
+            .0
+            .iter()
+            .map(|bytes| i32::from_ne_bytes(*bytes))
             .collect()
     }
 

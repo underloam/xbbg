@@ -892,7 +892,7 @@ async fn receive_subscription_updates(
     close_rx: &mut watch::Receiver<bool>,
     limit: usize,
     max_wait_ms: Option<u32>,
-) -> Result<Option<Vec<SubscriptionUpdate>>, BlpError> {
+) -> Result<Option<Vec<SubscriptionUpdate>>, Box<BlpError>> {
     if *close_rx.borrow() {
         return Ok(None);
     }
@@ -931,7 +931,7 @@ async fn receive_subscription_updates(
                     break;
                 }
             }
-            Some(Err(error)) if batch.updates.is_empty() => return Err(error),
+            Some(Err(error)) if batch.updates.is_empty() => return Err(Box::new(error)),
             Some(Err(error)) => {
                 pending
                     .lock()
@@ -954,7 +954,7 @@ async fn drain_forwarder_into_pending(
     claim: &xbbg_async::engine::SessionClaim,
     rx: &mut SubscriptionReceiver,
     pending: &StdMutex<VecDeque<StreamBatchResult>>,
-) -> Result<(), BlpAsyncError> {
+) -> Result<(), Box<BlpAsyncError>> {
     let barrier = claim.drain_forwarder();
     tokio::pin!(barrier);
     let barrier_result = loop {
@@ -978,8 +978,7 @@ async fn drain_forwarder_into_pending(
             .expect("subscription pending queue poisoned")
             .push_back(item);
     }
-    barrier_result?;
-    Ok(())
+    barrier_result.map_err(Box::new)
 }
 
 /// Stable machine-readable error code embedded in every native error message
@@ -2151,7 +2150,7 @@ impl JsSubscription {
             max_wait_ms,
         )
         .await
-        .map_err(blp_error_to_napi)?;
+        .map_err(|error| blp_error_to_napi(*error))?;
 
         let Some(updates) = updates else {
             return Ok(None);
@@ -2198,7 +2197,7 @@ impl JsSubscription {
             max_wait_ms,
         )
         .await
-        .map_err(blp_error_to_napi)?;
+        .map_err(|error| blp_error_to_napi(*error))?;
 
         let Some(updates) = updates else {
             return Ok(None);
@@ -2595,7 +2594,7 @@ impl JsSubscription {
                     Some(rx) => {
                         let result = drain_forwarder_into_pending(claim, rx, self.pending.as_ref())
                             .await
-                            .map_err(blp_async_error_to_napi);
+                            .map_err(|error| blp_async_error_to_napi(*error));
                         rx.close();
                         result
                     }
@@ -3418,7 +3417,7 @@ mod tests {
                 .await
                 .expect_err("terminal data-loss error");
             assert!(matches!(
-                error,
+                *error,
                 BlpError::SubscriptionDataLoss {
                     ref topic,
                     ref detail,

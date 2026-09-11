@@ -10,6 +10,43 @@ import type {
   NativeSubscriptionUpdateBatch,
 } from '../src/napi';
 
+// Exercise the public wrappers while replacing only their eager native-addon load.
+// The resolver mock covers native-free installs; the require mock also isolates local builds.
+vi.mock(import('node:module'), async (importOriginal) => {
+  const actual = await importOriginal();
+  const nativeAddon = {
+    JsEngine: vi.fn<() => never>(() => {
+      throw new Error('subscription lifecycle tests must not instantiate the native engine');
+    }),
+    getLogLevel: () => 'off',
+    setLogLevel: () => undefined,
+  };
+
+  return {
+    ...actual,
+    createRequire: (...args: Parameters<typeof actual.createRequire>) => {
+      const nodeRequire = actual.createRequire(...args);
+      return new Proxy(nodeRequire, {
+        apply(target, thisArgument, argumentsList) {
+          const moduleId: unknown = argumentsList[0];
+          if (typeof moduleId === 'string' && /(?:^|[/\\])napi[-_]xbbg\.node$/u.test(moduleId)) {
+            return nativeAddon;
+          }
+          return Reflect.apply(target, thisArgument, argumentsList);
+        },
+      });
+    },
+  };
+});
+
+vi.mock(import('../src/native/resolve-native.js'), () => ({
+  resolveNativeAddon: () => ({
+    binaryPath: 'napi_xbbg.node',
+    key: 'test',
+    packageName: '@xbbg/core-test',
+  }),
+}));
+
 function typedBuffer(view: ArrayBufferView): Buffer {
   return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
 }

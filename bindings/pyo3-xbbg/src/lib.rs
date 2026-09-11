@@ -217,7 +217,7 @@ async fn drain_forwarder_into_pending(
     claim: &xbbg_async::engine::SessionClaim,
     rx: &mut SubscriptionReceiver,
     pending: &StdMutex<VecDeque<StreamItem>>,
-) -> Result<(), BlpAsyncError> {
+) -> Result<(), Box<BlpAsyncError>> {
     let barrier = claim.drain_forwarder();
     tokio::pin!(barrier);
     let barrier_result = loop {
@@ -241,7 +241,7 @@ async fn drain_forwarder_into_pending(
             .expect("subscription pending queue poisoned")
             .push_back(item);
     }
-    barrier_result
+    barrier_result.map_err(Box::new)
 }
 fn collect_drained_stream_items(
     pending: &StdMutex<VecDeque<StreamItem>>,
@@ -2740,10 +2740,12 @@ impl PySubscription {
                     let mut rx_guard = rx_arc.lock().await;
                     let forwarder_result = match rx_guard.as_mut() {
                         Some(rx) => drain_forwarder_into_pending(claim, rx, pending.as_ref()).await,
-                        None => claim.drain_forwarder().await,
+                        None => claim.drain_forwarder().await.map_err(Box::new),
                     };
                     if cleanup_error.is_none() {
-                        cleanup_error = forwarder_result.err().map(blp_async_error_to_pyerr);
+                        cleanup_error = forwarder_result
+                            .err()
+                            .map(|error| blp_async_error_to_pyerr(*error));
                     }
                 }
             }
