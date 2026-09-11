@@ -8,13 +8,13 @@
 </p>
 
 [![CI](https://github.com/xbbg-org/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/xbbg-org/xbbg/actions/workflows/ci-rust.yml)
-[![PyPI version](https://img.shields.io/pypi/v/xbbg.svg)](https://pypi.org/project/xbbg/)
-[![Conda version](https://anaconda.org/conda-forge/xbbg/badges/version.svg)](https://anaconda.org/conda-forge/xbbg)
-[![npm version](https://img.shields.io/npm/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core)
-[![Python versions](https://img.shields.io/pypi/pyversions/xbbg.svg)](https://pypi.org/project/xbbg/)
-[![PyPI downloads](https://pepy.tech/badge/xbbg)](https://pepy.tech/project/xbbg)
-[![npm downloads](https://img.shields.io/npm/dm/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)
+
+| | Version | Downloads | Runtime |
+| :--- | :---: | :---: | :---: |
+| **Python** | [![PyPI version](https://img.shields.io/pypi/v/xbbg.svg)](https://pypi.org/project/xbbg/) [![conda-forge version](https://img.shields.io/conda/vn/conda-forge/xbbg.svg)](https://anaconda.org/conda-forge/xbbg) | [![PyPI downloads per month](https://static.pepy.tech/badge/xbbg/month)](https://pepy.tech/projects/xbbg) [![PyPI downloads total](https://static.pepy.tech/badge/xbbg)](https://pepy.tech/projects/xbbg) | [![Python versions](https://img.shields.io/pypi/pyversions/xbbg.svg)](https://pypi.org/project/xbbg/) |
+| **JavaScript** | [![npm version](https://img.shields.io/npm/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) | [![npm downloads per month](https://img.shields.io/npm/dm/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) | [![Node.js versions](https://img.shields.io/node/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) |
+| **Rust** | [![crates.io version](https://img.shields.io/crates/v/xbbg_core.svg)](https://crates.io/crates/xbbg_core) | [![crates.io downloads](https://img.shields.io/crates/d/xbbg_core.svg)](https://crates.io/crates/xbbg_core) | [![MSRV](https://img.shields.io/crates/msrv/xbbg_core.svg)](https://crates.io/crates/xbbg_core) |
 
 **Links:** [Documentation](https://xbbg.org/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
@@ -553,6 +553,8 @@ Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 - JavaScript/Node bindings: [js-xbbg/README.md](js-xbbg/README.md)
 - LangChain/LangGraph tools: [js-xbbg-langgraph/README.md](js-xbbg-langgraph/README.md)
 - PyPI: [pypi.org/project/xbbg](https://pypi.org/project/xbbg/)
+- npm: [npmjs.com/package/@xbbg/core](https://www.npmjs.com/package/@xbbg/core)
+- crates.io: [crates.io/crates/xbbg_core](https://crates.io/crates/xbbg_core)
 - Source: [github.com/xbbg-org/xbbg](https://github.com/xbbg-org/xbbg)
 - Issues: [GitHub Issues](https://github.com/xbbg-org/xbbg/issues)
 - Discord: [Join the community](https://discord.gg/P34uMwgCjC)
