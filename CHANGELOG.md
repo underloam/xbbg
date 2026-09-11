@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.4.12] - 2026-09-11
+
 ### Added
 
 - **Explicit resource limits and ownership controls.** Engines expose `runtime_worker_threads` / `runtimeWorkerThreads` (default 2) and `max_subscription_sessions` / `maxSubscriptionSessions` (default 32). Native Arrow carriers expose `compact()` to detach retained slices from larger backing allocations when the caller prefers a copy over retaining the parent.
@@ -1629,7 +1631,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/xbbg-org/xbbg/compare/v1.4.11...HEAD
+[Unreleased]: https://github.com/xbbg-org/xbbg/compare/v1.4.12...HEAD
+[1.4.12]: https://github.com/xbbg-org/xbbg/compare/v1.4.11...v1.4.12
 [1.4.11]: https://github.com/xbbg-org/xbbg/compare/v1.4.10...v1.4.11
 [1.4.10]: https://github.com/xbbg-org/xbbg/compare/v1.4.9...v1.4.10
 [1.4.9]: https://github.com/xbbg-org/xbbg/compare/v1.4.8...v1.4.9
