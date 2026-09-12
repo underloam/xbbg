@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patched JavaScript test tooling.** Both JavaScript packages now require Vitest `^4.1.11` and lock its coordinated `@vitest/*` dependencies, including `@vitest/mocker`, to `4.1.11`, addressing the redirect-mock path traversal and arbitrary file read in [GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9).
+- **Patched MCPB archive tooling.** The private build tools now pin `fflate` to `0.8.3`, fixing the malformed ZIP64 infinite loop in [GHSA-px8p-9vwx-vf98](https://github.com/advisories/GHSA-px8p-9vwx-vf98).
+
 ## [1.4.12] - 2026-09-11
 
 ### Added

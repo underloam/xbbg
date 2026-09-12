@@ -1,13 +1,13 @@
 {
   "name": "xbbg-mcpb-build-tools",
-  "private": true,
   "version": "0.0.0",
+  "private": true,
   "scripts": {
     "test": "node --test pack.test.mjs"
   },
   "dependencies": {
     "@anthropic-ai/mcpb": "2.1.2",
-    "fflate": "0.8.2"
+    "fflate": "0.8.3"
   },
   "overrides": {
     "tmp": "0.2.7"

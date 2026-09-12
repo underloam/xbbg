@@ -79,7 +79,7 @@
     "tsx": "^4.22.3",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.59.4",
-    "vitest": "^4.1.6"
+    "vitest": "^4.1.11"
   },
   "peerDependencies": {
     "@langchain/core": ">=1.0.0 <2"
