@@ -2,42 +2,42 @@
 # Defines code ownership for automatic PR review requests.
 # See: https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners
 #
-# Ownership is assigned to the @xbbg-org/maintainers team rather than to an
+# Ownership is assigned to the @underloam/maintainers team rather than to an
 # individual account, so review routing does not depend on one person and no
 # personal handle is published in the repository. A team must have at least write
 # access to the repository to be a valid code owner.
 
 # Global owners - all files default to these owners
-* @xbbg-org/maintainers
+* @underloam/maintainers
 
 # Rust workspace
-/crates/ @xbbg-org/maintainers
-/bindings/ @xbbg-org/maintainers
-/apps/ @xbbg-org/maintainers
+/crates/ @underloam/maintainers
+/bindings/ @underloam/maintainers
+/apps/ @underloam/maintainers
 
 # Python package
-/py-xbbg/ @xbbg-org/maintainers
+/py-xbbg/ @underloam/maintainers
 
 # JavaScript packages
-/js-xbbg/ @xbbg-org/maintainers
-/js-xbbg-langgraph/ @xbbg-org/maintainers
+/js-xbbg/ @underloam/maintainers
+/js-xbbg-langgraph/ @underloam/maintainers
 
 # Service definitions and codegen
-/defs/ @xbbg-org/maintainers
+/defs/ @underloam/maintainers
 
 # Documentation and policy
-/README.md @xbbg-org/maintainers
-/SECURITY.md @xbbg-org/maintainers
-/CODE_OF_CONDUCT.md @xbbg-org/maintainers
-/RELEASE_PROCESS.md @xbbg-org/maintainers
+/README.md @underloam/maintainers
+/SECURITY.md @underloam/maintainers
+/CODE_OF_CONDUCT.md @underloam/maintainers
+/RELEASE_PROCESS.md @underloam/maintainers
 
 # GitHub workflows and configuration
-/.github/ @xbbg-org/maintainers
+/.github/ @underloam/maintainers
 
 # Build and project configuration
-/Cargo.toml @xbbg-org/maintainers
-/Cargo.lock @xbbg-org/maintainers
-/pyproject.toml @xbbg-org/maintainers
-/MANIFEST.in @xbbg-org/maintainers
-/uv.lock @xbbg-org/maintainers
-/pixi.toml @xbbg-org/maintainers
+/Cargo.toml @underloam/maintainers
+/Cargo.lock @underloam/maintainers
+/pyproject.toml @underloam/maintainers
+/MANIFEST.in @underloam/maintainers
+/uv.lock @underloam/maintainers
+/pixi.toml @underloam/maintainers

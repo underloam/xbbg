@@ -107,6 +107,32 @@ tag-triggered workflows. Dispatch each one manually on the new tag:
 `crates-publish.yml` avoids this trap entirely by being invoked as a reusable
 workflow rather than waiting on a tag event.
 
+### Organization rename cutover
+
+Repository URLs and the MCP Registry namespace use `underloam`; Python package
+names, npm's `@xbbg` scope, crate names, and `xbbg.org` are unchanged.
+Before publishing, confirm the PyPI, npm, and crates.io trusted publishers use
+the current GitHub owner with their existing workflow and environment restrictions.
+Also verify that CI can pull both owner-qualified GHCR build images.
+
+Historical release assets remain immutable. An older release's `server.json`
+retains its original registry namespace; downloading it in
+`mcp_registry_publish.yml` does not migrate that namespace.
+For a registry-only cutover without a new package release:
+
+1. Download the existing descriptor and the exact MCPB asset it identifies.
+2. Verify the bundle bytes against both the descriptor's `fileSha256` and the
+   GitHub release asset's SHA-256 digest.
+3. Run `scripts/render_mcp_registry_server.py` with the descriptor's version,
+   the canonical `underloam/xbbg` URL for that same asset, and its verified hash.
+4. Validate and publish only the temporary `io.github.underloam/xbbg-mcp`
+   descriptor. Do not upload or replace either historical release asset.
+
+The old bundle retains its historical manifest metadata. Future releases generate
+both the descriptor and bundle metadata under `underloam`. Existing registry
+clients must switch to the new server name; a GitHub redirect does not rename
+an MCP Registry subscription.
+
 ## CI/CD Workflows
 
 ### On Every Push/PR
@@ -184,13 +210,13 @@ called file appears only as `job_workflow_ref`, which crates.io does not check. 
 you register only `crates-publish.yml`, automatic releases fail OIDC while manual
 dispatch still succeeds.
 
-For every entry use repository owner `xbbg-org`, repository `xbbg`, and leave the
+For every entry use repository owner `underloam`, repository `xbbg`, and leave the
 environment blank.
 
-**Status: all 12 entries are configured** (6 crates × 2 workflows) as of 1.4.7.
-No `CARGO_REGISTRY_TOKEN` secret exists and none is needed. Do not remove either
-entry for a crate — dropping `semantic_version.yml` silently breaks automatic
-releases while leaving manual dispatch working.
+Before releasing after an organization rename, confirm all 12 entries use the
+current owner (6 crates × 2 workflows). No `CARGO_REGISTRY_TOKEN` secret is needed.
+Keep both entries for every crate: dropping `semantic_version.yml` breaks
+automatic releases while leaving manual dispatch working.
 
 #### First publish of a new crate name
 
@@ -225,11 +251,11 @@ returns 422. Yanking is the realistic retirement path.
 
 | npm package | Publisher | GitHub org/user | Repository | Workflow filename | Environment |
 |-------------|-----------|-----------------|------------|-------------------|-------------|
-| `@xbbg/core` | GitHub Actions | `xbbg-org` | `xbbg` | `npm-publish.yml` | leave blank |
-| `@xbbg/core-linux-x64` | GitHub Actions | `xbbg-org` | `xbbg` | `npm-publish.yml` | leave blank |
-| `@xbbg/core-win32-x64` | GitHub Actions | `xbbg-org` | `xbbg` | `npm-publish.yml` | leave blank |
-| `@xbbg/core-darwin-arm64` | GitHub Actions | `xbbg-org` | `xbbg` | `npm-publish.yml` | leave blank |
-| `@xbbg/langgraph` | GitHub Actions | `xbbg-org` | `xbbg` | `npm-publish.yml` | leave blank |
+| `@xbbg/core` | GitHub Actions | `underloam` | `xbbg` | `npm-publish.yml` | leave blank |
+| `@xbbg/core-linux-x64` | GitHub Actions | `underloam` | `xbbg` | `npm-publish.yml` | leave blank |
+| `@xbbg/core-win32-x64` | GitHub Actions | `underloam` | `xbbg` | `npm-publish.yml` | leave blank |
+| `@xbbg/core-darwin-arm64` | GitHub Actions | `underloam` | `xbbg` | `npm-publish.yml` | leave blank |
+| `@xbbg/langgraph` | GitHub Actions | `underloam` | `xbbg` | `npm-publish.yml` | leave blank |
 
 GitHub environment `npm` is intentionally not required because current repository credentials cannot create it. Add an environment only if an admin wants reviewer-based release approvals; if you do, update both the workflow `environment:` and all npm trusted publisher entries to the exact same environment name.
 
@@ -295,7 +321,7 @@ Go to **GitHub Actions** > **Publish JS Packages** > **Run workflow**.
 5. Publishes missing packages in dependency order: platform packages first, then `@xbbg/core`
 6. Uses npm trusted publishing/OIDC with provenance from GitHub Actions; no npm token is required for normal releases
 
-The npm Trusted Publisher configuration must match the workflow filename exactly: `npm-publish.yml`, repository `xbbg-org/xbbg`, and blank environment unless a matching GitHub environment is intentionally added.
+The npm Trusted Publisher configuration must match the workflow filename exactly: `npm-publish.yml`, repository `underloam/xbbg`, and blank environment unless a matching GitHub environment is intentionally added.
 
 ## Local Development
 

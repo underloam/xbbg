@@ -1,7 +1,7 @@
 #!/usr/bin/env sh
 set -eu
 
-REPO=${XBBG_MCP_REPO:-xbbg-org/xbbg}
+REPO=${XBBG_MCP_REPO:-underloam/xbbg}
 INSTALL_DIR=${XBBG_MCP_INSTALL_DIR:-$HOME/.local/bin}
 VERSION=${1:-${XBBG_MCP_VERSION:-}}
 

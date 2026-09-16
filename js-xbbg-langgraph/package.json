@@ -14,12 +14,12 @@
   ],
   "homepage": "https://xbbg.org/javascript/",
   "bugs": {
-    "url": "https://github.com/xbbg-org/xbbg/issues"
+    "url": "https://github.com/underloam/xbbg/issues"
   },
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/xbbg-org/xbbg.git",
+    "url": "git+https://github.com/underloam/xbbg.git",
     "directory": "js-xbbg-langgraph"
   },
   "files": [

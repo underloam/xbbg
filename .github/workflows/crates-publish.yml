@@ -119,7 +119,7 @@ jobs:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -uo pipefail
-          UA='xbbg-release-workflow (+https://github.com/xbbg-org/xbbg)'
+          UA='xbbg-release-workflow (+https://github.com/underloam/xbbg)'
           pending=""
           for crate in $CRATE_ORDER; do
             if curl -fsS -o /dev/null -H "User-Agent: $UA" \
@@ -283,7 +283,7 @@ jobs:
           # always reported "missing": the index wait timed out after a successful
           # upload, and the skip-if-already-published path never triggered, making
           # retries fail instead of being idempotent.
-          CRATES_UA='xbbg-release-workflow (+https://github.com/xbbg-org/xbbg)'
+          CRATES_UA='xbbg-release-workflow (+https://github.com/underloam/xbbg)'
 
           crate_exists() {
             curl -fsS -o /dev/null -H "User-Agent: $CRATES_UA" \

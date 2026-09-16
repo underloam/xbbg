@@ -70,5 +70,5 @@ Add any other context about the problem here, such as:
 ## Checklist
 
 - [ ] I have checked the [documentation](https://xbbg.org/) for similar issues
-- [ ] I have searched existing [issues](https://github.com/xbbg-org/xbbg/issues) to see if this has been reported
+- [ ] I have searched existing [issues](https://github.com/underloam/xbbg/issues) to see if this has been reported
 - [ ] I can provide a minimal reproducible example

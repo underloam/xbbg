@@ -31,8 +31,8 @@ This MCPB bundles the xbbg MCP launchers and prebuilt xbbg MCP binaries for macO
 
 The macOS/Linux launcher searches for Bloomberg runtime libraries through `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, a vendored authorized SDK layout, or the official Python `blpapi` package. The Windows launcher uses the same precedence, also scans `PATH` (where a Bloomberg Terminal install places `C:\\blp\\DAPI`), skips runtimes whose version cannot be verified or is too old to export the entry points `xbbg-mcp.exe` imports, and runs the child from the validated runtime directory while rejecting higher-priority shadow DLLs.
 
-Documentation: https://github.com/xbbg-org/xbbg/tree/main/apps/xbbg-mcp
-Privacy policy: https://github.com/xbbg-org/xbbg/tree/main/apps/xbbg-mcp#privacy-policy
+Documentation: https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp
+Privacy policy: https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp#privacy-policy
 """
 
 POSIX_FIND_REAL_BINARY = f'''find_real_binary() {{
@@ -462,16 +462,16 @@ def build_manifest(version: str) -> dict[str, object]:
             "files, credentials, or market data."
         ),
         "author": {
-            "name": "xbbg-org",
-            "url": "https://github.com/xbbg-org",
+            "name": "underloam",
+            "url": "https://github.com/underloam",
         },
         "repository": {
             "type": "git",
-            "url": "https://github.com/xbbg-org/xbbg.git",
+            "url": "https://github.com/underloam/xbbg.git",
         },
-        "homepage": "https://github.com/xbbg-org/xbbg",
-        "documentation": "https://github.com/xbbg-org/xbbg/tree/main/apps/xbbg-mcp",
-        "support": "https://github.com/xbbg-org/xbbg/issues",
+        "homepage": "https://github.com/underloam/xbbg",
+        "documentation": "https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp",
+        "support": "https://github.com/underloam/xbbg/issues",
         "server": {
             "type": "binary",
             "entry_point": "server/xbbg-mcp",
@@ -519,7 +519,7 @@ def build_manifest(version: str) -> dict[str, object]:
         "tools_generated": True,
         "keywords": ["mcp", "model-context-protocol", "bloomberg", "market-data", "finance", "xbbg"],
         "license": "Apache-2.0",
-        "privacy_policies": ["https://github.com/xbbg-org/xbbg/tree/main/apps/xbbg-mcp#privacy-policy"],
+        "privacy_policies": ["https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp#privacy-policy"],
         "compatibility": {
             "claude_desktop": ">=1.0.0",
             "platforms": ["darwin", "linux", "win32"],

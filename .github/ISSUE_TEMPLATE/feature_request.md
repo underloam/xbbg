@@ -55,5 +55,5 @@ Please redact credentials, tokens, account numbers, proprietary Bloomberg data, 
 ## Checklist
 
 - [ ] I have checked the [documentation](https://xbbg.org/) to ensure this doesn't already exist
-- [ ] I have searched existing [issues](https://github.com/xbbg-org/xbbg/issues) to see if this has been requested
+- [ ] I have searched existing [issues](https://github.com/underloam/xbbg/issues) to see if this has been requested
 - [ ] This feature would be useful to other users (not just my specific use case)

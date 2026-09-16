@@ -33,7 +33,7 @@ This Code of Conduct applies within all project spaces, including GitHub reposit
 
 ## Enforcement
 
-Instances of unacceptable behavior may be reported privately to the project maintainers by opening a [private security advisory](https://github.com/xbbg-org/xbbg/security/advisories/new), which is visible only to the maintainer team. All complaints will be reviewed and investigated promptly and fairly.
+Instances of unacceptable behavior may be reported privately to the project maintainers by opening a [private security advisory](https://github.com/underloam/xbbg/security/advisories/new), which is visible only to the maintainer team. All complaints will be reviewed and investigated promptly and fairly.
 
 Project maintainers are obligated to maintain confidentiality with regard to the reporter of an incident.
 

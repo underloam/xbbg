@@ -24,13 +24,13 @@ def parse_args() -> argparse.Namespace:
 def build_server_metadata(version: str, mcpb_url: str, sha256: str) -> dict[str, object]:
     return {
         "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-        "name": "io.github.xbbg-org/xbbg-mcp",
+        "name": "io.github.underloam/xbbg-mcp",
         "title": "xbbg MCP",
         "description": "Local Bloomberg tools for xbbg users.",
         "version": version,
-        "websiteUrl": "https://github.com/xbbg-org/xbbg/tree/main/apps/xbbg-mcp",
+        "websiteUrl": "https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp",
         "repository": {
-            "url": "https://github.com/xbbg-org/xbbg",
+            "url": "https://github.com/underloam/xbbg",
             "source": "github",
             "subfolder": "apps/xbbg-mcp",
         },

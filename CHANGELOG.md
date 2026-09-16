@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- GitHub repository links and generated MCP metadata now use the `underloam` organization. The MCP Registry identity is `io.github.underloam/xbbg-mcp`; package names and `xbbg.org` are unchanged.
+
 ### Fixed
 
 - **Patched JavaScript test tooling.** Both JavaScript packages now require Vitest `^4.1.11` and lock its coordinated `@vitest/*` dependencies, including `@vitest/mocker`, to `4.1.11`, addressing the redirect-mock path traversal and arbitrary file read in [GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9).
@@ -91,7 +95,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Third-party Rust versions are centralized in `[workspace.dependencies]`.** The arrow family alone was restated across eight manifests and `tokio` across five, and the disabled `xbbg-cli` / `dotnet-xbbg` manifests had already drifted to `arrow 57.1.0` and a `csbindgen 2` that has never been published. Members now inherit with `{ workspace = true }` and layer only their own `features`. `default-features` is set in the workspace table because Cargo silently ignores a member's `default-features = false` when the workspace entry omits it. The migration is feature-neutral: resolved feature sets were diffed per package before and after.
 - **`rmcp` upgraded from 2.1.0 to 3.1.2** in `xbbg-mcp`, with no source changes required. Both versions default `ProtocolVersion::LATEST` to MCP `2025-11-25`, so the advertised revision is unchanged; 3.x additionally negotiates the `2026-07-28` draft.
 - **Internal crate versions are centralized too, and now carry a `version`.** Every intra-workspace dependency was a bare `{ path = ... }`. `cargo publish` rejects a path dependency with no version, so no crate with an internal dependency could be published at all -- the actual reason the Rust crates sat at 1.1.2 while the project tagged v1.4.6. The internal crates now sit in `[workspace.dependencies]` as `{ path, version }` and members inherit with `{ workspace = true }`, matching the convention already used for third-party crates. Because those entries set `default-features = false`, `xbbg-mcp` and `xbbg-bench` now name `features = ["live"]` explicitly where they previously inherited it via default features.
-- **crates.io package metadata is complete and points at the project, not a personal account.** All five published crates had `repository` and `homepage` pointing at a legacy personal GitHub account and its `github.io` pages site; both now resolve to the `xbbg-org` repository and `https://xbbg.org/`. `main` had also dropped the `homepage`, `readme`, and `keywords` that 1.1.2 actually shipped. Every published crate now declares `homepage`, `readme`, `keywords`, `categories`, and `rust-version` (crates.io reported the MSRV as unset for all of them), plus an explicit `include` allowlist so only source, `Cargo.toml`, and `README.md` are ever packaged.
+- **crates.io package metadata is complete and points at the project, not a personal account.** All five published crates had `repository` and `homepage` pointing at a legacy personal GitHub account and its `github.io` pages site; both now resolve to the `underloam` repository and `https://xbbg.org/`. `main` had also dropped the `homepage`, `readme`, and `keywords` that 1.1.2 actually shipped. Every published crate now declares `homepage`, `readme`, `keywords`, `categories`, and `rust-version` (crates.io reported the MSRV as unset for all of them), plus an explicit `include` allowlist so only source, `Cargo.toml`, and `README.md` are ever packaged.
 - **`blpapi-sys` is renamed to `xbbg-blpapi-sys` to match the name it is published under.** The bare `blpapi-sys` name is taken on crates.io, so the local package name never matched the registry name and `cargo publish -p xbbg-blpapi-sys` could not resolve. `[lib] name = "blpapi_sys"` is retained, so Rust code still says `blpapi_sys::` and the change is source-compatible with the published 1.1.2.
 - **`exchanges.toml` moved from `defs/` into `crates/xbbg-ext/data/`.** `xbbg-ext` embeds it with `include_str!`, and the path reached outside the crate root, so the published sdist would not have contained the file and the crate would have been unbuildable from crates.io. `xbbg-ext` was its only consumer.
 
@@ -144,7 +148,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Added
 
 - **Complete Bloomberg entitlement-ID routes across bindings**: Python and `@xbbg/core` now request EIDs for intraday bars and ticks as well as BDP/BDS/BDH; LangGraph exposes `returnEids` on BDP/BDS/BDH/BDIB/BDTICK plus `xbbg_check_entitlements`, and MCP exposes `return_eids` on its dedicated BDP/BDS/BDH/BDIB tools and generic IntradayTick route plus `check_entitlements`, with bounded results preserving entitlement metadata.
-- **Official MCP Registry publish workflow**: Added a manual GitHub Actions workflow that publishes release `server.json` metadata through `mcp-publisher` with GitHub Actions OIDC, so the xbbg-org namespace can publish without relying on a maintainer's local public organization membership.
+- **Official MCP Registry publish workflow**: Added a manual GitHub Actions workflow that publishes release `server.json` metadata through `mcp-publisher` with GitHub Actions OIDC, so the underloam namespace can publish without relying on a maintainer's local public organization membership.
 - **Batched subscription delivery in `@xbbg/core`**: one native crossing now drains many ticks (`nextUpdates`) and Arrow subscriptions return multi-row zero-copy batches (`nextArrowBatch`); tick field layouts cross the boundary once per layout version and `Tick` caches decoded `BigInt`/`Date` values.
 - **`SubscriptionArrowBatcher`** in the Rust engine: cached schema + reusable Arrow builders convert streaming updates into multi-row RecordBatches instead of one-row batches per tick.
 - **Offline benchmark coverage**: registered the previously orphaned Arrow/subscription bench targets, added a `serde_json` vs `simd-json` BQL parser bench, and added offline Rust→Python / Rust→JS binding-handoff benches that run without a Bloomberg connection.
@@ -644,7 +648,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ### Fixed
 
-- **SAPI authentication fails with `BLPAPI_ERROR_DUPLICATE_CORRELATIONID`** ([#248](https://github.com/xbbg-org/xbbg/issues/248)): `CorrelationId::default()` returned `Int(0)`, which is a valid explicit correlation ID. When `setSessionIdentityOptions` registered `Int(0)` for the auth flow, subsequent `sendRequest` calls with the same default ID were rejected as duplicates (rc=131077). The default is now `CorrelationId::Unset` (maps to `BLPAPI_CORRELATION_TYPE_UNSET` in the FFI struct), matching the official Python `blpapi` behavior where the SDK auto-generates unique IDs. Affects all SAPI authentication modes (`app`, `user`, `userapp`, `dir`, `token`).
+- **SAPI authentication fails with `BLPAPI_ERROR_DUPLICATE_CORRELATIONID`** ([#248](https://github.com/underloam/xbbg/issues/248)): `CorrelationId::default()` returned `Int(0)`, which is a valid explicit correlation ID. When `setSessionIdentityOptions` registered `Int(0)` for the auth flow, subsequent `sendRequest` calls with the same default ID were rejected as duplicates (rc=131077). The default is now `CorrelationId::Unset` (maps to `BLPAPI_CORRELATION_TYPE_UNSET` in the FFI struct), matching the official Python `blpapi` behavior where the SDK auto-generates unique IDs. Affects all SAPI authentication modes (`app`, `user`, `userapp`, `dir`, `token`).
 
 ## [1.0.0b5] - 2026-03-12
 
@@ -679,7 +683,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ### Added
 
-- **Backend enum and availability checks** ([#234](https://github.com/xbbg-org/xbbg/issues/234)): Ported `Backend` enum and backend availability infrastructure from `release/0.x` into `py-xbbg/src/xbbg/backend.py`. The canonical `Backend` enum now has all 13 backends (added `CUDF`, `MODIN`, `DASK`, `IBIS`, `PYSPARK`, `SQLFRAME`). New public helpers: `is_backend_available()`, `check_backend()`, `get_available_backends()`, `print_backend_status()`, `validate_backend_format()`, `is_format_supported()`, `get_supported_formats()`, `check_format_compatibility()`. Includes `MIN_VERSIONS`, `PACKAGE_NAMES`, `MODULE_NAMES`, and `SUPPORTED_FORMATS` dicts for version validation and actionable install instructions.
+- **Backend enum and availability checks** ([#234](https://github.com/underloam/xbbg/issues/234)): Ported `Backend` enum and backend availability infrastructure from `release/0.x` into `py-xbbg/src/xbbg/backend.py`. The canonical `Backend` enum now has all 13 backends (added `CUDF`, `MODIN`, `DASK`, `IBIS`, `PYSPARK`, `SQLFRAME`). New public helpers: `is_backend_available()`, `check_backend()`, `get_available_backends()`, `print_backend_status()`, `validate_backend_format()`, `is_format_supported()`, `get_supported_formats()`, `check_format_compatibility()`. Includes `MIN_VERSIONS`, `PACKAGE_NAMES`, `MODULE_NAMES`, and `SUPPORTED_FORMATS` dicts for version validation and actionable install instructions.
 
 ### Changed
 
@@ -1636,104 +1640,104 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/xbbg-org/xbbg/compare/v1.4.12...HEAD
-[1.4.12]: https://github.com/xbbg-org/xbbg/compare/v1.4.11...v1.4.12
-[1.4.11]: https://github.com/xbbg-org/xbbg/compare/v1.4.10...v1.4.11
-[1.4.10]: https://github.com/xbbg-org/xbbg/compare/v1.4.9...v1.4.10
-[1.4.9]: https://github.com/xbbg-org/xbbg/compare/v1.4.8...v1.4.9
-[1.4.8]: https://github.com/xbbg-org/xbbg/compare/v1.4.7...v1.4.8
-[1.4.7]: https://github.com/xbbg-org/xbbg/compare/v1.4.6...v1.4.7
-[1.4.6]: https://github.com/xbbg-org/xbbg/compare/v1.4.5...v1.4.6
-[1.4.5]: https://github.com/xbbg-org/xbbg/compare/v1.4.4...v1.4.5
-[1.4.4]: https://github.com/xbbg-org/xbbg/compare/v1.4.3...v1.4.4
-[1.4.3]: https://github.com/xbbg-org/xbbg/compare/v1.4.2...v1.4.3
-[1.4.2]: https://github.com/xbbg-org/xbbg/compare/v1.4.1...v1.4.2
-[1.4.1]: https://github.com/xbbg-org/xbbg/compare/v1.4.0...v1.4.1
-[1.4.0]: https://github.com/xbbg-org/xbbg/compare/v1.3.1...v1.4.0
-[1.3.1]: https://github.com/xbbg-org/xbbg/compare/v1.3.0...v1.3.1
-[1.3.0]: https://github.com/xbbg-org/xbbg/compare/v1.2.7...v1.3.0
-[1.2.7]: https://github.com/xbbg-org/xbbg/compare/v1.2.6...v1.2.7
-[1.2.6]: https://github.com/xbbg-org/xbbg/compare/v1.2.5...v1.2.6
-[1.2.5]: https://github.com/xbbg-org/xbbg/compare/v1.2.4...v1.2.5
-[1.2.4]: https://github.com/xbbg-org/xbbg/compare/v1.2.3...v1.2.4
-[1.2.3]: https://github.com/xbbg-org/xbbg/compare/v1.2.2...v1.2.3
-[1.2.2]: https://github.com/xbbg-org/xbbg/compare/v1.2.1...v1.2.2
-[1.2.1]: https://github.com/xbbg-org/xbbg/compare/v1.2.0...v1.2.1
-[1.2.0]: https://github.com/xbbg-org/xbbg/compare/v1.1.2...v1.2.0
-[1.1.2]: https://github.com/xbbg-org/xbbg/compare/v1.1.1...v1.1.2
-[1.1.1]: https://github.com/xbbg-org/xbbg/compare/v1.1.1b1...v1.1.1
-[1.1.1b1]: https://github.com/xbbg-org/xbbg/compare/v1.1.0...v1.1.1b1
-[1.1.0]: https://github.com/xbbg-org/xbbg/compare/v1.0.0...v1.1.0
-[1.0.0]: https://github.com/xbbg-org/xbbg/compare/v1.0.0rc4...v1.0.0
-[1.0.0rc4]: https://github.com/xbbg-org/xbbg/compare/v1.0.0rc3...v1.0.0rc4
-[1.0.0rc3]: https://github.com/xbbg-org/xbbg/compare/v1.0.0rc2...v1.0.0rc3
-[1.0.0rc2]: https://github.com/xbbg-org/xbbg/compare/v1.0.0rc1...v1.0.0rc2
-[1.0.0rc1]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b7...v1.0.0rc1
-[1.0.0b7]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b6...v1.0.0b7
-[1.0.0b6]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b5...v1.0.0b6
-[1.0.0b5]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b4...v1.0.0b5
-[1.0.0b4]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b3...v1.0.0b4
-[1.0.0b3]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b2...v1.0.0b3
-[1.0.0b2]: https://github.com/xbbg-org/xbbg/compare/v1.0.0b1...v1.0.0b2
-[1.0.0b1]: https://github.com/xbbg-org/xbbg/compare/v1.0.0a3...v1.0.0b1
-[1.0.0a3]: https://github.com/xbbg-org/xbbg/compare/v1.0.0a2...v1.0.0a3
-[1.0.0a2]: https://github.com/xbbg-org/xbbg/compare/v1.0.0a1...v1.0.0a2
-[1.0.0a1]: https://github.com/xbbg-org/xbbg/compare/v0.12.1...v1.0.0a1
-[0.12.0]: https://github.com/xbbg-org/xbbg/compare/v0.12.0b3...v0.12.0
-[0.12.0b3]: https://github.com/xbbg-org/xbbg/compare/v0.12.0b2...v0.12.0b3
-[0.12.0b2]: https://github.com/xbbg-org/xbbg/compare/v0.12.0b1...v0.12.0b2
-[0.12.0b1]: https://github.com/xbbg-org/xbbg/compare/v0.11.4...v0.12.0b1
-[0.11.4]: https://github.com/xbbg-org/xbbg/compare/v0.11.3...v0.11.4
-[0.11.3]: https://github.com/xbbg-org/xbbg/compare/v0.11.2...v0.11.3
-[0.11.2]: https://github.com/xbbg-org/xbbg/compare/v0.11.1...v0.11.2
-[0.11.1]: https://github.com/xbbg-org/xbbg/compare/v0.11.0...v0.11.1
-[0.11.0]: https://github.com/xbbg-org/xbbg/compare/v0.11.0b5...v0.11.0
-[0.11.0b5]: https://github.com/xbbg-org/xbbg/compare/v0.11.0b4...v0.11.0b5
-[0.11.0b4]: https://github.com/xbbg-org/xbbg/compare/v0.11.0b3...v0.11.0b4
-[0.11.0b3]: https://github.com/xbbg-org/xbbg/compare/v0.11.0b2...v0.11.0b3
-[0.11.0b2]: https://github.com/xbbg-org/xbbg/compare/v0.11.0b1...v0.11.0b2
-[0.11.0b1]: https://github.com/xbbg-org/xbbg/compare/v0.10.3...v0.11.0b1
-[0.10.3]: https://github.com/xbbg-org/xbbg/compare/v0.10.2...v0.10.3
-[0.10.2]: https://github.com/xbbg-org/xbbg/compare/v0.10.1...v0.10.2
-[0.10.1]: https://github.com/xbbg-org/xbbg/compare/v0.10.0...v0.10.1
-[0.10.0]: https://github.com/xbbg-org/xbbg/compare/v0.9.1...v0.10.0
-[0.9.1]: https://github.com/xbbg-org/xbbg/compare/v0.9.0...v0.9.1
-[0.9.0]: https://github.com/xbbg-org/xbbg/compare/v0.8.2...v0.9.0
-[0.8.2]: https://github.com/xbbg-org/xbbg/compare/v0.8.1...v0.8.2
-[0.8.1]: https://github.com/xbbg-org/xbbg/compare/v0.8.0...v0.8.1
-[0.8.0]: https://github.com/xbbg-org/xbbg/compare/v0.8.0rc1...v0.8.0
-[0.8.0rc1]: https://github.com/xbbg-org/xbbg/compare/v0.8.0b2...v0.8.0rc1
-[0.8.0b2]: https://github.com/xbbg-org/xbbg/compare/v0.8.0b1...v0.8.0b2
-[0.8.0b1]: https://github.com/xbbg-org/xbbg/compare/v0.7.11...v0.8.0b1
-[0.7.11]: https://github.com/xbbg-org/xbbg/compare/v0.7.10...v0.7.11
-[0.7.10]: https://github.com/xbbg-org/xbbg/compare/v0.7.9...v0.7.10
-[0.7.9]: https://github.com/xbbg-org/xbbg/compare/v0.7.8a2...v0.7.9
-[0.7.8a2]: https://github.com/xbbg-org/xbbg/compare/v0.7.7...v0.7.8a2
-[0.7.7]: https://github.com/xbbg-org/xbbg/compare/v0.7.7a4...v0.7.7
-[0.7.7a4]: https://github.com/xbbg-org/xbbg/compare/v0.7.7a3...v0.7.7a4
-[0.7.7a3]: https://github.com/xbbg-org/xbbg/compare/v0.7.7a2...v0.7.7a3
-[0.7.7a2]: https://github.com/xbbg-org/xbbg/compare/v0.7.7a1...v0.7.7a2
-[0.7.7a1]: https://github.com/xbbg-org/xbbg/compare/v0.7.6...v0.7.7a1
-[0.7.6]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a8...v0.7.6
-[0.7.6a8]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a7...v0.7.6a8
-[0.7.6a7]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a6...v0.7.6a7
-[0.7.6a6]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a5...v0.7.6a6
-[0.7.6a5]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a4...v0.7.6a5
-[0.7.6a4]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a3...v0.7.6a4
-[0.7.6a3]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a2...v0.7.6a3
-[0.7.6a2]: https://github.com/xbbg-org/xbbg/compare/v0.7.6a1...v0.7.6a2
-[0.7.6a1]: https://github.com/xbbg-org/xbbg/compare/v0.7.5...v0.7.6a1
-[0.7.5]: https://github.com/xbbg-org/xbbg/compare/v0.7.5b2...v0.7.5
-[0.7.5b2]: https://github.com/xbbg-org/xbbg/compare/v0.7.5b1...v0.7.5b2
-[0.7.5b1]: https://github.com/xbbg-org/xbbg/compare/v0.7.5a9...v0.7.5b1
-[0.7.5a9]: https://github.com/xbbg-org/xbbg/compare/v0.7.5a09...v0.7.5a9
-[0.7.5a09]: https://github.com/xbbg-org/xbbg/compare/v0.7.5a8...v0.7.5a09
-[0.7.5a8]: https://github.com/xbbg-org/xbbg/compare/v0.7.5a7...v0.7.5a8
-[0.7.5a7]: https://github.com/xbbg-org/xbbg/compare/v0.7.2...v0.7.5a7
-[0.7.2]: https://github.com/xbbg-org/xbbg/compare/v0.7.0...v0.7.2
-[0.7.0]: https://github.com/xbbg-org/xbbg/compare/v0.6.7...v0.7.0
-[0.6.7]: https://github.com/xbbg-org/xbbg/compare/v0.6.0...v0.6.7
-[0.6.0]: https://github.com/xbbg-org/xbbg/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/xbbg-org/xbbg/compare/v0.1.22...v0.5.0
-[0.1.22]: https://github.com/xbbg-org/xbbg/compare/v0.1.17...v0.1.22
-[0.1.17]: https://github.com/xbbg-org/xbbg/releases/tag/v0.1.17
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.4.12...HEAD
+[1.4.12]: https://github.com/underloam/xbbg/compare/v1.4.11...v1.4.12
+[1.4.11]: https://github.com/underloam/xbbg/compare/v1.4.10...v1.4.11
+[1.4.10]: https://github.com/underloam/xbbg/compare/v1.4.9...v1.4.10
+[1.4.9]: https://github.com/underloam/xbbg/compare/v1.4.8...v1.4.9
+[1.4.8]: https://github.com/underloam/xbbg/compare/v1.4.7...v1.4.8
+[1.4.7]: https://github.com/underloam/xbbg/compare/v1.4.6...v1.4.7
+[1.4.6]: https://github.com/underloam/xbbg/compare/v1.4.5...v1.4.6
+[1.4.5]: https://github.com/underloam/xbbg/compare/v1.4.4...v1.4.5
+[1.4.4]: https://github.com/underloam/xbbg/compare/v1.4.3...v1.4.4
+[1.4.3]: https://github.com/underloam/xbbg/compare/v1.4.2...v1.4.3
+[1.4.2]: https://github.com/underloam/xbbg/compare/v1.4.1...v1.4.2
+[1.4.1]: https://github.com/underloam/xbbg/compare/v1.4.0...v1.4.1
+[1.4.0]: https://github.com/underloam/xbbg/compare/v1.3.1...v1.4.0
+[1.3.1]: https://github.com/underloam/xbbg/compare/v1.3.0...v1.3.1
+[1.3.0]: https://github.com/underloam/xbbg/compare/v1.2.7...v1.3.0
+[1.2.7]: https://github.com/underloam/xbbg/compare/v1.2.6...v1.2.7
+[1.2.6]: https://github.com/underloam/xbbg/compare/v1.2.5...v1.2.6
+[1.2.5]: https://github.com/underloam/xbbg/compare/v1.2.4...v1.2.5
+[1.2.4]: https://github.com/underloam/xbbg/compare/v1.2.3...v1.2.4
+[1.2.3]: https://github.com/underloam/xbbg/compare/v1.2.2...v1.2.3
+[1.2.2]: https://github.com/underloam/xbbg/compare/v1.2.1...v1.2.2
+[1.2.1]: https://github.com/underloam/xbbg/compare/v1.2.0...v1.2.1
+[1.2.0]: https://github.com/underloam/xbbg/compare/v1.1.2...v1.2.0
+[1.1.2]: https://github.com/underloam/xbbg/compare/v1.1.1...v1.1.2
+[1.1.1]: https://github.com/underloam/xbbg/compare/v1.1.1b1...v1.1.1
+[1.1.1b1]: https://github.com/underloam/xbbg/compare/v1.1.0...v1.1.1b1
+[1.1.0]: https://github.com/underloam/xbbg/compare/v1.0.0...v1.1.0
+[1.0.0]: https://github.com/underloam/xbbg/compare/v1.0.0rc4...v1.0.0
+[1.0.0rc4]: https://github.com/underloam/xbbg/compare/v1.0.0rc3...v1.0.0rc4
+[1.0.0rc3]: https://github.com/underloam/xbbg/compare/v1.0.0rc2...v1.0.0rc3
+[1.0.0rc2]: https://github.com/underloam/xbbg/compare/v1.0.0rc1...v1.0.0rc2
+[1.0.0rc1]: https://github.com/underloam/xbbg/compare/v1.0.0b7...v1.0.0rc1
+[1.0.0b7]: https://github.com/underloam/xbbg/compare/v1.0.0b6...v1.0.0b7
+[1.0.0b6]: https://github.com/underloam/xbbg/compare/v1.0.0b5...v1.0.0b6
+[1.0.0b5]: https://github.com/underloam/xbbg/compare/v1.0.0b4...v1.0.0b5
+[1.0.0b4]: https://github.com/underloam/xbbg/compare/v1.0.0b3...v1.0.0b4
+[1.0.0b3]: https://github.com/underloam/xbbg/compare/v1.0.0b2...v1.0.0b3
+[1.0.0b2]: https://github.com/underloam/xbbg/compare/v1.0.0b1...v1.0.0b2
+[1.0.0b1]: https://github.com/underloam/xbbg/compare/v1.0.0a3...v1.0.0b1
+[1.0.0a3]: https://github.com/underloam/xbbg/compare/v1.0.0a2...v1.0.0a3
+[1.0.0a2]: https://github.com/underloam/xbbg/compare/v1.0.0a1...v1.0.0a2
+[1.0.0a1]: https://github.com/underloam/xbbg/compare/v0.12.1...v1.0.0a1
+[0.12.0]: https://github.com/underloam/xbbg/compare/v0.12.0b3...v0.12.0
+[0.12.0b3]: https://github.com/underloam/xbbg/compare/v0.12.0b2...v0.12.0b3
+[0.12.0b2]: https://github.com/underloam/xbbg/compare/v0.12.0b1...v0.12.0b2
+[0.12.0b1]: https://github.com/underloam/xbbg/compare/v0.11.4...v0.12.0b1
+[0.11.4]: https://github.com/underloam/xbbg/compare/v0.11.3...v0.11.4
+[0.11.3]: https://github.com/underloam/xbbg/compare/v0.11.2...v0.11.3
+[0.11.2]: https://github.com/underloam/xbbg/compare/v0.11.1...v0.11.2
+[0.11.1]: https://github.com/underloam/xbbg/compare/v0.11.0...v0.11.1
+[0.11.0]: https://github.com/underloam/xbbg/compare/v0.11.0b5...v0.11.0
+[0.11.0b5]: https://github.com/underloam/xbbg/compare/v0.11.0b4...v0.11.0b5
+[0.11.0b4]: https://github.com/underloam/xbbg/compare/v0.11.0b3...v0.11.0b4
+[0.11.0b3]: https://github.com/underloam/xbbg/compare/v0.11.0b2...v0.11.0b3
+[0.11.0b2]: https://github.com/underloam/xbbg/compare/v0.11.0b1...v0.11.0b2
+[0.11.0b1]: https://github.com/underloam/xbbg/compare/v0.10.3...v0.11.0b1
+[0.10.3]: https://github.com/underloam/xbbg/compare/v0.10.2...v0.10.3
+[0.10.2]: https://github.com/underloam/xbbg/compare/v0.10.1...v0.10.2
+[0.10.1]: https://github.com/underloam/xbbg/compare/v0.10.0...v0.10.1
+[0.10.0]: https://github.com/underloam/xbbg/compare/v0.9.1...v0.10.0
+[0.9.1]: https://github.com/underloam/xbbg/compare/v0.9.0...v0.9.1
+[0.9.0]: https://github.com/underloam/xbbg/compare/v0.8.2...v0.9.0
+[0.8.2]: https://github.com/underloam/xbbg/compare/v0.8.1...v0.8.2
+[0.8.1]: https://github.com/underloam/xbbg/compare/v0.8.0...v0.8.1
+[0.8.0]: https://github.com/underloam/xbbg/compare/v0.8.0rc1...v0.8.0
+[0.8.0rc1]: https://github.com/underloam/xbbg/compare/v0.8.0b2...v0.8.0rc1
+[0.8.0b2]: https://github.com/underloam/xbbg/compare/v0.8.0b1...v0.8.0b2
+[0.8.0b1]: https://github.com/underloam/xbbg/compare/v0.7.11...v0.8.0b1
+[0.7.11]: https://github.com/underloam/xbbg/compare/v0.7.10...v0.7.11
+[0.7.10]: https://github.com/underloam/xbbg/compare/v0.7.9...v0.7.10
+[0.7.9]: https://github.com/underloam/xbbg/compare/v0.7.8a2...v0.7.9
+[0.7.8a2]: https://github.com/underloam/xbbg/compare/v0.7.7...v0.7.8a2
+[0.7.7]: https://github.com/underloam/xbbg/compare/v0.7.7a4...v0.7.7
+[0.7.7a4]: https://github.com/underloam/xbbg/compare/v0.7.7a3...v0.7.7a4
+[0.7.7a3]: https://github.com/underloam/xbbg/compare/v0.7.7a2...v0.7.7a3
+[0.7.7a2]: https://github.com/underloam/xbbg/compare/v0.7.7a1...v0.7.7a2
+[0.7.7a1]: https://github.com/underloam/xbbg/compare/v0.7.6...v0.7.7a1
+[0.7.6]: https://github.com/underloam/xbbg/compare/v0.7.6a8...v0.7.6
+[0.7.6a8]: https://github.com/underloam/xbbg/compare/v0.7.6a7...v0.7.6a8
+[0.7.6a7]: https://github.com/underloam/xbbg/compare/v0.7.6a6...v0.7.6a7
+[0.7.6a6]: https://github.com/underloam/xbbg/compare/v0.7.6a5...v0.7.6a6
+[0.7.6a5]: https://github.com/underloam/xbbg/compare/v0.7.6a4...v0.7.6a5
+[0.7.6a4]: https://github.com/underloam/xbbg/compare/v0.7.6a3...v0.7.6a4
+[0.7.6a3]: https://github.com/underloam/xbbg/compare/v0.7.6a2...v0.7.6a3
+[0.7.6a2]: https://github.com/underloam/xbbg/compare/v0.7.6a1...v0.7.6a2
+[0.7.6a1]: https://github.com/underloam/xbbg/compare/v0.7.5...v0.7.6a1
+[0.7.5]: https://github.com/underloam/xbbg/compare/v0.7.5b2...v0.7.5
+[0.7.5b2]: https://github.com/underloam/xbbg/compare/v0.7.5b1...v0.7.5b2
+[0.7.5b1]: https://github.com/underloam/xbbg/compare/v0.7.5a9...v0.7.5b1
+[0.7.5a9]: https://github.com/underloam/xbbg/compare/v0.7.5a09...v0.7.5a9
+[0.7.5a09]: https://github.com/underloam/xbbg/compare/v0.7.5a8...v0.7.5a09
+[0.7.5a8]: https://github.com/underloam/xbbg/compare/v0.7.5a7...v0.7.5a8
+[0.7.5a7]: https://github.com/underloam/xbbg/compare/v0.7.2...v0.7.5a7
+[0.7.2]: https://github.com/underloam/xbbg/compare/v0.7.0...v0.7.2
+[0.7.0]: https://github.com/underloam/xbbg/compare/v0.6.7...v0.7.0
+[0.6.7]: https://github.com/underloam/xbbg/compare/v0.6.0...v0.6.7
+[0.6.0]: https://github.com/underloam/xbbg/compare/v0.5.0...v0.6.0
+[0.5.0]: https://github.com/underloam/xbbg/compare/v0.1.22...v0.5.0
+[0.1.22]: https://github.com/underloam/xbbg/compare/v0.1.17...v0.1.22
+[0.1.17]: https://github.com/underloam/xbbg/releases/tag/v0.1.17

@@ -544,7 +544,7 @@ jobs:
           MCPB_SHA256="$(shasum -a 256 "$DIST_DIR/xbbg-mcp-v${VERSION}.mcpb" | cut -d ' ' -f 1)"
           python scripts/render_mcp_registry_server.py \
             --version "$VERSION" \
-            --mcpb-url "https://github.com/xbbg-org/xbbg/releases/download/v${VERSION}/xbbg-mcp-v${VERSION}.mcpb" \
+            --mcpb-url "https://github.com/underloam/xbbg/releases/download/v${VERSION}/xbbg-mcp-v${VERSION}.mcpb" \
             --sha256 "$MCPB_SHA256" \
             --output "$DIST_DIR/server.json"
 

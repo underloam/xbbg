@@ -61,13 +61,13 @@ The check result includes `service`, `eids`, `entitled`, and `failed_eids`, plus
 For macOS arm64 and Linux amd64, install the latest wrapper + binary pair with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbbg-org/xbbg/main/scripts/install-xbbg-mcp.sh | sh
+curl -fsSL https://raw.githubusercontent.com/underloam/xbbg/main/scripts/install-xbbg-mcp.sh | sh
 ```
 
 To install a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/xbbg-org/xbbg/main/scripts/install-xbbg-mcp.sh | sh -s -- 1.0.0
+curl -fsSL https://raw.githubusercontent.com/underloam/xbbg/main/scripts/install-xbbg-mcp.sh | sh -s -- 1.0.0
 ```
 
 The installer places two files in `~/.local/bin/` by default:
@@ -237,7 +237,7 @@ The server uses two async runtime workers. Small result conversions stay inline;
 
 ## Privacy Policy
 
-`xbbg-mcp` runs locally as a stdio MCP server. It does not send telemetry or usage data to xbbg-org, GitHub, Anthropic, Smithery, Glama, or any other third party.
+`xbbg-mcp` runs locally as a stdio MCP server. It does not send telemetry or usage data to underloam, GitHub, Anthropic, Smithery, Glama, or any other third party.
 
 Tool calls are handled on the user's machine and forwarded only to the Bloomberg runtime/API endpoint configured by the user (`XBBG_MCP_HOST` / `XBBG_HOST`, default `localhost:8194`) under that user's Bloomberg agreements and entitlements. Results are returned only to the MCP client process that launched the server.
 

@@ -17,7 +17,7 @@ Contributors must obtain and use the Bloomberg SDK under their own Bloomberg agr
 
 1. Clone the repository:
    ```bash
-   git clone https://github.com/xbbg-org/xbbg.git
+   git clone https://github.com/underloam/xbbg.git
    cd xbbg
    ```
 
@@ -83,7 +83,7 @@ CI runs this automatically as the **ABI Compat** job.
 
 ## Reporting Issues
 
-Please use [GitHub Issues](https://github.com/xbbg-org/xbbg/issues) to report bugs or request features.
+Please use [GitHub Issues](https://github.com/underloam/xbbg/issues) to report bugs or request features.
 
 When reporting a bug, include:
 - Python version (`python --version`)

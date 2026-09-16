@@ -7,7 +7,7 @@
   </a>
 </p>
 
-[![CI](https://github.com/xbbg-org/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/xbbg-org/xbbg/actions/workflows/ci-rust.yml)
+[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
 [![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)<br>
 **Python** [![PyPI version](https://img.shields.io/pypi/v/xbbg.svg)](https://pypi.org/project/xbbg/) [![conda-forge version](https://img.shields.io/conda/vn/conda-forge/xbbg.svg)](https://anaconda.org/conda-forge/xbbg) [![Python versions](https://img.shields.io/pypi/pyversions/xbbg.svg)](https://pypi.org/project/xbbg/) [![PyPI downloads per month](https://static.pepy.tech/badge/xbbg/month)](https://pepy.tech/projects/xbbg) [![PyPI downloads total](https://static.pepy.tech/badge/xbbg)](https://pepy.tech/projects/xbbg)<br>
 **JavaScript** [![npm version](https://img.shields.io/npm/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![Node.js versions](https://img.shields.io/node/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![npm downloads per month](https://img.shields.io/npm/dm/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core)<br>
@@ -20,10 +20,10 @@
 ---
 
 <!-- xbbg:latest-release-start -->
-Latest release: xbbg==1.4.12 (release: [notes](https://github.com/xbbg-org/xbbg/releases/tag/v1.4.12))
+Latest release: xbbg==1.4.12 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v1.4.12))
 <!-- xbbg:latest-release-end -->
 
-> This `main` branch is the Rust-powered v1 release. For the legacy pure-Python line, use [`release/0.x`](https://github.com/xbbg-org/xbbg/tree/release/0.x).
+> This `main` branch is the Rust-powered v1 release. For the legacy pure-Python line, use [`release/0.x`](https://github.com/underloam/xbbg/tree/release/0.x).
 
 > **Important:** xbbg is an independent open-source project. It is not affiliated with, endorsed by, sponsored by, or approved by Bloomberg Finance L.P. or its affiliates. Bloomberg, Bloomberg Terminal, B-PIPE, BQL, and related names are trademarks or service marks of their respective owners. xbbg does not grant access to Bloomberg services, data, software, licenses, credentials, or entitlements; users must obtain and use those separately under their own Bloomberg agreements and applicable policies.
 
@@ -552,8 +552,8 @@ Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 - PyPI: [pypi.org/project/xbbg](https://pypi.org/project/xbbg/)
 - npm: [npmjs.com/package/@xbbg/core](https://www.npmjs.com/package/@xbbg/core)
 - crates.io: [crates.io/crates/xbbg_core](https://crates.io/crates/xbbg_core)
-- Source: [github.com/xbbg-org/xbbg](https://github.com/xbbg-org/xbbg)
-- Issues: [GitHub Issues](https://github.com/xbbg-org/xbbg/issues)
+- Source: [github.com/underloam/xbbg](https://github.com/underloam/xbbg)
+- Issues: [GitHub Issues](https://github.com/underloam/xbbg/issues)
 - Discord: [Join the community](https://discord.gg/P34uMwgCjC)
 - Changelog: [CHANGELOG.md](CHANGELOG.md)
 - Contributing: [CONTRIBUTING.md](CONTRIBUTING.md)
@@ -571,7 +571,7 @@ If you use xbbg in research or published work, please cite:
   title = {{xbbg}: Independent client for Bloomberg-connected data workflows},
   year = {2026},
   publisher = {GitHub},
-  url = {https://github.com/xbbg-org/xbbg},
+  url = {https://github.com/underloam/xbbg},
   version = {1.3.0}
 }
 ```

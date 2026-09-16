@@ -13,7 +13,7 @@ If you discover a security vulnerability in xbbg, please report it responsibly:
 
 1. **Do not** open a public GitHub issue for security vulnerabilities.
 2. Use GitHub's private vulnerability reporting:
-   [Report a vulnerability](https://github.com/xbbg-org/xbbg/security/advisories/new).
+   [Report a vulnerability](https://github.com/underloam/xbbg/security/advisories/new).
    This opens a private advisory visible only to the maintainers. Include:
    - A description of the vulnerability
    - Steps to reproduce
