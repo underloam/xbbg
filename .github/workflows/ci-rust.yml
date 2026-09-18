@@ -138,6 +138,17 @@ jobs:
       - name: Check generated files are up to date
         run: python defs/codegen/generate.py --check
 
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.0.1
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Test release version tooling
+        run: >-
+          uv run --no-project --with "pytest>=8.4" --with "pytest-asyncio>=0.24" --with "packaging>=23.2"
+          python -m pytest scripts/test_stamp_workspace_version.py
+          scripts/test_check_release_versions.py -q
+
   # ════════════════════════════════════════════════════════════════════════════
   # Python Lint (fast, no SDK needed)
   # ════════════════════════════════════════════════════════════════════════════
@@ -830,6 +841,12 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+      - name: Install Python LangGraph adapter
+        run: uv pip install --system "./py-xbbg-langgraph[test]"
+
+      - name: Test Python LangGraph adapter
+        run: pytest py-xbbg-langgraph/tests -v
+
   # ════════════════════════════════════════════════════════════════════════════
   # Declared floors - resolve the lower bounds we advertise and actually run them
   # ════════════════════════════════════════════════════════════════════════════
@@ -905,6 +922,14 @@ jobs:
       - name: Run tests at declared floors
         working-directory: ${{ runner.temp }}/test-run
         run: pytest tests -v -m "not live"
+
+      - name: Install Python LangGraph adapter at declared floors
+        env:
+          UV_RESOLUTION: lowest-direct
+        run: uv pip install --system "./py-xbbg-langgraph[test]"
+
+      - name: Test Python LangGraph adapter at declared floors
+        run: pytest py-xbbg-langgraph/tests -v
 
   # ════════════════════════════════════════════════════════════════════════════
   # Unused Dependencies (optional, non-blocking)

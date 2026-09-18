@@ -190,11 +190,8 @@ jobs:
         with:
           rustflags: ""
 
-      # Every internal version lives in the root manifest: workspace.package.version
-      # plus the `version` field of each internal entry in workspace.dependencies.
-      # Stamping one file keeps them in lockstep. The script asserts it changed the
-      # expected number of anchors so a manifest reshuffle fails loudly instead of
-      # silently publishing mismatched versions.
+      # Semantic releases already stamp the tag tree. Reuse the same helper for
+      # manual publishing, including retries of older releases.
       - name: Stamp workspace version
         if: steps.pending.outputs.has_work == 'true'
         shell: bash
@@ -202,50 +199,7 @@ jobs:
           STAMP_VERSION: ${{ steps.version.outputs.version }}
         run: |
           set -euo pipefail
-          python - <<'PY'
-          import os
-          import re
-          import sys
-          from pathlib import Path
-
-          version = os.environ["STAMP_VERSION"]
-          path = Path("Cargo.toml")
-          text = path.read_text(encoding="utf-8")
-
-          # 1. [workspace.package] version
-          new_text, pkg_hits = re.subn(
-              r'(?ms)(^\[workspace\.package\]\n(?:.*?\n)??version\s*=\s*)"[^"]+"',
-              rf'\1"{version}"',
-              text,
-              count=1,
-          )
-          if pkg_hits != 1:
-              sys.exit("could not stamp [workspace.package] version in Cargo.toml")
-
-          # 2. version field of every internal workspace.dependencies entry
-          internal = (
-              "blpapi-sys",
-              "xbbg_core",
-              "xbbg-arrow",
-              "xbbg-async",
-              "xbbg-ext",
-              "xbbg-log",
-              "xbbg-recipes",
-          )
-          dep_hits = 0
-          for name in internal:
-              pattern = rf'(?m)^({re.escape(name)}\s*=\s*\{{[^\n}}]*?version\s*=\s*)"[^"]+"'
-              new_text, n = re.subn(pattern, rf'\1"{version}"', new_text, count=1)
-              if n != 1:
-                  sys.exit(f"could not stamp workspace.dependencies version for {name}")
-              dep_hits += n
-
-          if dep_hits != len(internal):
-              sys.exit(f"stamped {dep_hits} internal deps, expected {len(internal)}")
-
-          path.write_text(new_text, encoding="utf-8")
-          print(f"Stamped {version}: 1 workspace.package + {dep_hits} internal deps")
-          PY
+          python scripts/stamp_workspace_version.py "$STAMP_VERSION"
 
           # No `--offline`: a fresh runner has no registry cache, so an offline
           # resolve fails with "no matching package named `arrow-array` found".

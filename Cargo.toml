@@ -29,7 +29,7 @@ default-members = [
 resolver = "2"
 
 [workspace.package]
-version = "1.4.7"
+version = "1.4.12"
 license = "Apache-2.0"
 repository = "https://github.com/underloam/xbbg"
 homepage = "https://xbbg.org/"
@@ -53,20 +53,20 @@ rust-version = "1.88"
 # ── Internal workspace crates ─────────────────────────────────────────────────
 # Publishing requires every path dependency to also carry a `version`; a bare
 # `{ path = ... }` makes `cargo publish` fail outright. Declaring both here is
-# the single source of truth, so the release job stamps one file and
-# `cargo set-version --workspace` keeps these in lockstep with
-# `workspace.package.version`.
+# the single source of truth. The semantic release job uses
+# `scripts/stamp_workspace_version.py` to keep these in lockstep with
+# `workspace.package.version` before committing and tagging.
 #
 # `blpapi-sys` is published as `xbbg-blpapi-sys` (the bare name is taken on
 # crates.io) while keeping `[lib] name = "blpapi_sys"`, so Rust code still says
 # `blpapi_sys::` and only the registry name differs.
-blpapi-sys = { package = "xbbg-blpapi-sys", path = "crates/blpapi-sys", version = "1.4.7" }
-xbbg_core = { path = "crates/xbbg-core", version = "1.4.7", default-features = false }
-xbbg-arrow = { path = "crates/xbbg-arrow", version = "1.4.7" }
-xbbg-async = { path = "crates/xbbg-async", version = "1.4.7", default-features = false }
-xbbg-ext = { path = "crates/xbbg-ext", version = "1.4.7" }
-xbbg-log = { path = "crates/xbbg-log", version = "1.4.7" }
-xbbg-recipes = { path = "crates/xbbg-recipes", version = "1.4.7", default-features = false }
+blpapi-sys = { package = "xbbg-blpapi-sys", path = "crates/blpapi-sys", version = "1.4.12" }
+xbbg_core = { path = "crates/xbbg-core", version = "1.4.12", default-features = false }
+xbbg-arrow = { path = "crates/xbbg-arrow", version = "1.4.12" }
+xbbg-async = { path = "crates/xbbg-async", version = "1.4.12", default-features = false }
+xbbg-ext = { path = "crates/xbbg-ext", version = "1.4.12" }
+xbbg-log = { path = "crates/xbbg-log", version = "1.4.12" }
+xbbg-recipes = { path = "crates/xbbg-recipes", version = "1.4.12", default-features = false }
 
 # ── Arrow columnar carriers ───────────────────────────────────────────────────
 arrow = { version = "59.2.0", default-features = false }

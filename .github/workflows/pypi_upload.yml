@@ -243,6 +243,16 @@ jobs:
         # after v7, so `@v10` does not resolve.
         uses: astral-sh/setup-uv@v10.0.1
 
+      - name: Check release source versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          PYTHON_VERSION: ${{ matrix.python }}
+        run: |
+          uv run --no-project --isolated --python "${UV_PYTHON:-$PYTHON_VERSION}" \
+            python -I scripts/stamp_workspace_version.py "$RELEASE_VERSION" --check
+
       - name: Build wheel
         run: uv build --wheel --out-dir build-wheel/
 
@@ -266,6 +276,19 @@ jobs:
         run: |
           mkdir -p dist
           cp build-wheel/*.whl dist/
+
+      - name: Check installed wheel release versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+          PYTHON_VERSION: ${{ matrix.python }}
+        # Install the repaired artifact, not the checkout. -I also excludes
+        # PYTHONPATH and the script directory from Python's import search path.
+        run: |
+          uv run --no-project --isolated --python "${UV_PYTHON:-$PYTHON_VERSION}" \
+            --with packaging --with ./dist/*.whl \
+            python -I scripts/check_release_versions.py "$RELEASE_VERSION"
 
       - name: Upload wheel
         uses: actions/upload-artifact@v7
@@ -571,6 +594,15 @@ jobs:
 
       - name: Setup uv
         uses: astral-sh/setup-uv@v10.0.1
+
+      - name: Check release source versions
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        env:
+          RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          uv run --no-project --isolated \
+            python -I scripts/stamp_workspace_version.py "$RELEASE_VERSION" --check
 
       - name: Build sdist
         run: uv build --sdist --out-dir dist/

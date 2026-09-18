@@ -13,11 +13,11 @@ name: Bump Version and Create Release
 #
 # WHAT THIS WORKFLOW DOES:
 # 1. Reads release notes from CHANGELOG.md [Unreleased] section
-# 2. Creates a git tag and GitHub release with those notes
-# 3. Updates CHANGELOG.md: renames [Unreleased] to [version] - date
-# 4. Adds a new empty [Unreleased] section
-# 5. Commits the CHANGELOG.md changes
-# 6. Triggers downstream workflows (assets, docs, etc.)
+# 2. Updates CHANGELOG.md and README.md when creating a GitHub release
+# 3. Stamps Cargo workspace versions, updates Cargo.lock and regenerates type stubs
+# 4. Commits release sources before creating the git tag (also for tag-only releases)
+# 5. Creates the GitHub release when requested
+# 6. Publishes stable Rust crates through the reusable workflow
 #
 # See CONTRIBUTING.md for detailed documentation.
 # =============================================================================
@@ -322,23 +322,33 @@ jobs:
       with:
         rustflags: ""
 
+    - name: Stamp release workspace versions
+      env:
+        RELEASE_VERSION: ${{ steps.new_version.outputs.new_version }}
+      run: |
+        python scripts/stamp_workspace_version.py "$RELEASE_VERSION"
+        # Keep existing third-party resolutions while updating workspace package versions.
+        cargo update --workspace
+
     - name: Regenerate type stubs
       run: |
         cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
         CARGO_MANIFEST_DIR=${{ github.workspace }}/bindings/pyo3-xbbg ./target/debug/stub_gen
 
-    - name: Commit release doc changes
-      if: inputs.create_release == true
+    - name: Commit release sources
       run: |
         VERSION="${{ steps.new_version.outputs.new_version }}"
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
-        git add CHANGELOG.md README.md py-xbbg/src/xbbg/_core/__init__.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
+        git add Cargo.toml Cargo.lock py-xbbg/src/xbbg/_core/__init__.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
+        if [ "${{ inputs.create_release }}" = "true" ]; then
+          git add CHANGELOG.md README.md
+        fi
         if git diff --cached --quiet; then
-          echo "No release doc changes"
+          echo "No release source changes"
         else
-          git commit -m "docs(release): update docs and type stubs for ${VERSION} release"
+          git commit -m "chore(release): prepare ${VERSION} source tree"
           BRANCH="${GITHUB_REF#refs/heads/}"
           git push origin HEAD:"${BRANCH}"
         fi
@@ -365,8 +375,8 @@ jobs:
 
   # Publish the Rust crates to crates.io. Invoked directly rather than relying on
   # the tag push: tags created above use GITHUB_TOKEN, and a GITHUB_TOKEN tag push
-  # does not start tag-triggered workflows. Pre-releases are excluded because
-  # crates.io only accepts the stable X.Y.Z versions this repo tags.
+  # does not start tag-triggered workflows. Pre-releases are excluded by this
+  # workflow's stable-only crates.io publishing policy.
   publish-crates:
     name: Publish Rust crates
     needs: [bump-version]

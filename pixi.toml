@@ -50,14 +50,14 @@ build = { cmd = "python -m build", description = "Build sdist + wheel (portable 
 build-native = { cmd = "python -m build", env = { RUSTFLAGS = "-C target-cpu=native" }, description = "Build sdist + wheel tuned for this host CPU (internal deployments/benchmarks; not portable)" }
 test = "pytest py-xbbg/tests/ -ra -v"
 test-cov = "pytest py-xbbg/tests/ --cov=py-xbbg/src/xbbg --cov-report=xml -ra -v"
-lint-py = "ruff check py-xbbg/src py-xbbg/tests"
+lint-py = "ruff check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 lint-rs = "cargo clippy -- -D warnings"
 lint = { depends-on = ["lint-py", "lint-rs"] }
 typecheck = "ty check --exclude benchmarks --exclude examples --exclude scripts"
-fmt-py = "ruff format py-xbbg/src py-xbbg/tests"
+fmt-py = "ruff format py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 fmt-rs = "cargo fmt --all"
 fmt = { depends-on = ["fmt-py", "fmt-rs"] }
-fmt-check-py = "ruff format --check py-xbbg/src py-xbbg/tests"
+fmt-check-py = "ruff format --check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 fmt-check-rs = "cargo fmt --all -- --check"
 fmt-check = { depends-on = ["fmt-check-py", "fmt-check-rs"] }
 ci = { depends-on = ["fmt-check", "lint", "test"] }
@@ -85,9 +85,9 @@ ruff = ">=0.16.3"
 ty = ">=0.0.71"
 
 [feature.lint.tasks]
-lint = "ruff check py-xbbg/src py-xbbg/tests"
-fmt = "ruff format py-xbbg/src py-xbbg/tests"
-fmt-check = "ruff format --check py-xbbg/src py-xbbg/tests"
+lint = "ruff check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
+fmt = "ruff format py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
+fmt-check = "ruff format --check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 typecheck = "ty check --exclude benchmarks --exclude examples --exclude scripts"
 
 [feature.dev.pypi-dependencies]

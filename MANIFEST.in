@@ -64,6 +64,7 @@ prune vendor
 prune crates/blpapi-sys/vendor
 prune js-xbbg
 prune js-xbbg-langgraph
+prune py-xbbg-langgraph
 prune py-xbbg/tests
 
 # Build artifacts

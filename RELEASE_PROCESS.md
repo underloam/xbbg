@@ -27,6 +27,7 @@ Dev builds (untagged commits) automatically get versions like `0.12.1.dev268+g84
 | Build backend | `setuptools` | Python packaging |
 | Rust extension | `setuptools-rust` | Compiles PyO3 extension (`xbbg._core`) |
 | Version | `setuptools_scm` | Derives Python package versions from git tags |
+| Rust workspace version | `scripts/stamp_workspace_version.py` | Stamps the workspace and internal dependency versions before the release commit/tag |
 | JS package version | `js-xbbg/scripts/stamp-version.ts` | Stamps `@xbbg/core` wrapper/platform package versions for JS release workflows |
 | Build tool | `uv` | Fast package manager and build frontend |
 
@@ -87,11 +88,18 @@ Go to **GitHub Actions** > **Bump Version and Create Release** > **Run workflow*
 1. **Version Calculation**: Computes new version from current tags
 2. **Changelog Update**: Renames `[Unreleased]` to `[version] - date`
 3. **README Release Sync**: Updates the `README.md` latest-release marker block to the new version/tag
-4. **Git Tag**: Creates `vX.Y.Z` tag and pushes it
-5. **GitHub Release**: Creates release with notes from CHANGELOG
-6. **crates.io Publish**: `semantic_version.yml` calls `crates-publish.yml` directly as a
+4. **Rust Version Stamp**: Stamps `Cargo.toml` and updates workspace entries in `Cargo.lock`, then commits the version, documentation, and generated stubs before tagging
+5. **Git Tag**: Creates `vX.Y.Z` tag and pushes it
+6. **GitHub Release**: Creates release with notes from CHANGELOG
+7. **crates.io Publish**: `semantic_version.yml` calls `crates-publish.yml` directly as a
    dependent job, so the six published Rust crates go out in dependency order with no
    manual step. Stable versions only; pre-releases are skipped.
+
+Cargo stamping also runs when `create_release=false`, because that mode still creates a tag. Python prerelease versions are normalized to Cargo SemVer (`1.5.0rc2` becomes `1.5.0-rc.2`).
+
+The tagged source must already contain the correct Cargo versions. `pypi_upload.yml` checks them before building wheels and the sdist; it does not modify the tagged tree. Each repaired wheel is installed in isolation and checked against the release version through distribution metadata, `xbbg.__version__`, `_core.__version__`, and `_core.version()`. Equivalent Python/Cargo prerelease spellings are accepted; a stale core version blocks publication even if the other version fields agree.
+
+Existing published wheels and tags are immutable. Version-reporting corrections ship in a new release rather than replacing an old wheel or moving its tag.
 
 **Still manual after the run:** PyPI and npm are *not* automatic. Both
 `pypi_upload.yml` and `npm-publish.yml` declare `push.tags: ["v*"]`, but the tag is
@@ -420,9 +428,10 @@ When asked to create a release:
 - Reuse `vX.Y.Z` tags for JS-only GitHub assets; use `js-vX.Y.Z` instead so the PyPI/npm publish workflows do not trigger
 - Upload to PyPI manually (OIDC trusted publishing only)
 - Upload npm packages manually except for emergency recovery or first-time package seeding; normal npm releases must go through `npm-publish.yml` trusted publishing on a stable `vX.Y.Z` tag
-- Edit `version` in `Cargo.toml` for a release; `crates-publish.yml` stamps
-  `workspace.package.version` and every internal `workspace.dependencies` entry from
-  the release version
+- Hand-edit `version` in `Cargo.toml` for a release; `semantic_version.yml` uses
+  `scripts/stamp_workspace_version.py` to synchronize the workspace and internal
+  dependency versions before committing and tagging. `crates-publish.yml` reuses
+  the same helper.
 - Run `cargo publish` by hand, except for the one-time seeding of a brand-new crate
   name that has no Trusted Publisher yet
 - Add a path dependency without a matching `version`; `cargo publish` rejects a bare

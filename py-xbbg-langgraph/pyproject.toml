@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=82", "wheel>=0.46"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "xbbg-langgraph"
+version = "0.1.0"
+description = "LangChain and LangGraph tools for Bloomberg workflows backed by Python xbbg"
+readme = { text = "LangChain/LangGraph-compatible Bloomberg tools backed by xbbg. Includes bounded request tools, finite streaming snapshots, native extension helpers, and content-and-artifact results. See https://github.com/underloam/xbbg#python-langchain-and-langgraph for installation and usage. Bloomberg access and SDK runtime libraries are required for live requests.", content-type = "text/plain" }
+requires-python = ">=3.10,<3.15"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+authors = [{ name = "xbbg contributors" }]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Financial and Insurance Industry",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Typing :: Typed",
+]
+dependencies = [
+    "xbbg>=1.4.12,<2",
+    # LangGraph 1.2 requires this floor; includes GHSA-pjwx-r37v-7724 hardening.
+    "langchain-core>=1.4.0,<2",
+    "pydantic>=2.10,<3",
+]
+
+[project.optional-dependencies]
+# Tested public ToolNode/StateGraph baseline. 1.0.10 resolves a prebuilt package
+# that imports runtime symbols absent from that graph release.
+test = ["pytest>=8.4", "pytest-asyncio>=0.24", "pyarrow>=22.0.0", "langgraph>=1.2.0,<2"]
+
+[project.urls]
+Homepage = "https://xbbg.org/"
+Source = "https://github.com/underloam/xbbg"
+Issues = "https://github.com/underloam/xbbg/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+xbbg_langgraph = ["py.typed"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+filterwarnings = ["error::DeprecationWarning", "error::PendingDeprecationWarning", "error::FutureWarning"]
+
+[tool.ruff]
+extend = "../pyproject.toml"
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["D", "PT"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["xbbg", "xbbg_langgraph"]

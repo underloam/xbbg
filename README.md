@@ -207,6 +207,81 @@ await sub.unsubscribe()
 
 For longer walkthroughs and example output shapes, use the [examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) or [xbbg.org](https://xbbg.org/).
 
+## Python LangChain and LangGraph
+
+[`py-xbbg-langgraph`](py-xbbg-langgraph/) provides the separate `xbbg-langgraph` distribution, imported as `xbbg_langgraph`. It exposes the same 32 tool names as the JavaScript adapter: 21 Bloomberg request/recipe/snapshot tools and 11 extension helpers, including inline Vega-Lite chart specifications. Python arguments and factory names use `snake_case`.
+
+Install from this checkout (the new distribution has not yet been published):
+
+```bash
+pip install ./py-xbbg-langgraph
+# For the agent example below:
+pip install langchain langchain-openai
+# For custom graphs without the LangChain agent package:
+pip install "langgraph>=1.2,<2"
+```
+
+Requires Python 3.10–3.14, xbbg 1.4.12+, and `langchain-core` 1.4+. Graph workflows target LangGraph 1.2+. The adapter installs `langchain-core` and Pydantic; ordinary xbbg installs remain unchanged. Live requests still require authorized Bloomberg connectivity and SDK runtime libraries. Tool creation and schema inspection do not import the native extension or start a session.
+
+```python
+from langchain.agents import create_agent
+from langchain_openai import ChatOpenAI
+from xbbg_langgraph import BLOOMBERG_TOOL_INSTRUCTIONS, create_all_bloomberg_tools
+
+tools = create_all_bloomberg_tools(
+    max_securities=10,
+    max_fields=25,
+    max_rows=500,          # Application artifact
+    max_content_rows=50,  # Model-facing preview
+    disabled_tools={"xbbg_bql", "xbbg_bsrch"},
+)
+
+# Configure OPENAI_API_KEY and Bloomberg access before invoking.
+agent = create_agent(
+    model=ChatOpenAI(model="gpt-4.1"),
+    tools=tools,
+    system_prompt=BLOOMBERG_TOOL_INSTRUCTIONS,
+)
+result = agent.invoke({
+    "messages": [{"role": "user", "content": "Get PX_LAST for IBM US Equity."}],
+})
+```
+
+For custom LangGraph workflows, pass these tools to `langgraph.prebuilt.ToolNode` and bind the same list to your model. `create_bloomberg_tools()` returns only the 21 core tools; `create_bloomberg_ext_tools()` returns the 11 helpers. Individual factories such as `create_bdp_tool()` are also exported. Factories accept either keyword options or one `BloombergToolsOptions` instance, not both.
+
+All tools support `.invoke()` and `.ainvoke()`. Use `.ainvoke()` inside a running event loop. A full LangChain tool call produces a `ToolMessage` with independently bounded content and artifact:
+
+```python
+from xbbg_langgraph import create_bdp_tool
+
+tool = create_bdp_tool(max_securities=1, max_fields=1)
+message = tool.invoke({
+    "type": "tool_call",
+    "id": "reference-price",
+    "name": "xbbg_bdp",
+    "args": {"securities": ["IBM US Equity"], "fields": ["PX_LAST"]},
+})
+print(message.content)
+print(message.artifact)
+```
+
+Calling with bare arguments instead returns the content string, following LangChain's normal contract. Envelopes retain the JavaScript keys `tool`, `data`, `rowCount`, `truncated`, and optional `truncation`/`hasErrors`. Defaults cap artifacts at 1 MiB and content at 64 KiB, with additional node, depth, and string limits. Native Arrow rows are sliced before conversion; snapshot tables share one materialization allowance. Errors and entitlement metadata take priority over ordinary data. Binary values, including sparse-update presence bitmaps, use tagged base64 rather than losing null-versus-absent information.
+
+Snapshots require `max_updates`; `timeout_ms` cannot exceed `max_stream_wait_ms` (15 seconds by default). They close subscriptions on completion, timeout, error, or cancellation. Successful collection with a cleanup failure retains the updates and reports `unsubscribeError`. Depth snapshots without explicit fields request all available scalar fields; `all_fields=False` requires a nonempty field list.
+
+Pass `engine=your_xbbg_engine` to route tools through an application-owned `xbbg.blp.Engine`; otherwise they use xbbg's existing global/scoped engine. The adapter never reconfigures or shuts down that engine. `request_timeout` is a coroutine deadline in seconds (default 60), not a way to preempt synchronous SDK startup or subscription cleanup. Configure the engine's connection/request timeouts for those boundaries.
+
+Output caps do not limit Bloomberg's upstream response size. Native metadata getters and an individual native cell can allocate before projection. Request bounded universes and date ranges even when the returned preview is small.
+
+Python-specific boundaries:
+
+- Recipe tickers must be fully qualified; builders never guess a `US Equity` suffix. Recipe fields accept identifiers and argument-free BQL field access, not arbitrary query fragments. Use `xbbg_bql` for parameterized expressions.
+- `active_only` is not exposed because the current native corporate-bond builder does not implement that filter. Unsupported BQL/BFLDS keyword options are also rejected rather than ignored.
+- CDX `recovery_rate` uses Python's percentage convention: `40` means 40%, not `0.40`.
+- Chart tools do not fetch data or render it. Render only when `data.spec` is present and `data.renderable` is not false. Explicit `max_points` truncation preserves a valid inline spec; structural result clipping disables rendering.
+
+Adapter checks: `pip install "./py-xbbg-langgraph[test]"`, then `pytest py-xbbg-langgraph/tests`. The existing CI Python matrix and dependency-floor job run this suite.
+
 ## JavaScript and Node
 
 xbbg also ships supported Node bindings in [`@xbbg/core`](js-xbbg/README.md). The JS layer uses the same Rust engine through a native N-API addon, so Node can use the same Bloomberg connection modes and request surfaces as Python.
@@ -548,7 +623,8 @@ Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 
 - Documentation: [xbbg.org](https://xbbg.org/)
 - JavaScript/Node bindings: [js-xbbg/README.md](js-xbbg/README.md)
-- LangChain/LangGraph tools: [js-xbbg-langgraph/README.md](js-xbbg-langgraph/README.md)
+- Python LangChain/LangGraph tools: [usage](#python-langchain-and-langgraph)
+- JavaScript LangChain/LangGraph tools: [js-xbbg-langgraph/README.md](js-xbbg-langgraph/README.md)
 - PyPI: [pypi.org/project/xbbg](https://pypi.org/project/xbbg/)
 - npm: [npmjs.com/package/@xbbg/core](https://www.npmjs.com/package/@xbbg/core)
 - crates.io: [crates.io/crates/xbbg_core](https://crates.io/crates/xbbg_core)

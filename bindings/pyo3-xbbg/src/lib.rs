@@ -3034,11 +3034,9 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     info!("xbbg._core module initialized");
 
-    // Version from git describe (e.g., "v1.0.0" or "v1.0.0-5-g1a2b3c4")
-    // Strip the leading 'v' for Python version string
-    let git_version = env!("VERGEN_GIT_DESCRIBE");
-    let pkg_version = git_version.strip_prefix('v').unwrap_or(git_version);
-    m.add("__version__", pkg_version)?;
+    // Release identity comes from the stamped manifest, including source archives
+    // without Git metadata. Keep the Git description in build provenance only.
+    m.add("__version__", xbbg_core::version())?;
     let build_info = PyDict::new(_py);
     build_info.set_item("profile", env!("XBBG_BUILD_PROFILE"))?;
     build_info.set_item("target", env!("XBBG_BUILD_TARGET"))?;
@@ -3050,6 +3048,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     build_info.set_item("rustFlags", rust_flags)?;
     build_info.set_item("rustcVersion", env!("XBBG_BUILD_RUSTC_VERSION"))?;
     build_info.set_item("gitCommit", env!("XBBG_BUILD_GIT_COMMIT"))?;
+    build_info.set_item("gitDescribe", env!("VERGEN_GIT_DESCRIBE"))?;
     build_info.set_item("allocator", env!("XBBG_BUILD_ALLOCATOR"))?;
     build_info.set_item("optLevel", env!("XBBG_BUILD_OPT_LEVEL"))?;
     let target_features: Vec<&str> = env!("XBBG_BUILD_TARGET_FEATURES")

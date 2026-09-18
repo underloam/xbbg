@@ -20,6 +20,13 @@ def test_imports():
     assert hasattr(xbbg._core, "__version__")
 
 
+def test_native_version_attribute_reports_the_compiled_crate():
+    """Release identity must not depend on whether Git metadata was available."""
+    from xbbg import _core
+
+    assert _core.__version__ == _core.version()
+
+
 def test_public_python_surface_remains_importable():
     """Public package and blp facade names stay importable across internal splits."""
     import xbbg
