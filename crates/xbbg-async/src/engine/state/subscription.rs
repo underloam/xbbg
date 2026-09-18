@@ -158,6 +158,9 @@ pub enum MessageOutcome {
     Closed,
 }
 
+/// Handles from one sparse message, sorted by requested index. `None` is projected metadata.
+type RequestedFieldSelection<'a> = SmallVec<[(FieldIndex, Option<xbbg_core::Element<'a>>); 8]>;
+
 /// State for a single subscription, owned by PumpA.
 pub struct SubscriptionState {
     /// Topic string (e.g., "IBM US Equity")
@@ -392,6 +395,12 @@ impl SubscriptionState {
         } else {
             self.extract_requested_fields(&elem, subscription_data.as_ref())
         };
+        // Keep every historical version increment, but materialize only this
+        // message's final schema, including partial progress before an error.
+        if self.layout.version != self.layout_version {
+            self.layout =
+                Self::build_layout(self.layout_version, &self.field_strings, &self.field_kinds);
+        }
         let values = match values {
             Ok(values) => values,
             Err(error) => {
@@ -470,23 +479,39 @@ impl SubscriptionState {
         elem: &xbbg_core::Element<'_>,
         subscription_data: Option<&Arc<str>>,
     ) -> Result<SmallVec<[UpdateField; 8]>, BlpError> {
+        let selected = self.select_present_requested_fields(elem, subscription_data.is_some());
+        let field_count = selected
+            .as_ref()
+            .map_or(self.field_names.len(), |fields| fields.len());
         let mut values = SmallVec::new();
-        for idx in 0..self.field_names.len() {
+        for position in 0..field_count {
+            let (idx, selected_field) = selected.as_ref().map_or((position, None), |fields| {
+                let (idx, field) = &fields[position];
+                (usize::from(*idx), field.as_ref())
+            });
             let value = if Some(idx as FieldIndex) == self.subscription_data_index {
                 let Some(value) = subscription_data else {
                     continue;
                 };
                 UpdateValue::Str(Arc::clone(value))
             } else {
-                let Some(field) = elem.get(&self.field_names[idx]) else {
-                    // Missing is not a clear: leave it out of this delta.
-                    continue;
+                let named_field;
+                let field = match selected_field {
+                    Some(field) => field,
+                    None => {
+                        let Some(field) = elem.get(&self.field_names[idx]) else {
+                            // Missing is not a clear: leave it out of this delta.
+                            continue;
+                        };
+                        named_field = field;
+                        &named_field
+                    }
                 };
                 let datatype = field.datatype();
                 if field.is_array() || !Self::should_capture_datatype(datatype) {
-                    return Err(Self::unsupported_shape(&field));
+                    return Err(Self::unsupported_shape(field));
                 }
-                self.update_value_for_field(idx, &field, datatype)?
+                self.update_value_for_field(idx, field, datatype)?
             };
             self.observe_kind(idx as FieldIndex, &value);
             values.push(UpdateField {
@@ -495,6 +520,45 @@ impl SubscriptionState {
             });
         }
         Ok(values)
+    }
+
+    fn select_present_requested_fields<'a>(
+        &self,
+        elem: &xbbg_core::Element<'a>,
+        has_subscription_data: bool,
+    ) -> Option<RequestedFieldSelection<'a>> {
+        // Keep narrow and dense subscriptions on the existing name-lookup path.
+        // The scan is bounded by inline capacity, including projected metadata.
+        if self.field_names.len() <= 8 || self.field_names.len() > usize::from(FieldIndex::MAX) + 1
+        {
+            return None;
+        }
+        let projected = self
+            .subscription_data_index
+            .filter(|_| has_subscription_data);
+        let children = elem.num_children();
+        if children > 8 - usize::from(projected.is_some()) || children * 2 > self.field_names.len()
+        {
+            return None;
+        }
+        let mut selected = RequestedFieldSelection::new();
+        if let Some(idx) = projected {
+            selected.push((idx, None));
+        }
+        for child_idx in 0..children {
+            // Fall back before changing state if indexed access is unavailable.
+            let child = elem.get_at(child_idx)?;
+            let Some(&idx) = self.field_name_keys.get(&child.name_key()) else {
+                continue;
+            };
+            if Some(idx) != self.subscription_data_index {
+                selected.push((idx, Some(child)));
+            }
+        }
+        // Decode in requested order, not schema order: error precedence and
+        // field-kind/version observation must match the name-lookup path.
+        selected.sort_unstable_by_key(|(idx, _)| *idx);
+        Some(selected)
     }
 
     fn extract_all_fields(
@@ -627,8 +691,6 @@ impl SubscriptionState {
         if merged != self.field_kinds[idx] {
             self.field_kinds[idx] = merged;
             self.layout_version = self.layout_version.wrapping_add(1).max(1);
-            self.layout =
-                Self::build_layout(self.layout_version, &self.field_strings, &self.field_kinds);
         }
     }
 
@@ -673,8 +735,6 @@ impl SubscriptionState {
         self.field_kinds.push(FieldKind::Unknown);
         self.string_value_cache.push(None);
         self.layout_version = self.layout_version.wrapping_add(1).max(1);
-        self.layout =
-            Self::build_layout(self.layout_version, &self.field_strings, &self.field_kinds);
         idx
     }
 
@@ -1322,5 +1382,476 @@ mod tests {
         ));
         drop(forwarder);
         handle.await.unwrap();
+    }
+    #[test]
+    fn wide_sparse_reverse_schema_preserves_i64_null_absence_and_requested_order() {
+        let requested = [
+            "FIELD_00",
+            "EXACT_I64",
+            "FIELD_02",
+            "EXPLICIT_NULL",
+            "FIELD_04",
+            "ABSENT_AFTER_IMAGE",
+            "FIELD_06",
+            "TEXT",
+            "FIELD_08",
+            "FIELD_09",
+            "FIELD_10",
+            "FIELD_11",
+            "FIELD_12",
+            "FIELD_13",
+            "FIELD_14",
+            "FIELD_15",
+        ];
+        let image = fixture(
+            r#"<element name="TEXT" type="String"/>
+        <element name="ABSENT_AFTER_IMAGE" type="Int32"/>
+        <element name="EXPLICIT_NULL" type="Int32"/>
+        <element name="EXACT_I64" type="Int64"/>"#,
+            "MarketDataEvents",
+            |formatter| {
+                formatter.json(
+                r#"{"TEXT":"initial","ABSENT_AFTER_IMAGE":77,"EXPLICIT_NULL":88,"EXACT_I64":-9007199254740993}"#,
+            )
+            },
+        );
+        let delta = fixture(
+            r#"<element name="TEXT" type="String"/>
+        <element name="EXPLICIT_NULL" type="Int32" minOccurs="0"/>
+        <element name="EXACT_I64" type="Int64"/>"#,
+            "MarketDataEvents",
+            |formatter| {
+                formatter
+                    .json(r#"{"TEXT":"changed","EXPLICIT_NULL":null,"EXACT_I64":9007199254740993}"#)
+            },
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        let mut state = SubscriptionState::new(
+            "TEST".into(),
+            requested.iter().map(|field| (*field).to_owned()).collect(),
+            tx,
+            5,
+            false,
+        );
+
+        assert_eq!(
+            deliver(&mut state, &image),
+            MessageOutcome::Normal {
+                first_message: true
+            }
+        );
+        let image_update = rx
+            .try_recv()
+            .expect("image delivered immediately")
+            .expect("image update");
+        let image_names: Vec<_> = image_update
+            .values
+            .iter()
+            .map(|field| {
+                image_update.layout.fields[field.index as usize]
+                    .name
+                    .as_ref()
+            })
+            .collect();
+        assert_eq!(
+            image_names,
+            vec!["EXACT_I64", "EXPLICIT_NULL", "ABSENT_AFTER_IMAGE", "TEXT"]
+        );
+        assert!(matches!(
+            image_update.values[0].value,
+            UpdateValue::I64(-9_007_199_254_740_993)
+        ));
+        assert!(matches!(image_update.values[1].value, UpdateValue::I32(88)));
+        assert!(matches!(image_update.values[2].value, UpdateValue::I32(77)));
+        assert!(matches!(
+            &image_update.values[3].value,
+            UpdateValue::Str(value) if value.as_ref() == "initial"
+        ));
+
+        assert_eq!(
+            deliver(&mut state, &delta),
+            MessageOutcome::Normal {
+                first_message: false
+            }
+        );
+        let delta_update = rx
+            .try_recv()
+            .expect("delta delivered immediately")
+            .expect("delta update");
+        let delta_names: Vec<_> = delta_update
+            .values
+            .iter()
+            .map(|field| {
+                delta_update.layout.fields[field.index as usize]
+                    .name
+                    .as_ref()
+            })
+            .collect();
+        assert_eq!(delta_names, vec!["EXACT_I64", "EXPLICIT_NULL", "TEXT"]);
+        assert!(matches!(
+            delta_update.values[0].value,
+            UpdateValue::I64(9_007_199_254_740_993)
+        ));
+        assert!(matches!(delta_update.values[1].value, UpdateValue::Null));
+        assert!(matches!(
+            &delta_update.values[2].value,
+            UpdateValue::Str(value) if value.as_ref() == "changed"
+        ));
+    }
+
+    #[test]
+    fn wide_sparse_reverse_schema_reports_first_requested_unsupported_field() {
+        let requested = [
+            "SUPPORTED",
+            "FIRST_UNSUPPORTED",
+            "FIELD_02",
+            "FIELD_03",
+            "FIELD_04",
+            "FIELD_05",
+            "FIELD_06",
+            "FIELD_07",
+            "FIELD_08",
+            "FIELD_09",
+            "FIELD_10",
+            "FIELD_11",
+            "FIELD_12",
+            "FIELD_13",
+            "SECOND_UNSUPPORTED",
+            "FIELD_15",
+        ];
+        let event = fixture_with_types(
+            r#"<element name="SECOND_UNSUPPORTED" type="SecondValue"/>
+        <element name="FIRST_UNSUPPORTED" type="FirstValue"/>
+        <element name="SUPPORTED" type="Int32"/>"#,
+            r#"<sequenceType name="FirstValue">
+            <element name="INNER" type="String"/>
+        </sequenceType>
+        <sequenceType name="SecondValue">
+            <element name="INNER" type="String"/>
+        </sequenceType>"#,
+            "MarketDataEvents",
+            |formatter| {
+                formatter.json(
+                r#"{"SECOND_UNSUPPORTED":{"INNER":"second"},"FIRST_UNSUPPORTED":{"INNER":"first"},"SUPPORTED":7}"#,
+            )
+            },
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        let mut state = SubscriptionState::new(
+            "TEST".into(),
+            requested.iter().map(|field| (*field).to_owned()).collect(),
+            tx,
+            6,
+            false,
+        );
+
+        assert_eq!(deliver(&mut state, &event), MessageOutcome::Closed);
+        assert!(matches!(
+            rx.try_recv().expect("terminal schema error"),
+            Err(BlpError::SchemaUnsupported { element, .. }) if element == "FIRST_UNSUPPORTED"
+        ));
+    }
+
+    #[test]
+    fn one_message_keeps_exact_layout_version_and_retained_layouts_immutable() {
+        let requested = [
+            "ANCHOR",
+            "PROMOTED_I64",
+            "FIELD_02",
+            "PROMOTED_TEXT",
+            "FIELD_04",
+            "FIELD_05",
+            "FIELD_06",
+            "FIELD_07",
+            "FIELD_08",
+            "FIELD_09",
+            "FIELD_10",
+            "FIELD_11",
+            "FIELD_12",
+            "FIELD_13",
+            "FIELD_14",
+            "FIELD_15",
+        ];
+        let first_event = fixture(
+            r#"<element name="ANCHOR" type="Float64"/>
+        <element name="PROMOTED_I64" type="Int32"/>
+        <element name="PROMOTED_TEXT" type="Float64"/>"#,
+            "MarketDataEvents",
+            |formatter| formatter.json(r#"{"ANCHOR":1.25,"PROMOTED_I64":7,"PROMOTED_TEXT":8.5}"#),
+        );
+        let multi_change = fixture(
+            r#"<element name="ANCHOR" type="Float64"/>
+        <element name="PROMOTED_I64" type="Int64"/>
+        <element name="PROMOTED_TEXT" type="String"/>
+        <element name="DISCOVERED_I32" type="Int32"/>
+        <element name="DISCOVERED_F64" type="Float64"/>"#,
+            "MarketDataEvents",
+            |formatter| {
+                formatter.json(
+                r#"{"ANCHOR":2.5,"PROMOTED_I64":1234567890123,"PROMOTED_TEXT":"ready","DISCOVERED_I32":7,"DISCOVERED_F64":4.5}"#,
+            )
+            },
+        );
+        let initial_names: Vec<_> = requested
+            .iter()
+            .copied()
+            .chain(["MKTDATA_EVENT_TYPE", "MKTDATA_EVENT_SUBTYPE"])
+            .collect();
+        let (tx, mut rx) = subscription_channel(1);
+        let mut state = SubscriptionState::new(
+            "TEST".into(),
+            requested.iter().map(|field| (*field).to_owned()).collect(),
+            tx,
+            7,
+            true,
+        );
+
+        assert_eq!(
+            deliver(&mut state, &first_event),
+            MessageOutcome::Normal {
+                first_message: true
+            }
+        );
+        let first = rx
+            .try_recv()
+            .expect("first update delivered immediately")
+            .expect("first update");
+        let first_version = first.layout.version;
+        assert_eq!(first.values.len(), 3);
+        assert!(matches!(first.values[0].value, UpdateValue::F64(1.25)));
+        let retained_layout = first.layout.clone();
+
+        assert_eq!(
+            deliver(&mut state, &multi_change),
+            MessageOutcome::Normal {
+                first_message: false
+            }
+        );
+        let second = rx
+            .try_recv()
+            .expect("multi-change update delivered immediately")
+            .expect("multi-change update");
+        // Two kind promotions, plus discovery and kind observation for each new field.
+        assert_eq!(second.layout.version, first_version + 6);
+        let mut expected_names = initial_names.clone();
+        expected_names.extend(["DISCOVERED_I32", "DISCOVERED_F64"]);
+        let second_names: Vec<_> = second
+            .layout
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect();
+        assert_eq!(second_names, expected_names);
+        for (index, field) in second.layout.fields.iter().enumerate() {
+            assert_eq!(field.index as usize, index);
+        }
+        assert_eq!(second.layout.fields[0].kind, FieldKind::F64);
+        assert_eq!(second.layout.fields[1].kind, FieldKind::Str);
+        assert_eq!(second.layout.fields[3].kind, FieldKind::Str);
+        assert_eq!(second.layout.fields[18].kind, FieldKind::I32);
+        assert_eq!(second.layout.fields[19].kind, FieldKind::F64);
+        let second_value_names: Vec<_> = second
+            .values
+            .iter()
+            .map(|field| second.layout.fields[field.index as usize].name.as_ref())
+            .collect();
+        assert_eq!(
+            second_value_names,
+            vec![
+                "ANCHOR",
+                "PROMOTED_I64",
+                "PROMOTED_TEXT",
+                "DISCOVERED_I32",
+                "DISCOVERED_F64"
+            ]
+        );
+        assert!(matches!(second.values[0].value, UpdateValue::F64(2.5)));
+        assert!(matches!(
+            second.values[1].value,
+            UpdateValue::I64(1_234_567_890_123)
+        ));
+        assert!(matches!(
+            &second.values[2].value,
+            UpdateValue::Str(value) if value.as_ref() == "ready"
+        ));
+        assert!(matches!(second.values[3].value, UpdateValue::I32(7)));
+        assert!(matches!(second.values[4].value, UpdateValue::F64(4.5)));
+
+        assert_eq!(retained_layout.version, first_version);
+        let retained_names: Vec<_> = retained_layout
+            .fields
+            .iter()
+            .map(|field| field.name.as_ref())
+            .collect();
+        assert_eq!(retained_names, initial_names);
+        assert_eq!(retained_layout.fields[0].kind, FieldKind::F64);
+        assert_eq!(retained_layout.fields[1].kind, FieldKind::I32);
+        assert_eq!(retained_layout.fields[3].kind, FieldKind::F64);
+
+        let second_signature: Vec<_> = second
+            .layout
+            .fields
+            .iter()
+            .map(|field| (field.name.to_string(), field.index, field.kind))
+            .collect();
+        assert_eq!(
+            deliver(&mut state, &multi_change),
+            MessageOutcome::Normal {
+                first_message: false
+            }
+        );
+        let third = rx
+            .try_recv()
+            .expect("same-kind update delivered immediately")
+            .expect("same-kind update");
+        assert_eq!(third.layout.version, second.layout.version);
+        let third_signature: Vec<_> = third
+            .layout
+            .fields
+            .iter()
+            .map(|field| (field.name.to_string(), field.index, field.kind))
+            .collect();
+        assert_eq!(third_signature, second_signature);
+    }
+
+    #[test]
+    fn mktbar_projection_overrides_sdk_field_at_requested_position() {
+        let requested = [
+            "FIELD_00",
+            "VOLUME",
+            "FIELD_02",
+            "SUBSCRIPTION_DATA",
+            "FIELD_04",
+            "LAST_PRICE",
+            "FIELD_06",
+            "FIELD_07",
+            "FIELD_08",
+            "FIELD_09",
+            "FIELD_10",
+            "FIELD_11",
+            "FIELD_12",
+            "FIELD_13",
+            "FIELD_14",
+            "FIELD_15",
+        ];
+        let event = fixture(
+            r#"<element name="LAST_PRICE" type="Float64"/>
+        <element name="SUBSCRIPTION_DATA" type="String"/>
+        <element name="VOLUME" type="Int32"/>"#,
+            "MarketBarUpdate",
+            |formatter| {
+                formatter.json(
+                    r#"{"LAST_PRICE":101.5,"SUBSCRIPTION_DATA":"SDK_FIELD_VALUE","VOLUME":42}"#,
+                )
+            },
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        let mut state = SubscriptionState::new(
+            "//blp/mktbar/ticker/TEST".into(),
+            requested.iter().map(|field| (*field).to_owned()).collect(),
+            tx,
+            9,
+            false,
+        );
+
+        assert_eq!(
+            deliver(&mut state, &event),
+            MessageOutcome::Normal {
+                first_message: true
+            }
+        );
+        let update = rx
+            .try_recv()
+            .expect("mktbar update delivered immediately")
+            .expect("mktbar update");
+        let names: Vec<_> = update
+            .values
+            .iter()
+            .map(|field| update.layout.fields[field.index as usize].name.as_ref())
+            .collect();
+        assert_eq!(names, vec!["VOLUME", "SUBSCRIPTION_DATA", "LAST_PRICE"]);
+        assert_eq!(update.values[0].index, 1);
+        assert_eq!(update.values[1].index, 3);
+        assert_eq!(update.values[2].index, 5);
+        assert!(matches!(update.values[0].value, UpdateValue::I32(42)));
+        assert!(matches!(
+            &update.values[1].value,
+            UpdateValue::Str(value) if value.as_ref() == "MarketBarUpdate"
+        ));
+        assert!(matches!(update.values[2].value, UpdateValue::F64(101.5)));
+    }
+
+    #[test]
+    fn wide_sparse_dataloss_is_terminal_after_an_accepted_update() {
+        let requested = [
+            "LAST_PRICE",
+            "FIELD_01",
+            "FIELD_02",
+            "FIELD_03",
+            "FIELD_04",
+            "FIELD_05",
+            "FIELD_06",
+            "FIELD_07",
+            "FIELD_08",
+            "FIELD_09",
+            "FIELD_10",
+            "FIELD_11",
+            "FIELD_12",
+            "FIELD_13",
+            "FIELD_14",
+            "FIELD_15",
+        ];
+        let data = fixture(
+            r#"<element name="LAST_PRICE" type="Float64"/>"#,
+            "MarketDataEvents",
+            |formatter| formatter.json(r#"{"LAST_PRICE":99.25}"#),
+        );
+        let dataloss = fixture(
+            r#"<element name="MKTDATA_EVENT_SUBTYPE" type="String"/>
+        <element name="MKTDATA_EVENT_TYPE" type="String"/>"#,
+            "MarketDataEvents",
+            |formatter| {
+                formatter
+                    .json(r#"{"MKTDATA_EVENT_SUBTYPE":"DATALOSS","MKTDATA_EVENT_TYPE":"SUMMARY"}"#)
+            },
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        let mut state = SubscriptionState::new(
+            "TEST".into(),
+            requested.iter().map(|field| (*field).to_owned()).collect(),
+            tx,
+            11,
+            false,
+        );
+
+        assert_eq!(
+            deliver(&mut state, &data),
+            MessageOutcome::Normal {
+                first_message: true
+            }
+        );
+        let accepted = rx
+            .try_recv()
+            .expect("data update delivered immediately")
+            .expect("accepted data update");
+        assert_eq!(accepted.values.len(), 1);
+        assert_eq!(
+            accepted.layout.fields[accepted.values[0].index as usize]
+                .name
+                .as_ref(),
+            "LAST_PRICE"
+        );
+        assert!(matches!(accepted.values[0].value, UpdateValue::F64(99.25)));
+
+        assert_eq!(deliver(&mut state, &dataloss), MessageOutcome::DataLoss);
+        assert!(matches!(
+            rx.try_recv().expect("terminal DATALOSS error"),
+            Err(BlpError::SubscriptionDataLoss { topic, .. }) if topic == "TEST"
+        ));
+        assert_eq!(deliver(&mut state, &data), MessageOutcome::Closed);
+        assert!(matches!(
+            rx.try_recv(),
+            Err(mpsc::error::TryRecvError::Disconnected)
+        ));
     }
 }

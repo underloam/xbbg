@@ -51,6 +51,12 @@ subscriptions are claimed from a separate session pool.
 clear. Requested arrays/complex values and non-null decode failures are errors.
 All-fields mode omits unrequested nonscalars without suppressing a later scalar.
 
+Requested-field extraction uses a bounded present-field scan for wide, sparse
+messages and retains name lookups for narrow or dense messages. Values remain in
+requested order. Changed immutable layouts are built once per message while
+preserving every discovery/type-change version increment. These optimizations
+neither combine messages nor wait for another event before delivering an update.
+
 Arrow conversion appends non-null binary `__xbbg_present`. Bit `i`, LSB-first,
 maps to schema field `i + 2` after `timestamp` and `topic`. A present-null field
 sets its bit; absence does not. Interpret against each batch's current schema;

@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Changed
 
 - GitHub repository links and generated MCP metadata now use the `underloam` organization. The MCP Registry identity is `io.github.underloam/xbbg-mcp`; package names and `xbbg.org` are unchanged.
+- **Lower per-event subscription processing cost.** Wide, sparse requested-field updates use a bounded present-field scan; narrow and dense updates retain name lookups. Schema discovery and type changes build the final immutable layout once per message without changing version increments. Requested-field order, null/absence semantics, terminal errors, and individual-event delivery are unchanged; no batching or API changes.
 
 ### Fixed
 
