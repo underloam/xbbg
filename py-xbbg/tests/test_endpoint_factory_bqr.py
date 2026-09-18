@@ -11,6 +11,24 @@ from xbbg.ext import fixed_income
 from xbbg.services import Operation, Service
 
 
+class FakeEngine:
+    async def list_valid_elements(self, _service, _operation):
+        return [
+            "includeBrokerCodes",
+            "includeConditionCodes",
+            "includeExchangeCodes",
+            "includeSpreadPrice",
+            "includeYield",
+            "maxDataPoints",
+        ]
+
+
+@pytest.fixture
+def stub_engine(monkeypatch):
+    blp._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+
+
 def _raw_bqr_table(*, broker: bool = True, condition_codes: bool = False) -> ArrowTable:
     row: dict[str, Any] = {
         "ticker": "/isin/US037833FB15@MSG1 Corp",
@@ -41,7 +59,7 @@ def _generic_bqr_table() -> ArrowTable:
 
 
 @pytest.mark.asyncio
-async def test_abqr_generated_routes_intraday_tick_defaults(monkeypatch):
+async def test_abqr_generated_routes_intraday_tick_defaults(monkeypatch, stub_engine):
     captured: dict[str, Any] = {}
 
     async def fake_arequest(*, service, operation, backend, **kwargs):
@@ -71,7 +89,7 @@ async def test_abqr_generated_routes_intraday_tick_defaults(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_abqr_generated_warns_for_non_isin_msg1_source(monkeypatch):
+async def test_abqr_generated_warns_for_non_isin_msg1_source(monkeypatch, stub_engine):
     async def fake_arequest(**_kwargs):
         return _raw_bqr_table()
 
@@ -83,7 +101,7 @@ async def test_abqr_generated_warns_for_non_isin_msg1_source(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_abqr_generated_reshapes_generic_path_output(monkeypatch):
+async def test_abqr_generated_reshapes_generic_path_output(monkeypatch, stub_engine):
     captured: dict[str, Any] = {}
 
     async def fake_arequest(*, service, operation, backend, **kwargs):
@@ -124,7 +142,7 @@ async def test_abqr_generated_reshapes_generic_path_output(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_abqr_generated_keeps_typed_include_output(monkeypatch):
+async def test_abqr_generated_keeps_typed_include_output(monkeypatch, stub_engine):
     captured: dict[str, Any] = {}
     typed_table = _raw_bqr_table(condition_codes=True)
 
@@ -157,7 +175,7 @@ async def test_abqr_generated_keeps_typed_include_output(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_abqr_generated_uses_explicit_datetime_range_and_event_types(monkeypatch):
+async def test_abqr_generated_uses_explicit_datetime_range_and_event_types(monkeypatch, stub_engine):
     captured: dict[str, Any] = {}
 
     async def fake_arequest(*, service, operation, backend, **kwargs):

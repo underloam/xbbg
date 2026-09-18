@@ -6,6 +6,17 @@ from xbbg import blp
 from xbbg.services import Operation, Service
 
 
+class FakeEngine:
+    async def list_valid_elements(self, _service, _operation):
+        return ["eventType", "interval", "maxDataPoints"]
+
+
+@pytest.fixture(autouse=True)
+def stub_engine(monkeypatch):
+    blp._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+
+
 @pytest.mark.asyncio
 async def test_abdtick_forwards_overrides(monkeypatch):
     captured: dict[str, object] = {}

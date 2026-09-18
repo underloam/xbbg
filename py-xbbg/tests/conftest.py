@@ -41,6 +41,40 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip_live)
 
 
+def _fail_engine_construction(*_args: object, **_kwargs: object) -> None:
+    pytest.fail(
+        "unit test constructed a real Bloomberg engine (xbbg._core.PyEngine). Without a "
+        "terminal the SDK blocks for its whole start-attempt cycle and has hung Windows CI "
+        "runners until the job timeout. Patch blp._get_engine with a fake engine, or mark "
+        "the test live/integration."
+    )
+
+
+class _ForbiddenPyEngine:
+    """Stand-in for ``xbbg._core.PyEngine``; every constructor path fails the test."""
+
+    def __new__(cls, *args: object, **kwargs: object):
+        _fail_engine_construction()
+
+    @staticmethod
+    def with_config(*args: object, **kwargs: object) -> None:
+        _fail_engine_construction()
+
+
+@pytest.fixture(autouse=True)
+def _no_real_engine(request, monkeypatch):
+    """Fail fast when a non-live test starts a real Bloomberg session.
+
+    ``pytest.fail`` raises a ``BaseException`` subclass, so it is not swallowed by the
+    ``except Exception`` fallbacks around schema lookups.
+    """
+    if "live" in request.keywords or "integration" in request.keywords:
+        return
+    from xbbg import _core
+
+    monkeypatch.setattr(_core, "PyEngine", _ForbiddenPyEngine)
+
+
 @pytest.fixture
 def sample_tickers():
     """Fixture providing sample ticker symbols."""
