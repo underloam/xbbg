@@ -484,7 +484,7 @@ async def main():
 result = asyncio.run(main())
 ```
 
-In Jupyter, VS Code Interactive, and marimo, one-shot sync calls such as `blp.bdp(...)` and `blp.bdh(...)` use a notebook-only bridge when the notebook event loop is already running. Generic async applications such as FastAPI or ASGI services should still use the async APIs directly.
+In Jupyter, VS Code Interactive, and marimo, every sync call, including `blp.bdp(...)`, `blp.bql(...)`, and `blp.subscribe(...)`, uses a notebook-only bridge when the notebook event loop is already running. Generic async applications such as FastAPI or ASGI services should still use the async APIs directly.
 
 ## Subscriptions: raw, tick mode, and all fields
 

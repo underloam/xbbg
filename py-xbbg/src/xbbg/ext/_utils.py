@@ -51,9 +51,10 @@ def _canonical_column_name(name: str) -> str:
 def _syncify(async_func: Callable[_P, Coroutine[Any, Any, _T]]) -> Callable[_P, _T]:
     """Create a synchronous wrapper for an async ext helper.
 
-    Ext sync helpers should match the core ``xbbg.bdp`` boundary: run normally
-    from synchronous code, bridge one-shot calls in notebooks, and fail clearly
-    in other running event loops before creating an unawaited coroutine.
+    Ext sync helpers share the core ``xbbg.bdp`` boundary: run normally from
+    synchronous code, use the notebook bridge inside running notebook loops,
+    and fail clearly in other running event loops before creating an
+    unawaited coroutine.
     """
     sync_name = async_func.__name__[1:] if async_func.__name__.startswith("a") else async_func.__name__
 
@@ -61,12 +62,7 @@ def _syncify(async_func: Callable[_P, Coroutine[Any, Any, _T]]) -> Callable[_P, 
     def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _T:
         from xbbg import blp
 
-        sync_wrapper = blp._build_sync_wrapper(
-            sync_name,
-            async_func,
-            allow_notebook_bridge=True,
-        )
-        return sync_wrapper(*args, **kwargs)
+        return blp._run_sync(sync_name, async_func, args, kwargs)
 
     wrapper.__name__ = sync_name
     wrapper.__qualname__ = sync_name

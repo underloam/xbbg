@@ -200,37 +200,37 @@ async def alist_valid_elements(service: str, operation: str) -> list[str] | None
 # Sync API wrappers
 def get_schema(service: str) -> ServiceSchema:
     """Get schema for a service (sync wrapper)."""
-    import asyncio
+    from .blp import _run_sync
 
-    return asyncio.run(aget_schema(service))
+    return _run_sync("get_schema", aget_schema, (service,), {})
 
 
 def get_operation(service: str, operation: str) -> OperationSchema:
     """Get schema for a specific operation (sync wrapper)."""
-    import asyncio
+    from .blp import _run_sync
 
-    return asyncio.run(aget_operation(service, operation))
+    return _run_sync("get_operation", aget_operation, (service, operation), {})
 
 
 def list_operations(service: str) -> list[str]:
     """List all operations for a service (sync wrapper)."""
-    import asyncio
+    from .blp import _run_sync
 
-    return asyncio.run(alist_operations(service))
+    return _run_sync("list_operations", alist_operations, (service,), {})
 
 
 def get_enum_values(service: str, operation: str, element: str) -> list[str] | None:
     """Get valid enum values for an element (sync wrapper)."""
-    import asyncio
+    from .blp import _run_sync
 
-    return asyncio.run(aget_enum_values(service, operation, element))
+    return _run_sync("get_enum_values", aget_enum_values, (service, operation, element), {})
 
 
 def list_valid_elements(service: str, operation: str) -> list[str] | None:
     """List all valid element names for an operation (sync wrapper)."""
-    import asyncio
+    from .blp import _run_sync
 
-    return asyncio.run(alist_valid_elements(service, operation))
+    return _run_sync("list_valid_elements", alist_valid_elements, (service, operation), {})
 
 
 # Cache management

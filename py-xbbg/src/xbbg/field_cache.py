@@ -13,7 +13,6 @@ Resolution hierarchy (implemented in Rust):
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 import warnings
@@ -74,7 +73,9 @@ def resolve_field_types(
     Returns:
         Dict mapping field names to Arrow type strings.
     """
-    return asyncio.run(aresolve_field_types(fields, overrides))
+    from .blp import _run_sync
+
+    return _run_sync("resolve_field_types", aresolve_field_types, (fields, overrides), {})
 
 
 async def aresolve_field_types(

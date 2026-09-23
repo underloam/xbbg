@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, field
 from datetime import datetime
 import importlib
@@ -260,4 +259,6 @@ async def afetch_exchange_info(ticker: str, **kwargs) -> ExchangeInfo:
 
 def fetch_exchange_info(ticker: str, **kwargs) -> ExchangeInfo:
     """Sync fetch exchange metadata from Bloomberg."""
-    return asyncio.run(afetch_exchange_info(ticker=ticker, **kwargs))
+    from xbbg.blp import _run_sync
+
+    return _run_sync("fetch_exchange_info", afetch_exchange_info, (ticker,), kwargs)

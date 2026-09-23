@@ -5,7 +5,7 @@ with support for multiple DataFrame backends via narwhals.
 
 API Design:
 - Async-first: Core implementation uses async/await (abdp, abdh, etc.)
-- Sync wrappers: Convenience functions wrap async with asyncio.run(), with a notebook bridge for one-shot requests
+- Sync wrappers: Convenience functions wrap async with asyncio.run(), with a notebook bridge inside running notebook loops
 - Generic API: arequest() and request() for power users and arbitrary Bloomberg requests
 - Users can use either style based on their needs
 """
@@ -323,8 +323,6 @@ _engine_lock = threading.Lock()
 
 # Scoped engine for multi-engine routing (async-safe via contextvars)
 _active_engine: contextvars.ContextVar[Engine | None] = contextvars.ContextVar("_active_engine", default=None)
-
-_NOTEBOOK_SYNC_BRIDGE_NAMES = frozenset({"bdp", "bdh", "bds", "bdib", "bdtick", "request"})
 
 
 class Engine:
@@ -2481,30 +2479,44 @@ def _run_in_notebook_sync_bridge(
     return _notebook_sync_bridge.submit(async_func, args, kwargs)
 
 
+def _run_sync(
+    sync_name: str,
+    async_func: Callable[..., Any],
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+) -> Any:
+    """Run ``async_func`` to completion for a synchronous public API.
+
+    Without a running loop this is ``asyncio.run``. Notebook loops (IPykernel,
+    marimo) block on the managed background loop. Any other running loop is
+    rejected before the coroutine is created.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(async_func(*args, **kwargs))
+
+    if _is_notebook_context():
+        return _run_in_notebook_sync_bridge(async_func, args, kwargs)
+
+    raise RuntimeError(
+        f"{sync_name}() cannot be used inside an async context. "
+        f"Use 'await a{sync_name}()' instead, "
+        f"or use xbbg.Engine(...) for scoped async engines."
+    )
+
+
 def _build_sync_wrapper(
     sync_name: str,
     async_func: Callable[..., Any],
     *,
     template: Callable[..., Any] | None = None,
-    allow_notebook_bridge: bool = False,
 ) -> Callable[..., Any]:
     template_func = template if template is not None else async_func
 
     @functools.wraps(template_func)
     def wrapped(*args, **kwargs):
-        try:
-            asyncio.get_running_loop()
-        except RuntimeError:
-            return asyncio.run(async_func(*args, **kwargs))
-
-        if allow_notebook_bridge and _is_notebook_context():
-            return _run_in_notebook_sync_bridge(async_func, args, kwargs)
-
-        raise RuntimeError(
-            f"{sync_name}() cannot be used inside an async context. "
-            f"Use 'await a{sync_name}()' instead, "
-            f"or use xbbg.Engine(...) for scoped async engines."
-        )
+        return _run_sync(sync_name, async_func, args, kwargs)
 
     wrapped.__name__ = sync_name
     wrapped.__qualname__ = sync_name
@@ -2568,7 +2580,6 @@ def _install_generated_endpoint(spec: _GeneratedEndpointSpec) -> None:
         spec.sync_name,
         generated_async,
         template=async_template,
-        allow_notebook_bridge=spec.sync_name in _NOTEBOOK_SYNC_BRIDGE_NAMES,
     )
 
 
@@ -3970,10 +3981,10 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
     """
     from pathlib import Path
 
-    from .schema import aget_schema
+    from .schema import get_schema
 
     # Get tasvc schema
-    schema = asyncio.run(aget_schema("//blp/tasvc"))
+    schema = get_schema("//blp/tasvc")
 
     # Find studyRequest operation
     op = schema.get_operation("studyRequest")
@@ -5388,11 +5399,7 @@ def _install_manual_sync_wrappers() -> None:
         ("bops", abops),
         ("bschema", abschema),
     ):
-        globals()[sync_name] = _build_sync_wrapper(
-            sync_name,
-            async_func,
-            allow_notebook_bridge=sync_name in _NOTEBOOK_SYNC_BRIDGE_NAMES,
-        )
+        globals()[sync_name] = _build_sync_wrapper(sync_name, async_func)
 
 
 _install_manual_sync_wrappers()

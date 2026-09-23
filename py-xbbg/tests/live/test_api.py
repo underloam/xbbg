@@ -488,7 +488,7 @@ class TestAbdh:
 
 
 class TestNotebookSyncBridge:
-    """Live regression coverage for issue #281 notebook sync wrappers."""
+    """Live regression coverage for notebook sync wrappers (#281, #353)."""
 
     @staticmethod
     def _enable_fake_ipykernel(IPython):
@@ -521,18 +521,23 @@ class TestNotebookSyncBridge:
         logger.info(f"  Notebook bridge bdp rows: {len(bdp_df)}, bdh rows: {len(bdh_df)}")
 
     @pytest.mark.asyncio
-    async def test_streaming_sync_wrapper_still_raises_in_notebook_loop(self):
-        """Streaming sync wrappers stay async-aware and do not use the notebook bridge."""
+    async def test_subscribe_sync_wrapper_works_in_ipykernel_loop(self):
+        """A bridged subscribe() handle is consumed and closed on the notebook loop."""
         IPython = pytest.importorskip("IPython")
         from xbbg import blp, subscribe
 
         original_get_ipython = self._enable_fake_ipykernel(IPython)
         try:
-            with pytest.raises(RuntimeError, match="await asubscribe"):
-                subscribe([CONFIG.streaming_ticker], [CONFIG.price_field])
+            sub = subscribe([CONFIG.streaming_ticker], ["LAST_PRICE"])
+            try:
+                batch = await asyncio.wait_for(sub.__anext__(), timeout=20)
+            finally:
+                await sub.unsubscribe()
         finally:
             IPython.get_ipython = original_get_ipython
             blp._stop_notebook_sync_loop()
+
+        assert len(batch) >= 1
 
 
 # =============================================================================

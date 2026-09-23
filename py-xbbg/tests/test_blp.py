@@ -30,7 +30,7 @@ class TestNotebookSyncBridge:
         async def fake_request():
             return "ok"
 
-        wrapper = blp._build_sync_wrapper("bdp", fake_request, allow_notebook_bridge=True)
+        wrapper = blp._build_sync_wrapper("bdp", fake_request)
         monkeypatch.setattr(blp, "_is_notebook_context", lambda: False)
 
         async def call_wrapper():
@@ -82,7 +82,7 @@ class TestNotebookSyncBridge:
         async def fake_request():
             return scoped_value.get(), threading.current_thread().name
 
-        wrapper = blp._build_sync_wrapper("bdp", fake_request, allow_notebook_bridge=True)
+        wrapper = blp._build_sync_wrapper("bdp", fake_request)
         monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
         token = scoped_value.set("active-engine")
 
@@ -108,7 +108,7 @@ class TestNotebookSyncBridge:
         async def fake_request():
             raise ExpectedError("boom")
 
-        wrapper = blp._build_sync_wrapper("bdh", fake_request, allow_notebook_bridge=True)
+        wrapper = blp._build_sync_wrapper("bdh", fake_request)
         monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
 
         async def call_wrapper():
@@ -226,8 +226,8 @@ class TestNotebookSyncBridge:
             stopper.join(timeout=1)
             assert not stopper.is_alive()
 
-    def test_public_bridge_scope_is_one_shot_only(self, monkeypatch):
-        """Installed public wrappers should bridge one-shot APIs, not streams."""
+    def test_public_sync_wrappers_use_notebook_bridge(self, monkeypatch):
+        """Generated and manual sync wrappers, including BQL (#353) and streams, bridge in notebooks."""
         from xbbg import blp
 
         def fake_bridge(async_func, args, kwargs):
@@ -236,24 +236,19 @@ class TestNotebookSyncBridge:
         monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
         monkeypatch.setattr(blp, "_run_in_notebook_sync_bridge", fake_bridge)
 
-        async def call_bdp():
-            return blp.bdp("AAPL US Equity", "PX_LAST")
+        query = "get(px_last) for(['AAPL US Equity'])"
 
-        async def call_request():
-            return blp.request(service="//blp/refdata", operation="ReferenceDataRequest")
+        async def call_bql():
+            return blp.bql(query, backend="pandas")
 
         async def call_subscribe():
-            blp.subscribe(["AAPL US Equity"], ["LAST_PRICE"])
+            return blp.subscribe(["AAPL US Equity"], ["LAST_PRICE"])
 
-        bdp_name, bdp_args, _ = asyncio.run(call_bdp())
-        request_name, _, request_kwargs = asyncio.run(call_request())
-
-        _CASE.assertEqual(bdp_name, "abdp")
-        _CASE.assertEqual(bdp_args, ("AAPL US Equity", "PX_LAST"))
-        _CASE.assertEqual(request_name, "arequest")
-        _CASE.assertEqual(request_kwargs["service"], "//blp/refdata")
-        with pytest.raises(RuntimeError, match="await asubscribe"):
-            asyncio.run(call_subscribe())
+        _CASE.assertEqual(asyncio.run(call_bql()), ("abql", (query,), {"backend": "pandas"}))
+        _CASE.assertEqual(
+            asyncio.run(call_subscribe()),
+            ("asubscribe", (["AAPL US Equity"], ["LAST_PRICE"]), {}),
+        )
 
 
 class TestEngineContextScopes:
