@@ -22,6 +22,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Synchronized native release versions.** Cargo workspace and internal dependency versions now match 1.4.12, and future release workflows stamp and commit them before tagging. The binding version uses the stamped crate identity even without Git metadata; Git descriptions remain in build provenance. Release builds reject unstamped source trees and wheels whose Python, binding, or core versions disagree.
 - **Patched JavaScript test tooling.** Both JavaScript packages now require Vitest `^4.1.11` and lock its coordinated `@vitest/*` dependencies, including `@vitest/mocker`, to `4.1.11`, addressing the redirect-mock path traversal and arbitrary file read in [GHSA-82fw-gwwq-j7x9](https://github.com/advisories/GHSA-82fw-gwwq-j7x9).
 - **Patched MCPB archive tooling.** The private build tools now pin `fflate` to `0.8.3`, fixing the malformed ZIP64 infinite loop in [GHSA-px8p-9vwx-vf98](https://github.com/advisories/GHSA-px8p-9vwx-vf98).
+- **Python docs no longer claim a 60-second request timeout.** The `PyEngineConfig.request_timeout_ms` docstring and type stub still said `Default: 60_000`, but the default has been `0` (no timeout) since 1.1.1. Requests wait for Bloomberg until they finish unless you opt in with `configure(request_timeout_ms=...)`.
 
 ## [1.4.12] - 2026-09-11
 

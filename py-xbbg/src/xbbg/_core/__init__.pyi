@@ -835,12 +835,12 @@ class PyEngineConfig:
     @property
     def request_timeout_ms(self) -> builtins.int:
         r"""
-        Hard per-request timeout in ms; 0 disables. Default: 60_000.
+        Hard per-request timeout in ms; 0 disables. Default: 0 (no timeout).
         """
     @request_timeout_ms.setter
     def request_timeout_ms(self, value: builtins.int) -> None:
         r"""
-        Hard per-request timeout in ms; 0 disables. Default: 60_000.
+        Hard per-request timeout in ms; 0 disables. Default: 0 (no timeout).
         """
     @property
     def streams_deactivated_warn_ms(self) -> builtins.int:

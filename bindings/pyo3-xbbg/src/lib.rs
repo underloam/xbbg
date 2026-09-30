@@ -685,7 +685,7 @@ pub struct PyEngineConfig {
     pub retry_backoff_factor: f64,
     #[pyo3(get, set)]
     pub retry_max_delay_ms: u64,
-    /// Hard per-request timeout in ms; 0 disables. Default: 60_000.
+    /// Hard per-request timeout in ms; 0 disables. Default: 0 (no timeout).
     #[pyo3(get, set)]
     pub request_timeout_ms: u64,
     /// Warn threshold for a subscription's streams staying deactivated, in ms;
