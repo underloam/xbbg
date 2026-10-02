@@ -1,20 +1,29 @@
 import type {
+  AdminStatus,
   CdxTickerInfo,
   EngineConfig,
   EntitlementReport,
   ExchangeInfoResult,
   ExchangeOverrideInput,
+  FeedInfo,
   FieldInfo,
   FuturesCandidate,
   FxPairInfo,
   MarketRule,
   RequestInput,
   SeatType,
+  ServiceStatus,
+  SessionStatus,
   SessionWindowsInfo,
+  StreamOptions,
   StringPair,
+  SubscriptionEvent,
+  SubscriptionFailure,
   SubscriptionStats,
+  SubscriptionStatus,
   TickerParts,
   TimeRange,
+  TopicState,
 } from './types';
 
 export type NativeArrowColumnType =
@@ -108,14 +117,27 @@ export interface NativeSubscriptionUpdateBatch {
 export interface NativeSubscription {
   nextUpdates(maxItems?: number, maxWaitMs?: number): Promise<NativeSubscriptionUpdateBatch | null>;
   nextArrowBatch(maxRows?: number, maxWaitMs?: number): Promise<NativeArrowZeroCopyBatch | null>;
-  add(tickers: readonly string[]): Promise<void>;
+  add(tickers: readonly string[], aliases?: Readonly<Record<string, string>>): Promise<void>;
+  addFields(fields: readonly string[]): Promise<void>;
+  latest(): NativeArrowZeroCopyBatch;
+  takeWarnings(): SubscriptionEvent[];
   remove(tickers: readonly string[]): Promise<void>;
   unsubscribe(drain: boolean): Promise<NativeSubscriptionUpdateBatch[] | null>;
   unsubscribeArrow(drain: boolean): Promise<NativeArrowZeroCopyBatch[] | null>;
   readonly tickers: string[];
   readonly fields: string[];
+  readonly deliversRows: boolean;
   readonly isActive: boolean;
   readonly stats: SubscriptionStats;
+  readonly status: SubscriptionStatus;
+  readonly events: SubscriptionEvent[];
+  readonly failures: SubscriptionFailure[];
+  readonly failedTickers: string[];
+  readonly topicStates: Record<string, TopicState>;
+  readonly fieldErrors: Record<string, Record<string, string>>;
+  readonly sessionStatus: SessionStatus;
+  readonly serviceStatus: Record<string, ServiceStatus>;
+  readonly adminStatus: AdminStatus;
 }
 
 export interface NativeEngine {
@@ -147,6 +169,12 @@ export interface NativeEngine {
     tickers: readonly string[],
     fields: readonly string[],
     allFields: boolean | undefined,
+    aliases?: Readonly<Record<string, string>>,
+    onDelayed?: StreamOptions['onDelayed'],
+    isolated?: boolean,
+    rows?: boolean,
+    onFieldError?: string,
+    zeroAsNull?: readonly string[],
   ): Promise<NativeSubscription>;
   subscribeWithOptions(
     service: string,
@@ -157,7 +185,14 @@ export interface NativeEngine {
     overflowPolicy: string | undefined,
     streamCapacity: number | undefined,
     allFields: boolean | undefined,
+    aliases?: Readonly<Record<string, string>>,
+    onDelayed?: StreamOptions['onDelayed'],
+    isolated?: boolean,
+    rows?: boolean,
+    onFieldError?: string,
+    zeroAsNull?: readonly string[],
   ): Promise<NativeSubscription>;
+  subscriptionFeeds(): FeedInfo[];
   signalShutdown(): void;
   isAvailable(): boolean;
 
@@ -258,6 +293,15 @@ export interface NativeEngine {
     asof: string | undefined,
   ): Promise<NativeArrowZeroCopyBatch>;
   recipeResolveIsins(isins: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
+  recipeResolveVenues(
+    securities: readonly string[],
+    pcsOverrides?: Readonly<Record<string, string>>,
+  ): Promise<NativeArrowZeroCopyBatch>;
+  recipeAuctionSnapshot(
+    securities: readonly string[],
+    fields?: readonly string[],
+    pcsOverrides?: Readonly<Record<string, string>>,
+  ): Promise<NativeArrowZeroCopyBatch>;
   recipeIssuerIsins(bondIsins: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
   recipeEtfNavRelationships(tickers: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
   recipeEtfNavSnapshot(tickers: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
@@ -287,6 +331,12 @@ export interface NativeAddon {
   JsEngine: NativeEngineConstructor;
   setLogLevel: (level: string) => void;
   getLogLevel: () => string;
+
+  // Auction utilities
+  extAuctionFieldGroup: (name: string) => string[] | null;
+  extAuctionFieldGroupNames: () => string[];
+  extAuctionZeroPriceFields: () => string[];
+  extImbalanceSide: (code: string) => 'buy' | 'sell' | 'none' | null;
 
   // Date utilities
   extParseDate: (dateStr: string) => number[];

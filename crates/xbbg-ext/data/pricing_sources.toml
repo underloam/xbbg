@@ -1,0 +1,8 @@
+# Only NEW YORK -> SNY2 has been live-verified. Other entries are routing defaults;
+# every venue is validated against Bloomberg's returned PRICING_SOURCE.
+[pfd_exchange_pcs]
+"NEW YORK" = "SNY2"
+"NASDAQ/NGS" = "NASP"
+"NASDAQ/NGM" = "NASP"
+"NASDAQ/NCM" = "NASP"
+"NYSE AMERICAN" = "AMEX"

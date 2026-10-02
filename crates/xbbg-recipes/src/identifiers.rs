@@ -113,7 +113,7 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
             row.issuer_equity_isin = parent_values
                 .get(parent_ticker)
                 .and_then(|fields| fields.get("ID_ISIN"))
-                .cloned();
+                .and_then(|value| clean_bloomberg_text(value));
             if row.issuer_equity_isin.is_some() {
                 row.status = "resolved".to_string();
                 row.error = None;
@@ -133,6 +133,9 @@ pub(crate) fn isin_lookup_ticker(isin: &str) -> String {
 
 pub(crate) fn build_equity_ticker(parsed: Option<&str>, exchange: Option<&str>) -> Option<String> {
     let parsed = clean_bloomberg_text(parsed?)?;
+    if non_equity_sector(&parsed).is_some() {
+        return None;
+    }
     if parsed.split_whitespace().any(|token| token == "Equity") {
         return Some(parsed);
     }
@@ -147,6 +150,16 @@ pub(crate) fn build_equity_ticker(parsed: Option<&str>, exchange: Option<&str>) 
     }
 
     Some(format!("{parsed} Equity"))
+}
+
+fn non_equity_sector(parsed: &str) -> Option<&str> {
+    let sector = parsed.split_whitespace().last()?;
+    [
+        "Pfd", "Corp", "Govt", "Comdty", "Index", "Curncy", "Mtge", "Muni", "M-Mkt",
+    ]
+    .iter()
+    .any(|key| sector.eq_ignore_ascii_case(key))
+    .then_some(sector)
 }
 
 pub(crate) fn build_resolve_isin_rows(
@@ -164,7 +177,12 @@ pub(crate) fn build_resolve_isin_rows(
             let exchange =
                 fields.and_then(|map| map.get("EQY_PRIM_SECURITY_COMP_EXCH").map(String::as_str));
             let resolved_ticker = build_equity_ticker(parsed, exchange);
-            let (status, error) = if resolved_ticker.is_some() {
+            let (status, error) = if let Some(sector) = parsed.and_then(non_equity_sector) {
+                (
+                    "unresolved".to_string(),
+                    Some(format!("market sector '{sector}' is not Equity")),
+                )
+            } else if resolved_ticker.is_some() {
                 ("resolved".to_string(), None)
             } else {
                 (
@@ -241,7 +259,9 @@ fn first_clean_field(fields: Option<&HashMap<String, String>>, names: &[&str]) -
     })
 }
 
-fn refdata_value_map(batch: &RecordBatch) -> Result<HashMap<String, HashMap<String, String>>> {
+pub(crate) fn refdata_value_map(
+    batch: &RecordBatch,
+) -> Result<HashMap<String, HashMap<String, String>>> {
     let ticker_col = as_string_col(batch, "ticker")?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
@@ -256,8 +276,20 @@ fn refdata_value_map(batch: &RecordBatch) -> Result<HashMap<String, HashMap<Stri
         let Some(raw_value) = array_value_as_string(value_col, row) else {
             continue;
         };
-        let Some(value) = clean_bloomberg_text(&raw_value) else {
+        // These are Bloomberg missing-value markers. Literal "nan"/"null" can
+        // be identifiers; callers clean their own optional numeric/text fields.
+        let value = raw_value.trim();
+        if value.is_empty()
+            || ["N/A", "N.A.", "#N/A"]
+                .iter()
+                .any(|missing| value.eq_ignore_ascii_case(missing))
+        {
             continue;
+        }
+        let value = if value.len() == raw_value.len() {
+            raw_value
+        } else {
+            value.to_string()
         };
         values
             .entry(ticker_col.value(row).to_string())
@@ -373,6 +405,44 @@ fn build_issuer_isins_batch(rows: &[IssuerIsinResolution]) -> Result<RecordBatch
 mod tests {
     use super::*;
     use arrow_array::StringArray;
+
+    #[test]
+    fn resolve_isins_rejects_non_equity_yellow_keys() {
+        let isin = (0..10)
+            .map(|digit| format!("ZZ000000001{digit}"))
+            .find(|candidate| xbbg_ext::is_valid_isin(candidate))
+            .unwrap();
+        let lookup = isin_lookup_ticker(&isin);
+        for sector in [
+            "Pfd", "Corp", "Govt", "Comdty", "Index", "Curncy", "Mtge", "Muni", "M-Mkt",
+        ] {
+            let values = HashMap::from([(
+                lookup.clone(),
+                HashMap::from([
+                    (
+                        "PARSEKYABLE_DES".to_string(),
+                        format!("SYNTHETIC     {sector}"),
+                    ),
+                    ("EQY_PRIM_SECURITY_COMP_EXCH".to_string(), "US".to_string()),
+                ]),
+            )]);
+            let rows = build_resolve_isin_rows(
+                std::slice::from_ref(&isin),
+                std::slice::from_ref(&lookup),
+                &values,
+            );
+            let batch = build_resolve_isins_batch(&rows).unwrap();
+            assert_eq!(
+                as_string_col(&batch, "status").unwrap().value(0),
+                "unresolved"
+            );
+            assert!(batch.column_by_name("resolved_ticker").unwrap().is_null(0));
+            assert!(as_string_col(&batch, "error")
+                .unwrap()
+                .value(0)
+                .contains(sector));
+        }
+    }
 
     #[test]
     fn resolve_isins_preserves_order_and_unresolved_rows() {

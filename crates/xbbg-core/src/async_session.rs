@@ -366,6 +366,37 @@ impl AsyncSession {
         Ok(())
     }
 
+    /// Update existing subscriptions, matched by their correlation IDs.
+    ///
+    /// Each entry supplies the complete replacement field list and options.
+    /// Update per-CID state before calling: status and repaint data may reach
+    /// the handler before this returns, as with [`AsyncSession::subscribe`].
+    pub fn resubscribe(&self, subs: &crate::SubscriptionList, label: Option<&str>) -> Result<()> {
+        let (label_ptr, label_len, _label_cstring) = match label {
+            Some(l) => {
+                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
+                    detail: format!("invalid subscription label: {}", e),
+                })?;
+                (cs.as_ptr(), l.len() as i32, Some(cs))
+            }
+            None => (std::ptr::null(), 0, None),
+        };
+
+        // SAFETY: valid session/list pointers; the optional label remains alive
+        // for the duration of the SDK call.
+        let rc = unsafe {
+            crate::ffi::blpapi_Session_resubscribe(self.ptr, subs.as_ptr(), label_ptr, label_len)
+        };
+
+        if rc != 0 {
+            return Err(BlpError::Internal {
+                detail: format!("blpapi_Session_resubscribe failed with rc={}", rc),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Cancel the subscriptions in `subs`; entries are matched by
     /// correlation ID. Termination is confirmed to the handler via
     /// `SubscriptionTerminated` / `SubscriptionFailure` status messages.

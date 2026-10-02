@@ -2,6 +2,7 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arrow::record_batch::RecordBatch;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
@@ -12,16 +13,18 @@ use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, Serve
 use xbbg_async::BlpAsyncError;
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
+use xbbg_recipes::{recipe_auction_snapshot, recipe_resolve_venues, RecipeError};
 
 mod request_adapter;
 mod serialization;
 mod stdin;
 
 use request_adapter::{
-    bdh_request_params, bdib_request_params, bdp_request_params, bds_request_params,
-    bflds_request_params, bql_request_params, bsrch_request_params, check_entitlements_params,
-    generic_request_params, BdhArgs, BdibArgs, BdpArgs, BdsArgs, BfldsArgs, BqlArgs, BsrchArgs,
-    CheckEntitlementsArgs, RequestArgs,
+    auction_snapshot_params, bdh_request_params, bdib_request_params, bdp_request_params,
+    bds_request_params, bflds_request_params, bql_request_params, bsrch_request_params,
+    check_entitlements_params, generic_request_params, resolve_venues_params, AuctionSnapshotArgs,
+    BdhArgs, BdibArgs, BdpArgs, BdsArgs, BfldsArgs, BqlArgs, BsrchArgs, CheckEntitlementsArgs,
+    RequestArgs, ResolveVenuesArgs,
 };
 
 use serialization::{
@@ -104,6 +107,10 @@ impl XbbgMcpServer {
             .request(params)
             .await
             .map_err(|error| map_request_error(error, &self.result_limits))?;
+        self.serialize_batch(batch).await
+    }
+
+    async fn serialize_batch(&self, batch: RecordBatch) -> Result<CallToolResult, ErrorData> {
         let payload = if should_offload(&batch, &self.result_limits) {
             let limits = self.result_limits.clone();
             self.run_blocking_serialization(move || record_batch_to_json(&batch, &limits))
@@ -244,6 +251,57 @@ impl XbbgMcpServer {
     }
 
     #[tool(
+        description = "Route composite equity tickers/ISINs to the primary exchange listing and preferreds to venue pricing sources. Returns one row per input in input order, including duplicates, with status/error and venue metadata in bounded structured JSON with Arrow schema metadata.",
+        annotations(
+            title = "Resolve Bloomberg Auction Venues",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn resolve_venues(
+        &self,
+        Parameters(args): Parameters<ResolveVenuesArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = self.bounded_input(resolve_venues_params(args))?;
+        let batch = recipe_resolve_venues(
+            self.engine().await?,
+            params.securities,
+            params.pcs_overrides,
+        )
+        .await
+        .map_err(|error| map_recipe_error(error, &self.result_limits))?;
+        self.serialize_batch(batch).await
+    }
+
+    #[tool(
+        description = "Read auction/imbalance values from Bloomberg reference data on the primary venue. Uses the default auction field group unless fields or groups are selected; groups expand first, then explicit fields, with duplicates removed. Returns one row per input with status/error and bounded structured JSON with Arrow schema metadata. Time-of-day fields are terminal-local. Reference data carries no delayed/real-time flag; use subscriptions for that.",
+        annotations(
+            title = "Bloomberg Auction Snapshot",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn auction_snapshot(
+        &self,
+        Parameters(args): Parameters<AuctionSnapshotArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = self.bounded_input(auction_snapshot_params(args))?;
+        let batch = recipe_auction_snapshot(
+            self.engine().await?,
+            params.securities,
+            params.fields,
+            params.pcs_overrides,
+        )
+        .await
+        .map_err(|error| map_recipe_error(error, &self.result_limits))?;
+        self.serialize_batch(batch).await
+    }
+
+    #[tool(
         description = "Check a nonempty list of Bloomberg entitlement IDs against a service. The service defaults to //blp/refdata.",
         annotations(
             title = "Check Bloomberg Entitlements",
@@ -314,7 +372,7 @@ impl ServerHandler for XbbgMcpServer {
                     ),
             )
             .with_instructions(
-                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, check_entitlements, or request. Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block.",
+                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, resolve_venues, auction_snapshot, check_entitlements, or request. resolve_venues routes composite equities to primary exchange listings and preferreds to venue pricing sources, preserving one status/error row per input. auction_snapshot reads Bloomberg reference data on the primary venue; time-of-day fields are terminal-local, and reference data carries no delayed/real-time flag (use subscriptions for that). Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block.",
             )
     }
 }
@@ -620,6 +678,16 @@ fn bounded_internal_error(error: &impl std::fmt::Display, limits: &ResultLimits)
     ErrorData::internal_error(message, truncation_data(truncated))
 }
 
+fn map_recipe_error(error: RecipeError, limits: &ResultLimits) -> ErrorData {
+    match error {
+        RecipeError::Engine(error) => map_request_error(*error, limits),
+        RecipeError::InvalidArgument(detail) => bounded_invalid_params(&detail, limits),
+        other @ (RecipeError::Ext(_) | RecipeError::Arrow(_) | RecipeError::Other(_)) => {
+            bounded_internal_error(&other, limits)
+        }
+    }
+}
+
 fn map_request_error(error: BlpAsyncError, limits: &ResultLimits) -> ErrorData {
     match error {
         BlpAsyncError::ConfigError { detail } => bounded_invalid_params(&detail, limits),
@@ -868,6 +936,7 @@ mod tests {
         assert_eq!(
             names,
             [
+                "auction_snapshot",
                 "bdh",
                 "bdib",
                 "bdp",
@@ -876,7 +945,8 @@ mod tests {
                 "bql",
                 "bsrch",
                 "check_entitlements",
-                "request"
+                "request",
+                "resolve_venues"
             ]
         );
 
@@ -916,6 +986,28 @@ mod tests {
             .expect("check_entitlements properties");
         assert!(entitlement_schema.get("eids").is_some());
         assert!(entitlement_schema.get("service").is_some());
+
+        for tool_name in ["resolve_venues", "auction_snapshot"] {
+            let tool = tool_by_name.get(tool_name).expect("auction tool");
+            let schema = tool.input_schema.get("properties").unwrap();
+            assert_eq!(
+                tool.input_schema.get("required"),
+                Some(&json!(["securities"]))
+            );
+            assert_eq!(schema["securities"]["type"], "array");
+            assert_eq!(schema["securities"]["minItems"], 1);
+            assert!(schema["securities"].get("maxItems").is_none());
+            assert!(schema.get("pcs_overrides").is_some());
+            let annotations = tool.annotations.as_ref().unwrap();
+            assert_eq!(annotations.read_only_hint, Some(true));
+            assert_eq!(annotations.destructive_hint, Some(false));
+        }
+        let snapshot_schema = tool_by_name["auction_snapshot"]
+            .input_schema
+            .get("properties")
+            .unwrap();
+        assert_eq!(snapshot_schema["fields"]["maxItems"], 256);
+        assert_eq!(snapshot_schema["groups"]["maxItems"], 8);
 
         let generic_schema = tool_by_name
             .get("request")
@@ -1024,5 +1116,28 @@ mod tests {
 
         assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
         assert_eq!(error.data.unwrap()["error_data_omitted"], true);
+    }
+
+    #[test]
+    fn recipe_errors_keep_request_classification_and_output_bounds() {
+        let limits = ResultLimits {
+            max_result_bytes: MIN_RESULT_BYTES,
+            ..ResultLimits::default()
+        };
+        for error in [
+            RecipeError::Engine(Box::new(BlpAsyncError::ConfigError {
+                detail: "x".repeat(100_000),
+            })),
+            RecipeError::InvalidArgument("x".repeat(100_000)),
+        ] {
+            let error = map_recipe_error(error, &limits);
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
+            assert_eq!(error.data.unwrap()["message_truncated"], true);
+        }
+        let error = map_recipe_error(RecipeError::Other("x".repeat(100_000)), &limits);
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
+        assert_eq!(error.data.unwrap()["message_truncated"], true);
     }
 }

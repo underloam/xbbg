@@ -1,6 +1,6 @@
 # @xbbg/langgraph
 
-Last updated: 2026-09-04.
+Last updated: 2026-09-30.
 
 LangChain/LangGraph-compatible Bloomberg tools backed by [`@xbbg/core`](../js-xbbg/README.md).
 
@@ -44,7 +44,7 @@ Append the exported instructions to your system prompt:
 import { BLOOMBERG_TOOL_INSTRUCTIONS } from "@xbbg/langgraph";
 ```
 
-The instructions tell the model to ask clarifying questions for ambiguous tickers, fields, date ranges, currencies, periodicity, overrides, or universes; request `/isin/{isin}` for ISIN identifiers and `/cusip/{cusip}` for CUSIPs; use `xbbg_bflds` for unknown fields; prefer finite recipe tools for BEQS/YAS/universe workflows; use bounded snapshot tools instead of open subscriptions; keep requests bounded; and report empty, truncated, or errored responses directly.
+The instructions tell the model to ask clarifying questions for ambiguous tickers, fields, date ranges, currencies, periodicity, overrides, or universes; request `/isin/{isin}` for ISIN identifiers and `/cusip/{cusip}` for CUSIPs (the auction recipes also accept valid bare ISINs); use `xbbg_bflds` for unknown fields; prefer finite recipe tools for BEQS/YAS/universe and validated auction workflows; use bounded snapshot tools instead of open subscriptions; keep requests bounded; and report empty, truncated, or errored responses directly.
 
 ## LangChain `createAgent` example
 
@@ -125,6 +125,8 @@ All tools use LangChain `responseFormat: "content_and_artifact"`. In `ToolNode`,
 
 ## Tool factories
 
+`createBloombergTools()` includes all 23 core tools by default. `createBloombergExtTools()` adds 11 extension helpers; `createAllBloombergTools()` includes all 34 tools. `BLOOMBERG_TOOL_NAMES` lists the complete inventory, and `disabledTools` removes named tools from these factories.
+
 Core Bloomberg request tools:
 
 - `xbbg_bdp` - reference/current fields for a bounded securities list and explicit fields list.
@@ -142,12 +144,40 @@ Core Bloomberg request tools:
 - `xbbg_preferreds` - preferred stock discovery for one equity ticker.
 - `xbbg_corporate_bonds` - corporate bond universe query for one issuer/company ticker.
 - `xbbg_index_members` - index constituents through the core index recipe.
-- `xbbg_resolve_isins` - raw ISIN-to-security resolution; pass raw ISIN strings to this recipe only.
+- `xbbg_resolve_isins` - raw ISIN-to-security resolution; pass raw ISIN strings without `/isin/` prefixes.
+- `xbbg_resolve_venues` - validated primary venue routing for equities and preferreds, with per-call pricing-source overrides and per-input status/error rows.
+- `xbbg_auction_snapshot` - finite reference-data auction/imbalance fields on validated venues; unresolved or mismatched rows retain diagnostics and null field values.
 - `xbbg_issuer_isins` - issuer/bond ISIN workflow starting from known bond ISIN strings.
 - `xbbg_etf_holdings` - ETF holdings for one ETF ticker.
 - `xbbg_stream_snapshot` - bounded `//blp/mktdata` live observation that always unsubscribes.
 - `xbbg_mktbar_snapshot` - bounded `//blp/mktbar` live bar observation for one ticker.
 - `xbbg_depth_snapshot` - bounded `//blp/mktdepthdata` market-depth observation for one ticker.
+
+### Auction recipes
+
+Both auction tools take a bounded `securities` array of Bloomberg tickers, valid bare ISINs, `/isin/<ISIN>`, or `/bbgid/<FIGI>` inputs. The core routes composite equities to their primary exchange listing and preferreds to a pricing-source-qualified venue, validates the returned `EXCH_CODE` or `PRICING_SOURCE`, and respects explicitly supplied venues. Never guess a venue ticker or accept a silent composite fallback.
+
+The recipes keep one row per input in input order, including duplicates. `input_order`, `security`, `status`, and `error` remain available alongside the venue; `xbbg_resolve_venues` also returns routing metadata such as `lookup`, `method`, and `venue_figi`. Inspect every row's `status` (`resolved`, `unresolved`, `unsupported`, or `mismatch`) rather than treating the whole response as a success. Auction field values are null on unresolved, unsupported, or mismatched rows. Normal artifact/content limits still apply, so inspect truncation diagnostics before assuming every row is present.
+
+Optional `pcsOverrides` is a per-call string record mapping preferred exchange names to pricing sources, for example `{ "NEW YORK": "SNY2" }`. Overrides take precedence over the packaged mappings, exchange names are normalized by the core, and overridden venues are still validated. `xbbg_auction_snapshot` accepts optional `fields` in requested column order; omitting them or passing `[]` selects `AuctionFields.default` from `@xbbg/core`. The `maxFields` limit applies to explicitly supplied fields, not the core's default bundle.
+
+The tools use the core's JSON row backend. Booleans and finite floating-point values remain JSON primitives; Arrow Int64 and Time64 microsecond values become decimal strings in the adapter to avoid loss of integer precision. Date32 values are UTC-midnight epoch-millisecond numbers; time-only values have no invented date or timezone. Duplicate security rows are retained. JSON objects cannot represent repeated column names; use the core Arrow backend when repeated field columns are required.
+
+```ts
+import { createResolveVenuesTool, createAuctionSnapshotTool } from "@xbbg/langgraph";
+
+const venues = createResolveVenuesTool();
+const auction = createAuctionSnapshotTool();
+
+await venues.invoke({ securities: ["IBM US Equity", "AAPL US Equity"] });
+await auction.invoke({
+  securities: ["IBM US Equity"],
+  fields: ["IMBALANCE_INDIC_RT", "ORDER_IMB_BUY_VOLUME", "ORDER_IMB_SELL_VOLUME"],
+  pcsOverrides: { "NEW YORK": "SNY2" },
+});
+```
+
+These tools use finite recipe requests with `backend: "json"`; they do not open streams or require `maxUpdates`.
 
 ### Entitlement IDs
 
@@ -174,12 +204,12 @@ The row limit alone does not discard attached `eidData`, `metadata`, `securityEr
 { "eids": [101, 202], "service": "//blp/refdata" }
 ```
 
-Securities are passed through in the form the user supplied them: Bloomberg tickers as `<TICKER> <MARKET_SECTOR>` (for example `<TICKER> <EXCHANGE> Equity`, `<INDEX_TICKER> Index`, `<CCY_PAIR> Curncy`), raw ISINs as `/isin/<ISIN>`, raw CUSIPs as `/cusip/<CUSIP>`. The market sector ending is Bloomberg's yellow key — `Equity`, `Index`, `Curncy`, `Comdty`, `Corp`, `Govt`, `Muni`, `Mtge`, `M-Mkt`, or `Pfd` (preferred securities) — and request tools pass it through to Bloomberg unvalidated. The agent guidance and every securities/ticker field description instruct the model that the ticker format is a template, not authorization to construct one — identifiers are never converted into guessed tickers; `xbbg_resolve_isins` exists for explicit resolution. Note `xbbg_ext_ticker`'s `parse_ticker` is narrower than the request tools: it parses generic futures-style tickers only (`Index`/`Curncy`/`Comdty`/`Corp`, or `<ROOT><N> <EXCHANGE> Equity`) and rejects other sectors.
+Securities are passed through in the form the user supplied them: Bloomberg tickers as `<TICKER> <MARKET_SECTOR>` (for example `<TICKER> <EXCHANGE> Equity`, `<INDEX_TICKER> Index`, `<CCY_PAIR> Curncy`), raw ISINs as `/isin/<ISIN>`, raw CUSIPs as `/cusip/<CUSIP>`. The auction recipes also accept valid bare ISINs and normalize them in the core. The market sector ending is Bloomberg's yellow key — `Equity`, `Index`, `Curncy`, `Comdty`, `Corp`, `Govt`, `Muni`, `Mtge`, `M-Mkt`, or `Pfd` (preferred securities) — and general request tools pass it through to Bloomberg unvalidated; auction recipes validate venue routing separately. The agent guidance and securities/ticker field descriptions instruct the model that the ticker format is a template, not authorization to construct one — identifiers are never converted into guessed tickers; `xbbg_resolve_isins` exists for explicit security resolution and `xbbg_resolve_venues` for venue resolution. Note `xbbg_ext_ticker`'s `parse_ticker` is narrower than the request tools: it parses generic futures-style tickers only (`Index`/`Curncy`/`Comdty`/`Corp`, or `<ROOT><N> <EXCHANGE> Equity`) and rejects other sectors.
 BQL is passed as one complete expression string. Use placeholder shapes such as `get(<FIELD>) for('<TICKER> <MARKET_SECTOR>')`, `get(<FIELD_1>, <FIELD_2>) for(['<TICKER_1> <MARKET_SECTOR>', '<TICKER_2> <MARKET_SECTOR>'])`, `get(<FIELD>, <WEIGHT_FIELD>) for(holdings('<ETF_TICKER> <MARKET_SECTOR>'))`, or `get(<FIELD>) for(members('<INDEX_TICKER> <MARKET_SECTOR>')) with(...)`. Prefer `xbbg_bdp`/`xbbg_bdh` for simple reference or historical requests.
 
 Dealer quote / BQR workflows in xbbg use fixed-income identifiers with a quote source, for example `/isin/<ISIN>@<QUOTE_SOURCE> <MARKET_SECTOR>`; use `xbbg_bqr` for that workflow and `xbbg_bdtick` for raw intraday ticks.
 
-Streaming surfaces are intentionally exposed only as bounded snapshot tools. Each snapshot requires `maxUpdates`, applies the configured `maxStreamUpdates`/`maxStreamWaitMs` caps, stops on count, timeout, or stream completion, and calls `unsubscribe(false)` unless `drain: true` is explicitly provided. The package does not expose open-ended async subscription iterators as agent tools. If collection succeeds but releasing the subscription fails, the snapshot result still returns the collected updates and reports the failure in an `unsubscribeError` field instead of discarding data.
+Streaming surfaces are intentionally exposed only as bounded snapshot tools (`xbbg_stream_snapshot`, `xbbg_mktbar_snapshot`, and `xbbg_depth_snapshot`). Each streaming snapshot requires `maxUpdates`, applies the configured `maxStreamUpdates`/`maxStreamWaitMs` caps, stops on count, timeout, or stream completion, and calls `unsubscribe(false)` unless `drain: true` is explicitly provided. The package does not expose open-ended async subscription iterators as agent tools. If collection succeeds but releasing the subscription fails, the snapshot result still returns the collected updates and reports the failure in an `unsubscribeError` field instead of discarding data.
 
 Arrow snapshot rows share one materialization allowance across all updates, not a fresh allowance for each table: at most `min(max(maxRows, maxContentRows), floor(maxResultNodes / 3))` rows are read before projection. Materialized rows are charged to the same aggregate node budget used for result bounding. An update cut short at this stage carries `rowCount`, `rows`, `truncated`, and a `truncation` diagnostic with `reason: "max_rows"` and `omittedRowsAtLeast`. A collection failure remains the primary thrown error even if unsubscribe also fails.
 

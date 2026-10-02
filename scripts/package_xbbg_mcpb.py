@@ -513,6 +513,14 @@ def build_manifest(version: str) -> dict[str, object]:
             {"name": "bql", "description": "Bloomberg Query Language request."},
             {"name": "bsrch", "description": "Bloomberg search request."},
             {"name": "bflds", "description": "Bloomberg field metadata lookup."},
+            {
+                "name": "resolve_venues",
+                "description": "Route composite equities to primary exchange listings and preferreds to venue pricing sources.",
+            },
+            {
+                "name": "auction_snapshot",
+                "description": "Bloomberg primary-venue auction reference data; terminal-local times, no delayed/real-time flag.",
+            },
             {"name": "check_entitlements", "description": "Bloomberg entitlement-ID check for a service."},
             {"name": "request", "description": "Generic Bloomberg request."},
         ],

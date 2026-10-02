@@ -47,6 +47,7 @@ export type {
   ChartSpecInput,
 } from "./ext-schemas";
 export {
+  createAuctionSnapshotTool,
   createBdhTool,
   createBdibTool,
   createBeqsTool,
@@ -63,6 +64,7 @@ export {
   createMktbarSnapshotTool,
   createPreferredsTool,
   createResolveIsinsTool,
+  createResolveVenuesTool,
   createStreamSnapshotTool,
   createYasTool,
   createBloombergTools,

@@ -401,7 +401,8 @@ async def test_field_exposure_modes():
     ticker = ["ES1 Index"]
     requested_fields = ["LAST_PRICE", "BID", "ASK"]
     metadata_fields = {"MKTDATA_EVENT_TYPE", "MKTDATA_EVENT_SUBTYPE"}
-    base_columns = {"timestamp", "topic"}
+    # Every Arrow subscription batch carries the sparse-update presence bitmap (1.4.12+).
+    base_columns = {"timestamp", "topic", "__xbbg_present"}
 
     print(f"\n{'=' * 60}")
     print("TEST: Field exposure modes")

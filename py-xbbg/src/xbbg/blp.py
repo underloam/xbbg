@@ -69,11 +69,15 @@ _FIELD_TYPE_RESOLUTION_CACHE: dict[tuple[tuple[str, ...], str], dict[str, str]] 
 _FIELD_TYPE_RESOLUTION_CACHE_LOCK = threading.Lock()
 _FIELD_TYPE_RESOLUTION_CACHE_GENERATION = 0
 _DEFAULT_SYNC_STREAM_CAPACITY = 256
-_DEFAULT_MAX_SYNC_STREAM_PRODUCERS = 32
-_SYNC_STREAM_PRODUCERS_LOCK = threading.Lock()
-_GLOBAL_SYNC_STREAM_PRODUCER_SCOPE = object()
-_ACTIVE_SYNC_STREAM_PRODUCERS: dict[object, set[object]] = {}
+_DEFAULT_MAX_SUBSCRIPTION_SESSIONS = 32
+_SYNC_STREAM_SESSION_WAIT_MS = 5000
 _SYNC_STREAM_CLOSE_TIMEOUT_SECONDS = 1.0
+_SUBSCRIPTION_WARNING_SINK: contextvars.ContextVar[Callable[[str, type[Warning]], None] | None] = (
+    contextvars.ContextVar("xbbg_subscription_warning_sink", default=None)
+)
+_SYNC_STREAM_SESSION_LIMIT: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "xbbg_sync_stream_session_limit", default=None
+)
 
 
 def _clear_field_type_resolution_cache() -> None:
@@ -372,6 +376,10 @@ class Engine:
 
     def shutdown(self) -> None:
         self._py_engine.signal_shutdown()
+
+    def subscription_feeds(self) -> list[dict[str, Any]]:
+        """Return shared-feed diagnostics for this engine, without identity data."""
+        return self._py_engine.subscription_feeds()
 
 
 # =============================================================================
@@ -1904,7 +1912,10 @@ async def abdp(
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
         format: Output format. Options:
             - Format.LONG (default): ticker, field, value (strings)
-            - Format.LONG_TYPED: ticker, field, value_f64, value_i64, etc.
+            - Format.LONG_TYPED: ticker, field, value_f64, value_i64,
+              value_str, value_bool, value_date, value_ts, value_time.
+              Dates use Date32, full datetimes use UTC timestamps, and
+              time-only values use Time64 microseconds in value_time.
             - Format.LONG_WITH_METADATA: ticker, field, value, dtype
         field_types: Manual type overrides for fields (e.g., {'VOLUME': 'int64'}).
             If None, types are auto-resolved from Bloomberg field metadata.
@@ -1961,7 +1972,10 @@ async def abdh(
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
         format: Output format. Options:
             - Format.LONG (default): ticker, date, field, value (strings)
-            - Format.LONG_TYPED: ticker, date, field, value_f64, value_i64, etc.
+            - Format.LONG_TYPED: ticker, date, field, value_f64, value_i64,
+              value_str, value_bool, value_date, value_ts, value_time.
+              Dates use Date32, full datetimes use UTC timestamps, and
+              time-only values use Time64 microseconds in value_time.
             - Format.LONG_WITH_METADATA: ticker, date, field, value, dtype
         field_types: Manual type overrides for fields (e.g., {'VOLUME': 'int64'}).
             If None, types are auto-resolved from Bloomberg field metadata.
@@ -2617,6 +2631,32 @@ class Tick:
     timestamp: datetime
 
 
+def subscription_feeds() -> list[dict[str, Any]]:
+    """Return retained upstream feeds for the active engine.
+
+    Each row contains ``service``, ``topic``, ``options`` (list), ``fields``
+    (union list), ``consumers``, ``delayed`` (bool or None), ``state``,
+    ``isolated``, and ``field_errors`` (field-to-category dict). Closed feeds
+    leave the registry; this is a current snapshot, not an event history.
+    """
+    return _get_engine().subscription_feeds()
+
+
+def _warn_subscription(message: str, category: type[Warning]) -> None:
+    sink = _SUBSCRIPTION_WARNING_SINK.get()
+    if sink is not None:
+        sink(message, category)
+        return
+    frame = sys._getframe(1)
+    stacklevel = 2
+    while frame is not None and (
+        frame.f_globals.get("__name__", "") == "xbbg" or frame.f_globals.get("__name__", "").startswith("xbbg.")
+    ):
+        stacklevel += 1
+        frame = frame.f_back
+    warnings.warn(message, category, stacklevel=stacklevel)
+
+
 class Subscription:
     """Subscription handle with async iteration and dynamic control.
 
@@ -2674,10 +2714,14 @@ class Subscription:
         return lambda batch: converter(batch.to_table(), backend)
 
     def __aiter__(self):
+        if not self._sub.delivers_rows:
+            raise RuntimeError("rows=False subscriptions do not yield rows; use latest() instead")
         return self
 
     async def __anext__(self) -> Any:
         try:
+            if not self._sub.delivers_rows:
+                raise RuntimeError("rows=False subscriptions do not yield rows; use latest() instead")
             if self._tick_mode:
                 return await self._sub.__anext_tick_dict__()
 
@@ -2688,31 +2732,90 @@ class Subscription:
                 raise
             raise mapped from exc
 
+        finally:
+            self._emit_warnings()
         return self._convert_batch(batch)
 
-    async def add(self, tickers: str | list[str]) -> None:
+    def _emit_warnings(self) -> None:
+        pending = self._sub.take_warnings()
+        if not pending:
+            return
+        from .exceptions import BlpDelayedDataWarning, BlpFieldWarning, BlpSubscriptionWarning
+
+        categories = {"DelayedStream": BlpDelayedDataWarning, "FieldException": BlpFieldWarning}
+        for event in pending:
+            kind = event["message_type"]
+            detail = event.get("detail") or kind
+            topic = event.get("topic")
+            message = f"{topic}: {detail}" if topic else detail
+            _warn_subscription(message, categories.get(kind, BlpSubscriptionWarning))
+
+    async def add(self, tickers: str | list[str], aliases: Mapping[str, str] | None = None) -> None:
         """Add tickers to subscription dynamically.
 
         Args:
             tickers: Single ticker or list of tickers to add
+            aliases: Bloomberg topic to consumer label mapping. Labels appear
+                in rows, status, and ``remove``.
         """
         ticker_list = self._topic_normalizer(tickers)
         logger.debug("subscription add: %s", ticker_list)
         try:
-            await self._sub.add(ticker_list)
+            native_aliases = (
+                None
+                if aliases is None
+                else {self._topic_normalizer(topic)[0]: label for topic, label in aliases.items()}
+            )
+            await self._sub.add(ticker_list, aliases=native_aliases)
         except Exception as exc:
             mapped = _normalize_engine_exception(exc)
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            self._emit_warnings()
+
+    async def add_fields(self, fields: str | Sequence[str]) -> None:
+        """Add projected fields; shared upstream field unions grow but never shrink."""
+        try:
+            await self._sub.add_fields(_normalize_fields(fields))
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        finally:
+            self._emit_warnings()
+
+    def latest(self, backend: Backend | str | None = None) -> DataFrameResult:
+        """Return the materialized image, independently of the iteration output mode.
+
+        Columns are ``topic`` (consumer label), ``last_update`` (UTC),
+        ``live``, ``delayed``, and projected data fields. Unknown values and
+        explicit clears are null. ``backend`` follows ordinary request results.
+        """
+        try:
+            batch = self._sub.latest()
+            return _convert_result_backend(batch, backend)
+        except Exception as exc:
+            mapped = _normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        finally:
+            self._emit_warnings()
 
     async def remove(self, tickers: str | list[str]) -> None:
-        """Remove tickers from subscription dynamically.
+        """Remove consumer labels (or unaliased tickers) dynamically.
 
         Args:
-            tickers: Single ticker or list of tickers to remove
+            tickers: Single consumer label or list of labels to remove
         """
-        ticker_list = self._topic_normalizer(tickers)
+        active_labels = set(self.tickers)
+        ticker_list = [
+            ticker if ticker in active_labels else self._topic_normalizer(ticker)[0]
+            for ticker in _normalize_tickers(tickers)
+        ]
         logger.debug("subscription remove: %s", ticker_list)
         try:
             await self._sub.remove(ticker_list)
@@ -2744,12 +2847,22 @@ class Subscription:
         return [{"ticker": ticker, "reason": reason, "kind": kind} for ticker, reason, kind in self._sub.failures]
 
     @property
-    def topic_states(self) -> dict[str, dict[str, int | str]]:
-        """Topic lifecycle state keyed by ticker/topic."""
+    def topic_states(self) -> dict[str, dict[str, int | str | bool | None]]:
+        """Topic lifecycle, delayed flag, and upstream topic keyed by consumer label."""
         return {
-            ticker: {"state": state, "last_change_us": last_change_us}
-            for ticker, state, last_change_us in self._sub.topic_states
+            ticker: {
+                "state": state,
+                "last_change_us": last_change_us,
+                "delayed": delayed,
+                "feed_topic": feed_topic,
+            }
+            for ticker, state, last_change_us, delayed, feed_topic in self._sub.topic_states
         }
+
+    @property
+    def field_errors(self) -> dict[str, dict[str, str]]:
+        """Rejected explicit fields, keyed by consumer label then field name."""
+        return self._sub.field_errors
 
     @property
     def session_status(self) -> dict[str, int | str]:
@@ -2771,7 +2884,7 @@ class Subscription:
 
     @property
     def events(self) -> list[dict[str, str | int | None]]:
-        """Bounded lifecycle/event history for the subscription."""
+        """Bounded event history, including warnings and DataLoss/FeedRecovered notices."""
         return [
             {
                 "at_us": at_us,
@@ -2793,6 +2906,7 @@ class Subscription:
             "tickers": self.tickers,
             "failed_tickers": self.failed_tickers,
             "topic_states": self.topic_states,
+            "field_errors": self.field_errors,
             "session": self.session_status,
             "admin": self.admin_status,
             "services": self.service_status,
@@ -2852,6 +2966,8 @@ class Subscription:
             if mapped is exc:
                 raise
             raise mapped from exc
+        finally:
+            self._emit_warnings()
         if not drain:
             return None
         if self._tick_mode:
@@ -2883,6 +2999,12 @@ async def asubscribe(
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
     output: str | None = None,
+    aliases: Mapping[str, str] | None = None,
+    on_delayed: str = "warn",
+    isolated: bool = False,
+    rows: bool = True,
+    on_field_error: str = "warn",
+    zero_as_null: Sequence[str] | None = None,
 ) -> Subscription:
     """Create an async subscription to real-time market data.
 
@@ -2892,14 +3014,23 @@ async def asubscribe(
     Subscription recovery is handled automatically by the Bloomberg SDK (see
     BLPAPI ChangeLog v3.11.6); per-subscription availability transitions fire
     as ``SubscriptionStreamsActivated`` / ``SubscriptionStreamsDeactivated``
-    events which are reflected in ``sub.topic_states`` (``streams_active``).
+    events available in ``sub.events``.
 
     Dict ticks are sparse deltas: missing keys are unchanged, while present
     ``None`` values explicitly clear fields. Arrow batches append the binary
     ``__xbbg_present`` bitset (LSB-first; bit i maps to schema field i + 2).
-    Bloomberg DATALOSS or local queue loss raises
-    ``BlpSubscriptionDataLossError`` and ends the stream; resubscribe for a
-    fresh image. Connection-down notifications alone remain nonterminal.
+    For row consumers, Bloomberg DATALOSS or local queue loss raises
+    ``BlpSubscriptionDataLossError`` and ends the stream. Image-only consumers
+    (``rows=False``) recover from DATALOSS with a fresh paint; ``sub.events``
+    records DataLoss/FeedRecovered. Session termination does not auto-recover.
+    Connection-down notifications alone remain nonterminal.
+
+    Market-data feeds are shared within an engine by default. A late row consumer
+    receives a projected image. Field-union repaints reach waiting consumers in
+    full; existing consumers receive only changed projected values and clears.
+    Filtered streams omit rows with none of their data fields.
+    ``all_fields=True`` also exposes scalar fields induced by other consumers.
+    Other services are always isolated and keep their service-specific semantics.
 
     Args:
         tickers: Securities to subscribe to
@@ -2913,7 +3044,7 @@ async def asubscribe(
         service: Bloomberg service (e.g., '//blp/mktdata'). For BPS services
             such as ``//blp/mktbar`` and ``//blp/mktvwap``, tickers are
             normalized to explicit service topics.
-        options: List of subscription options. If provided, uses subscribe_with_options
+        options: List of Bloomberg subscription options.
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
             Quote updates are conflated by Bloomberg; trades are still delivered as received.
         tick_mode: If True, return native dict ticks without building Arrow (implies raw=True)
@@ -2925,6 +3056,20 @@ async def asubscribe(
         output: Output selector: ``"record_batch"``, ``"backend"``, ``"dict"``,
             or ``"tick"`` (case-insensitive). When provided, it takes precedence
             over ``raw`` and ``tick_mode``; ``None`` retains their behavior.
+        aliases: Bloomberg topic to consumer label mapping. Labels replace
+            topics in rows, status, ``tickers``, and ``remove``.
+        on_delayed: ``"warn"`` emits one BlpDelayedDataWarning per topic;
+            ``"raise"`` rejects only that topic; ``"ignore"`` records the flag
+            without a warning.
+        isolated: If True, use private feeds and a dedicated subscription session.
+        rows: If False, maintain an image without queuing rows. Iteration raises
+            RuntimeError; read ``latest()`` instead. Image-only consumers cannot
+            overflow a row queue.
+        on_field_error: ``"warn"`` emits BlpFieldWarning for rejected explicit
+            fields; ``"raise"`` rejects the affected topic; ``"ignore"`` records
+            ``field_errors`` without warnings.
+        zero_as_null: Field names whose numeric zero values become null in
+            ``latest()`` only. Rows and stored images remain unchanged.
 
     Returns:
         Subscription handle for iteration and control
@@ -3014,33 +3159,50 @@ async def asubscribe(
     engine = _get_engine()
     logger.debug("subscribe: tickers=%s fields=%s", ticker_list, field_list)
 
-    # Use subscribe_with_options if service, subscription options, or config params provided
-    if (
-        subscription_service is not None
-        or subscription_options is not None
-        or flush_threshold is not None
-        or stream_capacity is not None
-        or overflow_policy is not None
-    ):
-        opt_kwargs = {
-            k: v
-            for k, v in {
-                "flush_threshold": flush_threshold,
-                "stream_capacity": stream_capacity,
-                "overflow_policy": overflow_policy,
-                "all_fields": all_fields,
-            }.items()
-            if v is not None
-        }
-        py_sub = await engine.subscribe_with_options(
-            subscription_service or "//blp/mktdata",
-            ticker_list,
-            field_list,
-            subscription_options or [],
-            **opt_kwargs,
-        )
-    else:
-        py_sub = await engine.subscribe(ticker_list, field_list, all_fields=all_fields)
+    session_limit = _SYNC_STREAM_SESSION_LIMIT.get()
+    native_kwargs: dict[str, Any] = {
+        "all_fields": all_fields,
+        "aliases": None if aliases is None else {topic_normalizer(topic)[0]: label for topic, label in aliases.items()},
+        "on_delayed": on_delayed,
+        "isolated": isolated,
+        "rows": rows,
+        "on_field_error": on_field_error,
+        "zero_as_null": None if zero_as_null is None else _normalize_fields(zero_as_null),
+        "session_wait_ms": _SYNC_STREAM_SESSION_WAIT_MS if session_limit is not None else None,
+    }
+    try:
+        if (
+            subscription_service is not None
+            or subscription_options is not None
+            or flush_threshold is not None
+            or stream_capacity is not None
+            or overflow_policy is not None
+        ):
+            native_kwargs.update(
+                (key, value)
+                for key, value in {
+                    "flush_threshold": flush_threshold,
+                    "stream_capacity": stream_capacity,
+                    "overflow_policy": overflow_policy,
+                }.items()
+                if value is not None
+            )
+            py_sub = await engine.subscribe_with_options(
+                subscription_service or "//blp/mktdata",
+                ticker_list,
+                field_list,
+                subscription_options or [],
+                **native_kwargs,
+            )
+        else:
+            py_sub = await engine.subscribe(ticker_list, field_list, **native_kwargs)
+    except Exception as exc:
+        if session_limit is not None:
+            from . import _core
+
+            if isinstance(exc, _core.BlpValidationError) and str(exc).startswith("Configuration error: session_wait:"):
+                raise RuntimeError(f"sync stream producer limit reached ({session_limit})") from exc
+        raise
 
     return Subscription(
         py_sub,
@@ -3064,6 +3226,11 @@ async def astream(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    aliases: Mapping[str, str] | None = None,
+    on_delayed: str = "warn",
+    isolated: bool = False,
+    on_field_error: str = "warn",
+    zero_as_null: Sequence[str] | None = None,
 ):
     """High-level async streaming - simple iteration.
 
@@ -3083,6 +3250,13 @@ async def astream(
         stream_capacity: Capacity of the native subscription stream.
         overflow_policy: Overflow policy for the native stream: ``"drop_newest"``
             (default) or ``"block"``.
+        aliases: Bloomberg topic to consumer label mapping.
+        on_delayed: ``"warn"`` (default), ``"raise"`` (reject delayed topics),
+            or ``"ignore"`` (flag only).
+        isolated: Use private feeds instead of sharing market-data subscriptions.
+        on_field_error: Rejected-field policy: ``"warn"``, ``"raise"``, or ``"ignore"``.
+        zero_as_null: Fields whose numeric zeros are null in latest images only;
+            emitted rows retain the original values.
 
     Yields:
         Batches of market data (RecordBatch, DataFrame, or dict)
@@ -3114,6 +3288,11 @@ async def astream(
         flush_threshold=flush_threshold,
         stream_capacity=stream_capacity,
         overflow_policy=overflow_policy,
+        aliases=aliases,
+        on_delayed=on_delayed,
+        isolated=isolated,
+        on_field_error=on_field_error,
+        zero_as_null=zero_as_null,
     ) as sub:
         async for batch in sub:
             if callback is not None:
@@ -3124,40 +3303,19 @@ async def astream(
             yield batch
 
 
-def _reserve_sync_stream_producer() -> tuple[object, object]:
+def _sync_stream_session_limit() -> int:
+    """Capture the configured pool limit for sync claim-timeout diagnostics."""
     scoped = _active_engine.get()
     if scoped is not None:
-        scope: object = scoped
         config = getattr(scoped, "_config_snapshot", None)
     else:
-        scope = _GLOBAL_SYNC_STREAM_PRODUCER_SCOPE
         with _engine_lock:
             config = _config
-
     try:
-        limit = int(getattr(config, "max_subscription_sessions", _DEFAULT_MAX_SYNC_STREAM_PRODUCERS))
+        limit = int(getattr(config, "max_subscription_sessions", _DEFAULT_MAX_SUBSCRIPTION_SESSIONS))
     except (TypeError, ValueError):
-        limit = _DEFAULT_MAX_SYNC_STREAM_PRODUCERS
-    limit = max(1, limit)
-
-    slot = object()
-    with _SYNC_STREAM_PRODUCERS_LOCK:
-        active = _ACTIVE_SYNC_STREAM_PRODUCERS.setdefault(scope, set())
-        if len(active) >= limit:
-            raise RuntimeError(f"sync stream producer limit reached ({limit})")
-        active.add(slot)
-    return scope, slot
-
-
-def _release_sync_stream_producer(reservation: tuple[object, object]) -> None:
-    scope, slot = reservation
-    with _SYNC_STREAM_PRODUCERS_LOCK:
-        active = _ACTIVE_SYNC_STREAM_PRODUCERS.get(scope)
-        if active is None:
-            return
-        active.discard(slot)
-        if not active:
-            _ACTIVE_SYNC_STREAM_PRODUCERS.pop(scope, None)
+        limit = _DEFAULT_MAX_SUBSCRIPTION_SESSIONS
+    return max(1, limit)
 
 
 def stream(
@@ -3173,10 +3331,19 @@ def stream(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    aliases: Mapping[str, str] | None = None,
+    on_delayed: str = "warn",
+    isolated: bool = False,
+    on_field_error: str = "warn",
+    zero_as_null: Sequence[str] | None = None,
 ):
     """High-level sync streaming using the managed background event loop.
 
     Use astream() directly from async contexts.
+
+    New pool-session claims wait at most five seconds before raising the producer
+    limit RuntimeError. Joining existing shared feeds needs no session claim and
+    never waits for capacity. There is no separate Python producer counter.
 
     Args:
         tickers: Securities to subscribe to
@@ -3192,6 +3359,13 @@ def stream(
             sync bridge. Defaults to 256.
         overflow_policy: Overflow policy for the native stream: ``"drop_newest"``
             (default) or ``"block"``.
+        aliases: Bloomberg topic to consumer label mapping.
+        on_delayed: ``"warn"`` (default), ``"raise"`` (reject delayed topics),
+            or ``"ignore"`` (flag only).
+        isolated: Use private feeds instead of sharing market-data subscriptions.
+        on_field_error: Rejected-field policy: ``"warn"``, ``"raise"``, or ``"ignore"``.
+        zero_as_null: Fields whose numeric zeros are null in latest images only;
+            emitted rows retain the original values.
 
     Yields:
         Batches of market data
@@ -3217,6 +3391,20 @@ def stream(
     producer_space_available: asyncio.Event | None = None
     producer_error: BaseException | None = None
 
+    pending_warnings: queue.SimpleQueue[tuple[str, type[Warning]]] = queue.SimpleQueue()
+
+    def forward_warning(message: str, category: type[Warning]) -> None:
+        pending_warnings.put((message, category))
+        consumer_wakeup.set()
+
+    def emit_pending_warnings() -> None:
+        while True:
+            try:
+                message, category = pending_warnings.get_nowait()
+            except queue.Empty:
+                return
+            _warn_subscription(message, category)
+
     async def run_stream() -> None:
         nonlocal producer_loop, producer_space_available
         producer_loop = asyncio.get_running_loop()
@@ -3235,7 +3423,14 @@ def stream(
             flush_threshold=flush_threshold,
             stream_capacity=stream_capacity,
             overflow_policy=overflow_policy,
+            aliases=aliases,
+            on_delayed=on_delayed,
+            isolated=isolated,
+            on_field_error=on_field_error,
+            zero_as_null=zero_as_null,
         )
+        warning_token = _SUBSCRIPTION_WARNING_SINK.set(forward_warning)
+        session_token = _SYNC_STREAM_SESSION_LIMIT.set(session_limit)
         try:
             async for batch in source:
                 while not stop_event.is_set():
@@ -3250,14 +3445,14 @@ def stream(
                 else:
                     break
         finally:
-            await source.aclose()
+            try:
+                await source.aclose()
+            finally:
+                _SUBSCRIPTION_WARNING_SINK.reset(warning_token)
+                _SYNC_STREAM_SESSION_LIMIT.reset(session_token)
 
-    producer_slot = _reserve_sync_stream_producer()
-    try:
-        producer_call = _notebook_sync_bridge.start(run_stream, (), {})
-    except BaseException:
-        _release_sync_stream_producer(producer_slot)
-        raise
+    session_limit = _sync_stream_session_limit()
+    producer_call = _notebook_sync_bridge.start(run_stream, (), {})
 
     def producer_finished(result: concurrent.futures.Future[Any]) -> None:
         nonlocal producer_error
@@ -3270,7 +3465,6 @@ def stream(
             if not stop_event.is_set():
                 producer_error = error
         finally:
-            _release_sync_stream_producer(producer_slot)
             producer_done.set()
             consumer_wakeup.set()
 
@@ -3279,6 +3473,7 @@ def stream(
     try:
         while True:
             consumer_wakeup.clear()
+            emit_pending_warnings()
             try:
                 batch = data_queue.get_nowait()
             except queue.Empty:
@@ -3302,6 +3497,7 @@ def stream(
                     callback(batch)
                 except Exception as error:
                     logger.warning("callback raised exception: %s", error, exc_info=True)
+            emit_pending_warnings()
             yield batch
 
         if producer_error is not None:
@@ -3333,6 +3529,13 @@ def stream(
                     exc_info=(type(error), error, error.__traceback__),
                 )
             else:
+                raise
+        finally:
+            try:
+                emit_pending_warnings()
+            except Warning as warning_error:
+                if active_error is not None and not isinstance(active_error, GeneratorExit):
+                    raise active_error from warning_error
                 raise
 
 

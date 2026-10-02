@@ -2994,7 +2994,9 @@ dependencies = [
  "serde_json",
  "tokio",
  "xbbg-async",
+ "xbbg-ext",
  "xbbg-log",
+ "xbbg-recipes",
  "xbbg_core",
 ]
 

@@ -19,6 +19,8 @@ pub struct FieldMeta {
     pub name: Arc<str>,
     pub index: FieldIndex,
     pub kind: FieldKind,
+    /// Metadata hints yield to the first SDK-observed kind.
+    pub(crate) provisional: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +52,7 @@ pub struct UpdateField {
     pub value: UpdateValue,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum UpdateValue {
     /// An explicitly present Bloomberg null, never an absent or unreadable field.
     Null,
@@ -80,6 +82,7 @@ impl FieldMeta {
             name: name.into(),
             index,
             kind,
+            provisional: false,
         }
     }
 }

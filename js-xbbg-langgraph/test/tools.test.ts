@@ -5,7 +5,9 @@ import { ToolNode } from "@langchain/langgraph/prebuilt";
 import {
   BLOOMBERG_TOOL_NAMES,
   createAllBloombergTools,
+  createAuctionSnapshotTool,
   createBloombergTools,
+  createResolveVenuesTool,
   toolParameterJsonSchema,
 } from "../src";
 import { createToolResult, limitResult, type ResultLimitOptions } from "../src/result-limits";
@@ -71,6 +73,8 @@ function fakeEngine(): XbbgEngineLike {
     corporateBonds: vi.fn(async () => [{ ticker: "AAPL 3.25 02/23/26 Corp" }]),
     indexMembers: vi.fn(async () => [{ member: "AAPL US Equity" }]),
     resolveIsins: vi.fn(async () => [{ isin: "US0378331005", security: "AAPL US Equity" }]),
+    resolveVenues: vi.fn(async () => []),
+    auctionSnapshot: vi.fn(async () => []),
     issuerIsins: vi.fn(async () => [{ issuer: "Apple Inc", isin: "US037833FB15" }]),
     etfHoldings: vi.fn(async () => [{ ticker: "AAPL US Equity", weight: 0.07 }]),
     stream: vi.fn(async () => fakeSubscription([]).subscription),
@@ -185,6 +189,8 @@ describe("Bloomberg request tools", () => {
     const tools = createAllBloombergTools({ core });
 
     expect(tools.map((entry) => entry.name)).toContain("xbbg_bdp");
+    expect(tools.map((entry) => entry.name)).toContain("xbbg_resolve_venues");
+    expect(tools.map((entry) => entry.name)).toContain("xbbg_auction_snapshot");
     expect(core.connect).not.toHaveBeenCalled();
   });
 
@@ -192,12 +198,20 @@ describe("Bloomberg request tools", () => {
     const engine = fakeEngine();
     const tools = createBloombergTools({
       core: fakeCore(engine),
-      disabledTools: ["xbbg_beqs", "xbbg_etf_holdings", "xbbg_stream_snapshot"],
+      disabledTools: [
+        "xbbg_beqs",
+        "xbbg_etf_holdings",
+        "xbbg_resolve_venues",
+        "xbbg_auction_snapshot",
+        "xbbg_stream_snapshot",
+      ],
     });
 
     const names = tools.map((entry) => entry.name);
     expect(names).not.toContain("xbbg_beqs");
     expect(names).not.toContain("xbbg_etf_holdings");
+    expect(names).not.toContain("xbbg_resolve_venues");
+    expect(names).not.toContain("xbbg_auction_snapshot");
     expect(names).not.toContain("xbbg_stream_snapshot");
     expect(names).toContain("xbbg_yas");
   });
@@ -1529,6 +1543,262 @@ describe("Bloomberg request tools", () => {
       rows: [{ value: 1 }],
       truncatedInput: true,
     });
+  });
+});
+
+describe("Bloomberg auction recipes", () => {
+  it("retains venue failures and duplicate input order in independently bounded results", async () => {
+    const engine = fakeEngine();
+    const resolved = {
+      input_order: 0,
+      security: "IBM US Equity",
+      lookup: "IBM US Equity",
+      kind: "equity",
+      composite: "IBM US Equity",
+      venue_topic: "IBM UN Equity",
+      venue_figi: "SYNTHETIC_FIGI",
+      method: "exchange_ticker",
+      exch_code: "UN",
+      mic: "XNYS",
+      pricing_source: "UN",
+      status: "resolved",
+      error: null,
+    };
+    const rows = [
+      resolved,
+      {
+        input_order: 1,
+        security: "SYNTHETIC Index",
+        lookup: "SYNTHETIC Index",
+        kind: "index",
+        composite: null,
+        venue_topic: null,
+        venue_figi: null,
+        method: null,
+        exch_code: null,
+        mic: null,
+        pricing_source: null,
+        status: "unsupported",
+        error: "Unsupported market sector Index",
+      },
+      { ...resolved, input_order: 2 },
+    ];
+    vi.mocked(engine.resolveVenues).mockResolvedValueOnce(rows);
+    const tool = createResolveVenuesTool({
+      core: fakeCore(engine),
+      maxContentRows: 3,
+      maxRows: 2,
+    });
+
+    const [content, artifact] = await invokeArtifact(tool, {
+      securities: [" IBM US Equity ", "SYNTHETIC Index", "IBM US Equity"],
+      pcsOverrides: { " NEW YORK ": " SNY2 " },
+    });
+    const preview = JSON.parse(content.split("\n")[1] ?? "{}") as Record<string, unknown>;
+
+    expect(engine.resolveVenues).toHaveBeenCalledWith(
+      ["IBM US Equity", "SYNTHETIC Index", "IBM US Equity"],
+      { backend: "json", pcsOverrides: { "NEW YORK": "SNY2" } },
+    );
+    expect(artifact).toMatchObject({
+      tool: "xbbg_resolve_venues",
+      rowCount: 3,
+      hasErrors: true,
+      truncated: true,
+      truncation: { reasons: ["max_rows"] },
+    });
+    expect(artifact.data).toEqual(rows.slice(0, 2));
+    expect(preview.data).toEqual(rows);
+  });
+
+  it("preserves typed snapshot values and null failure rows without leaking per-call options", async () => {
+    const engine = fakeEngine();
+    const rows = [
+      {
+        input_order: 0,
+        security: "IBM US Equity",
+        venue_topic: "IBM UN Equity",
+        status: "resolved",
+        error: null,
+        IN_AUCTION_RT: false,
+        ORDER_IMB_BUY_VOLUME: 0n,
+        THEORETICAL_TIME_TODAY_RT: 57_541_123_456n,
+        CLOSING_AUCTION_VOLUME_DATE_RT: Date.UTC(2026, 0, 2),
+      },
+      {
+        input_order: 1,
+        security: "/isin/US0000000002",
+        venue_topic: "/isin/US0000000002@SNY2",
+        status: "mismatch",
+        error: "Expected pricing source SNY2, received EXCH",
+        IN_AUCTION_RT: null,
+        ORDER_IMB_BUY_VOLUME: null,
+        THEORETICAL_TIME_TODAY_RT: null,
+        CLOSING_AUCTION_VOLUME_DATE_RT: null,
+      },
+      {
+        input_order: 2,
+        security: "SYNTHETIC",
+        venue_topic: null,
+        status: "unresolved",
+        error: "Missing MARKET_SECTOR_DES",
+        IN_AUCTION_RT: null,
+        ORDER_IMB_BUY_VOLUME: null,
+        THEORETICAL_TIME_TODAY_RT: null,
+        CLOSING_AUCTION_VOLUME_DATE_RT: null,
+      },
+    ];
+    const defaultRows = [
+      {
+        input_order: 0,
+        security: "AAPL US Equity",
+        venue_topic: "AAPL UW Equity",
+        status: "resolved",
+        error: null,
+        IMBALANCE_INDIC_RT: "NOIM",
+      },
+    ];
+    vi.mocked(engine.auctionSnapshot)
+      .mockResolvedValueOnce(rows)
+      .mockResolvedValueOnce(defaultRows);
+    const tool = createAuctionSnapshotTool({ core: fakeCore(engine) });
+
+    const [content, artifact] = await invokeArtifact(tool, {
+      securities: [" IBM US Equity ", "/isin/US0000000002", "SYNTHETIC"],
+      fields: [
+        " IN_AUCTION_RT ",
+        " ORDER_IMB_BUY_VOLUME ",
+        "THEORETICAL_TIME_TODAY_RT",
+        "CLOSING_AUCTION_VOLUME_DATE_RT",
+      ],
+      pcsOverrides: { " NEW YORK ": " SNY2 " },
+    });
+    const preview = JSON.parse(content.split("\n")[1] ?? "{}") as Record<string, unknown>;
+
+    expect(engine.auctionSnapshot).toHaveBeenNthCalledWith(
+      1,
+      ["IBM US Equity", "/isin/US0000000002", "SYNTHETIC"],
+      {
+        backend: "json",
+        fields: [
+          "IN_AUCTION_RT",
+          "ORDER_IMB_BUY_VOLUME",
+          "THEORETICAL_TIME_TODAY_RT",
+          "CLOSING_AUCTION_VOLUME_DATE_RT",
+        ],
+        pcsOverrides: { "NEW YORK": "SNY2" },
+      },
+    );
+    expect(artifact).toMatchObject({
+      tool: "xbbg_auction_snapshot",
+      rowCount: 3,
+      hasErrors: true,
+      truncated: false,
+    });
+    const jsonRows = rows.map((row) => ({
+      ...row,
+      ORDER_IMB_BUY_VOLUME: row.ORDER_IMB_BUY_VOLUME?.toString() ?? null,
+      THEORETICAL_TIME_TODAY_RT: row.THEORETICAL_TIME_TODAY_RT?.toString() ?? null,
+    }));
+    expect(artifact.data).toEqual(jsonRows);
+    expect(preview.data).toEqual(jsonRows);
+
+    const defaultResult = await invokeJson(tool, {
+      securities: ["AAPL US Equity"],
+      fields: [],
+    });
+    expect(engine.auctionSnapshot).toHaveBeenNthCalledWith(2, ["AAPL US Equity"], {
+      backend: "json",
+      fields: [],
+      pcsOverrides: undefined,
+    });
+    expect(defaultResult.data).toEqual(defaultRows);
+  });
+
+  describe.each([
+    { name: "xbbg_resolve_venues", method: "resolveVenues" },
+    { name: "xbbg_auction_snapshot", method: "auctionSnapshot" },
+  ] as const)("$name", ({ name, method }) => {
+    it("keeps request-wide error identity and cause instead of returning empty data", async () => {
+      const engine = fakeEngine();
+      const failure = new Error("Reference request failed");
+      failure.name = "BlpRequestError";
+      vi.mocked(engine[method]).mockRejectedValueOnce(failure);
+      const tool = byName(createBloombergTools({ core: fakeCore(engine) }), name);
+
+      await expect(tool.invoke({ securities: ["IBM US Equity"] })).rejects.toMatchObject({
+        name: "BlpRequestError",
+        message: `${name} failed: Reference request failed`,
+        cause: failure,
+      });
+      expect(failure.message).toBe("Reference request failed");
+    });
+
+    it.each([
+      { label: "missing securities", input: {} },
+      { label: "a scalar security", input: { securities: "IBM US Equity" } },
+      { label: "empty securities", input: { securities: [] } },
+      { label: "blank securities", input: { securities: [" "] } },
+      { label: "non-string securities", input: { securities: [42] } },
+      {
+        label: "too many securities",
+        input: { securities: ["IBM US Equity", "AAPL US Equity", "MSFT US Equity"] },
+      },
+      { label: "an oversized security", input: { securities: ["X".repeat(33)] } },
+      { label: "a null PCS map", input: { securities: ["IBM US Equity"], pcsOverrides: null } },
+      { label: "an array PCS map", input: { securities: ["IBM US Equity"], pcsOverrides: [] } },
+      {
+        label: "a blank exchange name",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { " ": "SNY2" } },
+      },
+      {
+        label: "a blank pricing source",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { "NEW YORK": " " } },
+      },
+      {
+        label: "a numeric pricing source",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { "NEW YORK": 42 } },
+      },
+      {
+        label: "a nested pricing source",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { "NEW YORK": { source: "SNY2" } } },
+      },
+      {
+        label: "an oversized exchange name",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { ["X".repeat(33)]: "SNY2" } },
+      },
+      {
+        label: "an oversized pricing source",
+        input: { securities: ["IBM US Equity"], pcsOverrides: { "NEW YORK": "X".repeat(33) } },
+      },
+    ])("rejects $label before connecting", async ({ input }) => {
+      const engine = fakeEngine();
+      const core = fakeCore(engine);
+      const tool = byName(
+        createBloombergTools({ core, maxSecurities: 2, maxStringChars: 32 }),
+        name,
+      );
+
+      await expect(tool.invoke(input)).rejects.toThrow();
+      expect(core.connect).not.toHaveBeenCalled();
+      expect(engine[method]).not.toHaveBeenCalled();
+    });
+  });
+
+  it.each([
+    { label: "a scalar field", fields: "IMBALANCE_INDIC_RT" },
+    { label: "a non-string field", fields: [42] },
+    { label: "a blank field", fields: [" "] },
+    { label: "an oversized field", fields: ["X".repeat(33)] },
+    { label: "too many fields", fields: ["IN_AUCTION_RT", "ORDER_IMB_BUY_VOLUME"] },
+  ])("rejects $label before snapshot work starts", async ({ fields }) => {
+    const engine = fakeEngine();
+    const core = fakeCore(engine);
+    const tool = createAuctionSnapshotTool({ core, maxFields: 1, maxStringChars: 32 });
+
+    await expect(tool.invoke({ securities: ["IBM US Equity"], fields })).rejects.toThrow();
+    expect(core.connect).not.toHaveBeenCalled();
+    expect(engine.auctionSnapshot).not.toHaveBeenCalled();
   });
 });
 

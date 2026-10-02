@@ -15,6 +15,7 @@ use std::time::Duration;
 
 use arrow_array::RecordBatch;
 use futures_util::Stream;
+use parking_lot::Mutex;
 use tokio::sync::{mpsc, oneshot};
 
 use xbbg_core::BlpError;
@@ -187,7 +188,7 @@ impl Stream for RequestStream {
 /// Background thread enforcing slow-request warnings and hard timeouts.
 struct TimeoutScanner {
     stop: Arc<AtomicBool>,
-    thread: Option<JoinHandle<()>>,
+    thread: Mutex<Option<JoinHandle<()>>>,
 }
 
 impl TimeoutScanner {
@@ -228,7 +229,7 @@ impl TimeoutScanner {
             })?;
         Ok(Self {
             stop,
-            thread: Some(thread),
+            thread: Mutex::new(Some(thread)),
         })
     }
 
@@ -236,9 +237,11 @@ impl TimeoutScanner {
         self.stop.store(true, Ordering::Release);
     }
 
-    fn join(&mut self) {
+    fn join(&self) {
         self.signal_stop();
-        if let Some(thread) = self.thread.take() {
+        // Keep concurrent shutdown callers waiting until the join is complete.
+        let mut thread = self.thread.lock();
+        if let Some(thread) = thread.take() {
             let _ = thread.join();
         }
     }
@@ -501,13 +504,14 @@ impl RequestWorkerPool {
     /// Graceful shutdown - waits for all workers' sessions to stop (blocking).
     ///
     /// Use this for clean shutdown when you can afford to wait.
-    pub fn shutdown_blocking(&mut self) {
+    /// Shared owners may call this repeatedly; the scanner is joined once.
+    pub fn shutdown_blocking(&self) {
         self.shutting_down.store(true, Ordering::Release);
         xbbg_log::info!(
             pool_size = self.workers.len(),
             "shutting down request pool (blocking)"
         );
-        if let Some(scanner) = &mut self.scanner {
+        if let Some(scanner) = &self.scanner {
             scanner.join();
         }
         for worker in &self.workers {

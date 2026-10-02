@@ -120,6 +120,51 @@ impl TestEvent {
         // SAFETY: adopt that owned reference exactly once using the core ownership boundary.
         let event = unsafe { Event::from_raw(raw_event.as_ptr()) };
 
+        Self::append_raw(raw_event, definition, correlation_ids, format);
+        Self {
+            event,
+            _service: service,
+        }
+    }
+
+    /// Append another message to the same SDK event. A mutable borrow prevents
+    /// existing message views from being used while the event is extended.
+    pub fn append_message(
+        &mut self,
+        message_type: &str,
+        correlation_ids: &[i64],
+        format: impl FnOnce(&mut TestMessageFormatter),
+    ) {
+        let name = Name::get_or_intern(message_type);
+        let mut definition = ptr::null_mut();
+        // SAFETY: this fixture keeps its service alive; built-in definitions are SDK-owned.
+        let result = unsafe {
+            if let Some(service) = &self._service {
+                sdk::blpapi_Service_getEventDefinition(
+                    service.0.as_ptr(),
+                    &mut definition,
+                    ptr::null(),
+                    name.as_ptr(),
+                )
+            } else {
+                sdk::blpapi_TestUtil_getAdminMessageDefinition(&mut definition, name.as_ptr())
+            }
+        };
+        assert_eq!(result, 0, "test message definition");
+        Self::append_raw(
+            NonNull::new(self.event.as_ptr()).expect("live test event"),
+            definition,
+            correlation_ids,
+            format,
+        );
+    }
+
+    fn append_raw(
+        event: NonNull<sdk::blpapi_Event_t>,
+        definition: *mut sdk::blpapi_SchemaElementDefinition_t,
+        correlation_ids: &[i64],
+        format: impl FnOnce(&mut TestMessageFormatter),
+    ) {
         let mut properties = ptr::null_mut();
         // SAFETY: properties is an initialized output pointer.
         assert_eq!(
@@ -142,29 +187,25 @@ impl TestEvent {
                     )
                 },
                 0,
-                "set test correlation IDs"
+                "set test correlation IDs",
             );
         }
         let mut formatter = ptr::null_mut();
-        // SAFETY: event, schema definition and properties outlive the formatter.
+        // SAFETY: the event owner, schema owner and properties outlive this formatter.
         assert_eq!(
             unsafe {
                 sdk::blpapi_TestUtil_appendMessage(
                     &mut formatter,
-                    raw_event.as_ptr(),
+                    event.as_ptr(),
                     definition,
                     properties.0.as_ptr(),
                 )
             },
             0,
-            "append test message"
+            "append test message",
         );
         let mut formatter = TestMessageFormatter(NonNull::new(formatter).expect("test formatter"));
         format(&mut formatter);
-        Self {
-            event,
-            _service: service,
-        }
     }
 
     pub fn event(&self) -> &Event {

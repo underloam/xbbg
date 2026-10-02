@@ -19,6 +19,8 @@ export const BLOOMBERG_TOOL_NAMES = [
   "xbbg_corporate_bonds",
   "xbbg_index_members",
   "xbbg_resolve_isins",
+  "xbbg_resolve_venues",
+  "xbbg_auction_snapshot",
   "xbbg_issuer_isins",
   "xbbg_etf_holdings",
   "xbbg_stream_snapshot",

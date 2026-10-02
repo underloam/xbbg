@@ -21,8 +21,8 @@ const SERVICE_OPEN_TIMEOUT_MS: u64 = 10_000;
 
 use super::dispatch::{DispatchKey, SERVICE_OPEN_CID_TAG};
 use super::state::{
-    subscription_forwarder_channel, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics,
-    SubscriptionSender, SubscriptionState, SubscriptionTerminator,
+    subscription_forwarder_channel, FieldKind, MessageOutcome, SubscriptionForwarder,
+    SubscriptionMetrics, SubscriptionSender, SubscriptionState, SubscriptionTerminator,
 };
 use super::{
     attach_auth_context, build_session_options, BlpAsyncError, EngineConfig, OverflowPolicy,
@@ -129,14 +129,21 @@ fn log_subscription_session_event(
     }
 }
 
+pub(super) struct FeedRegistration {
+    pub(super) topic: String,
+    pub(super) status_topic: String,
+    pub(super) stream: SubscriptionSender,
+}
+
 struct SubscriptionRegistrationRequest {
-    topics: Vec<String>,
+    service: String,
+    registrations: Vec<FeedRegistration>,
     fields: Vec<String>,
+    field_kinds: HashMap<String, FieldKind>,
     all_fields: bool,
     options: Vec<String>,
     flush_threshold: Option<usize>,
     overflow_policy: Option<OverflowPolicy>,
-    stream: SubscriptionSender,
     forwarder: Option<SubscriptionForwarder>,
 }
 
@@ -166,11 +173,32 @@ enum StatusMutation {
         active: bool,
         reason: Option<String>,
     },
+    FieldExceptions {
+        key: SlabKey,
+        errors: Vec<(String, String)>,
+    },
 }
 
 impl StatusMutation {
+    fn key(&self) -> SlabKey {
+        match self {
+            Self::Started { key, .. }
+            | Self::Unsubscribed { key, .. }
+            | Self::Failed { key, .. }
+            | Self::StreamsActive { key, .. }
+            | Self::FieldExceptions { key, .. } => *key,
+        }
+    }
+
     fn apply(self, status: &mut super::SubscriptionStatusState) {
         match self {
+            Self::FieldExceptions { key, errors } => {
+                if let Some(topic) = status.topic_for_key(key).map(str::to_string) {
+                    for (field, category) in errors {
+                        status.record_field_error(&topic, &field, &category);
+                    }
+                }
+            }
             Self::Started { key, reason } => {
                 let topic = status.mark_topic_started(key);
                 status.record_subscription_event(
@@ -278,6 +306,7 @@ struct SubscriptionWorkerShared {
     runtime_handle: OnceLock<tokio::runtime::Handle>,
     forwarder: Mutex<Option<(SubscriptionForwarder, JoinHandle<()>)>>,
     forwarder_capacity: usize,
+    changed: tokio::sync::Notify,
 }
 
 struct PendingSubscriptionServiceWaiter<'a> {
@@ -330,6 +359,7 @@ impl SubscriptionWorkerShared {
             runtime_handle: OnceLock::new(),
             forwarder: Mutex::new(None),
             forwarder_capacity,
+            changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -421,21 +451,6 @@ impl SubscriptionWorkerShared {
         }
     }
 
-    async fn drain_forwarder(&self) -> Result<(), BlpAsyncError> {
-        let forwarder = self
-            .forwarder
-            .lock()
-            .as_ref()
-            .map(|(sender, _)| sender.clone());
-        if let Some(forwarder) = forwarder {
-            forwarder
-                .drain()
-                .await
-                .map_err(|_| BlpAsyncError::ChannelClosed)?;
-        }
-        Ok(())
-    }
-
     fn mark_shutdown_requested(&self) -> bool {
         !self.shutdown.swap(true, Ordering::AcqRel)
     }
@@ -443,8 +458,9 @@ impl SubscriptionWorkerShared {
     fn dispatch_event(self: &Arc<Self>, ev: xbbg_core::Event) {
         let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
             let mut state = self.state.lock();
-            state.dispatch_event(ev, self);
+            state.dispatch_event(&ev, self);
         }));
+        self.changed.notify_waiters();
         if result.is_err() {
             self.health.store(
                 if self.shutdown_requested() {
@@ -571,6 +587,37 @@ impl SubscriptionWorkerShared {
     fn prepare_for_reuse(&self) -> bool {
         self.state.lock().prepare_for_reuse()
     }
+
+    async fn wait_for_cancellations(
+        &self,
+        registrations: &[FeedRegistration],
+    ) -> Result<(), BlpAsyncError> {
+        let wait = async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                self.ensure_running()?;
+                let pending = {
+                    let state = self.state.lock();
+                    state.pending_cancel.iter().any(|key| {
+                        state.subs.get(*key).is_some_and(|sub| {
+                            registrations
+                                .iter()
+                                .any(|entry| entry.topic.as_str() == sub.topic.as_ref())
+                        })
+                    })
+                };
+                if !pending {
+                    return Ok(());
+                }
+                changed.await;
+            }
+        };
+        tokio::time::timeout(Duration::from_secs(10), wait)
+            .await
+            .map_err(|_| BlpAsyncError::BlpError(BlpError::Timeout))?
+    }
 }
 
 impl SubscriptionWorkerState {
@@ -639,7 +686,15 @@ impl SubscriptionWorkerState {
             return;
         }
         if let Some(status) = &self.status {
+            // Seed readiness once for a service opened before the claim existed.
+            // Later SDK down/up transitions remain authoritative.
+            if status.load().services().contains_key(service) {
+                return;
+            }
             status.update(|next| {
+                if next.services().contains_key(service) {
+                    return;
+                }
                 next.record_service_state(
                     service.to_string(),
                     true,
@@ -680,55 +735,69 @@ impl SubscriptionWorkerState {
         request: SubscriptionRegistrationRequest,
     ) -> Result<RegisteredSubscriptions, BlpError> {
         let SubscriptionRegistrationRequest {
-            topics,
+            registrations,
+            service,
             fields,
+            field_kinds,
             all_fields,
             options,
             flush_threshold,
             overflow_policy,
-            stream,
             forwarder,
         } = request;
-        if stream.is_closed() {
+        if registrations.iter().any(|entry| entry.stream.is_closed()) {
             return Err(BlpError::SubscriptionFailure {
                 cid: None,
                 label: Some("cannot subscribe with a terminal subscription stream".to_string()),
             });
         }
-        let stream_terminator = stream.terminator();
+        let stream_terminator = registrations.last().map(|entry| entry.stream.terminator());
         let mut sub_list = SubscriptionList::new();
         let field_refs: Vec<&str> = fields.iter().map(String::as_str).collect();
         let options_str = options.join(",");
-        let mut keys = Vec::with_capacity(topics.len());
-        let mut metrics = Vec::with_capacity(topics.len());
-        let mut registered_topics = Vec::with_capacity(topics.len());
+        let mut keys = Vec::with_capacity(registrations.len());
+        let mut metrics = Vec::with_capacity(registrations.len());
+        let mut registered_topics = Vec::with_capacity(registrations.len());
         let ft = flush_threshold.unwrap_or(self.config.subscription_flush_threshold);
         let op = overflow_policy.unwrap_or(self.config.overflow_policy);
 
-        for topic in &topics {
-            let state = SubscriptionState::with_policy_and_forwarder(
+        for FeedRegistration {
+            topic,
+            status_topic,
+            stream,
+        } in registrations
+        {
+            let mut state = SubscriptionState::with_policy_and_forwarder(
                 topic.clone(),
                 fields.clone(),
-                stream.clone(),
+                stream,
                 ft,
                 op,
                 all_fields,
                 forwarder.clone(),
             );
+            state.set_service(&service);
+            // Decode the delayed flag independently of consumer projections.
+            // It is not added to the Bloomberg subscription's requested union.
+            state.add_fields(&["IS_DELAYED_STREAM".to_string()]);
+            state.seed_kinds(&field_kinds);
             let metrics_arc = state.metrics.clone();
             let key = self.subs.insert(state);
             if let Some(state) = self.subs.get_mut(key) {
                 state.set_topic_id(key as u32);
             }
             let cid = DispatchKey::from_slab_key(key).to_correlation_id();
-            if let Err(e) = sub_list.add(topic, &field_refs, &options_str, &cid) {
+            if let Err(e) = sub_list.add(&topic, &field_refs, &options_str, &cid) {
                 xbbg_log::error!(worker_id = self.id, topic = %topic, error = %e, "failed to add topic");
                 self.subs.remove(key);
-                continue;
+                for prior in keys.drain(..) {
+                    self.subs.remove(prior);
+                }
+                return Err(e);
             }
             keys.push(key);
             metrics.push(metrics_arc);
-            registered_topics.push(topic.clone());
+            registered_topics.push(status_topic);
             xbbg_log::debug!(worker_id = self.id, topic = %topic, key = key, "subscription added");
         }
 
@@ -738,7 +807,7 @@ impl SubscriptionWorkerState {
                 label: Some("failed to build any subscription entries".to_string()),
             });
         }
-        self.stream_terminator = Some(stream_terminator);
+        self.stream_terminator = stream_terminator;
         Ok((sub_list, keys, metrics, registered_topics))
     }
 
@@ -768,7 +837,7 @@ impl SubscriptionWorkerState {
         }
         if let Some(status) = &self.status {
             if !pending_keys.is_empty() {
-                status.update(|next| {
+                status.update_topics(&pending_keys, |next| {
                     for &key in &pending_keys {
                         let topic = next.mark_topic_unsubscribing(key);
                         next.record_subscription_event(
@@ -785,7 +854,7 @@ impl SubscriptionWorkerState {
         (unsub_list, pending_keys.len())
     }
 
-    fn dispatch_event(&mut self, ev: xbbg_core::Event, shared: &SubscriptionWorkerShared) {
+    fn dispatch_event(&mut self, ev: &xbbg_core::Event, shared: &SubscriptionWorkerShared) {
         let et = ev.event_type();
         if et == EventType::SubscriptionStatus {
             let mut mutations = Vec::new();
@@ -794,7 +863,8 @@ impl SubscriptionWorkerState {
             }
             if let Some(status) = &self.status {
                 if !mutations.is_empty() {
-                    status.update(|next| {
+                    let keys: Vec<_> = mutations.iter().map(StatusMutation::key).collect();
+                    status.update_topics(&keys, |next| {
                         for mutation in mutations {
                             mutation.apply(next);
                         }
@@ -815,7 +885,7 @@ impl SubscriptionWorkerState {
                     &mut channel_closed,
                 );
             }
-            streaming_topics.retain(|(key, _)| {
+            streaming_topics.retain(|key| {
                 self.subs
                     .get(*key)
                     .is_some_and(|state| !state.stream.is_closed())
@@ -824,7 +894,7 @@ impl SubscriptionWorkerState {
                 self.subs
                     .iter()
                     .filter(|(_, state)| state.stream.is_closed())
-                    .map(|(_, state)| state.topic.to_string())
+                    .map(|(key, _)| key)
                     .collect::<Vec<_>>()
             } else {
                 Vec::new()
@@ -834,24 +904,33 @@ impl SubscriptionWorkerState {
                     || !streaming_topics.is_empty()
                     || !inactive_topics.is_empty()
                 {
-                    status.update(|next| {
-                        for topic in data_loss_topics {
+                    let keys: Vec<_> = data_loss_topics
+                        .iter()
+                        .chain(&streaming_topics)
+                        .chain(&inactive_topics)
+                        .copied()
+                        .collect();
+                    status.update_topics(&keys, |next| {
+                        for key in data_loss_topics {
+                            let topic = next.topic_for_key(key).map(str::to_string);
                             next.record_admin_data_loss(
-                                Some(topic),
+                                topic,
                                 Some("subscription data reported DATALOSS".to_string()),
                             );
                         }
-                        for (key, topic) in streaming_topics {
-                            next.mark_topic_streaming(key);
+                        for key in streaming_topics {
+                            let topic = next.mark_topic_streaming(key);
                             next.record_subscription_event(
                                 "SubscriptionStreaming",
-                                Some(topic),
+                                topic,
                                 None,
                                 SubscriptionEventLevel::Info,
                             );
                         }
-                        for topic in inactive_topics {
-                            let _ = next.set_topic_streams_active(&topic, false);
+                        for key in inactive_topics {
+                            if let Some(topic) = next.topic_for_key(key).map(str::to_string) {
+                                let _ = next.set_topic_streams_active(&topic, false);
+                            }
                         }
                     });
                 }
@@ -873,8 +952,8 @@ impl SubscriptionWorkerState {
     fn collect_subscription_data(
         &mut self,
         msg: &xbbg_core::Message<'_>,
-        data_loss_topics: &mut Vec<String>,
-        streaming_topics: &mut Vec<(SlabKey, String)>,
+        data_loss_topics: &mut Vec<SlabKey>,
+        streaming_topics: &mut Vec<SlabKey>,
         channel_closed: &mut bool,
     ) {
         for correlation_id in msg.correlation_ids() {
@@ -888,7 +967,7 @@ impl SubscriptionWorkerState {
             if let Some(state) = self.subs.get_mut(key) {
                 match state.on_message(msg) {
                     MessageOutcome::DataLoss => {
-                        data_loss_topics.push(state.topic.to_string());
+                        data_loss_topics.push(key);
                         *channel_closed = true;
                     }
                     MessageOutcome::Closed => {
@@ -897,7 +976,7 @@ impl SubscriptionWorkerState {
                     MessageOutcome::Normal { first_message } => {
                         if first_message {
                             let topic = state.topic.to_string();
-                            streaming_topics.push((key, topic.clone()));
+                            streaming_topics.push(key);
                             xbbg_log::debug!(
                                 worker_id = self.id,
                                 key,
@@ -931,22 +1010,20 @@ impl SubscriptionWorkerState {
             };
             let key = dispatch_key.to_slab_key();
             match msg_type {
-                "SubscriptionStarted" => {
+                "SubscriptionStarted" if !self.pending_cancel.contains(&key) => {
                     if self
                         .subs
                         .get(key)
                         .is_some_and(|state| !state.stream.is_closed())
                     {
-                        xbbg_log::debug!(
-                            worker_id = self.id,
-                            key,
-                            reason = %reason.as_deref().unwrap_or(""),
-                            "subscription started"
-                        );
                         mutations.push(StatusMutation::Started {
                             key,
                             reason: reason.clone(),
                         });
+                        let errors = subscription_field_exceptions(msg);
+                        if !errors.is_empty() {
+                            mutations.push(StatusMutation::FieldExceptions { key, errors });
+                        }
                     }
                 }
                 "SubscriptionFailure" => {
@@ -987,7 +1064,10 @@ impl SubscriptionWorkerState {
                                 reason = %reason_text,
                                 "subscription failed for topic"
                             );
-                            if self.subs.is_empty() && self.pending_cancel.is_empty() {
+                            if self.subs.is_empty()
+                                && self.pending_cancel.is_empty()
+                                && !state.stream.is_callback()
+                            {
                                 state.fail(BlpError::SubscriptionFailure {
                                     cid: None,
                                     label: Some(format!(
@@ -1037,7 +1117,10 @@ impl SubscriptionWorkerState {
                                 reason = %reason_text,
                                 "subscription terminated for topic"
                             );
-                            if self.subs.is_empty() && self.pending_cancel.is_empty() {
+                            if self.subs.is_empty()
+                                && self.pending_cancel.is_empty()
+                                && !state.stream.is_callback()
+                            {
                                 state.fail(BlpError::SubscriptionFailure {
                                     cid: None,
                                     label: Some(format!(
@@ -1180,22 +1263,22 @@ impl SubscriptionWorkerState {
                         .map(|value| format!(": {value}"))
                         .unwrap_or_default(),
                 );
+                if let Some(status) = &self.status {
+                    let terminal_detail = detail.clone();
+                    status.update(|next| {
+                        next.record_session_state(
+                            SessionLifecycleState::Terminated,
+                            "AuthorizationRevoked",
+                            Some(terminal_detail),
+                        );
+                    });
+                }
                 self.drain_for_shutdown(&detail);
                 shared.mark_shutdown_requested();
                 shared.stop_forwarder();
                 shared
                     .health
                     .store(WorkerHealth::Dead as u8, Ordering::Release);
-                if let Some(status) = &self.status {
-                    let detail = reason.or_else(|| Some(format!("worker={}", self.id)));
-                    status.update(|next| {
-                        next.record_session_state(
-                            SessionLifecycleState::Terminated,
-                            "AuthorizationRevoked",
-                            detail.clone(),
-                        );
-                    });
-                }
             }
             "SessionStartupFailure" => {
                 let reason = extract_reason_description(msg);
@@ -1232,6 +1315,16 @@ impl SubscriptionWorkerState {
                         .map(|value| format!(": {value}"))
                         .unwrap_or_default(),
                 );
+                if let Some(status) = &self.status {
+                    let terminal_detail = detail.clone();
+                    status.update(|next| {
+                        next.record_session_state(
+                            SessionLifecycleState::Terminated,
+                            "SessionTerminated",
+                            Some(terminal_detail),
+                        );
+                    });
+                }
                 self.drain_for_shutdown(&detail);
                 shared.mark_shutdown_requested();
                 shared.stop_forwarder();
@@ -1240,16 +1333,6 @@ impl SubscriptionWorkerState {
                 shared
                     .health
                     .store(WorkerHealth::Dead as u8, Ordering::Release);
-                if let Some(status) = &self.status {
-                    let detail = reason.or_else(|| Some(format!("worker={}", self.id)));
-                    status.update(|next| {
-                        next.record_session_state(
-                            SessionLifecycleState::Terminated,
-                            "SessionTerminated",
-                            detail.clone(),
-                        );
-                    });
-                }
             }
             "SessionConnectionUp" => {
                 // Informational. The SDK has re-established the TCP connection.
@@ -1468,24 +1551,28 @@ impl SubscriptionWorkerState {
     ) {
         let mut topics = Vec::new();
         if unattributable {
+            // A legacy channel gets one wildcard failure. Callback feeds receive
+            // one correlated notification each below, without duplicating the last feed.
             if let Some(terminator) = &self.stream_terminator {
-                terminator.fail(BlpError::SubscriptionDataLoss {
-                    topic: "*".to_string(),
-                    detail:
-                        "Bloomberg reported unattributable DATALOSS; resubscribe for a fresh image"
-                            .to_string(),
-                });
+                if self.subs.is_empty() || !terminator.is_callback() {
+                    terminator.fail(BlpError::SubscriptionDataLoss {
+                        topic: "*".to_string(),
+                        detail:
+                            "Bloomberg reported unattributable DATALOSS; resubscribe for a fresh image"
+                                .to_string(),
+                    });
+                }
             }
             topics.reserve(self.subs.len());
-            for (_, state) in self.subs.iter_mut() {
-                topics.push(state.topic.to_string());
+            for (key, state) in self.subs.iter_mut() {
+                topics.push(key);
                 state.on_dataloss(timestamp_us);
             }
         } else {
             topics.reserve(resolved_keys.len());
             for key in resolved_keys {
                 if let Some(state) = self.subs.get_mut(key) {
-                    topics.push(state.topic.to_string());
+                    topics.push(key);
                     state.on_dataloss(timestamp_us);
                 }
             }
@@ -1495,21 +1582,30 @@ impl SubscriptionWorkerState {
             .subs
             .iter()
             .filter(|(_, state)| state.stream.is_closed())
-            .map(|(_, state)| state.topic.to_string())
+            .map(|(key, _)| key)
             .collect::<Vec<_>>();
         if let Some(status) = &self.status {
-            status.update(|next| {
+            let keys: Vec<_> = topics.iter().chain(&inactive_topics).copied().collect();
+            let mutate = |next: &mut super::SubscriptionStatusState| {
                 if unattributable || topics.is_empty() {
                     next.record_admin_data_loss(None, None);
                 } else {
-                    for topic in topics {
-                        next.record_admin_data_loss(Some(topic), None);
+                    for key in topics {
+                        let topic = next.topic_for_key(key).map(str::to_string);
+                        next.record_admin_data_loss(topic, None);
                     }
                 }
-                for topic in inactive_topics {
-                    let _ = next.set_topic_streams_active(&topic, false);
+                for key in inactive_topics {
+                    if let Some(topic) = next.topic_for_key(key).map(str::to_string) {
+                        let _ = next.set_topic_streams_active(&topic, false);
+                    }
                 }
-            });
+            };
+            if unattributable {
+                status.update(mutate);
+            } else {
+                status.update_topics(&keys, mutate);
+            }
         }
     }
 
@@ -1519,19 +1615,18 @@ impl SubscriptionWorkerState {
     fn check_streams_deactivated(&mut self) {
         if self.subs.iter().any(|(_, state)| state.stream.is_closed()) {
             if let Some(status) = &self.status {
-                let topics = {
-                    let snapshot = status.load();
-                    snapshot
-                        .topic_statuses()
-                        .iter()
-                        .filter(|(_, info)| info.streams_active)
-                        .map(|(topic, _)| topic.clone())
-                        .collect::<Vec<_>>()
-                };
-                if !topics.is_empty() {
-                    status.update(|next| {
-                        for topic in topics {
-                            let _ = next.set_topic_streams_active(&topic, false);
+                let keys: Vec<_> = self
+                    .subs
+                    .iter()
+                    .filter(|(_, state)| state.stream.is_closed())
+                    .map(|(key, _)| key)
+                    .collect();
+                if !keys.is_empty() {
+                    status.update_topics(&keys, |next| {
+                        for key in &keys {
+                            if let Some(topic) = next.topic_for_key(*key).map(str::to_string) {
+                                let _ = next.set_topic_streams_active(&topic, false);
+                            }
                         }
                     });
                 }
@@ -1588,7 +1683,8 @@ impl SubscriptionWorkerState {
                 "subscription streams still deactivated"
             );
         }
-        status_arc.update(|next| {
+        let keys: Vec<_> = to_warn.iter().map(|(key, _, _)| *key).collect();
+        status_arc.update_topics(&keys, |next| {
             for (_, topic, elapsed_us) in &to_warn {
                 let detail = format!(
                     "topic has been streams-inactive for {}ms; SDK is still trying to recover",
@@ -1603,6 +1699,24 @@ impl SubscriptionWorkerState {
             }
         });
     }
+}
+
+fn subscription_field_exceptions(msg: &xbbg_core::Message<'_>) -> Vec<(String, String)> {
+    let Some(exceptions) = msg.elements().get_by_str("exceptions") else {
+        return Vec::new();
+    };
+    exceptions
+        .values()
+        .filter_map(|entry| {
+            let field = entry.get_by_str("fieldId")?.get_str(0)?.to_string();
+            let category = entry
+                .get_by_str("reason")?
+                .get_by_str("category")?
+                .get_str(0)?
+                .to_string();
+            Some((field, category))
+        })
+        .collect()
 }
 
 fn session_start_error(context: &str, reason: Option<String>) -> BlpError {
@@ -1795,19 +1909,19 @@ impl SubscriptionCommandHandle {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe(
+    pub(super) async fn subscribe(
         &self,
         service: String,
-        topics: Vec<String>,
+        registrations: Vec<FeedRegistration>,
         fields: Vec<String>,
+        field_kinds: HashMap<String, FieldKind>,
         all_fields: bool,
         options: Vec<String>,
         flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
-        stream: SubscriptionSender,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
-        if stream.is_closed() {
+        if registrations.iter().any(|entry| entry.stream.is_closed()) {
             return Err(BlpAsyncError::ConfigError {
                 detail: "cannot subscribe with a terminal subscription stream".to_string(),
             });
@@ -1833,7 +1947,14 @@ impl SubscriptionCommandHandle {
             );
             return Err(BlpAsyncError::BlpError(error));
         }
-        let stream_status = stream.clone();
+        self.inner
+            .shared
+            .wait_for_cancellations(&registrations)
+            .await?;
+        let stream_status: Vec<_> = registrations
+            .iter()
+            .map(|entry| entry.stream.clone())
+            .collect();
 
         let (keys, metrics, registered_topics, subscribe_result) = {
             self.lease.validate()?;
@@ -1852,13 +1973,14 @@ impl SubscriptionCommandHandle {
                 .shared
                 .record_service_ready_if_already_open(&service, was_open);
             let request = SubscriptionRegistrationRequest {
-                topics,
+                service: service.clone(),
+                registrations,
                 fields,
+                field_kinds,
                 all_fields,
                 options,
                 flush_threshold,
                 overflow_policy,
-                stream,
                 forwarder,
             };
             let (sub_list, keys, metrics, registered_topics) = self
@@ -1866,7 +1988,7 @@ impl SubscriptionCommandHandle {
                 .shared
                 .register_subscriptions(request)
                 .map_err(BlpAsyncError::BlpError)?;
-            status.update(|next| {
+            status.update_topics(&keys, |next| {
                 next.add_active(&registered_topics, &keys, metrics.clone());
             });
             let result = self.inner.session.subscribe(&sub_list, None);
@@ -1875,7 +1997,7 @@ impl SubscriptionCommandHandle {
 
         if let Err(error) = subscribe_result {
             self.inner.shared.cleanup_failed_subscribe(&keys);
-            status.update(|next| {
+            status.update_topics(&keys, |next| {
                 for topic in &registered_topics {
                     next.drop_topic(topic);
                 }
@@ -1888,7 +2010,7 @@ impl SubscriptionCommandHandle {
             self.inner.signal_shutdown();
             return Err(BlpAsyncError::BlpError(error));
         }
-        if stream_status.is_closed() {
+        if stream_status.iter().any(SubscriptionSender::is_closed) {
             xbbg_log::warn!(
                 worker_id = self.worker_id(),
                 "subscription stream terminated during subscribe; quarantining worker"
@@ -1899,33 +2021,6 @@ impl SubscriptionCommandHandle {
             });
         }
         Ok((keys, metrics))
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_topics(
-        &self,
-        service: String,
-        topics: Vec<String>,
-        fields: Vec<String>,
-        all_fields: bool,
-        options: Vec<String>,
-        flush_threshold: Option<usize>,
-        overflow_policy: Option<OverflowPolicy>,
-        stream: SubscriptionSender,
-        status: SharedSubscriptionStatus,
-    ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
-        self.subscribe(
-            service,
-            topics,
-            fields,
-            all_fields,
-            options,
-            flush_threshold,
-            overflow_policy,
-            stream,
-            status,
-        )
-        .await
     }
 
     async fn ensure_service(&self, service: &str) -> Result<(), BlpError> {
@@ -1986,16 +2081,98 @@ impl SubscriptionCommandHandle {
         }
     }
 
-    pub async fn unsubscribe(&self, keys: Vec<SlabKey>) -> Result<(), BlpAsyncError> {
-        self.unsubscribe_now(keys)
-    }
-
-    pub(crate) async fn drain_forwarder(&self) -> Result<(), BlpAsyncError> {
+    pub(crate) fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
         self.lease.validate()?;
-        self.inner.shared.drain_forwarder().await
+        let _lifecycle = self.inner.shared.lifecycle.read();
+        self.inner.shared.ensure_running()?;
+        let mut worker = self.inner.shared.state.lock();
+        let state = worker
+            .subs
+            .get_mut(key)
+            .ok_or_else(|| BlpAsyncError::ConfigError {
+                detail: "subscription feed no longer exists".into(),
+            })?;
+        state.enable_all_fields();
+        Ok(())
     }
 
-    fn unsubscribe_now(&self, keys: Vec<SlabKey>) -> Result<(), BlpAsyncError> {
+    pub(crate) fn seed_kinds(
+        &self,
+        key: SlabKey,
+        kinds: &HashMap<String, FieldKind>,
+    ) -> Result<(), BlpAsyncError> {
+        self.lease.validate()?;
+        let _lifecycle = self.inner.shared.lifecycle.read();
+        self.inner.shared.ensure_running()?;
+        let mut worker = self.inner.shared.state.lock();
+        let state = worker
+            .subs
+            .get_mut(key)
+            .ok_or_else(|| BlpAsyncError::ConfigError {
+                detail: "subscription feed no longer exists".into(),
+            })?;
+        state.seed_kinds(kinds);
+        Ok(())
+    }
+
+    /// Replace the upstream field union without changing its correlation ID.
+    pub(crate) fn resubscribe(
+        &self,
+        key: SlabKey,
+        fields: &[String],
+        kinds: &HashMap<String, FieldKind>,
+        options: &[String],
+    ) -> Result<(), BlpAsyncError> {
+        self.lease.validate()?;
+        let _lifecycle = self.inner.shared.lifecycle.read();
+        self.inner.shared.ensure_running()?;
+        let list = {
+            let mut worker = self.inner.shared.state.lock();
+            if worker.pending_cancel.contains(&key) {
+                return Err(BlpAsyncError::ConfigError {
+                    detail: "subscription is closing".into(),
+                });
+            }
+            let state = worker
+                .subs
+                .get_mut(key)
+                .ok_or_else(|| BlpAsyncError::ConfigError {
+                    detail: "subscription feed no longer exists".into(),
+                })?;
+            state.add_fields(fields);
+            state.seed_kinds(kinds);
+            let mut list = SubscriptionList::new();
+            let fields: Vec<_> = fields.iter().map(String::as_str).collect();
+            list.add(
+                &state.topic,
+                &fields,
+                &options.join(","),
+                &DispatchKey::from_slab_key(key).to_correlation_id(),
+            )?;
+            list
+        };
+        self.inner.session.resubscribe(&list, None)?;
+        Ok(())
+    }
+
+    /// Await terminal acknowledgements before returning an empty session to
+    /// the pool. A missing acknowledgement quarantines it via SessionClaim.
+    pub(crate) async fn wait_clean(&self) {
+        let wait = async {
+            loop {
+                let changed = self.inner.shared.changed.notified();
+                tokio::pin!(changed);
+                changed.as_mut().enable();
+                if self.inner.shared.reusable() || self.inner.shared.shutdown_requested() {
+                    return;
+                }
+                changed.await;
+            }
+        };
+        let _ = tokio::time::timeout(Duration::from_secs(10), wait).await;
+    }
+
+    pub(crate) fn unsubscribe_now(&self, keys: Vec<SlabKey>) -> Result<(), BlpAsyncError> {
         self.lease.validate()?;
         let unsubscribe_result = {
             let _lifecycle = self.inner.shared.lifecycle.read();
@@ -2296,7 +2473,9 @@ impl SubscriptionSessionPool {
         })
     }
 
-    pub async fn claim(self: &Arc<Self>) -> Result<SessionClaim, BlpAsyncError> {
+    pub(super) async fn acquire_capacity(
+        self: &Arc<Self>,
+    ) -> Result<OwnedSemaphorePermit, BlpAsyncError> {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(Self::shutdown_error());
         }
@@ -2307,6 +2486,13 @@ impl SubscriptionSessionPool {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(Self::shutdown_error());
         }
+        Ok(permit)
+    }
+
+    pub(super) async fn claim(
+        self: &Arc<Self>,
+        permit: OwnedSemaphorePermit,
+    ) -> Result<SessionClaim, BlpAsyncError> {
         let creation = self.begin_creation()?;
         let pool = Arc::clone(self);
         tokio::task::spawn_blocking(move || {
@@ -2437,90 +2623,8 @@ impl SessionClaim {
         Ok(handle.command_handle(lease))
     }
 
-    #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe(
-        &self,
-        service: String,
-        topics: Vec<String>,
-        fields: Vec<String>,
-        all_fields: bool,
-        options: Vec<String>,
-        flush_threshold: Option<usize>,
-        overflow_policy: Option<OverflowPolicy>,
-        stream: SubscriptionSender,
-        status: SharedSubscriptionStatus,
-    ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
-        self.command_handle()?
-            .subscribe(
-                service,
-                topics,
-                fields,
-                all_fields,
-                options,
-                flush_threshold,
-                overflow_policy,
-                stream,
-                status,
-            )
-            .await
-    }
-
-    #[allow(clippy::too_many_arguments)]
-    pub async fn add_topics(
-        &self,
-        service: String,
-        topics: Vec<String>,
-        fields: Vec<String>,
-        all_fields: bool,
-        options: Vec<String>,
-        flush_threshold: Option<usize>,
-        overflow_policy: Option<OverflowPolicy>,
-        stream: SubscriptionSender,
-        status: SharedSubscriptionStatus,
-    ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
-        self.command_handle()?
-            .add_topics(
-                service,
-                topics,
-                fields,
-                all_fields,
-                options,
-                flush_threshold,
-                overflow_policy,
-                stream,
-                status,
-            )
-            .await
-    }
-
-    pub async fn unsubscribe(&self, keys: Vec<SlabKey>) -> Result<(), BlpAsyncError> {
-        self.command_handle()?.unsubscribe(keys).await
-    }
-
-    /// Wait for every Block-policy update accepted before this call to leave
-    /// the session forwarder. Keep consuming the subscription receiver while
-    /// awaiting this barrier so a full receiver cannot stall the forwarder.
-    pub async fn drain_forwarder(&self) -> Result<(), BlpAsyncError> {
-        self.command_handle()?.drain_forwarder().await
-    }
-
     pub fn set_cleanup_status(&mut self, status: SharedSubscriptionStatus) {
         self.cleanup_status = Some(status);
-    }
-
-    pub fn close_without_reuse(mut self, keys: Vec<SlabKey>) {
-        self.lease.invalidate();
-        if let Some(handle) = self.handle.take() {
-            if !keys.is_empty() {
-                let _ = handle.unsubscribe_now(keys);
-            }
-            handle.signal_shutdown();
-            drop(handle);
-        }
-    }
-
-    pub fn worker_id(&self) -> Option<usize> {
-        self.handle.as_ref().map(SubscriptionWorkerHandle::id)
     }
 }
 
@@ -2551,6 +2655,261 @@ impl Drop for SessionClaim {
     }
 }
 
+/// SDK-backed worker adapter used by deterministic shared-feed tests. It
+/// exercises the real CID dispatch and extraction without starting a session.
+#[cfg(test)]
+pub(super) struct TestSubscriptionSession {
+    shared: SubscriptionWorkerShared,
+    pub(super) subscribes: AtomicUsize,
+    pub(super) resubscribes: AtomicUsize,
+    pub(super) unsubscribes: AtomicUsize,
+    pub(super) fail_resubscribe: Mutex<HashSet<SlabKey>>,
+}
+
+#[cfg(test)]
+impl TestSubscriptionSession {
+    pub(super) fn new(config: Arc<EngineConfig>) -> Arc<Self> {
+        Arc::new(Self {
+            shared: SubscriptionWorkerShared::new(
+                0,
+                config,
+                Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
+            ),
+            subscribes: AtomicUsize::new(0),
+            resubscribes: AtomicUsize::new(0),
+            unsubscribes: AtomicUsize::new(0),
+            fail_resubscribe: Mutex::new(HashSet::new()),
+        })
+    }
+
+    pub(super) fn subscribe(
+        &self,
+        service: &str,
+        registrations: Vec<FeedRegistration>,
+        fields: Vec<String>,
+        field_kinds: HashMap<String, FieldKind>,
+        all_fields: bool,
+        status: SharedSubscriptionStatus,
+    ) -> Result<Vec<SlabKey>, BlpAsyncError> {
+        self.shared.set_status(status.clone());
+        self.shared
+            .record_service_ready_if_already_open(service, true);
+        let (_, keys, metrics, topics) =
+            self.shared
+                .register_subscriptions(SubscriptionRegistrationRequest {
+                    service: service.into(),
+                    registrations,
+                    fields,
+                    field_kinds,
+                    all_fields,
+                    options: Vec::new(),
+                    flush_threshold: Some(1),
+                    overflow_policy: Some(OverflowPolicy::DropNewest),
+                    forwarder: None,
+                })?;
+        status.update_topics(&keys, |next| next.add_active(&topics, &keys, metrics));
+        self.subscribes.fetch_add(keys.len(), Ordering::Relaxed);
+        Ok(keys)
+    }
+
+    pub(super) fn resubscribe(
+        &self,
+        key: SlabKey,
+        fields: &[String],
+        kinds: &HashMap<String, FieldKind>,
+    ) -> Result<(), BlpAsyncError> {
+        self.resubscribes.fetch_add(1, Ordering::Relaxed);
+        if self.fail_resubscribe.lock().contains(&key) {
+            return Err(BlpAsyncError::ConfigError {
+                detail: "synthetic resubscribe failure".into(),
+            });
+        }
+        let mut worker = self.shared.state.lock();
+        worker.subs[key].add_fields(fields);
+        worker.subs[key].seed_kinds(kinds);
+        Ok(())
+    }
+
+    pub(super) fn enable_all_fields(&self, key: SlabKey) {
+        self.shared.state.lock().subs[key].enable_all_fields();
+    }
+
+    pub(super) fn seed_kinds(&self, key: SlabKey, kinds: &HashMap<String, FieldKind>) {
+        self.shared.state.lock().subs[key].seed_kinds(kinds);
+    }
+
+    pub(super) fn unsubscribe(
+        &self,
+        key: SlabKey,
+        _status: &SharedSubscriptionStatus,
+    ) -> Result<(), BlpAsyncError> {
+        let (_, count) = self.shared.build_unsubscribe_list(vec![key]);
+        self.unsubscribes.fetch_add(count, Ordering::Relaxed);
+        if count != 0 {
+            self.status(key, "SubscriptionTerminated");
+        }
+        Ok(())
+    }
+
+    fn cid(key: SlabKey) -> i64 {
+        match DispatchKey::from_slab_key(key).to_correlation_id() {
+            CorrelationId::Int(value) => value,
+            _ => unreachable!("slab dispatch uses integer CIDs"),
+        }
+    }
+
+    pub(super) fn data(&self, key: SlabKey, fields: &str, json: &str) {
+        let schema = format!(
+            r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+            <service name="//xbbg/test" version="1.0.0.0">
+                <event name="MarketDataEvents" eventType="Update"/>
+            </service><schema><sequenceType name="Update">{fields}</sequenceType></schema>
+            </ServiceDefinition>"#
+        );
+        let event = xbbg_core::test_support::TestEvent::with_schema(
+            &schema,
+            EventType::SubscriptionData,
+            "MarketDataEvents",
+            &[Self::cid(key)],
+            |formatter| formatter.json(json),
+        );
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn status(&self, key: SlabKey, message_type: &str) {
+        let event = xbbg_core::test_support::TestEvent::admin(
+            EventType::SubscriptionStatus,
+            message_type,
+            &[Self::cid(key)],
+            |_| {},
+        );
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn status_batch(&self, messages: &[(SlabKey, &str, String)]) {
+        let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+        <service name="//xbbg/test" version="1.0.0.0">
+            <event name="SubscriptionFailure" eventType="Status"/>
+            <event name="SubscriptionTerminated" eventType="Status"/>
+        </service><schema>
+            <sequenceType name="Status"><element name="reason" type="Reason"/></sequenceType>
+            <sequenceType name="Reason"><element name="description" type="String"/></sequenceType>
+        </schema></ServiceDefinition>"#;
+        let (key, message_type, reason) = messages.first().expect("nonempty status batch");
+        let json = serde_json::json!({"reason": {"description": reason}}).to_string();
+        let mut event = xbbg_core::test_support::TestEvent::with_schema(
+            schema,
+            EventType::SubscriptionStatus,
+            message_type,
+            &[Self::cid(*key)],
+            |formatter| formatter.json(&json),
+        );
+        for (key, message_type, reason) in &messages[1..] {
+            let json = serde_json::json!({"reason": {"description": reason}}).to_string();
+            event.append_message(message_type, &[Self::cid(*key)], |formatter| {
+                formatter.json(&json)
+            });
+        }
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn field_exceptions(&self, key: SlabKey, json: &str) {
+        let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+        <service name="//xbbg/test" version="1.0.0.0">
+            <event name="SubscriptionStarted" eventType="Started"/>
+        </service><schema>
+            <sequenceType name="Started"><element name="exceptions" type="Exception" maxOccurs="unbounded"/></sequenceType>
+            <sequenceType name="Exception"><element name="fieldId" type="String"/><element name="reason" type="Reason"/></sequenceType>
+            <sequenceType name="Reason">
+                <element name="category" type="String"/><element name="description" type="String"/>
+                <element name="subcategory" type="String"/><element name="errorCode" type="Int32"/>
+                <element name="source" type="String"/>
+            </sequenceType>
+        </schema></ServiceDefinition>"#;
+        let event = xbbg_core::test_support::TestEvent::with_schema(
+            schema,
+            EventType::SubscriptionStatus,
+            "SubscriptionStarted",
+            &[Self::cid(key)],
+            |formatter| formatter.json(json),
+        );
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn session_event(&self, message_type: &str) {
+        let event = if message_type == "AuthorizationRevoked" {
+            // TestUtil has no built-in authorization schema.
+            let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+            <service name="//xbbg/test" version="1.0.0.0">
+                <event name="AuthorizationRevoked" eventType="Revoked"/>
+            </service><schema><sequenceType name="Revoked"/></schema></ServiceDefinition>"#;
+            xbbg_core::test_support::TestEvent::with_schema(
+                schema,
+                EventType::AuthorizationStatus,
+                message_type,
+                &[],
+                |_| {},
+            )
+        } else {
+            xbbg_core::test_support::TestEvent::admin(
+                EventType::SessionStatus,
+                message_type,
+                &[],
+                |_| {},
+            )
+        };
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn admin_event(&self, message_type: &str) {
+        let event =
+            xbbg_core::test_support::TestEvent::admin(EventType::Admin, message_type, &[], |_| {});
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+
+    pub(super) fn service_event(&self, message_type: &str) {
+        self.service_event_for(message_type, "//blp/mktdata");
+    }
+
+    pub(super) fn service_event_for(&self, message_type: &str, service: &str) {
+        let schema = format!(
+            r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
+        <service name="//xbbg/test" version="1.0.0.0"><event name="{message_type}" eventType="Status"/></service>
+        <schema><sequenceType name="Status"><element name="serviceName" type="String"/></sequenceType></schema>
+        </ServiceDefinition>"#
+        );
+        let event = xbbg_core::test_support::TestEvent::with_schema(
+            &schema,
+            EventType::ServiceStatus,
+            message_type,
+            &[],
+            |formatter| formatter.json(&serde_json::json!({"serviceName": service}).to_string()),
+        );
+        self.shared
+            .state
+            .lock()
+            .dispatch_event(event.event(), &self.shared);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2564,13 +2923,21 @@ mod tests {
     ) -> (Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>, Vec<String>) {
         let (_, keys, metrics, topics) = worker
             .register_subscriptions(SubscriptionRegistrationRequest {
-                topics: topics.iter().map(|topic| (*topic).to_string()).collect(),
+                service: "//blp/mktdata".into(),
+                registrations: topics
+                    .iter()
+                    .map(|topic| FeedRegistration {
+                        topic: (*topic).into(),
+                        status_topic: (*topic).into(),
+                        stream: stream.clone(),
+                    })
+                    .collect(),
                 fields: vec!["PX_LAST".to_string()],
+                field_kinds: HashMap::new(),
                 all_fields: false,
                 options: Vec::new(),
                 flush_threshold: None,
                 overflow_policy: None,
-                stream: stream.clone(),
                 forwarder: None,
             })
             .expect("register test subscriptions");
@@ -2676,7 +3043,7 @@ mod tests {
             .expect("first admission permit");
         let waiter = {
             let pool = Arc::clone(&pool);
-            tokio::spawn(async move { pool.claim().await })
+            tokio::spawn(async move { pool.acquire_capacity().await })
         };
         tokio::task::yield_now().await;
         assert!(!waiter.is_finished());
@@ -2791,7 +3158,9 @@ mod tests {
                 let mut worker = shared.state.lock();
                 let (keys, _, _) = register_topics(&mut worker, &tx, &["TEST US Equity"]);
                 remove_registered_topics(&mut worker, &keys);
-                let message = event.event().messages().next().expect("terminal message");
+                // The SDK message is only valid while its iterator lives.
+                let mut messages = event.event().messages();
+                let message = messages.next().expect("terminal message");
                 worker.handle_session_status(&message, &shared);
             }
 
@@ -2813,7 +3182,8 @@ mod tests {
         let event = TestEvent::admin(EventType::Admin, "DataLoss", &[], |formatter| {
             formatter.json("{}");
         });
-        let message = event.event().messages().next().expect("data loss message");
+        let mut messages = event.event().messages();
+        let message = messages.next().expect("data loss message");
 
         worker.handle_admin_event(&message);
 
@@ -2834,7 +3204,8 @@ mod tests {
         let event = TestEvent::admin(EventType::Admin, "DataLoss", &[unknown_cid], |formatter| {
             formatter.json("{}")
         });
-        let message = event.event().messages().next().expect("data loss message");
+        let mut messages = event.event().messages();
+        let message = messages.next().expect("data loss message");
 
         worker.handle_admin_event(&message);
 
@@ -2865,7 +3236,8 @@ mod tests {
         let event = TestEvent::admin(EventType::Admin, "DataLoss", &[cid], |formatter| {
             formatter.json("{}");
         });
-        let message = event.event().messages().next().expect("data loss message");
+        let mut messages = event.event().messages();
+        let message = messages.next().expect("data loss message");
 
         worker.handle_admin_event(&message);
 
@@ -2908,11 +3280,8 @@ mod tests {
                 &[first_cid],
                 |formatter| formatter.json("{}"),
             );
-            let first_message = first_event
-                .event()
-                .messages()
-                .next()
-                .expect("first status message");
+            let mut first_messages = first_event.event().messages();
+            let first_message = first_messages.next().expect("first status message");
             let mut mutations = Vec::new();
             worker.collect_subscription_status(&first_message, &mut mutations);
             status.update(|next| {
@@ -2943,11 +3312,8 @@ mod tests {
                 &[last_cid],
                 |formatter| formatter.json("{}"),
             );
-            let last_message = last_event
-                .event()
-                .messages()
-                .next()
-                .expect("last status message");
+            let mut last_messages = last_event.event().messages();
+            let last_message = last_messages.next().expect("last status message");
             let mut mutations = Vec::new();
             worker.collect_subscription_status(&last_message, &mut mutations);
             status.update(|next| {
@@ -2991,7 +3357,8 @@ mod tests {
         for message_type in ["SubscriptionStarted", "SubscriptionStreamsActivated"] {
             let event =
                 TestEvent::admin(EventType::SubscriptionStatus, message_type, &[cid], |_| {});
-            let message = event.event().messages().next().expect("status message");
+            let mut messages = event.event().messages();
+            let message = messages.next().expect("status message");
             let mut mutations = Vec::new();
             worker.collect_subscription_status(&message, &mut mutations);
             status.update(|next| {
@@ -3040,13 +3407,18 @@ mod tests {
         worker.check_streams_deactivated();
 
         let error = match worker.register_subscriptions(SubscriptionRegistrationRequest {
-            topics: vec!["NEW US Equity".to_string()],
+            service: "//blp/mktdata".into(),
+            registrations: vec![FeedRegistration {
+                topic: "NEW US Equity".into(),
+                status_topic: "NEW US Equity".into(),
+                stream: tx,
+            }],
             fields: vec!["PX_LAST".to_string()],
+            field_kinds: HashMap::new(),
             all_fields: false,
             options: Vec::new(),
             flush_threshold: None,
             overflow_policy: None,
-            stream: tx,
             forwarder: None,
         }) {
             Ok(_) => panic!("terminal stream must reject add"),

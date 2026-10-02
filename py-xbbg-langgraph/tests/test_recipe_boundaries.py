@@ -2,17 +2,29 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta
+import json
+import sys
+from types import ModuleType
+from typing import Any
+from unittest.mock import AsyncMock
 
+from langchain_core.tools import ToolException
 from pydantic import ValidationError
 import pytest
 
 from xbbg_langgraph import (
+    BloombergToolsOptions,
+    create_all_bloomberg_tools,
+    create_auction_snapshot_tool,
+    create_bloomberg_tools,
     create_corporate_bonds_tool,
     create_depth_snapshot_tool,
     create_ext_bql_builder_tool,
     create_ext_chart_spec_tool,
     create_ext_market_session_tool,
+    create_resolve_venues_tool,
 )
 
 
@@ -84,3 +96,149 @@ def test_chart_rejects_integers_that_the_renderer_would_round():
 def test_market_rule_requires_a_lookup_key_at_schema_boundary():
     with pytest.raises(ValidationError, match="requires mic or exch_code"):
         create_ext_market_session_tool().args_schema.model_validate({"operation": "get_market_rule"})
+
+
+@pytest.fixture
+def auction_api(monkeypatch):
+    """Replace the public API modules so no test can initialize a native engine."""
+    package: Any = ModuleType("xbbg")
+    extension: Any = ModuleType("xbbg.ext")
+    extension.aresolve_venues = AsyncMock()
+    extension.aauction_snapshot = AsyncMock()
+    package.ext = extension
+    package.blp = ModuleType("xbbg.blp")
+    monkeypatch.setitem(sys.modules, "xbbg", package)
+    monkeypatch.setitem(sys.modules, "xbbg.ext", extension)
+    monkeypatch.setitem(sys.modules, "xbbg.blp", package.blp)
+    return extension
+
+
+@pytest.mark.parametrize("factory", [create_resolve_venues_tool, create_auction_snapshot_tool])
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"securities": []},
+        {"securities": ["SYNTH_A US Equity", "SYNTH_B US Equity", "SYNTH_C US Equity"]},
+        {"pcs_overrides": {"SYNTH EXCHANGE": 1}},
+        {"pcs_overrides": {"SYNTH EXCHANGE": " "}},
+        {"pcs_overrides": {"SYNTH A": "A", "SYNTH B": "B", "SYNTH C": "C"}},
+        {"pcs_overrides": {"SYNTH EXCHANGE": "A", " SYNTH EXCHANGE ": "B"}},
+    ],
+)
+def test_auction_tools_reject_unbounded_or_lossy_inputs(factory, arguments, auction_api):
+    tool = factory(max_securities=2)
+    with pytest.raises(ValidationError):
+        tool.invoke({"securities": ["SYNTH_A US Equity"], **arguments})
+    auction_api.aresolve_venues.assert_not_awaited()
+    auction_api.aauction_snapshot.assert_not_awaited()
+
+
+def test_auction_snapshot_rejects_oversized_explicit_field_selection(auction_api):
+    tool = create_auction_snapshot_tool(max_fields=1)
+    with pytest.raises(ValidationError):
+        tool.invoke(
+            {
+                "securities": ["SYNTH_A US Equity"],
+                "fields": ["IN_AUCTION_RT", "ORDER_IMB_BUY_VOLUME"],
+            }
+        )
+    auction_api.aauction_snapshot.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "factory,symbol",
+    [
+        (create_resolve_venues_tool, "aresolve_venues"),
+        (create_auction_snapshot_tool, "aauction_snapshot"),
+    ],
+)
+@pytest.mark.parametrize("invoke_async", [False, True])
+def test_auction_tools_explain_missing_xbbg_helpers(factory, symbol, invoke_async, auction_api, monkeypatch):
+    monkeypatch.delattr(auction_api, symbol)
+    tool = factory()
+    arguments = {"securities": ["SYNTH_A US Equity"]}
+
+    with pytest.raises(ToolException) as raised:
+        if invoke_async:
+            asyncio.run(tool.ainvoke(arguments))
+        else:
+            tool.invoke(arguments)
+
+    assert f"xbbg.ext.{symbol}" in str(raised.value)
+    assert "upgrade xbbg" in str(raised.value).lower()
+
+
+@pytest.mark.parametrize(
+    "name,method",
+    [
+        ("xbbg_resolve_venues", "aresolve_venues"),
+        ("xbbg_auction_snapshot", "aauction_snapshot"),
+    ],
+)
+@pytest.mark.parametrize("invoke_async", [False, True])
+def test_auction_tools_bound_rows_without_losing_venue_failures(name, method, invoke_async, auction_api):
+    pa = pytest.importorskip("pyarrow")
+    rows: list[dict[str, Any]] = [
+        {
+            "input_order": 0,
+            "security": "SYNTH_A US Equity",
+            "venue_topic": "SYNTH_A UN Equity",
+            "status": "resolved",
+            "error": None,
+        },
+        {
+            "input_order": 1,
+            "security": "SYNTH_B US Equity",
+            "venue_topic": "SYNTH_B UW Equity",
+            "status": "mismatch",
+            "error": "Venue exchange mismatch",
+        },
+        {
+            "input_order": 2,
+            "security": "SYNTH_C Index",
+            "venue_topic": None,
+            "status": "unsupported",
+            "error": "Unsupported market sector",
+        },
+    ]
+    arguments = {"securities": [row["security"] for row in rows]}
+    if name == "xbbg_auction_snapshot":
+        arguments["fields"] = ["IN_AUCTION_RT", "ORDER_IMB_BUY_VOLUME"]
+        for row in rows:
+            resolved = row["status"] == "resolved"
+            row["IN_AUCTION_RT"] = True if resolved else None
+            row["ORDER_IMB_BUY_VOLUME"] = 125.5 if resolved else None
+    getattr(auction_api, method).return_value = pa.RecordBatch.from_pylist(rows)
+    options = BloombergToolsOptions(
+        max_rows=2,
+        max_content_rows=1,
+        max_result_bytes=4096,
+        max_content_bytes=1024,
+    )
+    factory = create_all_bloomberg_tools if invoke_async else create_bloomberg_tools
+    tool = next(tool for tool in factory(options) if tool.name == name)
+    call = {"type": "tool_call", "id": "auction", "name": name, "args": arguments}
+    message = asyncio.run(tool.ainvoke(call)) if invoke_async else tool.invoke(call)
+    preview = json.loads(message.content)
+    assert preview["data"] == rows[:1]
+    assert message.artifact["data"] == rows[:2]
+    assert preview["rowCount"] == message.artifact["rowCount"] == 3
+    assert preview["truncated"] is message.artifact["truncated"] is True
+    assert preview["hasErrors"] is message.artifact["hasErrors"] is True
+    assert len(message.content.encode("utf-8")) <= options.max_content_bytes
+    assert len(json.dumps(message.artifact, allow_nan=False).encode("utf-8")) <= options.max_result_bytes
+
+
+@pytest.mark.parametrize(
+    "name,factory",
+    [
+        ("xbbg_resolve_venues", create_resolve_venues_tool),
+        ("xbbg_auction_snapshot", create_auction_snapshot_tool),
+    ],
+)
+def test_disabled_auction_tools_cannot_be_created_or_selected(name, factory):
+    options = BloombergToolsOptions(disabled_tools={name})
+    assert name not in {tool.name for tool in create_bloomberg_tools(options)}
+    assert name not in {tool.name for tool in create_all_bloomberg_tools(options)}
+    with pytest.raises(ValueError, match="disabled"):
+        factory(options)

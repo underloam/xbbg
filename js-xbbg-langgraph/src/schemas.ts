@@ -163,6 +163,15 @@ export interface ResolveIsinsInput {
   readonly isins: readonly string[];
 }
 
+export interface ResolveVenuesInput {
+  readonly securities: readonly string[];
+  readonly pcsOverrides?: Record<string, string>;
+}
+
+export interface AuctionSnapshotInput extends ResolveVenuesInput {
+  readonly fields?: readonly string[];
+}
+
 export interface IssuerIsinsInput {
   readonly bondIsins: readonly string[];
 }
@@ -1024,6 +1033,59 @@ export function createResolveIsinsSchema(
       options.maxStringChars,
       '["<ISIN>"]',
     ).describe("Raw ISIN strings to resolve. Do not add /isin/ prefixes for this recipe."),
+  });
+}
+
+interface VenueResolutionShape {
+  readonly securities: ZodOutput<string[]>;
+  readonly pcsOverrides: ZodOutput<Record<string, string> | undefined>;
+}
+
+function venueResolutionFields(
+  tool: string,
+  options: NormalizedBloombergToolsOptions,
+): VenueResolutionShape {
+  return {
+    pcsOverrides: z
+      .record(
+        nonEmptyString(tool, "pcsOverrides exchange", options.maxStringChars, "NEW YORK"),
+        nonEmptyString(tool, "pcsOverrides source", options.maxStringChars, "SNY2"),
+      )
+      .optional()
+      .describe(
+        'Per-call preferred exchange-name to pricing-source overrides, for example {"NEW YORK":"SNY2"}. Overrides win over packaged mappings; exchange names are normalized by the core and the returned venue pricing source is validated.',
+      ),
+    securities: stringArray(
+      tool,
+      "securities",
+      options.maxSecurities,
+      options.maxStringChars,
+      '["IBM US Equity", "AAPL US Equity"]',
+    ).describe(
+      "Securities supplied by the user: Bloomberg tickers, valid bare ISINs, /isin/<ISIN>, or /bbgid/<FIGI>. The core routes composite equities and preferreds to validated primary venues and respects explicit venue inputs; never guess venue tickers. Results preserve input order, duplicates, and each row's status/error, subject to output limits.",
+    ),
+  };
+}
+
+export function createResolveVenuesSchema(
+  options: NormalizedBloombergToolsOptions,
+): ZodOutput<ResolveVenuesInput> {
+  return z.object({ ...venueResolutionFields("xbbg_resolve_venues", options) });
+}
+
+export function createAuctionSnapshotSchema(
+  options: NormalizedBloombergToolsOptions,
+): ZodOutput<AuctionSnapshotInput> {
+  const tool = "xbbg_auction_snapshot";
+  return z.object({
+    ...venueResolutionFields(tool, options),
+    fields: z
+      .array(nonEmptyString(tool, "fields", options.maxStringChars, '["IMBALANCE_INDIC_RT"]'))
+      .max(options.maxFields, `${tool}: fields can contain at most ${options.maxFields} values`)
+      .optional()
+      .describe(
+        "Optional auction fields in requested column order. Omit or pass [] for AuctionFields.default. Values are returned only for validated venues; unresolved, unsupported, or mismatched rows retain status/error and have null field values.",
+      ),
   });
 }
 

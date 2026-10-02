@@ -473,6 +473,37 @@ impl Session {
         Ok(())
     }
 
+    /// Update existing subscriptions, matched by their correlation IDs.
+    ///
+    /// Each entry in `subs` supplies the replacement field list and options.
+    /// Use the complete desired list, not only newly added fields.
+    /// `label` is an optional diagnostic label, as in [`Session::subscribe`].
+    pub fn resubscribe(&self, subs: &SubscriptionList, label: Option<&str>) -> Result<()> {
+        let (label_ptr, label_len, _label_cstring) = match label {
+            Some(l) => {
+                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
+                    detail: format!("invalid label: {}", e),
+                })?;
+                (cs.as_ptr(), l.len() as i32, Some(cs))
+            }
+            None => (std::ptr::null(), 0, None),
+        };
+
+        // SAFETY: valid session/list pointers; the optional label remains alive
+        // for the duration of the SDK call.
+        let rc = unsafe {
+            crate::ffi::blpapi_Session_resubscribe(self.ptr, subs.as_ptr(), label_ptr, label_len)
+        };
+
+        if rc != 0 {
+            return Err(BlpError::Internal {
+                detail: format!("blpapi_Session_resubscribe failed with rc={}", rc),
+            });
+        }
+
+        Ok(())
+    }
+
     /// Unsubscribe from market data
     ///
     /// # Arguments

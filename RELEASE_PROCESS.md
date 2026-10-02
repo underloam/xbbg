@@ -541,3 +541,4 @@ Before triggering a release, ensure:
 - [ ] No placeholder text (TODO, FIXME, WIP, TBD) remains
 - [ ] Issue/PR numbers are referenced where applicable
 - [ ] Breaking changes are clearly marked
+- [ ] `py-xbbg-langgraph/pyproject.toml` requires an `xbbg` floor that contains every `xbbg` API its tools call (raise it to the version being released when new tools depend on new APIs, for example `xbbg.ext.resolve_venues`). The JS adapter's `@xbbg/core` dependency is stamped to the release version by `js-xbbg/scripts/stamp-version.ts`, so it needs no manual change.

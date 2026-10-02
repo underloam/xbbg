@@ -10,12 +10,7 @@ import { performance } from 'node:perf_hooks';
 import { setImmediate as yieldToEventLoop, setTimeout as sleep } from 'node:timers/promises';
 
 import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
-import type {
-  NativeArrowColumn,
-  NativeArrowZeroCopyBatch,
-  NativeSubscription,
-  NativeSubscriptionUpdateBatch,
-} from '../src/napi';
+import type { NativeArrowColumn, NativeArrowZeroCopyBatch, NativeSubscription } from '../src/napi';
 import type { SubscriptionReadOptions, SubscriptionStats } from '../src/types';
 import {
   collectProvenance,
@@ -102,7 +97,11 @@ interface ArrowReplaySubscription {
   return?(): Promise<IteratorResult<Table>>;
 }
 
-type ArrowSubscriptionConstructor = new (inner: NativeSubscription) => ArrowReplaySubscription;
+type NativeArrowReader = Pick<
+  NativeSubscription,
+  'nextArrowBatch' | 'unsubscribeArrow' | 'takeWarnings' | 'deliversRows'
+>;
+type ArrowSubscriptionConstructor = new (inner: NativeArrowReader) => ArrowReplaySubscription;
 
 interface CaptureTick {
   toObject(): ReplayRow;
@@ -127,9 +126,10 @@ interface DistReplayCore extends DistCore {
   readonly ArrowSubscription: ArrowSubscriptionConstructor;
 }
 
-class AutonomousNativeSubscription implements NativeSubscription {
+class AutonomousNativeSubscription implements NativeArrowReader {
   readonly fields: string[];
   readonly tickers: string[];
+  readonly deliversRows = true;
 
   private readonly batches: readonly NativeArrowZeroCopyBatch[];
   private readonly capacity: number;
@@ -178,15 +178,8 @@ class AutonomousNativeSubscription implements NativeSubscription {
     };
   }
 
-  async add(_tickers: readonly string[]): Promise<void> {}
-
-  async remove(_tickers: readonly string[]): Promise<void> {}
-
-  async nextUpdates(
-    _maxItems?: number,
-    _maxWaitMs?: number,
-  ): Promise<NativeSubscriptionUpdateBatch | null> {
-    return null;
+  takeWarnings(): [] {
+    return [];
   }
 
   async nextArrowBatch(
@@ -209,11 +202,6 @@ class AutonomousNativeSubscription implements NativeSubscription {
         resolve(batch);
       });
     });
-  }
-
-  async unsubscribe(_drain: boolean): Promise<NativeSubscriptionUpdateBatch[] | null> {
-    await this.stop(false);
-    return null;
   }
 
   async unsubscribeArrow(drain: boolean): Promise<NativeArrowZeroCopyBatch[] | null> {

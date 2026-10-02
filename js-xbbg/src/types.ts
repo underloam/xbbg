@@ -341,6 +341,102 @@ export interface StreamOptions {
   streamCapacity?: number;
   allFields?: boolean;
   fields?: readonly string[];
+  /** Upstream topic -> consumer label (used by rows, status, tickers and remove). */
+  aliases?: Record<string, string>;
+  /** Warn once per topic (default), reject delayed topics, or only record the flag. */
+  onDelayed?: 'warn' | 'raise' | 'ignore';
+  /** Opt out of engine-local market-data feed sharing. Default false. */
+  isolated?: boolean;
+  /** Keep a materialized image without queuing rows. Default true. */
+  rows?: boolean;
+  /** Rejected explicit fields: warn (default), fail the topic, or only record errors. */
+  onFieldError?: 'warn' | 'raise' | 'ignore';
+  /** Numeric zero sentinels to materialize as null in latest() only. */
+  zeroAsNull?: readonly string[];
+}
+
+export interface SubscriptionEvent {
+  atUs: number;
+  category: string;
+  level: string;
+  messageType: string;
+  topic?: string | null;
+  detail?: string | null;
+}
+
+export interface SubscriptionFailure {
+  topic: string;
+  reason: string;
+  kind: string;
+  atUs: number;
+}
+
+export interface TopicState {
+  topic: string;
+  feedTopic: string;
+  delayed?: boolean | null;
+  state: string;
+  lastChangeUs: number;
+  streamsActive: boolean;
+  streamsChangedUs: number;
+}
+
+export interface SessionStatus {
+  state: string;
+  lastChangeUs: number;
+  disconnectCount: number;
+  reconnectCount: number;
+}
+
+export interface ServiceStatus {
+  service: string;
+  up: boolean;
+  lastChangeUs: number;
+}
+
+export interface AdminStatus {
+  slowConsumerWarningActive: boolean;
+  slowConsumerWarningCount: number;
+  slowConsumerClearedCount: number;
+  dataLossCount: number;
+  lastWarningUs?: number | null;
+  lastClearedUs?: number | null;
+  lastDataLossUs?: number | null;
+}
+
+export interface SubscriptionStatus {
+  events: SubscriptionEvent[];
+  failures: SubscriptionFailure[];
+  failedTickers: string[];
+  topicStates: Record<string, TopicState>;
+  fieldErrors: Record<string, Record<string, string>>;
+  session: SessionStatus;
+  services: Record<string, ServiceStatus>;
+  admin: AdminStatus;
+}
+
+export interface FeedInfo {
+  service: string;
+  topic: string;
+  options: string[];
+  fields: string[];
+  consumers: number;
+  delayed?: boolean | null;
+  state: string;
+  isolated: boolean;
+  fieldErrors: Record<string, string>;
+}
+
+export interface ResolveVenuesOptions extends RecipeBackendOptions {
+  pcsOverrides?: Record<string, string>;
+}
+
+export interface AuctionSnapshotOptions extends ResolveVenuesOptions {
+  fields?: readonly string[];
+}
+
+export interface AuctionStreamOptions extends Omit<StreamOptions, 'aliases'> {
+  pcsOverrides?: Record<string, string>;
 }
 
 export interface BqrOptions {

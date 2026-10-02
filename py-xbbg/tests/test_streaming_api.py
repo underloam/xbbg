@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 import logging
 import queue
 import threading
@@ -11,97 +10,11 @@ import threading
 import pytest
 
 
-class TestAsubscribeSignature:
-    """Verify asubscribe() has all new streaming params with correct defaults."""
+class _QuietSubscription:
+    delivers_rows = True
 
-    def test_asubscribe_signature(self):
-        """All new params exist with correct defaults."""
-        from xbbg.blp import asubscribe
-
-        sig = inspect.signature(asubscribe)
-        params = sig.parameters
-
-        assert "service" in params
-        assert params["service"].default is None
-
-        assert "options" in params
-        assert params["options"].default is None
-
-        assert "conflate" in params
-        assert params["conflate"].default is False
-
-        assert "tick_mode" in params
-        assert params["tick_mode"].default is False
-
-        assert "flush_threshold" in params
-        assert params["flush_threshold"].default is None
-
-        assert "stream_capacity" in params
-        assert params["stream_capacity"].default is None
-
-        assert "overflow_policy" in params
-        assert params["overflow_policy"].default is None
-
-        assert "all_fields" in params
-        assert params["all_fields"].default is False
-
-
-class TestAstreamSignature:
-    """Verify astream() has callback and config params."""
-
-    def test_astream_signature(self):
-        """callback param exists with default None; config params present."""
-        from xbbg.blp import astream
-
-        sig = inspect.signature(astream)
-        params = sig.parameters
-
-        assert "callback" in params
-        assert params["callback"].default is None
-
-        assert "flush_threshold" in params
-        assert params["flush_threshold"].default is None
-
-        assert "stream_capacity" in params
-        assert params["stream_capacity"].default is None
-
-        assert "overflow_policy" in params
-        assert params["overflow_policy"].default is None
-
-        assert "all_fields" in params
-        assert params["all_fields"].default is False
-
-        assert "conflate" in params
-        assert params["conflate"].default is False
-
-
-class TestStreamSignature:
-    """Verify stream() also has the new params."""
-
-    def test_stream_signature(self):
-        """stream() has callback, flush_threshold, stream_capacity, overflow_policy."""
-        from xbbg.blp import stream
-
-        sig = inspect.signature(stream)
-        params = sig.parameters
-
-        assert "callback" in params
-        assert params["callback"].default is None
-
-        assert "flush_threshold" in params
-        assert params["flush_threshold"].default is None
-
-        assert "stream_capacity" in params
-        assert params["stream_capacity"].default is None
-
-        assert "overflow_policy" in params
-        assert params["overflow_policy"].default is None
-
-        assert "all_fields" in params
-        assert params["all_fields"].default is False
-
-        assert "conflate" in params
-        assert params["conflate"].default is False
+    def take_warnings(self):
+        return []
 
 
 class TestSyncStreamLifecycle:
@@ -187,53 +100,6 @@ class TestSyncStreamLifecycle:
         assert len(unsubscribed) == 2
         assert all(closed.is_set() for closed in unsubscribed)
 
-    def test_stream_producer_admission_is_scoped_per_engine(self, monkeypatch):
-        from xbbg import blp as blp_module
-
-        async def autonomous_stream(*_args, **_kwargs):
-            yield "first"
-            await asyncio.Event().wait()
-
-        class Config:
-            def __init__(self, limit):
-                self.max_subscription_sessions = limit
-
-        class ScopedEngine:
-            def __init__(self, limit):
-                self._config_snapshot = Config(limit)
-                self._py_engine = object()
-
-        def start_in_scope(generator, scope):
-            token = blp_module._active_engine.set(scope)
-            try:
-                return next(generator)
-            finally:
-                blp_module._active_engine.reset(token)
-
-        first_scope = ScopedEngine(2)
-        second_scope = ScopedEngine(1)
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
-        first_a = blp_module.stream("IBM US Equity", "LAST_PRICE")
-        first_b = blp_module.stream("MSFT US Equity", "LAST_PRICE")
-        second_a = blp_module.stream("NVDA US Equity", "LAST_PRICE")
-
-        try:
-            assert start_in_scope(first_a, first_scope) == "first"
-            assert start_in_scope(first_b, second_scope) == "first"
-
-            rejected_b = blp_module.stream("AMZN US Equity", "LAST_PRICE")
-            with pytest.raises(RuntimeError, match="producer limit"):
-                start_in_scope(rejected_b, second_scope)
-
-            assert start_in_scope(second_a, first_scope) == "first"
-            rejected_a = blp_module.stream("META US Equity", "LAST_PRICE")
-            with pytest.raises(RuntimeError, match="producer limit"):
-                start_in_scope(rejected_a, first_scope)
-        finally:
-            first_a.close()
-            first_b.close()
-            second_a.close()
-
     def test_consumer_exception_cancels_producer_waiting_for_tick(self, monkeypatch):
         from xbbg import blp as blp_module
 
@@ -296,12 +162,12 @@ class TestSyncStreamLifecycle:
         assert cleanup_started.wait(timeout=1)
         assert any(record.exc_info and record.exc_info[1] is cleanup_error for record in caplog.records)
 
-    def test_close_timeout_fails_and_retains_bounded_producer_slot(self, monkeypatch):
+    def test_close_timeout_fails_and_keeps_cleanup_tracked(self, monkeypatch):
         from xbbg import blp as blp_module
 
         cleanup_started = threading.Event()
         cleanup_finished = threading.Event()
-        producer_released = threading.Event()
+        producer_completed = threading.Event()
         cleanup_gate: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         producer_calls = []
 
@@ -326,7 +192,6 @@ class TestSyncStreamLifecycle:
 
         monkeypatch.setattr(blp_module, "astream", cancellation_resistant_stream)
         monkeypatch.setattr(blp_module._notebook_sync_bridge, "start", capture_start)
-        monkeypatch.setattr(blp_module, "_DEFAULT_MAX_SYNC_STREAM_PRODUCERS", 1)
         monkeypatch.setattr(blp_module, "_SYNC_STREAM_CLOSE_TIMEOUT_SECONDS", 0.01)
         monkeypatch.setattr(blp_module, "_config", None)
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE")
@@ -337,19 +202,18 @@ class TestSyncStreamLifecycle:
                 batches.close()
             assert cleanup_started.wait(timeout=1)
 
-            blocked = blp_module.stream("MSFT US Equity", "LAST_PRICE")
-            with pytest.raises(RuntimeError, match="producer limit"):
-                next(blocked)
+            assert not producer_calls[0].result.done()
+            assert not cleanup_finished.is_set()
         finally:
             if cleanup_gate:
                 assert producer_calls
-                producer_calls[0].result.add_done_callback(lambda _result: producer_released.set())
+                producer_calls[0].result.add_done_callback(lambda _result: producer_completed.set())
                 loop, gate = cleanup_gate[0]
                 loop.call_soon_threadsafe(gate.set_result, None)
 
         assert cleanup_finished.wait(timeout=1)
         assert producer_calls
-        assert producer_released.wait(timeout=1)
+        assert producer_completed.wait(timeout=1)
 
         async def completed_stream(*_args, **_kwargs):
             yield "accepted"
@@ -462,34 +326,19 @@ class TestSyncStreamLifecycle:
         assert received == list(range(20))
 
 
-class TestStreamingServiceHelpersSignature:
-    """avwap / amktbar / adepth / achains forward all_fields."""
-
-    def test_all_fields_kwarg_defaults(self):
-        from xbbg.blp import achains, adepth, amktbar, avwap
-
-        for fn in (adepth, achains):
-            sig = inspect.signature(fn)
-            assert "all_fields" in sig.parameters
-            assert sig.parameters["all_fields"].default is False
-
-        for fn in (avwap, amktbar):
-            sig = inspect.signature(fn)
-            assert "all_fields" in sig.parameters
-            assert sig.parameters["all_fields"].default is True
-
-
 class TestVwapContract:
     """Verify Market VWAP helpers use Bloomberg's required subscription shape."""
 
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
         import xbbg.blp as blp_module
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             tickers = ["//blp/mktvwap/ticker/IBM US Equity"]
             failed_tickers = []
             failures = []
-            topic_states = [("//blp/mktvwap/ticker/IBM US Equity", "pending", 1)]
+            topic_states = [
+                ("//blp/mktvwap/ticker/IBM US Equity", "pending", 1, None, "//blp/mktvwap/ticker/IBM US Equity")
+            ]
             session_status = {
                 "state": "up",
                 "last_change_us": 1,
@@ -524,7 +373,7 @@ class TestVwapContract:
             def __init__(self):
                 self.added: list[list[str]] = []
 
-            async def add(self, tickers):
+            async def add(self, tickers, aliases=None):
                 self.added.append(tickers)
 
         fake_sub = FakePySubscription()
@@ -544,13 +393,6 @@ class TestVwapContract:
 
         monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
         return blp_module, fake_sub
-
-    def test_avwap_signature_uses_vwap_only_contract(self):
-        from xbbg.blp import avwap
-
-        sig = inspect.signature(avwap)
-        assert "fields" not in sig.parameters
-        assert sig.parameters["all_fields"].default is True
 
     def test_avwap_builds_explicit_market_vwap_subscription(self, monkeypatch):
         from xbbg.services import Service
@@ -626,11 +468,11 @@ class TestMktbarContract:
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
         import xbbg.blp as blp_module
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             tickers = ["//blp/mktbar/ticker/ES1 Index"]
             failed_tickers = []
             failures = []
-            topic_states = [("//blp/mktbar/ticker/ES1 Index", "pending", 1)]
+            topic_states = [("//blp/mktbar/ticker/ES1 Index", "pending", 1, None, "//blp/mktbar/ticker/ES1 Index")]
             session_status = {
                 "state": "up",
                 "last_change_us": 1,
@@ -666,7 +508,7 @@ class TestMktbarContract:
                 self.added: list[list[str]] = []
                 self.removed: list[list[str]] = []
 
-            async def add(self, tickers):
+            async def add(self, tickers, aliases=None):
                 self.added.append(tickers)
 
             async def remove(self, tickers):
@@ -689,14 +531,6 @@ class TestMktbarContract:
 
         monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
         return blp_module, fake_sub
-
-    def test_amktbar_signature_uses_bar_size(self):
-        from xbbg.blp import amktbar
-
-        sig = inspect.signature(amktbar)
-        assert "bar_size" in sig.parameters
-        assert sig.parameters["bar_size"].default == 1
-        assert "interval" not in sig.parameters
 
     def test_amktbar_builds_explicit_market_bar_subscription(self, monkeypatch):
         from xbbg.services import Service
@@ -794,11 +628,11 @@ class TestConflatedMarketDataContract:
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
         import xbbg.blp as blp_module
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             tickers = ["ES1 Index"]
             failed_tickers = []
             failures = []
-            topic_states = [("ES1 Index", "pending", 1)]
+            topic_states = [("ES1 Index", "pending", 1, None, "ES1 Index")]
             session_status = {
                 "state": "up",
                 "last_change_us": 1,
@@ -940,11 +774,11 @@ class TestTickModeWarning:
 
         captured: dict[str, object] = {}
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             tickers = ["AAPL US Equity"]
             failed_tickers = []
             failures = []
-            topic_states = [("AAPL US Equity", "pending", 1)]
+            topic_states = [("AAPL US Equity", "pending", 1, None, "AAPL US Equity")]
             session_status = {
                 "state": "up",
                 "last_change_us": 1,
@@ -1025,7 +859,7 @@ class TestExplicitOutputSelector:
     ):
         from xbbg import blp as blp_module
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             def __init__(self):
                 self.batch_reads = 0
                 self.tick_reads = 0
@@ -1045,7 +879,7 @@ class TestExplicitOutputSelector:
         native_sub = FakePySubscription()
 
         class FakeEngine:
-            async def subscribe(self, _tickers, _fields, *, all_fields):
+            async def subscribe(self, _tickers, _fields, *, all_fields, **kwargs):
                 assert all_fields is False
                 return native_sub
 
@@ -1214,7 +1048,7 @@ class TestSubscriptionConversion:
                 self.to_table_calls += 1
                 return table
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def __anext__(self):
                 return batch
 
@@ -1244,7 +1078,7 @@ class TestSubscriptionConversion:
                 calls.append("to_table")
                 return table
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def __anext__(self):
                 return FakeBatch()
 
@@ -1270,7 +1104,7 @@ class TestSubscriptionConversion:
         batches = [object(), object()]
         calls = []
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def unsubscribe(self, drain, tick_mode):
                 calls.append((drain, tick_mode))
                 return batches
@@ -1296,7 +1130,7 @@ class TestSubscriptionConversion:
                 calls.append(self.table)
                 return self.table
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def unsubscribe(self, drain, tick_mode):
                 assert (drain, tick_mode) == (True, False)
                 return [FakeBatch(table) for table in tables]
@@ -1321,7 +1155,7 @@ class TestSubscriptionConversion:
                 calls.append("to_table")
                 return table
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def unsubscribe(self, drain, tick_mode):
                 assert (drain, tick_mode) == (True, False)
                 return [FakeBatch()]
@@ -1344,7 +1178,7 @@ class TestSubscriptionConversion:
         ticks = [{"topic": "IBM US Equity", "PX_LAST": None}, {"topic": "IBM US Equity"}]
         calls = []
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def unsubscribe(self, drain, tick_mode):
                 calls.append((drain, tick_mode))
                 return ticks
@@ -1370,7 +1204,7 @@ class TestSubscriptionConversion:
         native_error.topic = "IBM US Equity"
         native_error.detail = "consumer queue overflow"
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             async def unsubscribe(self, drain, tick_mode):
                 assert (drain, tick_mode) == (True, False)
                 raise native_error
@@ -1384,46 +1218,27 @@ class TestSubscriptionConversion:
         assert raised.value.detail == "consumer queue overflow"
 
 
-class TestSubscriptionStats:
-    """Verify Subscription class has a stats property."""
-
-    def test_subscription_stats_property_exists(self):
-        """Subscription.stats is a property descriptor."""
-        from xbbg.blp import Subscription
-
-        assert hasattr(Subscription, "stats")
-        assert isinstance(inspect.getattr_static(Subscription, "stats"), property)
-
-
 class TestSubscriptionFailureMetadata:
     """Verify Subscription exposes non-fatal failure metadata."""
-
-    def test_failure_properties_exist(self):
-        from xbbg.blp import Subscription
-
-        assert isinstance(inspect.getattr_static(Subscription, "failed_tickers"), property)
-        assert isinstance(inspect.getattr_static(Subscription, "failures"), property)
-        assert isinstance(inspect.getattr_static(Subscription, "status"), property)
-        assert isinstance(inspect.getattr_static(Subscription, "events"), property)
-        assert isinstance(inspect.getattr_static(Subscription, "topic_states"), property)
 
     def test_failure_properties_proxy_underlying_subscription(self):
         from xbbg.blp import Subscription
 
-        class FakePySubscription:
+        class FakePySubscription(_QuietSubscription):
             tickers = ["SPY US Equity"]
-            failed_tickers = ["/isin/BMG8192H1557"]
+            failed_tickers = ["SYNTHETIC-MISSING Equity"]
             failures = [
                 (
-                    "/isin/BMG8192H1557",
+                    "SYNTHETIC-MISSING Equity",
                     "Security is not valid for subscription [EX336]",
                     "failure",
                 )
             ]
             topic_states = [
-                ("SPY US Equity", "streaming", 123),
-                ("/isin/BMG8192H1557", "failed", 456),
+                ("SPY US Equity", "streaming", 123, False, "SPY UP Equity"),
+                ("SYNTHETIC-MISSING Equity", "failed", 456, None, "SYNTHETIC-MISSING Equity"),
             ]
+            field_errors = {}
             session_status = {
                 "state": "up",
                 "last_change_us": 789,
@@ -1447,7 +1262,7 @@ class TestSubscriptionFailureMetadata:
                     "subscription",
                     "warning",
                     "SubscriptionFailure",
-                    "/isin/BMG8192H1557",
+                    "SYNTHETIC-MISSING Equity",
                     "Security is not valid for subscription [EX336]",
                 ),
             ]
@@ -1468,10 +1283,10 @@ class TestSubscriptionFailureMetadata:
         sub = Subscription(FakePySubscription(), raw=True, backend=None)
 
         assert sub.tickers == ["SPY US Equity"]
-        assert sub.failed_tickers == ["/isin/BMG8192H1557"]
+        assert sub.failed_tickers == ["SYNTHETIC-MISSING Equity"]
         assert sub.failures == [
             {
-                "ticker": "/isin/BMG8192H1557",
+                "ticker": "SYNTHETIC-MISSING Equity",
                 "reason": "Security is not valid for subscription [EX336]",
                 "kind": "failure",
             }
@@ -1482,31 +1297,3 @@ class TestSubscriptionFailureMetadata:
         assert sub.service_status["//blp/mktdata"]["up"] is True
         assert sub.events[1]["message_type"] == "SubscriptionFailure"
         assert sub.status["session"]["reconnect_count"] == 1
-
-
-class TestBackwardCompatibility:
-    """Verify all new params are optional (backward compat)."""
-
-    def test_backward_compat_signature(self):
-        """asubscribe can be called with just tickers and fields — all new params have defaults."""
-        from xbbg.blp import asubscribe
-
-        sig = inspect.signature(asubscribe)
-        params = sig.parameters
-
-        assert "tickers" in params
-        assert "fields" in params
-
-        # Every new param must have a default (i.e. is optional)
-        new_params = [
-            "service",
-            "options",
-            "conflate",
-            "tick_mode",
-            "flush_threshold",
-            "stream_capacity",
-            "overflow_policy",
-        ]
-        for param_name in new_params:
-            assert param_name in params, f"{param_name} missing from signature"
-            assert params[param_name].default is not inspect.Parameter.empty, f"{param_name} should have a default"

@@ -24,6 +24,8 @@ __all__ = [
     "PyEngineConfig",
     "PySubscription",
     "enable_sdk_logging",
+    "ext_auction_field_groups",
+    "ext_auction_zero_price_fields",
     "ext_build_corporate_bonds_query",
     "ext_build_earning_header_rename",
     "ext_build_etf_holdings_query",
@@ -51,6 +53,7 @@ __all__ = [
     "ext_get_market_rule",
     "ext_get_month_code",
     "ext_get_month_name",
+    "ext_imbalance_side",
     "ext_infer_timezone",
     "ext_is_long_format",
     "ext_is_specific_contract",
@@ -71,6 +74,7 @@ __all__ = [
     "get_log_level",
     "recipe_active_cdx",
     "recipe_active_futures",
+    "recipe_auction_snapshot",
     "recipe_bqr",
     "recipe_cdx_ticker",
     "recipe_corporate_bonds",
@@ -87,6 +91,7 @@ __all__ = [
     "recipe_issuer_isins",
     "recipe_preferreds",
     "recipe_resolve_isins",
+    "recipe_resolve_venues",
     "recipe_turnover",
     "recipe_vol_surface",
     "recipe_yas",
@@ -451,13 +456,21 @@ class PyEngine:
         r"""
         List all valid element names for an operation.
         """
-    def subscribe(self, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False) -> typing.Any:
+    def subscribe(self, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None) -> typing.Any:
         r"""
         Subscribe to real-time market data.
         
         Returns a PySubscription that supports async iteration and dynamic add/remove.
         GIL is released during async operations; iteration and add/remove use separate
         locks to avoid contention.
+        Aliases map Bloomberg topics to consumer labels. Delayed streams warn by
+        default; on_delayed also accepts raise and ignore. Isolated subscriptions
+        do not share upstream feeds with other consumers.
+        Set rows=False for an image-only subscription read through latest().
+        on_field_error accepts warn, raise, or ignore. zero_as_null masks numeric
+        zero values only in latest(), leaving stream rows unchanged.
+        session_wait_ms optionally bounds pool-session acquisition; expiry raises
+        BlpValidationError starting with "Configuration error: session_wait:".
         
         Example:
         ```python
@@ -467,7 +480,7 @@ class PyEngine:
         await sub.unsubscribe()
         ```
         """
-    def subscribe_with_options(self, service: builtins.str, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], options: typing.Optional[typing.Sequence[builtins.str]] = None, flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False) -> typing.Any:
+    def subscribe_with_options(self, service: builtins.str, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], options: typing.Optional[typing.Sequence[builtins.str]] = None, flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None) -> typing.Any:
         r"""
         Subscribe to real-time data with custom service and options.
         
@@ -478,6 +491,14 @@ class PyEngine:
             tickers: List of securities to subscribe to
             fields: List of fields to subscribe to
             options: List of subscription options (e.g., ["VWAP_START_TIME=09:30"])
+            aliases: Optional Bloomberg topic to consumer label mapping
+            on_delayed: Delayed stream policy: warn, raise, or ignore
+            isolated: Disable sharing of upstream market-data feeds
+            rows: Deliver rows for iteration; False supports latest() only
+            on_field_error: Field rejection policy: warn, raise, or ignore
+            zero_as_null: Fields whose numeric zeros become null in latest()
+            session_wait_ms: Optional pool-session claim deadline in milliseconds;
+                expiry raises BlpValidationError("Configuration error: session_wait: ...")
         
         Example:
         ```python
@@ -490,6 +511,10 @@ class PyEngine:
         async for batch in sub:
             print(batch)
         ```
+        """
+    def subscription_feeds(self) -> builtins.list[dict]:
+        r"""
+        List retained upstream feeds without authentication or transport details.
         """
     def signal_shutdown(self) -> None:
         r"""
@@ -953,16 +978,28 @@ class PySubscription:
     
     Supports:
     - Async iteration (`async for batch in sub`)
-    - Dynamic add/remove of tickers
+    - Dynamic add/remove of ticker labels and expansion of requested fields
     - Explicit unsubscribe with optional drain
     - Context manager (`async with`)
     Data arrives as native `SubscriptionUpdate`s and is batched into Rust Arrow
     arrays on the consumer side before Python wrappers are attached.
+    Image-only subscriptions (`rows=False`) expose latest() but reject iteration.
+    Warning and status diagnostics remain available after unsubscribe.
     
     Design: Uses separate locks for rx (data receiving) vs stream (metadata snapshots),
     plus a dedicated operation lock to serialize add/remove/unsubscribe without holding
     the stream metadata lock across Bloomberg awaits.
     """
+    @property
+    def field_errors(self) -> builtins.dict[builtins.str, builtins.dict[builtins.str, builtins.str]]:
+        r"""
+        Get field rejection categories indexed by consumer label and field.
+        """
+    @property
+    def delivers_rows(self) -> builtins.bool:
+        r"""
+        Whether this handle delivers rows; False requires latest() instead of iteration.
+        """
     @property
     def tickers(self) -> builtins.list[builtins.str]:
         r"""
@@ -998,16 +1035,19 @@ class PySubscription:
     @property
     def service_status(self) -> builtins.list[tuple[builtins.str, builtins.bool, builtins.int]]: ...
     @property
-    def topic_states(self) -> builtins.list[tuple[builtins.str, builtins.str, builtins.int]]: ...
+    def topic_states(self) -> builtins.list[tuple[builtins.str, builtins.str, builtins.int, typing.Optional[builtins.bool], builtins.str]]: ...
     @property
-    def events(self) -> builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, typing.Optional[builtins.str], typing.Optional[builtins.str]]]: ...
+    def events(self) -> builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, typing.Optional[builtins.str], typing.Optional[builtins.str]]]:
+        r"""
+        Recent events, including DelayedStream and FieldException warnings.
+        """
     @property
     def failed_tickers(self) -> builtins.list[builtins.str]: ...
     @property
     def failures(self) -> builtins.list[tuple[builtins.str, builtins.str, builtins.str]]: ...
     def __aiter__(self) -> PySubscription:
         r"""
-        Async iterator protocol.
+        Async iterator protocol; image-only subscriptions must use latest().
         """
     def __anext__(self) -> typing.Any:
         r"""
@@ -1017,20 +1057,37 @@ class PySubscription:
         Returns an xbbg ArrowRecordBatch on success.
         Raises a Python exception (BlpRequestError, BlpInternalError, etc.) on error.
         Raises StopAsyncIteration when the subscription is closed.
+        Raises RuntimeError for rows=False; use latest() for image-only consumers.
         """
     def __anext_tick_dict__(self) -> typing.Any:
         r"""
         Get next update as a Python dict without building Arrow.
+        Raises RuntimeError for rows=False; use latest() for image-only consumers.
         """
-    def add(self, tickers: typing.Sequence[builtins.str]) -> typing.Any:
+    def add(self, tickers: typing.Sequence[builtins.str], aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> typing.Any:
         r"""
         Add tickers to the subscription dynamically.
         Iteration can continue while Bloomberg work is in flight.
+        """
+    def add_fields(self, fields: typing.Sequence[builtins.str]) -> typing.Any:
+        r"""
+        Add fields to this consumer's projection and expand its upstream feeds.
         """
     def remove(self, tickers: typing.Sequence[builtins.str]) -> typing.Any:
         r"""
         Remove tickers from the subscription dynamically.
         Iteration can continue while Bloomberg work is in flight.
+        """
+    def latest(self) -> typing.Any:
+        r"""
+        Get the materialized latest values as an xbbg ArrowRecordBatch.
+        Closed or terminated subscriptions raise instead of returning an empty batch.
+        """
+    def take_warnings(self) -> builtins.list[dict]:
+        r"""
+        Drain new DelayedStream and FieldException warnings, preserving event history.
+        
+        Each row has at_us, category, level, message_type, topic, and detail keys.
         """
     def unsubscribe(self, drain: builtins.bool = False, tick_mode: builtins.bool = False) -> typing.Any:
         r"""
@@ -1051,6 +1108,13 @@ class PySubscription:
 def _signal_interpreter_shutdown() -> None: ...
 
 def enable_sdk_logging(level: builtins.str) -> None: ...
+
+def ext_auction_field_groups() -> dict:
+    r"""
+    Get named auction field groups as lists in their canonical field order.
+    """
+
+def ext_auction_zero_price_fields() -> list[str]: ...
 
 def ext_build_corporate_bonds_query(ticker: builtins.str, ccy: typing.Optional[builtins.str] = None, extra_fields: typing.Sequence[builtins.str] = [], active_only: builtins.bool = True) -> builtins.str:
     r"""
@@ -1264,6 +1328,11 @@ def ext_get_month_name(code: builtins.str) -> typing.Optional[builtins.str]:
     Get month name for a futures month code.
     """
 
+def ext_imbalance_side(code: builtins.str) -> typing.Optional[builtins.str]:
+    r"""
+    Normalize a Bloomberg imbalance indicator to buy, sell, none, or None.
+    """
+
 def ext_infer_timezone(country_iso: builtins.str) -> typing.Optional[builtins.str]:
     r"""
     Infer timezone from country ISO code.
@@ -1388,6 +1457,13 @@ def recipe_active_futures(engine: PyEngine, gen_ticker: builtins.str, dt: builti
         gen_ticker: Generic futures ticker (e.g., "ES1 Index")
         dt: Reference date (YYYYMMDD format)
         freq: Roll frequency ("M" monthly, "Q"/"QE" quarterly)
+    """
+
+def recipe_auction_snapshot(engine: PyEngine, securities: typing.Sequence[builtins.str], fields: typing.Optional[typing.Sequence[builtins.str]] = None, pcs_overrides: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> typing.Any:
+    r"""
+    Fetch auction fields only from validated primary exchange venues.
+    
+    None or an empty field list selects the default auction field groups.
     """
 
 def recipe_bqr(engine: PyEngine, ticker: builtins.str, start_datetime: builtins.str, end_datetime: builtins.str, event_types: typing.Optional[typing.Sequence[builtins.str]] = None, include_broker_codes: builtins.bool = True) -> typing.Any:
@@ -1548,6 +1624,11 @@ def recipe_preferreds(engine: PyEngine, ticker: builtins.str, fields: typing.Opt
 def recipe_resolve_isins(engine: PyEngine, isins: typing.Sequence[builtins.str]) -> typing.Any:
     r"""
     Resolve equity ISINs through Bloomberg `/ISIN/<id>` lookups.
+    """
+
+def recipe_resolve_venues(engine: PyEngine, securities: typing.Sequence[builtins.str], pcs_overrides: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> typing.Any:
+    r"""
+    Resolve and validate primary exchange-auction venues in input order.
     """
 
 def recipe_turnover(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, ccy: typing.Optional[builtins.str] = None, factor: typing.Optional[builtins.float] = None) -> typing.Any:

@@ -1,7 +1,9 @@
 import type { StructuredToolInterface } from "@langchain/core/tools";
+import type { OverflowPolicy } from "./_defs_gen";
 
 import { createCoreResolver, type CoreResolver } from "./core-loader";
 import {
+  AUCTION_SNAPSHOT_DESCRIPTION,
   BDP_DESCRIPTION,
   BDH_DESCRIPTION,
   BDS_DESCRIPTION,
@@ -21,6 +23,7 @@ import {
   MKTBAR_SNAPSHOT_DESCRIPTION,
   PREFERREDS_DESCRIPTION,
   RESOLVE_ISINS_DESCRIPTION,
+  RESOLVE_VENUES_DESCRIPTION,
   STREAM_SNAPSHOT_DESCRIPTION,
   YAS_DESCRIPTION,
 } from "./descriptions";
@@ -34,6 +37,7 @@ import {
   type ToolContentAndArtifact,
 } from "./result-limits";
 import {
+  createAuctionSnapshotSchema,
   createBeqsSchema,
   createBdhSchema,
   createBdibSchema,
@@ -53,8 +57,10 @@ import {
   createMktbarSnapshotSchema,
   createPreferredsSchema,
   createResolveIsinsSchema,
+  createResolveVenuesSchema,
   createStreamSnapshotSchema,
   createYasSchema,
+  type AuctionSnapshotInput,
   type BdhInput,
   type BeqsInput,
   type BdibInput,
@@ -74,6 +80,7 @@ import {
   type MktbarSnapshotInput,
   type PreferredsInput,
   type ResolveIsinsInput,
+  type ResolveVenuesInput,
   type StreamSnapshotInput,
   type YasInput,
 } from "./schemas";
@@ -122,7 +129,7 @@ interface StreamOptionsInput {
   readonly options?: readonly string[];
   readonly conflate?: boolean;
   readonly flushThreshold?: number;
-  readonly overflowPolicy?: string;
+  readonly overflowPolicy?: OverflowPolicy;
   readonly streamCapacity?: number;
   readonly allFields?: boolean;
   readonly fields?: readonly string[];
@@ -775,6 +782,55 @@ function resolveIsinsWithResolver(resolver: CoreResolver): BloombergTool {
   );
 }
 
+function resolveVenuesWithResolver(resolver: CoreResolver): BloombergTool {
+  const name = "xbbg_resolve_venues" satisfies BloombergToolName;
+  return createBloombergStructuredTool(
+    async (input: ResolveVenuesInput): Promise<ToolContentAndArtifact> => {
+      try {
+        const engine = await resolver.getEngine();
+        const result = await engine.resolveVenues(input.securities, {
+          backend: "json",
+          pcsOverrides: input.pcsOverrides,
+        });
+        return resultString(resolver, name, result);
+      } catch (error) {
+        throwWithToolContext(name, error);
+      }
+    },
+    {
+      description: RESOLVE_VENUES_DESCRIPTION,
+      name,
+      responseFormat: "content_and_artifact",
+      schema: createResolveVenuesSchema(resolver.options),
+    },
+  );
+}
+
+function auctionSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
+  const name = "xbbg_auction_snapshot" satisfies BloombergToolName;
+  return createBloombergStructuredTool(
+    async (input: AuctionSnapshotInput): Promise<ToolContentAndArtifact> => {
+      try {
+        const engine = await resolver.getEngine();
+        const result = await engine.auctionSnapshot(input.securities, {
+          backend: "json",
+          fields: input.fields,
+          pcsOverrides: input.pcsOverrides,
+        });
+        return resultString(resolver, name, result);
+      } catch (error) {
+        throwWithToolContext(name, error);
+      }
+    },
+    {
+      description: AUCTION_SNAPSHOT_DESCRIPTION,
+      name,
+      responseFormat: "content_and_artifact",
+      schema: createAuctionSnapshotSchema(resolver.options),
+    },
+  );
+}
+
 function issuerIsinsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_issuer_isins" satisfies BloombergToolName;
   return createBloombergStructuredTool(
@@ -993,6 +1049,14 @@ export function createResolveIsinsTool(options: BloombergToolsOptions = {}): Blo
   return resolveIsinsWithResolver(createCoreResolver(options));
 }
 
+export function createResolveVenuesTool(options: BloombergToolsOptions = {}): BloombergTool {
+  return resolveVenuesWithResolver(createCoreResolver(options));
+}
+
+export function createAuctionSnapshotTool(options: BloombergToolsOptions = {}): BloombergTool {
+  return auctionSnapshotWithResolver(createCoreResolver(options));
+}
+
 export function createIssuerIsinsTool(options: BloombergToolsOptions = {}): BloombergTool {
   return issuerIsinsWithResolver(createCoreResolver(options));
 }
@@ -1035,6 +1099,8 @@ const CORE_TOOL_DEFINITIONS: readonly CoreToolDefinition[] = Object.freeze([
   { create: corporateBondsWithResolver, name: "xbbg_corporate_bonds" },
   { create: indexMembersWithResolver, name: "xbbg_index_members" },
   { create: resolveIsinsWithResolver, name: "xbbg_resolve_isins" },
+  { create: resolveVenuesWithResolver, name: "xbbg_resolve_venues" },
+  { create: auctionSnapshotWithResolver, name: "xbbg_auction_snapshot" },
   { create: issuerIsinsWithResolver, name: "xbbg_issuer_isins" },
   { create: etfHoldingsWithResolver, name: "xbbg_etf_holdings" },
   { create: streamSnapshotWithResolver, name: "xbbg_stream_snapshot" },

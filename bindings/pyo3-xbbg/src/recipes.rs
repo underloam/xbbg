@@ -2,6 +2,8 @@
 //!
 //! Exposes all recipe functions to Python via `#[pyfunction]` wrappers.
 
+use std::collections::HashMap;
+
 use pyo3::prelude::*;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
@@ -13,6 +15,7 @@ use crate::{native_arrow::record_batch_to_arrow_record_batch, PyEngine};
 /// Convert a RecipeError to a Python exception.
 fn recipe_err(e: xbbg_recipes::RecipeError) -> PyErr {
     match e {
+        xbbg_recipes::RecipeError::Engine(error) => crate::blp_async_error_to_pyerr(*error),
         xbbg_recipes::RecipeError::InvalidArgument(message) => {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
         }
@@ -520,6 +523,46 @@ recipe_wrapper!(
 );
 
 // =============================================================================
+// Auction Recipes
+// =============================================================================
+
+recipe_wrapper!(
+    /// Resolve and validate primary exchange-auction venues in input order.
+    #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+    #[pyfunction]
+    #[pyo3(signature = (engine, securities, pcs_overrides=None))]
+    |eng|
+    fn recipe_resolve_venues(
+        securities: Vec<String>,
+        pcs_overrides: Option<HashMap<String, String>>,
+    ) => xbbg_recipes::recipe_resolve_venues(
+        &eng,
+        securities,
+        pcs_overrides.unwrap_or_default(),
+    )
+);
+
+recipe_wrapper!(
+    /// Fetch auction fields only from validated primary exchange venues.
+    ///
+    /// None or an empty field list selects the default auction field groups.
+    #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+    #[pyfunction]
+    #[pyo3(signature = (engine, securities, fields=None, pcs_overrides=None))]
+    |eng|
+    fn recipe_auction_snapshot(
+        securities: Vec<String>,
+        fields: Option<Vec<String>>,
+        pcs_overrides: Option<HashMap<String, String>>,
+    ) => xbbg_recipes::recipe_auction_snapshot(
+        &eng,
+        securities,
+        fields.unwrap_or_default(),
+        pcs_overrides.unwrap_or_default(),
+    )
+);
+
+// =============================================================================
 // Currency Recipes
 // =============================================================================
 
@@ -574,6 +617,159 @@ pub fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         recipe_etf_nav_relationships,
         recipe_etf_nav_snapshot,
         recipe_etf_nav_history,
+        recipe_resolve_venues,
+        recipe_auction_snapshot,
         recipe_currency_conversion,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        BlpInternalError, BlpLimitError, BlpRequestError, BlpSessionError,
+        BlpSubscriptionDataLossError, BlpTimeoutError, BlpValidationError,
+    };
+    use pyo3::exceptions::{PyRuntimeError, PyValueError};
+    use xbbg_async::BlpAsyncError;
+    use xbbg_core::errors::CorrelationContext;
+    use xbbg_core::BlpError;
+    use xbbg_recipes::RecipeError;
+
+    #[test]
+    fn recipe_validation_errors_distinguish_arguments_from_engine_configuration() {
+        Python::initialize();
+        Python::attach(|py| {
+            let argument = recipe_err(RecipeError::InvalidArgument("fields are required".into()));
+            assert!(argument.is_instance_of::<PyValueError>(py));
+
+            let engine = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::ConfigError {
+                detail: "invalid recipe configuration".into(),
+            })));
+            assert!(engine.is_instance_of::<BlpValidationError>(py));
+            assert!(!engine.is_instance_of::<PyValueError>(py));
+            assert!(engine
+                .value(py)
+                .to_string()
+                .contains("invalid recipe configuration"));
+        });
+    }
+
+    #[test]
+    fn recipe_timeouts_preserve_the_typed_exception_for_each_engine_wrapper() {
+        Python::initialize();
+        Python::attach(|py| {
+            for timeout in [
+                BlpAsyncError::Timeout,
+                BlpAsyncError::Blp(BlpError::Timeout),
+                BlpAsyncError::BlpError(BlpError::Timeout),
+            ] {
+                let error = recipe_err(RecipeError::Engine(Box::new(timeout)));
+                assert!(error.is_instance_of::<BlpTimeoutError>(py));
+            }
+        });
+    }
+
+    #[test]
+    fn recipe_request_failures_preserve_context_and_limit_classification() {
+        Python::initialize();
+        Python::attach(|py| {
+            for (label, is_limit) in [("category=BAD_ARGS", false), ("category=LIMIT", true)] {
+                let error = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::Blp(
+                    BlpError::RequestFailure {
+                        service: "//blp/refdata".into(),
+                        operation: Some("ReferenceDataRequest".into()),
+                        cid: Some(CorrelationContext::U64(42)),
+                        label: Some(label.into()),
+                        request_id: Some("synthetic-request".into()),
+                        source: None,
+                    },
+                ))));
+                assert!(error.is_instance_of::<BlpRequestError>(py));
+                assert_eq!(error.is_instance_of::<BlpLimitError>(py), is_limit);
+                let message = error.value(py).to_string();
+                for context in [
+                    "//blp/refdata",
+                    "ReferenceDataRequest",
+                    "42",
+                    "synthetic-request",
+                    label,
+                ] {
+                    assert!(
+                        message.contains(context),
+                        "missing request context: {context}"
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn recipe_engine_failures_preserve_session_request_and_internal_types() {
+        Python::initialize();
+        Python::attach(|py| {
+            for session in [
+                BlpAsyncError::SessionLost {
+                    worker_id: 2,
+                    in_flight_count: 1,
+                },
+                BlpAsyncError::AllWorkersDown { pool_size: 2 },
+            ] {
+                let error = recipe_err(RecipeError::Engine(Box::new(session)));
+                assert!(error.is_instance_of::<BlpSessionError>(py));
+            }
+
+            let cancelled = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::Cancelled)));
+            assert!(cancelled.is_instance_of::<BlpRequestError>(py));
+
+            for internal in [
+                BlpAsyncError::ChannelClosed,
+                BlpAsyncError::Internal("synthetic failure".into()),
+            ] {
+                let error = recipe_err(RecipeError::Engine(Box::new(internal)));
+                assert!(error.is_instance_of::<BlpInternalError>(py));
+            }
+        });
+    }
+
+    #[test]
+    fn recipe_data_loss_preserves_structured_exception_attributes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let error = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::Blp(
+                BlpError::SubscriptionDataLoss {
+                    topic: "IBM US Equity".into(),
+                    detail: "synthetic data loss".into(),
+                },
+            ))));
+            assert!(error.is_instance_of::<BlpSubscriptionDataLossError>(py));
+            for (attribute, expected) in [
+                ("topic", "IBM US Equity"),
+                ("detail", "synthetic data loss"),
+            ] {
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr(attribute)
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    expected
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn non_engine_recipe_errors_keep_runtime_error_mapping() {
+        Python::initialize();
+        Python::attach(|py| {
+            let error = recipe_err(RecipeError::Other("synthetic recipe failure".into()));
+            assert!(error.is_instance_of::<PyRuntimeError>(py));
+            assert!(error
+                .value(py)
+                .to_string()
+                .contains("synthetic recipe failure"));
+        });
+    }
 }

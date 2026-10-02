@@ -35,6 +35,9 @@ import { resolveNativeAddon } from './native/resolve-native';
 import { configureRuntimeSearchPath } from './runtime-search-path';
 import type {
   ActiveCdxOptions,
+  AdminStatus,
+  AuctionSnapshotOptions,
+  AuctionStreamOptions,
   AuthConfig,
   BackendKind,
   BdhOptions,
@@ -63,6 +66,7 @@ import type {
   EtfHoldingsOptions,
   ExchangeInfoResult,
   ExchangeOverrideInput,
+  FeedInfo,
   FieldInfo,
   FormatKind,
   FuturesCandidate,
@@ -84,20 +88,27 @@ import type {
   RecipeBackendOptions,
   RequestInput,
   RequestOptions,
+  ResolveVenuesOptions,
   ResultMetadata,
   SeatType,
   ServerAddress,
   SecurityOverrideSpec,
+  ServiceStatus,
+  SessionStatus,
   SessionWindowsInfo,
   Socks5Config,
   StreamOptions,
   StringPair,
+  SubscriptionEvent,
+  SubscriptionFailure,
   SubscriptionReadOptions,
   SubscriptionStats,
+  SubscriptionStatus,
   TickerParts,
   TimeRange,
   TlsConfig,
   TurnoverOptions,
+  TopicState,
   VolFieldSpec,
   VolSurfaceOptions,
   VolSurfacePreset,
@@ -125,6 +136,9 @@ function isNativeAddon(value: unknown): value is NativeAddon {
   return (
     isPlainObject(value) &&
     typeof value.JsEngine === 'function' &&
+    typeof value.extAuctionFieldGroup === 'function' &&
+    typeof value.extAuctionZeroPriceFields === 'function' &&
+    typeof value.extImbalanceSide === 'function' &&
     typeof value.getLogLevel === 'function' &&
     typeof value.setLogLevel === 'function'
   );
@@ -198,6 +212,32 @@ const native = loadNative();
 
 // ── Constants ───────────────────────────────────────────────────────────
 export { Backend, Format };
+
+function auctionFields(name: string): readonly string[] {
+  const fields = native.extAuctionFieldGroup(name);
+  if (fields === null) {
+    throw new Error(`Native auction field group is missing: ${name}`);
+  }
+  return Object.freeze(fields);
+}
+
+/** Stream-valid auction fields, sourced from the native shared definition. */
+export const AuctionFields = Object.freeze({
+  imbalance: auctionFields('imbalance'),
+  indicative: auctionFields('indicative'),
+  state: auctionFields('state'),
+  halts: auctionFields('halts'),
+  results: auctionFields('results'),
+  composite: auctionFields('composite'),
+  quotes: auctionFields('quotes'),
+  default: auctionFields('default'),
+  zeroPriceFields: Object.freeze(native.extAuctionZeroPriceFields()),
+});
+
+/** Interpret Bloomberg imbalance codes; undisclosed/unknown codes return null. */
+export function imbalanceSide(code: string): 'buy' | 'sell' | 'none' | null {
+  return native.extImbalanceSide(code);
+}
 
 export const CDX_INFO_FIELDS = Object.freeze([
   'ROLLING_SERIES',
@@ -451,6 +491,75 @@ function validatedInavTickers(etfList: readonly string[], table: Table): string[
   }
 
   return resolved.map(({ inav }) => inav);
+}
+
+function validatedAuctionTopics(
+  securities: readonly string[],
+  table: Table,
+): { topics: string[]; aliases: Record<string, string> } {
+  const malformed = (): BlpValidationError =>
+    new BlpValidationError(
+      `Venue resolution is not one-to-one with securities: ${securities.join(', ')}`,
+      { element: 'securities' },
+    );
+  const order = table.getChild('input_order');
+  const security = table.getChild('security');
+  const venue = table.getChild('venue_topic');
+  const status = table.getChild('status');
+  const error = table.getChild('error');
+  if (
+    order === null ||
+    security === null ||
+    venue === null ||
+    status === null ||
+    error === null ||
+    table.numRows !== securities.length
+  ) {
+    throw malformed();
+  }
+  const rows = new Map<number, number>();
+  for (let row = 0; row < table.numRows; row += 1) {
+    const inputOrder: unknown = order.get(row);
+    if (typeof inputOrder !== 'number' || rows.has(inputOrder)) {
+      throw malformed();
+    }
+    rows.set(inputOrder, row);
+  }
+  const topics: string[] = [];
+  const labels = new Map<string, string>();
+  const failures: string[] = [];
+  for (const [index, input] of securities.entries()) {
+    const row = rows.get(index);
+    if (row === undefined || security.get(row) !== input) {
+      throw malformed();
+    }
+    const topic: unknown = venue.get(row);
+    const detail: unknown = error.get(row);
+    const resolution: unknown = status.get(row);
+    if (
+      resolution !== 'resolved' ||
+      typeof topic !== 'string' ||
+      topic.trim().length === 0 ||
+      (typeof detail === 'string' && detail.trim().length > 0)
+    ) {
+      failures.push(`${input}: ${typeof detail === 'string' ? detail : String(resolution)}`);
+      continue;
+    }
+    const normalizedTopic = topic.trim();
+    const previous = labels.get(normalizedTopic);
+    if (previous !== undefined) {
+      failures.push(`Ambiguous venue ${normalizedTopic}: ${previous}, ${input}`);
+    } else {
+      labels.set(normalizedTopic, input);
+      topics.push(normalizedTopic);
+    }
+  }
+  if (failures.length > 0) {
+    throw new BlpValidationError(`Auction preflight failed: ${failures.join('; ')}`, {
+      element: 'securities',
+    });
+  }
+  return { topics, aliases: Object.fromEntries(labels) };
 }
 
 const METADATA_KEY_EID_DATA = 'xbbg.eid_data';
@@ -920,10 +1029,67 @@ function normalizeSubscriptionOption(option: string): string {
   return clean;
 }
 
+function validateAliases(aliases: unknown): void {
+  if (aliases === undefined) {
+    return;
+  }
+  if (isPlainObject(aliases)) {
+    const prototype: unknown = Object.getPrototypeOf(aliases);
+    if (
+      (prototype === Object.prototype || prototype === null) &&
+      Object.values(aliases).every((label) => typeof label === 'string')
+    ) {
+      return;
+    }
+  }
+  throw new BlpValidationError('aliases must map topic strings to label strings', {
+    element: 'aliases',
+  });
+}
+
+function validateStreamControls(options: StreamOptions): void {
+  validateAliases(options.aliases);
+  const policy: unknown = options.onDelayed;
+  if (policy !== undefined && policy !== 'warn' && policy !== 'raise' && policy !== 'ignore') {
+    throw new BlpValidationError('onDelayed must be warn, raise, or ignore', {
+      element: 'onDelayed',
+    });
+  }
+  const isolated: unknown = options.isolated;
+  if (isolated !== undefined && typeof isolated !== 'boolean') {
+    throw new BlpValidationError('isolated must be a boolean', { element: 'isolated' });
+  }
+  const rows: unknown = options.rows;
+  if (rows !== undefined && typeof rows !== 'boolean') {
+    throw new BlpValidationError('rows must be a boolean', { element: 'rows' });
+  }
+  const fieldPolicy: unknown = options.onFieldError;
+  if (
+    fieldPolicy !== undefined &&
+    fieldPolicy !== 'warn' &&
+    fieldPolicy !== 'raise' &&
+    fieldPolicy !== 'ignore'
+  ) {
+    throw new BlpValidationError('onFieldError must be warn, raise, or ignore', {
+      element: 'onFieldError',
+    });
+  }
+  const zeroAsNull: unknown = options.zeroAsNull;
+  if (
+    zeroAsNull !== undefined &&
+    (!Array.isArray(zeroAsNull) || zeroAsNull.some((field: unknown) => typeof field !== 'string'))
+  ) {
+    throw new BlpValidationError('zeroAsNull must be an array of field names', {
+      element: 'zeroAsNull',
+    });
+  }
+}
+
 function buildStreamSubscriptionOptions(
   service: string,
   options: StreamOptions,
 ): readonly string[] | undefined {
+  validateStreamControls(options);
   const rawOptions = options.options;
   const { conflate } = options;
 
@@ -1423,13 +1589,40 @@ class SubscriptionCoordinator {
   private readonly resolveClosed: () => void;
   private closeError: Error | undefined;
   private lateReadError: Error | undefined;
+  private readonly deliversRows: boolean;
 
-  public constructor() {
+  public constructor(private readonly inner: NativeSubscription) {
+    this.deliversRows = inner.deliversRows;
     let resolveClosed!: () => void;
     this.closed = new Promise<void>((resolve) => {
       resolveClosed = resolve;
     });
     this.resolveClosed = resolveClosed;
+  }
+
+  public emitWarnings(): void {
+    for (const warning of this.inner.takeWarnings()) {
+      const delayed = warning.messageType === 'DelayedStream';
+      const message = `${warning.messageType}${warning.topic === undefined || warning.topic === null ? '' : `: ${warning.topic}`}`;
+      process.emitWarning(message, {
+        type: delayed ? 'BlpDelayedDataWarning' : 'BlpFieldWarning',
+        code: delayed ? 'XBBG_DELAYED_STREAM' : 'XBBG_FIELD_EXCEPTION',
+        ...(warning.detail === undefined || warning.detail === null
+          ? {}
+          : { detail: warning.detail }),
+      });
+    }
+  }
+
+  public ensureRowDelivery(): void {
+    if (!this.deliversRows) {
+      throw new BlpValidationError(
+        'Subscription has rows=false; use latest() instead of reading rows',
+        {
+          element: 'rows',
+        },
+      );
+    }
   }
 
   public get isOpen(): boolean {
@@ -1519,8 +1712,9 @@ function subscriptionCoordinatorFor(inner: NativeSubscription): SubscriptionCoor
   if (existing !== undefined) {
     return existing;
   }
-  const created = new SubscriptionCoordinator();
+  const created = new SubscriptionCoordinator(inner);
   subscriptionCoordinators.set(inner, created);
+  created.emitWarnings();
   return created;
 }
 
@@ -1593,6 +1787,7 @@ class SubscriptionIterator<TBatch, TValue> {
   }
 
   private async nextWithoutSignal(): Promise<IteratorResult<TValue, undefined>> {
+    this.coordinator.ensureRowDelivery();
     if (!this.isOpen()) {
       return { done: true, value: undefined };
     }
@@ -1607,6 +1802,7 @@ class SubscriptionIterator<TBatch, TValue> {
   }
 
   private async nextWithSignal(signal: AbortSignal): Promise<IteratorResult<TValue, undefined>> {
+    this.coordinator.ensureRowDelivery();
     if (signal.aborted) {
       return await rejectAfterSubscriptionCleanup(abortReason(signal), this.startClose(false));
     }
@@ -1658,6 +1854,8 @@ class SubscriptionIterator<TBatch, TValue> {
         }
         throwIfSubscriptionReadAborted(signal);
         throw error;
+      } finally {
+        this.coordinator.emitWarnings();
       }
 
       if (!this.isOpen()) {
@@ -1825,6 +2023,7 @@ class SubscriptionIterator<TBatch, TValue> {
         this.clearPending();
         this.closingPending.length = 0;
         this.coordinator.finishClose(closeError);
+        this.coordinator.emitWarnings();
       }
     })();
     this.closeInFlight = closePromise;
@@ -1924,11 +2123,36 @@ export class Subscription
     });
   }
 
-  public async add(tickers: readonly string[]): Promise<void> {
+  public async add(tickers: readonly string[], aliases?: Record<string, string>): Promise<void> {
+    validateAliases(aliases);
     try {
-      await this.inner.add(tickers);
+      await this.inner.add(tickers, aliases);
     } catch (error) {
       throw wrapError(error);
+    } finally {
+      this.coordinator.emitWarnings();
+    }
+  }
+
+  /** Grow this consumer's projection and the shared feed's field union. */
+  public async addFields(fields: readonly string[]): Promise<void> {
+    try {
+      await this.inner.addFields(fields);
+    } catch (error) {
+      throw wrapError(error);
+    } finally {
+      this.coordinator.emitWarnings();
+    }
+  }
+
+  /** Materialized last values, independent of the scalar/Arrow iterator read mode. */
+  public latest(options: RecipeBackendOptions = {}): unknown {
+    try {
+      return nativeArrowToBackend(this.inner.latest(), options.backend);
+    } catch (error) {
+      throw wrapError(error);
+    } finally {
+      this.coordinator.emitWarnings();
     }
   }
 
@@ -1937,6 +2161,8 @@ export class Subscription
       await this.inner.remove(tickers);
     } catch (error) {
       throw wrapError(error);
+    } finally {
+      this.coordinator.emitWarnings();
     }
   }
 
@@ -1972,6 +2198,42 @@ export class Subscription
 
   public get stats(): SubscriptionStats {
     return this.inner.stats;
+  }
+
+  public get status(): SubscriptionStatus {
+    return this.inner.status;
+  }
+
+  public get events(): SubscriptionEvent[] {
+    return this.inner.events;
+  }
+
+  public get failures(): SubscriptionFailure[] {
+    return this.inner.failures;
+  }
+
+  public get failedTickers(): string[] {
+    return this.inner.failedTickers;
+  }
+
+  public get topicStates(): Record<string, TopicState> {
+    return this.inner.topicStates;
+  }
+
+  public get fieldErrors(): Record<string, Record<string, string>> {
+    return this.inner.fieldErrors;
+  }
+
+  public get sessionStatus(): SessionStatus {
+    return this.inner.sessionStatus;
+  }
+
+  public get adminStatus(): AdminStatus {
+    return this.inner.adminStatus;
+  }
+
+  public get serviceStatus(): Record<string, ServiceStatus> {
+    return this.inner.serviceStatus;
   }
 
   public [Symbol.asyncIterator](): this {
@@ -2480,8 +2742,24 @@ export class Engine {
             options.overflowPolicy,
             options.streamCapacity,
             options.allFields,
+            options.aliases,
+            options.onDelayed,
+            options.isolated,
+            options.rows,
+            options.onFieldError,
+            options.zeroAsNull,
           )
-        : await this.inner.subscribe(tickers, fields, options.allFields);
+        : await this.inner.subscribe(
+            tickers,
+            fields,
+            options.allFields,
+            options.aliases,
+            options.onDelayed,
+            options.isolated,
+            options.rows,
+            options.onFieldError,
+            options.zeroAsNull,
+          );
       return new Subscription(stream);
     } catch (error) {
       throw wrapError(error);
@@ -2497,8 +2775,15 @@ export class Engine {
     overflowPolicy?: string,
     streamCapacity?: number,
     allFields?: boolean,
+    aliases?: Record<string, string>,
+    onDelayed?: StreamOptions['onDelayed'],
+    isolated?: boolean,
+    rows?: boolean,
+    onFieldError?: StreamOptions['onFieldError'],
+    zeroAsNull?: readonly string[],
   ): Promise<Subscription> {
     try {
+      validateStreamControls({ aliases, onDelayed, isolated, rows, onFieldError, zeroAsNull });
       const stream = await this.inner.subscribeWithOptions(
         service,
         tickers,
@@ -2508,11 +2793,21 @@ export class Engine {
         overflowPolicy,
         streamCapacity,
         allFields,
+        aliases,
+        onDelayed,
+        isolated,
+        rows,
+        onFieldError,
+        zeroAsNull,
       );
       return new Subscription(stream);
     } catch (error) {
       throw wrapError(error);
     }
+  }
+
+  public subscriptionFeeds(): FeedInfo[] {
+    return this.inner.subscriptionFeeds();
   }
 
   public signalShutdown(): void {
@@ -2537,6 +2832,12 @@ export class Engine {
       options.overflowPolicy,
       options.streamCapacity,
       options.allFields,
+      options.aliases,
+      options.onDelayed,
+      options.isolated,
+      options.rows,
+      options.onFieldError,
+      options.zeroAsNull,
     );
   }
 
@@ -2554,6 +2855,12 @@ export class Engine {
       options.overflowPolicy,
       options.streamCapacity,
       options.allFields,
+      options.aliases,
+      options.onDelayed,
+      options.isolated,
+      options.rows,
+      options.onFieldError,
+      options.zeroAsNull,
     );
   }
 
@@ -2567,6 +2874,12 @@ export class Engine {
       options.overflowPolicy,
       options.streamCapacity,
       options.allFields,
+      options.aliases,
+      options.onDelayed,
+      options.isolated,
+      options.rows,
+      options.onFieldError,
+      options.zeroAsNull,
     );
   }
 
@@ -2580,6 +2893,12 @@ export class Engine {
       options.overflowPolicy,
       options.streamCapacity,
       options.allFields,
+      options.aliases,
+      options.onDelayed,
+      options.isolated,
+      options.rows,
+      options.onFieldError,
+      options.zeroAsNull,
     );
   }
 
@@ -2593,6 +2912,12 @@ export class Engine {
       options.overflowPolicy,
       options.streamCapacity,
       options.allFields,
+      options.aliases,
+      options.onDelayed,
+      options.isolated,
+      options.rows,
+      options.onFieldError,
+      options.zeroAsNull,
     );
   }
 
@@ -2933,6 +3258,88 @@ export class Engine {
     } catch (error) {
       throw wrapError(error);
     }
+  }
+
+  public async resolveVenues(
+    securities: string | readonly string[],
+    options: ResolveVenuesOptions = {},
+  ): Promise<unknown> {
+    const backend = normalizeBackend(options.backend);
+    try {
+      const batch = await this.inner.recipeResolveVenues(
+        toStringArray(securities),
+        options.pcsOverrides,
+      );
+      return nativeArrowToBackend(batch, backend);
+    } catch (error) {
+      throw wrapError(error);
+    }
+  }
+
+  public async auctionSnapshot(
+    securities: string | readonly string[],
+    options: AuctionSnapshotOptions = {},
+  ): Promise<unknown> {
+    const backend = normalizeBackend(options.backend);
+    try {
+      const batch = await this.inner.recipeAuctionSnapshot(
+        toStringArray(securities),
+        options.fields ?? AuctionFields.default,
+        options.pcsOverrides,
+      );
+      return nativeArrowToBackend(batch, backend);
+    } catch (error) {
+      throw wrapError(error);
+    }
+  }
+
+  /** Resolve every input before opening a single, venue-only subscription. */
+  public async subscribeAuction(
+    securities: string | readonly string[],
+    options: AuctionStreamOptions = {},
+  ): Promise<Subscription> {
+    validateStreamControls(options);
+    if ('aliases' in options && options.aliases !== undefined) {
+      throw new BlpValidationError('Auction aliases are derived from input securities', {
+        element: 'aliases',
+      });
+    }
+    const inputs = [...new Set(toStringArray(securities))];
+    if (inputs.length === 0) {
+      throw new BlpValidationError('securities must not be empty', { element: 'securities' });
+    }
+    const { fields, pcsOverrides, zeroAsNull, ...streamOptions } = options;
+    const requestedFields =
+      fields === undefined || fields.length === 0 ? AuctionFields.default : fields;
+    let venues: Table;
+    try {
+      venues = toArrowTableFromNative(await this.inner.recipeResolveVenues(inputs, pcsOverrides));
+    } catch (error) {
+      throw wrapError(error);
+    }
+    const { topics, aliases } = validatedAuctionTopics(inputs, venues);
+    return await this.subscribe(topics, requestedFields, {
+      ...streamOptions,
+      aliases,
+      zeroAsNull:
+        zeroAsNull ??
+        AuctionFields.zeroPriceFields.filter((field) => requestedFields.includes(field)),
+    });
+  }
+
+  public async streamAuction(
+    securities: string | readonly string[],
+    options: Omit<AuctionStreamOptions, 'rows'> = {},
+  ): Promise<Subscription> {
+    if ('rows' in options && options.rows !== undefined) {
+      throw new BlpValidationError(
+        'streamAuction always delivers rows; use subscribeAuction for rows=false',
+        {
+          element: 'rows',
+        },
+      );
+    }
+    return await this.subscribeAuction(securities, options);
   }
 
   public async issuerIsins(
@@ -3335,6 +3742,9 @@ export {
 
 export type {
   ActiveCdxOptions,
+  AdminStatus,
+  AuctionSnapshotOptions,
+  AuctionStreamOptions,
   AuthConfig,
   BackendKind,
   BdhOptions,
@@ -3363,6 +3773,7 @@ export type {
   EtfHoldingsOptions,
   ExchangeInfoResult,
   ExchangeOverrideInput,
+  FeedInfo,
   FieldInfo,
   FormatKind,
   FuturesCandidate,
@@ -3384,20 +3795,27 @@ export type {
   RecipeBackendOptions,
   RequestInput,
   RequestOptions,
+  ResolveVenuesOptions,
   ResultMetadata,
   SeatType,
   ServerAddress,
   SecurityOverrideSpec,
+  ServiceStatus,
+  SessionStatus,
   SessionWindowsInfo,
   Socks5Config,
   StreamOptions,
   StringPair,
+  SubscriptionEvent,
+  SubscriptionFailure,
   SubscriptionReadOptions,
   SubscriptionStats,
+  SubscriptionStatus,
   TickerParts,
   TimeRange,
   TlsConfig,
   TurnoverOptions,
+  TopicState,
   VolFieldSpec,
   VolSurfaceOptions,
   VolSurfacePreset,

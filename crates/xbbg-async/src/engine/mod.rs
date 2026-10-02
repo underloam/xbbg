@@ -2,7 +2,7 @@
 //!
 //! Architecture:
 //! - RequestWorkerPool: Pre-warmed workers for all request types (bdp/bdh/bds/bdib/bdtick)
-//! - SubscriptionSessionPool: Pre-warmed sessions for subscriptions (each gets dedicated session)
+//! - SubscriptionSessionPool: Pre-warmed sessions owned by engine-wide shared feeds
 //!
 //! Workers encode stable dispatch keys into Bloomberg correlation IDs for O(1) dispatch.
 //! Pool sizes are configurable with sensible defaults.
@@ -13,14 +13,16 @@ mod exchange_cache;
 mod intraday_timezone;
 mod request_plan;
 mod request_pool;
+mod shared_subscriptions;
 pub mod state;
 mod subscription_pool;
+mod subscription_types;
 mod transport;
 mod worker;
 
 pub use transport::{ServerAddr, Socks5Proxy, TlsConfig, Transport};
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
@@ -45,13 +47,20 @@ pub use crate::services::ExtractorType;
 
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
+use shared_subscriptions::SharedSubscriptions;
+pub use shared_subscriptions::{
+    DelayedPolicy, FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle,
+};
+#[cfg(test)]
+use state::subscription_channel;
 use state::typed_builder::{ArrowType, TypedBuilder};
-use state::{subscription_channel, SubscriptionMetrics, SubscriptionReceiver, SubscriptionSender};
 pub use state::{
     BqlState, BulkDataState, HistDataState, IntradayTickState, LongMode, OutputFormat,
     RefDataState, SubscriptionState, SubscriptionUpdate,
 };
-pub use subscription_pool::{SessionClaim, SubscriptionCommandHandle, SubscriptionSessionPool};
+use state::{SubscriptionMetrics, SubscriptionReceiver};
+use subscription_pool::{SessionClaim, SubscriptionCommandHandle, SubscriptionSessionPool};
+use subscription_types::SubscriptionTypeResolver;
 pub use worker::UnifiedRequestState;
 
 const SESSION_STARTUP_TIMEOUT_MS: u32 = 30_000;
@@ -321,6 +330,9 @@ impl SubscriptionEventLevel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TopicStatusInfo {
     pub topic: String,
+    /// Bloomberg topic, before the consumer's alias is applied.
+    pub feed_topic: String,
+    pub delayed: Option<bool>,
     pub state: TopicLifecycleState,
     pub last_change_us: i64,
     /// Whether Bloomberg currently has active streams for this topic.
@@ -418,10 +430,32 @@ pub struct SubscriptionStatusState {
     failures: Vec<SubscriptionFailureInfo>,
     topic_states: HashMap<String, TopicStatusInfo>,
     events: VecDeque<SubscriptionEventInfo>,
+    event_sequence: u64,
+    observer_events: Option<Vec<SubscriptionEventInfo>>,
+    defer_indices: bool,
+    indices_dirty: bool,
+    #[cfg(test)]
+    index_scans: usize,
+    field_errors: HashMap<String, HashMap<String, String>>,
+    warnings: VecDeque<SubscriptionEventInfo>,
     session: SessionStatusInfo,
     services: HashMap<String, ServiceStatusInfo>,
     admin: AdminStatusInfo,
 }
+
+#[derive(Clone, Copy)]
+pub(crate) enum SubscriptionStatusScope<'a> {
+    Topics(&'a [SlabKey]),
+    Global,
+}
+
+type SubscriptionStatusObserver = dyn Fn(
+        &SubscriptionStatusState,
+        &SubscriptionStatusState,
+        SubscriptionStatusScope<'_>,
+        &[SubscriptionEventInfo],
+    ) + Send
+    + Sync;
 
 /// Shared status handle: readers get an ArcSwap snapshot, while writers take a
 /// small mutation mutex so all changes for one dispatch path are published as a
@@ -430,27 +464,70 @@ pub struct SubscriptionStatusState {
 pub struct SubscriptionStatusHandle {
     snapshot: ArcSwap<SubscriptionStatusState>,
     mutation_lock: ParkingMutex<()>,
+    observer: Option<Arc<SubscriptionStatusObserver>>,
+    pending_warnings: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    publications: std::sync::atomic::AtomicUsize,
 }
 
 pub type SharedSubscriptionStatus = Arc<SubscriptionStatusHandle>;
 
 impl SubscriptionStatusHandle {
     pub fn new(initial: SubscriptionStatusState) -> Self {
+        let pending_warnings = initial.warnings.len();
         Self {
             snapshot: ArcSwap::from_pointee(initial),
             mutation_lock: ParkingMutex::new(()),
+            observer: None,
+            pending_warnings: std::sync::atomic::AtomicUsize::new(pending_warnings),
+            #[cfg(test)]
+            publications: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
+    pub(crate) fn with_observer(observer: Arc<SubscriptionStatusObserver>) -> Self {
+        Self {
+            observer: Some(observer),
+            ..Self::default()
+        }
+    }
+
+    fn notify_observer(
+        &self,
+        previous: &SubscriptionStatusState,
+        next: &SubscriptionStatusState,
+        scope: SubscriptionStatusScope<'_>,
+        events: &[SubscriptionEventInfo],
+    ) {
+        #[cfg(test)]
+        self.publications
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some(observer) = &self.observer {
+            observer(previous, next, scope, events);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn publication_count(&self) -> usize {
+        self.publications.load(std::sync::atomic::Ordering::Relaxed)
+    }
     pub fn load(&self) -> arc_swap::Guard<Arc<SubscriptionStatusState>> {
         self.snapshot.load()
     }
 
     pub fn store(&self, next: Arc<SubscriptionStatusState>) {
-        let previous = {
-            let _guard = self.mutation_lock.lock();
-            self.snapshot.swap(next)
-        };
+        let _guard = self.mutation_lock.lock();
+        let previous = self.snapshot.swap(next.clone());
+        self.pending_warnings
+            .store(next.warnings.len(), std::sync::atomic::Ordering::Release);
+        let count = next.event_sequence.wrapping_sub(previous.event_sequence) as usize;
+        let events: Vec<_> = next
+            .events
+            .iter()
+            .skip(next.events.len().saturating_sub(count))
+            .cloned()
+            .collect();
+        self.notify_observer(&previous, &next, SubscriptionStatusScope::Global, &events);
         drop(previous);
     }
 
@@ -461,15 +538,65 @@ impl SubscriptionStatusHandle {
     }
 
     pub fn update_with<R>(&self, mutate: impl FnOnce(&mut SubscriptionStatusState) -> R) -> R {
-        let (result, previous) = {
-            let _guard = self.mutation_lock.lock();
-            let current = self.snapshot.load_full();
-            let mut next = (*current).clone();
-            let result = mutate(&mut next);
-            let previous = self.snapshot.swap(Arc::new(next));
-            (result, previous)
-        };
-        drop(previous);
+        self.update_scoped(SubscriptionStatusScope::Global, mutate)
+    }
+
+    /// Drain new subscription warnings without publishing or cloning an empty snapshot.
+    /// The status handle can outlive its subscription control, so this also works after close.
+    pub fn take_warnings(&self) -> Vec<SubscriptionEventInfo> {
+        if self
+            .pending_warnings
+            .load(std::sync::atomic::Ordering::Acquire)
+            == 0
+        {
+            return Vec::new();
+        }
+        let _guard = self.mutation_lock.lock();
+        if self
+            .pending_warnings
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == 0
+        {
+            return Vec::new();
+        }
+        let current = self.snapshot.load_full();
+        let mut next = (*current).clone();
+        let warnings = next.take_warnings();
+        let next = Arc::new(next);
+        self.snapshot.store(next.clone());
+        self.pending_warnings
+            .store(0, std::sync::atomic::Ordering::Release);
+        self.notify_observer(&current, &next, SubscriptionStatusScope::Global, &[]);
+        warnings
+    }
+
+    pub(crate) fn update_topics(
+        &self,
+        keys: &[SlabKey],
+        mutate: impl FnOnce(&mut SubscriptionStatusState),
+    ) {
+        self.update_scoped(SubscriptionStatusScope::Topics(keys), mutate);
+    }
+
+    fn update_scoped<R>(
+        &self,
+        scope: SubscriptionStatusScope<'_>,
+        mutate: impl FnOnce(&mut SubscriptionStatusState) -> R,
+    ) -> R {
+        let _guard = self.mutation_lock.lock();
+        let current = self.snapshot.load_full();
+        let mut next = (*current).clone();
+        next.observer_events = self.observer.as_ref().map(|_| Vec::new());
+        next.defer_indices =
+            matches!(scope, SubscriptionStatusScope::Topics(keys) if keys.len() > 1);
+        let result = mutate(&mut next);
+        next.finish_index_changes();
+        let events = next.observer_events.take().unwrap_or_default();
+        let next = Arc::new(next);
+        self.snapshot.store(next.clone());
+        self.pending_warnings
+            .store(next.warnings.len(), std::sync::atomic::Ordering::Release);
+        self.notify_observer(&current, &next, scope, &events);
         result
     }
 }
@@ -490,6 +617,14 @@ impl SubscriptionStatusState {
             failures: Vec::new(),
             topic_states: HashMap::new(),
             events: VecDeque::with_capacity(SUBSCRIPTION_EVENT_HISTORY_LIMIT),
+            event_sequence: 0,
+            observer_events: None,
+            defer_indices: false,
+            indices_dirty: false,
+            #[cfg(test)]
+            index_scans: 0,
+            field_errors: HashMap::new(),
+            warnings: VecDeque::new(),
             session: SessionStatusInfo {
                 state: SessionLifecycleState::Up,
                 ..SessionStatusInfo::default()
@@ -506,6 +641,8 @@ impl SubscriptionStatusState {
             status.topic_states.insert(
                 topic.clone(),
                 TopicStatusInfo {
+                    feed_topic: topic.clone(),
+                    delayed: None,
                     topic,
                     state: TopicLifecycleState::Pending,
                     last_change_us: now,
@@ -538,6 +675,8 @@ impl SubscriptionStatusState {
             self.topic_states.insert(
                 topic.clone(),
                 TopicStatusInfo {
+                    feed_topic: topic.clone(),
+                    delayed: None,
                     topic: topic.clone(),
                     state: TopicLifecycleState::Pending,
                     last_change_us: now,
@@ -551,8 +690,7 @@ impl SubscriptionStatusState {
     pub fn remove_topic(&mut self, topic: &str) -> Option<SlabKey> {
         let key = self.topic_to_key.remove(topic)?;
         self.key_to_topic.remove(&key);
-        self.topics.retain(|existing| existing != topic);
-        self.keys.retain(|existing| *existing != key);
+        self.remove_active_index(key, topic);
         self.metrics.remove(&key);
         Some(key)
     }
@@ -572,6 +710,7 @@ impl SubscriptionStatusState {
             Some(key)
         });
         self.topic_states.remove(topic);
+        self.field_errors.remove(topic);
         key
     }
 
@@ -599,16 +738,69 @@ impl SubscriptionStatusState {
         &self.events
     }
 
+    pub fn field_errors(&self) -> &HashMap<String, HashMap<String, String>> {
+        &self.field_errors
+    }
+
+    pub(crate) fn set_feed_topic(&mut self, label: &str, feed_topic: &str) {
+        if let Some(info) = self.topic_states.get_mut(label) {
+            info.feed_topic = feed_topic.to_string();
+        }
+    }
+
+    pub(crate) fn set_delayed(&mut self, label: &str, delayed: Option<bool>) {
+        if let Some(info) = self.topic_states.get_mut(label) {
+            info.delayed = delayed;
+        }
+    }
+
+    pub(crate) fn record_field_error(&mut self, label: &str, field: &str, category: &str) {
+        self.field_errors
+            .entry(label.to_string())
+            .or_default()
+            .insert(field.to_string(), category.to_string());
+    }
+
+    pub fn take_warnings(&mut self) -> Vec<SubscriptionEventInfo> {
+        self.warnings.drain(..).collect()
+    }
+
     fn finalize_key(&mut self, key: SlabKey) -> Option<String> {
         let topic = self
             .key_to_topic
             .remove(&key)
             .or_else(|| self.pending_key_to_topic.remove(&key))?;
         self.topic_to_key.remove(&topic);
-        self.topics.retain(|existing| existing != &topic);
-        self.keys.retain(|existing| *existing != key);
+        self.remove_active_index(key, &topic);
         self.metrics.remove(&key);
         Some(topic)
+    }
+
+    fn remove_active_index(&mut self, key: SlabKey, topic: &str) {
+        if self.defer_indices {
+            self.indices_dirty = true;
+        } else {
+            #[cfg(test)]
+            {
+                self.index_scans += 1;
+            }
+            self.keys.retain(|existing| *existing != key);
+            self.topics.retain(|existing| existing != topic);
+        }
+    }
+
+    fn finish_index_changes(&mut self) {
+        if self.indices_dirty {
+            #[cfg(test)]
+            {
+                self.index_scans += 1;
+            }
+            self.keys.retain(|key| self.key_to_topic.contains_key(key));
+            self.topics
+                .retain(|topic| self.topic_to_key.contains_key(topic));
+        }
+        self.defer_indices = false;
+        self.indices_dirty = false;
     }
 
     pub fn push_event(
@@ -619,17 +811,34 @@ impl SubscriptionStatusState {
         topic: Option<String>,
         detail: Option<String>,
     ) {
-        if self.events.len() >= SUBSCRIPTION_EVENT_HISTORY_LIMIT {
-            self.events.pop_front();
-        }
-        self.events.push_back(SubscriptionEventInfo {
+        let event = SubscriptionEventInfo {
             at_us: timestamp_now_us(),
             category,
             level,
             message_type: message_type.into(),
             topic,
             detail,
-        });
+        };
+        self.append_event(event);
+    }
+
+    fn append_event(&mut self, event: SubscriptionEventInfo) {
+        if let Some(events) = &mut self.observer_events {
+            events.push(event.clone());
+        }
+        if self.events.len() >= SUBSCRIPTION_EVENT_HISTORY_LIMIT {
+            self.events.pop_front();
+        }
+        if event.level == SubscriptionEventLevel::Warning
+            && matches!(
+                event.message_type.as_str(),
+                "DelayedStream" | "FieldException"
+            )
+        {
+            self.warnings.push_back(event.clone());
+        }
+        self.event_sequence = self.event_sequence.wrapping_add(1);
+        self.events.push_back(event);
     }
 
     fn update_topic_state(&mut self, topic: &str, state: TopicLifecycleState) {
@@ -642,6 +851,8 @@ impl SubscriptionStatusState {
             })
             .or_insert_with(|| TopicStatusInfo {
                 topic: topic.to_string(),
+                feed_topic: topic.to_string(),
+                delayed: None,
                 state,
                 last_change_us: now,
                 streams_active: false,
@@ -677,8 +888,7 @@ impl SubscriptionStatusState {
     pub fn mark_topic_unsubscribing(&mut self, key: SlabKey) -> Option<String> {
         let topic = self.key_to_topic.remove(&key)?;
         self.topic_to_key.remove(&topic);
-        self.topics.retain(|existing| existing != &topic);
-        self.keys.retain(|existing| *existing != key);
+        self.remove_active_index(key, &topic);
         self.metrics.remove(&key);
         self.pending_key_to_topic.insert(key, topic.clone());
         self.update_topic_state(&topic, TopicLifecycleState::Unsubscribing);
@@ -712,6 +922,42 @@ impl SubscriptionStatusState {
             at_us: timestamp_now_us(),
         });
         Some(topic)
+    }
+
+    /// Finalize a session's failed consumer topics without repeatedly scanning
+    /// the active vectors once for every topic.
+    fn record_failures(&mut self, failures: Vec<(SlabKey, String, SubscriptionFailureKind)>) {
+        let keys: std::collections::HashSet<_> = failures.iter().map(|failure| failure.0).collect();
+        for (key, reason, kind) in failures {
+            let Some(topic) = self
+                .key_to_topic
+                .remove(&key)
+                .or_else(|| self.pending_key_to_topic.remove(&key))
+            else {
+                continue;
+            };
+            self.topic_to_key.remove(&topic);
+            self.metrics.remove(&key);
+            let state = match kind {
+                SubscriptionFailureKind::Failure => TopicLifecycleState::Failed,
+                SubscriptionFailureKind::Terminated => TopicLifecycleState::Terminated,
+            };
+            self.update_topic_state(&topic, state);
+            self.set_topic_streams_active(&topic, false);
+            self.failures.push(SubscriptionFailureInfo {
+                topic: topic.clone(),
+                reason: reason.clone(),
+                kind,
+                at_us: timestamp_now_us(),
+            });
+        }
+        #[cfg(test)]
+        {
+            self.index_scans += 1;
+        }
+        self.keys.retain(|key| !keys.contains(key));
+        self.topics
+            .retain(|topic| self.topic_to_key.contains_key(topic));
     }
 
     pub fn clear_active(&mut self) {
@@ -1621,12 +1867,14 @@ fn null_array_for_datatype(data_type: &DataType, len: usize) -> Result<ArrayRef,
 ///
 /// Uses pre-warmed worker pools for efficient request handling:
 /// - RequestWorkerPool: Handles all request types with round-robin dispatch
-/// - SubscriptionSessionPool: Provides isolated sessions for subscriptions
+/// - SubscriptionSessionPool: Feeds share market data; consumer queues remain independent
 pub struct Engine {
     /// Pool of request workers
-    request_pool: RequestWorkerPool,
+    request_pool: Arc<RequestWorkerPool>,
     /// Pool of subscription sessions
     subscription_pool: Arc<SubscriptionSessionPool>,
+    subscriptions: Arc<SharedSubscriptions>,
+    field_types: Arc<SubscriptionTypeResolver>,
     /// Tokio runtime for async ops.
     ///
     /// `Some` for the entire public lifetime of the Engine; cleared only inside
@@ -1663,7 +1911,10 @@ impl Engine {
         );
 
         // Create request worker pool
-        let request_pool = RequestWorkerPool::new(config.request_pool_size, config.clone())?;
+        let request_pool = Arc::new(RequestWorkerPool::new(
+            config.request_pool_size,
+            config.clone(),
+        )?);
 
         // Create subscription session pool
         let subscription_pool = Arc::new(SubscriptionSessionPool::new(
@@ -1701,13 +1952,27 @@ impl Engine {
         if let Err(e) = exchange_cache.preload() {
             xbbg_log::warn!(error = %e, "failed to preload exchange cache");
         }
+        let schema_cache = crate::schema::SchemaCache::new();
+        let field_types = Arc::new(SubscriptionTypeResolver::new(
+            request_pool.clone(),
+            schema_cache.clone(),
+            rt.handle().clone(),
+        ));
+        let subscriptions = SharedSubscriptions::new(
+            subscription_pool.clone(),
+            config.clone(),
+            rt.handle().clone(),
+            Some(field_types.clone()),
+        );
 
         Ok(Self {
             request_pool,
             subscription_pool,
+            subscriptions,
+            field_types,
             rt: Some(rt),
             config,
-            schema_cache: crate::schema::SchemaCache::new(),
+            schema_cache,
             exchange_cache,
             shutdown_signal,
         })
@@ -1910,101 +2175,17 @@ impl Engine {
 
     // ─── Subscriptions ───────────────────────────────────────────────────────
 
-    /// Subscribe to real-time market data (//blp/mktdata).
-    ///
-    /// Claims a dedicated session from the pool for this subscription.
-    /// Returns a `SubscriptionStream` that provides:
-    /// - Async iteration over incoming data
-    /// - Dynamic add/remove of tickers
-    /// - Explicit unsubscribe with optional drain
-    ///
-    /// The session is returned to the pool when the stream is dropped.
+    /// Subscribe with engine-wide sharing for market-data feeds.
     pub async fn subscribe(
         &self,
-        topics: Vec<String>,
-        fields: Vec<String>,
-        all_fields: bool,
+        request: SubscribeRequest,
     ) -> Result<SubscriptionStream, BlpAsyncError> {
-        self.subscribe_with_options(
-            crate::services::Service::MktData.to_string(),
-            topics,
-            fields,
-            all_fields,
-            vec![],
-            None,
-            None,
-            None,
-        )
-        .await
+        self.subscriptions.subscribe(request).await
     }
 
-    /// Subscribe to real-time data with custom service and options.
-    ///
-    /// This is the generic subscription method that supports different services
-    /// (e.g., //blp/mktdata, //blp/mktvwap) and subscription options.
-    ///
-    /// # Arguments
-    /// * `service` - Bloomberg service (e.g., "//blp/mktdata", "//blp/mktvwap")
-    /// * `topics` - Securities to subscribe to
-    /// * `fields` - Fields to subscribe to
-    /// * `options` - Subscription options (e.g., ["VWAP_START_TIME=09:30"])
-    #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe_with_options(
-        &self,
-        service: String,
-        topics: Vec<String>,
-        fields: Vec<String>,
-        all_fields: bool,
-        options: Vec<String>,
-        stream_capacity: Option<usize>,
-        flush_threshold: Option<usize>,
-        overflow_policy: Option<OverflowPolicy>,
-    ) -> Result<SubscriptionStream, BlpAsyncError> {
-        let capacity = stream_capacity.unwrap_or(self.config.subscription_stream_capacity);
-        if capacity == 0 {
-            return Err(BlpAsyncError::ConfigError {
-                detail: "subscription stream capacity must be greater than zero".to_string(),
-            });
-        }
-        let (tx, rx) = subscription_channel(capacity);
-        let status = Arc::new(SubscriptionStatusHandle::new(
-            SubscriptionStatusState::default(),
-        ));
-
-        // Admission waits without consuming a runtime worker. Session startup
-        // itself moves to the blocking pool after a bounded permit is acquired.
-        let mut claim = self.subscription_pool.claim().await?;
-
-        // Start the subscription
-        claim
-            .subscribe(
-                service.clone(),
-                topics,
-                fields.clone(),
-                all_fields,
-                options.clone(),
-                flush_threshold,
-                overflow_policy,
-                tx.clone(),
-                status.clone(),
-            )
-            .await?;
-        claim.set_cleanup_status(status.clone());
-
-        let stream = SubscriptionStream {
-            rx,
-            tx,
-            claim: Some(claim),
-            fields,
-            all_fields,
-            service,
-            options,
-            status,
-            flush_threshold,
-            overflow_policy,
-        };
-
-        Ok(stream)
+    /// Current Bloomberg feeds; contains no identity or authentication details.
+    pub fn subscription_feeds(&self) -> Vec<FeedInfo> {
+        self.subscriptions.feeds()
     }
 
     // ─── Field Type Resolution ──────────────────────────────────────────────
@@ -2019,71 +2200,9 @@ impl Engine {
         manual_overrides: Option<&HashMap<String, String>>,
         default_type: &str,
     ) -> Result<HashMap<String, String>, BlpAsyncError> {
-        use crate::field_cache::global_resolver;
-
-        let resolver = global_resolver();
-
-        // Find fields not in cache (and not manually overridden)
-        let uncached: Vec<String> = fields
-            .iter()
-            .filter(|f| {
-                if let Some(overrides) = manual_overrides {
-                    if overrides.contains_key(*f) || overrides.contains_key(&f.to_uppercase()) {
-                        return false;
-                    }
-                }
-                resolver.get(f).is_none()
-            })
-            .cloned()
-            .collect();
-
-        // Query //blp/apiflds for uncached fields
-        if !uncached.is_empty() {
-            xbbg_log::debug!(fields = ?uncached, "Querying //blp/apiflds for field types");
-
-            let params = RequestParams {
-                service: crate::services::Service::ApiFlds.to_string(),
-                operation: "FieldInfoRequest".to_string(),
-                extractor: ExtractorType::FieldInfo,
-                field_ids: Some(uncached.clone()),
-                ..Default::default()
-            };
-
-            match self.request(params).await {
-                Ok(batch) => {
-                    resolver.insert_from_response(&batch);
-
-                    let (_, cache_path) = resolver.stats();
-                    let resolver_clone = resolver.clone();
-                    match self
-                        .runtime()
-                        .spawn_blocking(move || resolver_clone.save_to_disk())
-                        .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => {
-                            xbbg_log::warn!(
-                                path = %cache_path.display(),
-                                error = %error,
-                                "failed to persist field cache"
-                            );
-                        }
-                        Err(error) => {
-                            xbbg_log::warn!(
-                                path = %cache_path.display(),
-                                error = %error,
-                                "field cache save task failed"
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    xbbg_log::warn!(error = %e, "Failed to query field types, using defaults");
-                }
-            }
-        }
-
-        Ok(resolver.resolve_types(fields, manual_overrides, default_type))
+        self.field_types
+            .resolve_types(fields, manual_overrides, default_type)
+            .await
     }
 
     /// Pre-populate the field type cache for a list of fields.
@@ -2341,6 +2460,7 @@ impl Engine {
     /// Used by Drop and Python atexit to avoid blocking.
     pub fn signal_shutdown(&self) {
         xbbg_log::info!("Engine signal_shutdown requested");
+        self.subscriptions.shutdown();
         let _ = self.shutdown_signal.send(true);
         self.request_pool.signal_shutdown();
         self.subscription_pool.signal_shutdown();
@@ -2350,8 +2470,9 @@ impl Engine {
     ///
     /// Use this for clean shutdown when you can afford to wait.
     /// Consumes the Engine.
-    pub fn shutdown_blocking(mut self) {
+    pub fn shutdown_blocking(self) {
         xbbg_log::info!("Engine shutdown_blocking requested");
+        self.subscriptions.shutdown();
         let _ = self.shutdown_signal.send(true);
         self.request_pool.shutdown_blocking();
         self.subscription_pool.shutdown_blocking();
@@ -2359,8 +2480,7 @@ impl Engine {
 
     /// Get a receiver that fires when shutdown is signaled.
     ///
-    /// This signals a request, not completed terminal publication. Subscription
-    /// reads observe their channel's queued data, terminal error, and EOF instead.
+    /// Subscription terminal errors are published before this watch changes.
     pub fn shutdown_receiver(&self) -> watch::Receiver<bool> {
         self.shutdown_signal.subscribe()
     }
@@ -2531,237 +2651,87 @@ async fn collect_subscription_updates_until_drained(
     }
 }
 
-/// Stream for receiving real-time market data with dynamic subscription control.
-///
-/// Provides async iteration over incoming data and methods to dynamically
-/// add/remove tickers while the subscription is active.
-///
-/// Data arrives as `Result<SubscriptionUpdate, BlpError>`:
-/// - `Ok(update)` — normal data
-/// - `Err(error)` — subscription failure, session death, etc.
-///
-/// The underlying session is released back to the pool on drop.
+/// Sparse real-time updates with independent consumer control and delivery.
 pub struct SubscriptionStream {
-    /// Receiver for incoming data batches (or errors).
     rx: SubscriptionReceiver,
-    /// Sender for adding new topics (shares channel with existing subs).
-    tx: SubscriptionSender,
-    /// Session claim (released on drop).
-    claim: Option<SessionClaim>,
-    /// Subscribed fields.
-    fields: Vec<String>,
-    /// Whether batches should expose all top-level Bloomberg fields.
-    all_fields: bool,
-    /// Bloomberg service (e.g., "//blp/mktdata", "//blp/mktvwap").
-    service: String,
-    /// Subscription options.
-    options: Vec<String>,
-    /// Shared active/failed topic status.
-    status: SharedSubscriptionStatus,
-    /// Optional flush threshold override.
-    flush_threshold: Option<usize>,
-    /// Optional overflow policy override.
-    overflow_policy: Option<OverflowPolicy>,
+    handle: SubscriptionHandle,
 }
 
 impl SubscriptionStream {
-    fn command_handle(&self) -> Result<SubscriptionCommandHandle, BlpAsyncError> {
-        self.claim
-            .as_ref()
-            .ok_or_else(|| BlpAsyncError::ConfigError {
-                detail: "subscription already closed".to_string(),
-            })?
-            .command_handle()
-    }
-
-    fn cleanup_without_reuse_if_active(&mut self) {
-        let keys = self.status.load().keys().to_vec();
-        if keys.is_empty() {
-            return;
-        }
-        if let Some(claim) = self.claim.take() {
-            claim.close_without_reuse(keys);
-        }
-        self.status.update(|next| next.clear_active());
-    }
-
-    /// Receive the next batch of data or an error.
-    ///
-    /// Returns:
-    /// - `Some(Ok(update))` — normal data
-    /// - `Some(Err(error))` — subscription failure, session death, etc.
-    /// - `None` — subscription is closed
     pub async fn next(&mut self) -> Option<Result<SubscriptionUpdate, BlpError>> {
-        let item = self.rx.recv().await;
-        if matches!(&item, Some(Err(_))) {
-            self.cleanup_without_reuse_if_active();
-        }
-        item
+        self.rx.recv().await
     }
 
-    /// Try to receive data without blocking.
     pub fn try_next(&mut self) -> Option<Result<SubscriptionUpdate, BlpError>> {
-        let item = self.rx.try_recv().ok();
-        if matches!(&item, Some(Err(_))) {
-            self.cleanup_without_reuse_if_active();
-        }
-        item
+        self.rx.try_recv().ok()
     }
 
-    /// Add tickers to the subscription dynamically.
-    ///
-    /// New tickers will start receiving data on the same stream.
-    pub async fn add(&mut self, topics: Vec<String>) -> Result<(), BlpAsyncError> {
-        if self.tx.is_closed() {
-            return Err(BlpAsyncError::ConfigError {
-                detail: "cannot add topics to a terminal subscription stream".to_string(),
-            });
-        }
-        let command = self.command_handle()?;
-        let mut seen_topics = HashSet::new();
-
-        // Filter out already subscribed topics
-        let new_topics: Vec<String> = {
-            let snapshot = self.status.load();
-            topics
-                .into_iter()
-                .filter(|t| {
-                    !snapshot.topic_to_key().contains_key(t) && seen_topics.insert(t.clone())
-                })
-                .collect()
-        };
-
-        if new_topics.is_empty() {
-            return Ok(());
-        }
-
-        xbbg_log::debug!(topics = ?new_topics, "adding topics to subscription");
-
-        // Add new topics using the same stream sender
-        command
-            .add_topics(
-                self.service.clone(),
-                new_topics,
-                self.fields.clone(),
-                self.all_fields,
-                self.options.clone(),
-                self.flush_threshold,
-                self.overflow_policy,
-                self.tx.clone(),
-                self.status.clone(),
-            )
-            .await?;
-
-        Ok(())
+    pub async fn add(
+        &self,
+        topics: Vec<String>,
+        aliases: Vec<(String, String)>,
+    ) -> Result<(), BlpAsyncError> {
+        self.handle.add(topics, aliases).await
     }
 
-    /// Remove tickers from the subscription dynamically.
-    ///
-    /// Removed tickers will stop receiving data.
-    pub async fn remove(&mut self, topics: Vec<String>) -> Result<(), BlpAsyncError> {
-        let command = self.command_handle()?;
-        let mut seen_keys = HashSet::new();
-
-        // Find keys for topics to remove
-        let mut keys_to_remove = Vec::new();
-        let mut topics_to_remove = Vec::new();
-        {
-            let snapshot = self.status.load();
-            for topic in topics {
-                if let Some(&key) = snapshot.topic_to_key().get(&topic) {
-                    if seen_keys.insert(key) {
-                        keys_to_remove.push(key);
-                        topics_to_remove.push(topic);
-                    }
-                }
-            }
-        }
-
-        if keys_to_remove.is_empty() {
-            return Ok(());
-        }
-
-        xbbg_log::debug!(topics = ?topics_to_remove, keys = ?keys_to_remove, "removing topics from subscription");
-
-        command.unsubscribe(keys_to_remove.clone()).await?;
-
-        self.status.update(|next| {
-            for topic in &topics_to_remove {
-                next.drop_topic(topic);
-            }
-        });
-
-        Ok(())
+    pub async fn remove(&self, labels: Vec<String>) -> Result<(), BlpAsyncError> {
+        self.handle.remove(labels).await
     }
 
-    /// Get the currently subscribed topics.
+    pub async fn add_fields(&self, fields: Vec<String>) -> Result<(), BlpAsyncError> {
+        self.handle.add_fields(fields).await
+    }
+
     pub fn topics(&self) -> Vec<String> {
-        self.status.load().topics().to_vec()
+        self.handle.topics()
     }
-
-    /// Get the subscribed fields.
-    pub fn fields(&self) -> &[String] {
-        &self.fields
+    pub fn fields(&self) -> Vec<String> {
+        self.handle.fields()
     }
-
-    /// Check if any topics are still subscribed.
+    pub fn delivers_rows(&self) -> bool {
+        self.handle.delivers_rows()
+    }
     pub fn is_active(&self) -> bool {
-        self.claim.is_some() && !self.tx.is_closed() && self.status.load().has_active_topics()
+        self.handle.is_active()
+    }
+    pub fn status(&self) -> SharedSubscriptionStatus {
+        self.handle.status()
+    }
+    pub fn latest(&self) -> Result<RecordBatch, BlpAsyncError> {
+        self.handle.latest()
+    }
+    pub fn take_warnings(&self) -> Vec<SubscriptionEventInfo> {
+        self.handle.take_warnings()
     }
 
-    /// Unsubscribe from all topics and close the stream.
-    ///
-    /// If `drain` is true, returns remaining buffered updates before closing.
-    /// An unread stream failure is returned after forwarding and cleanup complete.
+    /// Detach this consumer only. Draining preserves accepted data and reports
+    /// an unread terminal failure ahead of a cleanup error.
     pub async fn unsubscribe(
         mut self,
         drain: bool,
     ) -> Result<Vec<SubscriptionUpdate>, BlpAsyncError> {
         let mut remaining = Vec::new();
-        let mut first_stream_error = None;
-        let mut cleanup_error = None;
-
-        if let Some(claim) = self.claim.take() {
-            let keys = self.status.load().keys().to_vec();
-            if !keys.is_empty() {
-                if let Err(error) = claim.unsubscribe(keys).await {
-                    cleanup_error = Some(error);
-                }
+        let mut first_error = None;
+        let mut cleanup_error = self.handle.unsubscribe().await.err();
+        if drain {
+            if let Err(error) = collect_subscription_updates_until_drained(
+                &mut self.rx,
+                self.handle.drain_forwarder(),
+                &mut remaining,
+                &mut first_error,
+            )
+            .await
+            {
+                cleanup_error.get_or_insert(error);
             }
-            if drain {
-                // Consume the receiver while the ordered forwarding barrier
-                // advances. Otherwise a full receiver makes an already-
-                // accepted Block-policy update wait for its timeout before the
-                // barrier can run.
-                if let Err(error) = collect_subscription_updates_until_drained(
-                    &mut self.rx,
-                    claim.drain_forwarder(),
-                    &mut remaining,
-                    &mut first_stream_error,
-                )
-                .await
-                {
-                    cleanup_error.get_or_insert(error);
-                }
-                // The forwarding barrier has accounted for all accepted work.
-                // Closing now distinguishes deliberate cancellation from a
-                // worker-shutdown failure while retaining buffered data and any
-                // earlier terminal error.
-                self.rx.close();
-            }
-            // SessionClaim::drop completes cleanup or quarantines a worker that
-            // still has pending Bloomberg state before an error is reported.
-            drop(claim);
         }
-
+        self.rx.close();
         if drain {
             while let Ok(item) = self.rx.try_recv() {
-                record_drained_subscription_item(item, &mut remaining, &mut first_stream_error);
+                record_drained_subscription_item(item, &mut remaining, &mut first_error);
             }
         }
-        self.status.update(|next| next.clear_active());
-
-        if let Some(error) = first_stream_error {
+        if let Some(error) = first_error {
             return Err(error.into());
         }
         if let Some(error) = cleanup_error {
@@ -2770,85 +2740,11 @@ impl SubscriptionStream {
         Ok(remaining)
     }
 
-    /// Close the stream with best-effort cleanup.
-    ///
-    /// Drop cannot await Bloomberg termination confirmations. If active topics remain,
-    /// cleanup sends an unsubscribe command and discards the worker instead of
-    /// returning a potentially dirty session to the reusable pool.
-    pub fn close(mut self) {
-        self.cleanup_without_reuse_if_active();
-    }
+    pub fn close(self) {}
 
-    /// Destructure the stream into its component parts.
-    ///
-    /// Used by PyO3 layer to separate rx (for iteration) from claim (for add/remove)
-    /// so they can use independent locks and avoid contention.
-    ///
-    /// Consumes self without running Drop (since we're taking ownership of parts).
-    ///
-    /// Returns an error if the stream was already closed and no longer owns a session claim.
-    #[allow(clippy::type_complexity)]
-    pub fn into_parts(
-        self,
-    ) -> Result<
-        (
-            SubscriptionReceiver,
-            SubscriptionSender,
-            SessionClaim,
-            SharedSubscriptionStatus,
-            Option<usize>,          // flush_threshold
-            Option<OverflowPolicy>, // overflow_policy
-            String,                 // service
-            Vec<String>,            // options
-            bool,                   // all_fields
-        ),
-        BlpError,
-    > {
-        use std::mem::ManuallyDrop;
-        use std::ptr;
-
-        // Prevent Drop from running — we're taking ownership of each field individually.
-        let this = ManuallyDrop::new(self);
-
-        // SAFETY: We read each field exactly once from the ManuallyDrop wrapper.
-        // The wrapper prevents the destructor from running, so no double-free.
-        unsafe {
-            let rx = ptr::read(&this.rx);
-            let tx = ptr::read(&this.tx);
-            let claim = ptr::read(&this.claim);
-            let status = ptr::read(&this.status);
-            let flush_threshold = ptr::read(&this.flush_threshold);
-            let overflow_policy = ptr::read(&this.overflow_policy);
-            let service = ptr::read(&this.service);
-            let options = ptr::read(&this.options);
-            let all_fields = ptr::read(&this.all_fields);
-
-            let Some(claim) = claim else {
-                return Err(BlpError::Internal {
-                    detail: "SubscriptionStream::into_parts called on already-closed stream"
-                        .to_string(),
-                });
-            };
-
-            Ok((
-                rx,
-                tx,
-                claim,
-                status,
-                flush_threshold,
-                overflow_policy,
-                service,
-                options,
-                all_fields,
-            ))
-        }
-    }
-}
-
-impl Drop for SubscriptionStream {
-    fn drop(&mut self) {
-        self.cleanup_without_reuse_if_active();
-        // If no active topics remain, SessionClaim drops normally and returns the worker to the pool.
+    /// Separate receiving from control without exposing upstream correlation IDs.
+    pub fn into_parts(self) -> (SubscriptionReceiver, SubscriptionHandle) {
+        (self.rx, self.handle)
     }
 }
 

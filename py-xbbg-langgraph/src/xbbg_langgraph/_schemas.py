@@ -482,6 +482,26 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
                 ids, "Exact raw ISIN strings, without /isin/ prefixes."
             )
         }
+    elif name in {"xbbg_resolve_venues", "xbbg_auction_snapshot"}:
+        pcs_overrides = Annotated[
+            dict[text, text],
+            Field(max_length=options.max_securities),
+            BeforeValidator(_check_map_keys),
+        ]
+        shape = {
+            "securities": required(
+                securities,
+                "Exact user-supplied tickers, bare ISINs, /isin/ or /bbgid/ topics, including explicit venue suffixes.",
+            ),
+            "pcs_overrides": optional(
+                pcs_overrides, "Preferred-stock exchange names mapped to pricing-source codes; overrides win."
+            ),
+        }
+        if name == "xbbg_auction_snapshot":
+            shape["fields"] = optional(
+                Annotated[list[text], Field(max_length=options.max_fields)],
+                "Auction field mnemonics in requested order. Omit or pass an empty list for AUCTION.DEFAULT.",
+            )
     elif name in {"xbbg_stream_snapshot", "xbbg_mktbar_snapshot", "xbbg_depth_snapshot"}:
         if name == "xbbg_stream_snapshot":
             shape = {"tickers": securities_field, "fields": fields_field}

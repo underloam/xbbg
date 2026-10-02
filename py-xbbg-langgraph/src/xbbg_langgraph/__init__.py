@@ -8,6 +8,7 @@ from langchain_core.tools import StructuredTool
 
 from .core_tools import (
     BLOOMBERG_CORE_TOOL_NAMES,
+    create_auction_snapshot_tool,
     create_bdh_tool,
     create_bdib_tool,
     create_bdp_tool,
@@ -28,6 +29,7 @@ from .core_tools import (
     create_mktbar_snapshot_tool,
     create_preferreds_tool,
     create_resolve_isins_tool,
+    create_resolve_venues_tool,
     create_stream_snapshot_tool,
     create_yas_tool,
 )
@@ -76,6 +78,8 @@ __all__ = [
     "create_index_members_tool",
     "create_resolve_isins_tool",
     "create_issuer_isins_tool",
+    "create_resolve_venues_tool",
+    "create_auction_snapshot_tool",
     "create_etf_holdings_tool",
     "create_stream_snapshot_tool",
     "create_mktbar_snapshot_tool",

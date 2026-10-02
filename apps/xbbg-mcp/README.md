@@ -1,6 +1,6 @@
 # xbbg-mcp
 
-Last updated: 2026-09-04.
+Last updated: 2026-09-30.
 
 Stdio MCP server for Bloomberg request/response workflows backed by `xbbg-async`.
 
@@ -17,10 +17,45 @@ The current server exposes request/response tools only:
 - `bql` - Bloomberg Query Language
 - `bsrch` - Bloomberg search
 - `bflds` - field metadata lookup
+- `resolve_venues` - resolve composite equity and preferred inputs to validated auction venues
+- `auction_snapshot` - primary-venue auction and imbalance reference data
 - `check_entitlements` - entitlement-ID check for a Bloomberg service
 - `request` - generic raw/custom request path
 
 Responses are returned as bounded structured JSON with Arrow schema metadata so an agent can inspect the shape without receiving an unbounded payload. Limits cover rows, cells, strings, metadata inspection/retention, and the final serialized payload; a row limit alone is not the output bound.
+
+## Auction venues and snapshots
+
+`resolve_venues` routes composite equity tickers or ISINs to their primary exchange listing and preferreds to venue pricing sources. Explicit exchange listings are respected. The recipe keeps one row per input, including duplicates and input order, with `status` (`resolved`, `unresolved`, `unsupported`, or `mismatch`) and `error`. The result also includes the lookup, security `kind`, equity `composite` ticker, venue topic, venue FIGI, routing method, exchange, MIC, and pricing source. Original input strings are retained in `security`; lookups are trimmed, and bare valid ISINs become `/isin/<ISIN>`.
+
+```json
+{
+  "securities": ["IBM US Equity", "AAPL US Equity"],
+  "pcs_overrides": {"NEW YORK": "SNY2"}
+}
+```
+
+`pcs_overrides` is optional on both tools. Its keys are preferred exchange names, trimmed, uppercased, and collapsed to single internal spaces; values are trimmed and uppercased pricing-source codes. Overrides take precedence over the built-in mapping; a blank or missing-value code such as `N.A.` disables the mapping for that exchange. Conflicting spellings of the same normalized exchange key are rejected. Every route is validated before it can be reported as resolved; an unknown preferred exchange needs a `pcs_overrides` entry.
+
+`auction_snapshot` first resolves the venue, then reads the requested fields using Bloomberg reference data on that venue. Failed or mismatched inputs retain their status/error row with null data fields. Results contain `input_order`, `security`, `venue_topic`, `status`, `error`, then the selected typed fields.
+
+```json
+{
+  "securities": ["IBM US Equity", "AAPL US Equity"],
+  "groups": ["imbalance", "quotes"],
+  "fields": ["IN_AUCTION_RT"]
+}
+```
+
+The optional `groups` list accepts `imbalance`, `indicative`, `state`, `halts`, `results`, `composite`, `quotes`, and `default` (trimmed, case-insensitive). Groups expand in the supplied order, followed by the explicit `fields` in their supplied order; field names are trimmed and uppercased and duplicates are removed, keeping their first occurrence. Unknown groups are invalid parameters. If the combined selection is empty, the default auction group is used: imbalance, indicative, state, halts, and results, in that order. Explicit fields or groups replace that implicit default; include `default` in `groups` to extend it.
+
+Both tools require at least one nonblank security (there is no count limit; results are bounded by the output limits) and accept at most 128 pricing-source overrides. `auction_snapshot` accepts up to eight group entries, 256 explicit fields, and 256 unique fields after expansion. Every input string, including override keys and values, is limited to 1,024 UTF-8 bytes; blank securities, fields, group names, or override keys are rejected rather than silently dropped. Blank override values are allowed to disable a mapping.
+
+**Timing and delayedness:** time-of-day fields are terminal-local, not exchange-local. Reference data carries no delayed/real-time flag. Use the xbbg subscription APIs for that information; this MCP server exposes request/response tools, not subscriptions.
+
+Temporal cells use the existing Arrow JSON string conventions: `Date32` is `YYYY-MM-DD`, and `Time64` is `HH:MM:SS[.fraction]` without an invented date or timezone. Timestamps include both date and time; UTC ends in `Z`, other declared timezones include their offset, and timestamps without a timezone have no suffix. Fractional seconds are preserved without rounding, including the microseconds in auction snapshots. Null cells remain JSON `null`. The same serialization applies to typed request columns such as `value_time` and `value_ts`; the Arrow schema retains the original temporal type, unit, and timezone.
+
+Both tools use the same bounded JSON envelope with Arrow schema metadata as `bdp`. Result limits can omit rows or fields; always inspect the truncation flags and counts before treating the returned rows as the complete input set.
 
 ## Entitlement IDs
 

@@ -411,6 +411,41 @@ pub fn ext_cdx_gen_to_specific(gen_ticker: String, series: u32) -> napi::Result<
 }
 
 // =============================================================================
+// Auction Utilities
+// =============================================================================
+
+/// Look up the stream-valid auction field group (trimmed, case-insensitive).
+#[napi]
+pub fn ext_auction_field_group(name: String) -> Option<Vec<String>> {
+    xbbg_ext::auction::field_group(&name)
+        .map(|fields| fields.iter().map(|field| (*field).to_string()).collect())
+}
+
+/// List the available auction field-group names in their canonical order.
+#[napi]
+pub fn ext_auction_field_group_names() -> Vec<String> {
+    xbbg_ext::auction::field_group_names()
+        .iter()
+        .map(|name| (*name).to_string())
+        .collect()
+}
+
+/// Price fields whose numeric zero sentinel can be masked in latest snapshots.
+#[napi]
+pub fn ext_auction_zero_price_fields() -> Vec<String> {
+    xbbg_ext::auction::ZERO_PRICE_FIELDS
+        .iter()
+        .map(|field| (*field).to_string())
+        .collect()
+}
+
+/// Normalize an imbalance code to buy, sell, or none; unknown sides remain null.
+#[napi]
+pub fn ext_imbalance_side(code: String) -> Option<String> {
+    xbbg_ext::auction::imbalance_side(&code).map(|side| side.as_str().to_string())
+}
+
+// =============================================================================
 // Currency Utilities
 // =============================================================================
 

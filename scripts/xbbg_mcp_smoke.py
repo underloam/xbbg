@@ -183,6 +183,8 @@ def main() -> int:
             "bflds",
             "bql",
             "bsrch",
+            "resolve_venues",
+            "auction_snapshot",
             "check_entitlements",
             "request",
         }
@@ -210,6 +212,16 @@ def main() -> int:
                 5,
                 "bql",
                 {"expression": "get(px_last) for('IBM US Equity')"},
+            ),
+            (
+                6,
+                "resolve_venues",
+                {"securities": ["IBM US Equity"]},
+            ),
+            (
+                7,
+                "auction_snapshot",
+                {"securities": ["IBM US Equity"], "groups": ["state"]},
             ),
         ]
 

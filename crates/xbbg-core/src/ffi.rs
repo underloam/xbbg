@@ -67,9 +67,10 @@ pub use blpapi_sys::{
     blpapi_Session_cancel, blpapi_Session_create, blpapi_Session_createIdentity,
     blpapi_Session_destroy, blpapi_Session_generateToken, blpapi_Session_getService,
     blpapi_Session_nextEvent, blpapi_Session_openService, blpapi_Session_openServiceAsync,
-    blpapi_Session_sendAuthorizationRequest, blpapi_Session_sendRequest, blpapi_Session_start,
-    blpapi_Session_stop, blpapi_Session_stopAsync, blpapi_Session_subscribe,
-    blpapi_Session_tryNextEvent, blpapi_Session_unsubscribe,
+    blpapi_Session_resubscribe, blpapi_Session_sendAuthorizationRequest,
+    blpapi_Session_sendRequest, blpapi_Session_start, blpapi_Session_stop,
+    blpapi_Session_stopAsync, blpapi_Session_subscribe, blpapi_Session_tryNextEvent,
+    blpapi_Session_unsubscribe,
 };
 
 // --- Service functions ---

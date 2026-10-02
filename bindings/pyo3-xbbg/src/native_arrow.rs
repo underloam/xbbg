@@ -1665,6 +1665,56 @@ mod tests {
     use super::*;
 
     #[test]
+    fn native_batch_and_table_preserve_temporal_types_precision_and_nulls() {
+        Python::initialize();
+        Python::attach(|py| {
+            let days = NaiveDate::from_ymd_opt(2026, 1, 2)
+                .unwrap()
+                .signed_duration_since(NaiveDate::from_ymd_opt(1970, 1, 1).unwrap())
+                .num_days() as i32;
+            let schema = Schema::new(vec![
+                Field::new("trade_date", DataType::Date32, true),
+                Field::new(
+                    "auction_time",
+                    DataType::Time64(TimeUnit::Microsecond),
+                    true,
+                ),
+            ]);
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(Date32Array::from(vec![Some(days), None])),
+                    Arc::new(Time64MicrosecondArray::from(vec![
+                        Some(57_541_123_456),
+                        None,
+                    ])),
+                ],
+            )
+            .unwrap();
+            let batch = record_batch_to_arrow_record_batch(py, batch).unwrap();
+            let table = batch.bind(py).call_method0("to_table").unwrap();
+            for carrier in [batch.bind(py), &table] {
+                let rows = carrier.call_method0("to_pylist").unwrap();
+                let values = rows.get_item(0).unwrap();
+                let date = values.get_item("trade_date").unwrap();
+                assert!(date.is_instance_of::<PyDate>());
+                assert!(date.eq(PyDate::new(py, 2026, 1, 2).unwrap()).unwrap());
+
+                let time = values.get_item("auction_time").unwrap();
+                assert!(time.is_instance_of::<PyTime>());
+                assert!(time
+                    .eq(PyTime::new(py, 15, 59, 1, 123_456, None).unwrap())
+                    .unwrap());
+                assert!(time.getattr("tzinfo").unwrap().is_none());
+
+                let nulls = rows.get_item(1).unwrap();
+                assert!(nulls.get_item("trade_date").unwrap().is_none());
+                assert!(nulls.get_item("auction_time").unwrap().is_none());
+            }
+        });
+    }
+
+    #[test]
     fn scalar_to_py_preserves_timestamp_timezone_metadata() {
         Python::initialize();
         Python::attach(|py| {

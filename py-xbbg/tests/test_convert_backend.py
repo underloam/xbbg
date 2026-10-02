@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, timezone
+from datetime import date, datetime, time, timezone
 import importlib.util
 import os
 from typing import Any
@@ -112,6 +112,59 @@ class TestConvertBackendNative:
     def test_rejects_non_native_inputs(self):
         with pytest.raises(TypeError, match="Expected xbbg ArrowTable or ArrowRecordBatch"):
             convert_backend_frame({"ticker": ["IBM"]}, Backend.NATIVE)
+
+
+@pytest.mark.parametrize(
+    "backend",
+    [Backend.NATIVE, Backend.PYARROW, Backend.PANDAS, Backend.POLARS, Backend.NARWHALS],
+)
+def test_temporal_backend_conversion_preserves_precision_nulls_and_logical_types(backend):
+    pa = pytest.importorskip("pyarrow")
+    if not check_backend(backend, raise_on_error=False):
+        pytest.skip(f"{backend.value} is not usable in this environment")
+    rows = [
+        {"value_time": time(15, 59, 1, 123456), "value_date": date(2026, 1, 2)},
+        {"value_time": time(0, 0), "value_date": date(1970, 1, 1)},
+        {"value_time": None, "value_date": None},
+    ]
+    # A typed Arrow batch exercises the accepted Arrow input path without a
+    # Bloomberg request; from_pylist cannot construct native Time64 columns.
+    schema = pa.schema([("value_time", pa.time64("us")), ("value_date", pa.date32())])
+    batch = pa.RecordBatch.from_pylist(rows, schema=schema)
+
+    result = convert_backend_frame(batch, backend)
+
+    if backend is Backend.PANDAS:
+        pd = pytest.importorskip("pandas")
+        assert isinstance(result, pd.DataFrame)
+        converted = pa.Table.from_pandas(result, preserve_index=False)
+    elif backend is Backend.POLARS:
+        pl = pytest.importorskip("polars")
+        assert result.schema == {"value_time": pl.Time, "value_date": pl.Date}
+        converted = result.to_arrow()
+    elif backend is Backend.NARWHALS:
+        assert result.schema == {"value_time": nw.Time, "value_date": nw.Date}
+        converted = result.to_arrow()
+    else:
+        converted = pa.table(result)
+
+    assert converted.to_pylist() == rows
+    # Polars stores its logical Time at nanosecond resolution; conversion must
+    # preserve the original microseconds without inventing a date or timezone.
+    unit = "ns" if backend is Backend.POLARS else "us"
+    assert converted.schema.field("value_time").type == pa.time64(unit)
+    assert converted.schema.field("value_date").type == pa.date32()
+
+
+def test_native_date32_conversion_preserves_dates_and_nulls():
+    pa = pytest.importorskip("pyarrow")
+    rows = [{"value_date": date(2026, 1, 2)}, {"value_date": None}]
+    table = ArrowTable.from_pylist(rows)
+
+    result = convert_backend_frame(table, Backend.NATIVE)
+
+    assert result.to_pylist() == rows
+    assert pa.table(result).schema.field("value_date").type == pa.date32()
 
 
 class TestConvertBackendPyArrow:

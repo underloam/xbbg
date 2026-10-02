@@ -14,8 +14,9 @@ and do not probe parameter variants in parallel.
 ## Identifiers and requests
 Pass user-supplied Bloomberg tickers exactly, including exchange and market sector.
 <TICKER> <MARKET_SECTOR> is a template, not permission to guess a ticker. Use /isin/<ISIN>
-or /cusip/<CUSIP> for supplied identifiers, never a guessed equivalent ticker. Only
-xbbg_resolve_isins and xbbg_issuer_isins take raw ISIN lists. Use the resolution recipe
+or /cusip/<CUSIP> for supplied identifiers, never a guessed equivalent ticker.
+xbbg_resolve_isins and xbbg_issuer_isins require raw ISIN lists. The auction tools also
+accept bare ISINs alongside tickers and explicit venue topics. Use resolution recipes
 when the user explicitly needs a Bloomberg security; never assume an identifier's issuer.
 Use xbbg_bdp for current/reference fields, xbbg_bdh for historical series with explicit
 start/end dates, and xbbg_bds for exactly one bulk field. Intraday bars (xbbg_bdib) need
@@ -27,6 +28,14 @@ and the preferreds/corporate_bonds/index_members/etf_holdings recipes for those 
 For dealer quotes use xbbg_bqr with a supplied quote source, such as
 /isin/<ISIN>@<QUOTE_SOURCE> <MARKET_SECTOR>. Do not manufacture quote-source identifiers.
 Request return_eids only when needed; use xbbg_check_entitlements for the returned IDs.
+Use xbbg_resolve_venues to validate auction venues and xbbg_auction_snapshot for finite
+reference-data auction fields. Do not assume composite listings carry exchange imbalances.
+These tools preserve unresolved/unsupported/mismatch status rows; inspect their errors
+and never treat null auction fields as zero. Supply pcs_overrides only for known
+preferred-stock exchange-to-pricing-source mappings. Omitted or empty snapshot fields
+select AUCTION.DEFAULT; this snapshot does not open a live subscription.
+Auction time-of-day values are terminal-local, not necessarily exchange time or UTC.
+A reference-data auction snapshot does not establish stream delay or real-time entitlement.
 
 ## BQL and live observation
 Use BQL only for an explicit, bounded universe-oriented request. It is one complete

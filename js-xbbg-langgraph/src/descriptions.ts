@@ -10,7 +10,7 @@ const REQUIRED_TOOL_INSTRUCTIONS = [
   "- Pass each security in the form the user supplied it; never translate between identifier kinds on your own.",
   "- User supplied a Bloomberg ticker: pass it through fully qualified as <TICKER> <MARKET_SECTOR>, for example <TICKER> <EXCHANGE> Equity, <INDEX_TICKER> Index, or <CCY_PAIR> Curncy.",
   "- The market sector ending (Bloomberg yellow key) is part of the security string. The sectors are: Equity, Index, Curncy, Comdty, Corp, Govt, Muni, Mtge, M-Mkt, and Pfd. Equity securities carry an exchange or composite code before the sector (<TICKER> <EXCHANGE> Equity); preferred securities use the Pfd sector; corporate and government bonds use Corp and Govt. Request tools pass the security through to Bloomberg without validating the sector, so copy it exactly as the user supplied it.",
-  "- User supplied a raw ISIN or CUSIP: pass Bloomberg identifier syntax directly: /isin/<ISIN> or /cusip/<CUSIP>. Never pass the bare identifier without its prefix, except to xbbg_resolve_isins and xbbg_issuer_isins, which take raw ISIN strings.",
+  "- User supplied a raw ISIN or CUSIP: pass Bloomberg identifier syntax directly: /isin/<ISIN> or /cusip/<CUSIP>. xbbg_resolve_isins and xbbg_issuer_isins take raw ISIN strings; xbbg_resolve_venues and xbbg_auction_snapshot also accept valid bare ISINs, which the core normalizes. Otherwise never pass a bare identifier without its prefix.",
   "- <TICKER> <MARKET_SECTOR> is a format template, not authorization to construct a ticker. Never invent, recall from memory, or guess the Bloomberg ticker behind an identifier the user gave; identifier syntax is already a complete, valid security input. Use xbbg_resolve_isins only when the user wants the resolved Bloomberg security itself.",
   "- Recipe tools that take tickers (xbbg_preferreds, xbbg_corporate_bonds, xbbg_index_members, xbbg_etf_holdings) do not accept identifier syntax. When the user supplied an ISIN or CUSIP for those workflows, resolve it with xbbg_resolve_isins first and use the returned Bloomberg security; never guess the ticker.",
   "- Do not use xbbg_bsrch as a replacement for a known ticker, ISIN, or CUSIP.",
@@ -32,7 +32,9 @@ const REQUIRED_TOOL_INSTRUCTIONS = [
   "- xbbg_preferreds: preferred stock discovery from the issuer's common equity ticker, never a guessed preferred ('Pfd') ticker. Resolve a supplied ISIN/CUSIP with xbbg_resolve_isins first. Prefer this over xbbg_ext_bql_builder plus xbbg_bql when the user wants the actual preferreds result.",
   "- xbbg_corporate_bonds: bounded corporate bond universe query for a company ticker. Prefer this over generic BQL for company debt discovery.",
   "- xbbg_index_members: index constituents through the core index recipe. Prefer this over generic BDS/BQL members when the user asks for constituents.",
-  "- xbbg_resolve_isins: resolves supplied ISIN strings to Bloomberg securities. Pass raw ISIN strings only for this recipe; otherwise use /isin/<ISIN> syntax with data tools.",
+  "- xbbg_resolve_isins: resolves supplied ISIN strings to Bloomberg securities. Pass raw ISIN strings to this recipe, not /isin/<ISIN> syntax.",
+  "- xbbg_resolve_venues: resolves composite equities and preferreds to validated primary venues, respecting explicit venue inputs. Optional pcsOverrides maps preferred exchange names to pricing sources for this call. Inspect each row's status/error; input order and duplicates are retained within output limits.",
+  "- xbbg_auction_snapshot: finite reference-data auction/imbalance snapshot on validated venues, not a stream. Pass optional fields (omit or [] for AuctionFields.default) and per-call pcsOverrides. Input order, duplicates, and status/error are retained; unresolved, unsupported, or mismatched rows have null field values. Never substitute composite data for a failed venue.",
   "- xbbg_issuer_isins: issuer/bond ISIN workflow for supplied bond ISIN strings.",
   "- xbbg_etf_holdings: ETF holdings recipe for a single ETF ticker. Prefer this over generic BQL holdings when the user asks for ETF constituents.",
   "- xbbg_stream_snapshot: bounded live market-data observation from //blp/mktdata. Requires explicit maxUpdates and always terminates/unsubscribes.",
@@ -148,6 +150,12 @@ export const INDEX_MEMBERS_DESCRIPTION =
 
 export const RESOLVE_ISINS_DESCRIPTION =
   "Resolve raw ISIN strings to Bloomberg securities through the core ISIN recipe. Do not add /isin/ prefixes in this tool; pass the exact ISIN strings supplied by the user.";
+
+export const RESOLVE_VENUES_DESCRIPTION =
+  "Resolve supplied securities to validated primary venues for auction/imbalance data, respecting explicit venue inputs. Accepts Bloomberg tickers, valid bare ISINs, /isin/<ISIN>, or /bbgid/<FIGI>; never guess venue tickers. Optional pcsOverrides maps preferred exchange names to pricing sources for this call. Returns input_order, security, routing metadata, status, and error; preserves input order and duplicates within output limits. Check resolved/unresolved/unsupported/mismatch status before using a venue.";
+
+export const AUCTION_SNAPSHOT_DESCRIPTION =
+  "Finite reference-data auction/imbalance snapshot on validated primary venues, not a subscription. Accepts supplied securities, optional fields (omit or [] for AuctionFields.default), and per-call pcsOverrides for preferred exchange pricing sources. Explicit venues are respected. Returns input_order, security, venue_topic, status, error, then requested field columns in order. Input order and duplicate securities are retained within output limits; unresolved, unsupported, or mismatched rows retain status/error and have null field values, never composite fallback data. Arrow Int64 and Time64 microsecond values become decimal strings in JSON to preserve precision; Date32 values are UTC-midnight epoch milliseconds. Time-only values have no invented date or timezone.";
 
 export const ISSUER_ISINS_DESCRIPTION =
   "Issuer/bond ISIN workflow for supplied bond ISIN strings. Use for issuer-level ISIN discovery starting from known bond ISINs.";

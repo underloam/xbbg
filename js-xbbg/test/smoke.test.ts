@@ -12,7 +12,7 @@ import type {
   SeatType,
   StreamOptions,
 } from '../src/index';
-import type { NativeArrowColumn, NativeArrowZeroCopyBatch } from '../src/napi';
+import type { NativeArrowColumn, NativeArrowZeroCopyBatch, NativeSubscription } from '../src/napi';
 import type { RequestInput } from '../src/types';
 
 const SESSION_HOST = process.env.XBBG_HOST ?? 'localhost';
@@ -27,21 +27,45 @@ function nativeUnavailable(err: unknown): boolean {
   );
 }
 
-function fakeNativeSubscription(): any {
+function fakeNativeSubscription(): NativeSubscription {
+  const status: api.SubscriptionStatus = {
+    events: [],
+    failures: [],
+    failedTickers: [],
+    topicStates: {},
+    fieldErrors: {},
+    session: { state: 'up', lastChangeUs: 0, disconnectCount: 0, reconnectCount: 0 },
+    services: {},
+    admin: {
+      slowConsumerWarningActive: false,
+      slowConsumerWarningCount: 0,
+      slowConsumerClearedCount: 0,
+      dataLossCount: 0,
+    },
+  };
   return {
     add: async () => undefined,
+    takeWarnings: () => [],
+    addFields: async () => undefined,
+    latest: () => ({ kind: 'zeroCopy', columns: [], numRows: 0, metadata: {} }),
+    status,
+    events: status.events,
+    failures: status.failures,
+    failedTickers: status.failedTickers,
+    topicStates: status.topicStates,
+    fieldErrors: status.fieldErrors,
+    sessionStatus: status.session,
+    serviceStatus: status.services,
+    adminStatus: status.admin,
     fields: ['BID', 'ASK'],
     isActive: true,
+    deliversRows: true,
     nextArrowBatch: async () => null,
     nextUpdates: async () => null,
     remove: async () => undefined,
     stats: {
       batchesSent: 0,
-      dataLossEvents: 0,
       droppedBatches: 0,
-      effectiveOverflowPolicy: 'drop_newest',
-      lastDataLossUs: 0,
-      lastMessageUs: 0,
       messagesReceived: 0,
       slowConsumer: false,
     },
@@ -567,6 +591,7 @@ describe('native Arrow zero-copy table construction', () => {
 
   it('subscription.next uses native updates', async () => {
     const sub = new api.Subscription({
+      ...fakeNativeSubscription(),
       add: async () => {},
       fields: [],
       isActive: true,
@@ -622,6 +647,7 @@ describe('native Arrow zero-copy table construction', () => {
       metadata: { 'xbbg.eid_data': '{"IBM US Equity":[101]}' },
     };
     const sub = new api.Subscription({
+      ...fakeNativeSubscription(),
       add: async () => {},
       fields: [],
       isActive: true,

@@ -24,6 +24,8 @@ type CoreEngineMethods = Pick<
   | "corporateBonds"
   | "indexMembers"
   | "resolveIsins"
+  | "resolveVenues"
+  | "auctionSnapshot"
   | "issuerIsins"
   | "etfHoldings"
   | "stream"
@@ -60,8 +62,7 @@ export interface CoreResolver {
 
 async function importCore(): Promise<XbbgCoreLike> {
   // @xbbg/core is loaded lazily so constructing tools never loads the native addon.
-  // No cast needed: @xbbg/core >=1.4.6 exports types already assignable to
-  // XbbgCoreLike. Older releases needed `as unknown as XbbgCoreLike` here.
+  // Keep the adapter's engine contract derived from the current core package.
   return await import("@xbbg/core");
 }
 

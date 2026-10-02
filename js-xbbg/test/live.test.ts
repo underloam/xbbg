@@ -6,11 +6,12 @@ Run with:
 
 import type { Table } from 'apache-arrow';
 
+import { DataType, DateUnit, TimeUnit } from 'apache-arrow';
 import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 
 import { Backend, connect } from '../src/index';
-import type { Engine } from '../src/index';
+import type { Engine, FeedInfo, Subscription } from '../src/index';
 
 const CONFIG = Object.freeze({
   bond_ticker: 'GT10 Govt',
@@ -1345,6 +1346,352 @@ describe('js-xbbg live Bloomberg API', () => {
         } finally {
           await subscription.unsubscribe();
         }
+      }));
+  });
+
+  describe('auction and shared subscription contracts', () => {
+    const topic = 'IBM US Equity';
+    const readTimeoutMs = 10_000;
+
+    async function waitForState(predicate: () => boolean, label: string): Promise<void> {
+      const deadline = Date.now() + readTimeoutMs;
+      while (!predicate()) {
+        assert.ok(Date.now() < deadline, `No ${label} within 10s`);
+        await sleep(50);
+      }
+    }
+
+    it('resolves composite and ISIN inputs and respects an explicit venue', async (t) =>
+      runCase(t, 'auction venue resolution', async () => {
+        const table = (await withTimeout(
+          engine!.resolveVenues(['IBM US Equity', 'US0378331005', 'SPY UP Equity']),
+          15_000,
+          'venue resolution',
+        )) as Table;
+        assert.equal(table.numRows, 3);
+        assert.deepEqual(
+          [0, 1, 2].map((row) => stringCell(table, 'venue_topic', row)),
+          ['IBM UN Equity', 'AAPL UW Equity', 'SPY UP Equity'],
+        );
+        assert.deepEqual(
+          [0, 1, 2].map((row) => stringCell(table, 'status', row)),
+          ['resolved', 'resolved', 'resolved'],
+        );
+        assert.equal(stringCell(table, 'method', 2), 'as_is');
+      }));
+
+    it('returns validated auction columns without requiring an active auction', async (t) =>
+      runCase(t, 'auction snapshot', async () => {
+        const table = (await withTimeout(
+          engine!.auctionSnapshot([topic], { fields: ['IN_AUCTION_RT', 'ORDER_IMB_BUY_VOLUME'] }),
+          15_000,
+          'auction snapshot',
+        )) as Table;
+        assertArrowTable(table, [
+          'input_order',
+          'security',
+          'venue_topic',
+          'status',
+          'error',
+          'IN_AUCTION_RT',
+          'ORDER_IMB_BUY_VOLUME',
+        ]);
+        assert.equal(table.numRows, 1);
+        assert.equal(stringCell(table, 'status', 0), 'resolved');
+        assert.equal(stringCell(table, 'venue_topic', 0), 'IBM UN Equity');
+      }));
+
+    it('keeps Time64 microsecond and Date32 auction columns without requiring non-null values', async (t) =>
+      runCase(t, 'auction snapshot temporal types', async () => {
+        const timeField = 'IMBALANCE_TIMESTAMP_RT';
+        const dateField = 'CLOSING_AUCTION_VOLUME_DATE_RT';
+        const table = (await withTimeout(
+          engine!.auctionSnapshot([topic], { fields: [timeField, dateField] }),
+          15_000,
+          'auction temporal snapshot',
+        )) as Table;
+        assertArrowTable(table, ['security', 'venue_topic', 'status', timeField, dateField]);
+        assert.equal(table.numRows, 1);
+        assert.equal(stringCell(table, 'status', 0), 'resolved');
+        assert.equal(stringCell(table, 'venue_topic', 0), 'IBM UN Equity');
+
+        // Schema types must not depend on there being an active auction or a non-null value.
+        const timeType = table.getChild(timeField)?.type;
+        assert.ok(DataType.isTime(timeType), 'Expected an Arrow time-of-day column');
+        assert.equal(timeType.bitWidth, 64);
+        assert.equal(timeType.unit, TimeUnit.MICROSECOND);
+        const dateType = table.getChild(dateField)?.type;
+        assert.ok(DataType.isDate(dateType), 'Expected an Arrow date column');
+        assert.equal(dateType.unit, DateUnit.DAY);
+      }));
+
+    it('shares a field union and late image, but isolates an opted-out consumer', async (t) =>
+      runCase(t, 'shared feed lifecycle', async () => {
+        const first = await engine!.subscribe([topic], ['LAST_PRICE', 'BID']);
+        let second: Subscription | undefined;
+        let isolated: Subscription | undefined;
+        const failures: unknown[] = [];
+        const feeds = (): FeedInfo[] =>
+          engine!
+            .subscriptionFeeds()
+            .filter((feed) => feed.service === '//blp/mktdata' && feed.topic === topic);
+        try {
+          const paint = await first.next({ signal: AbortSignal.timeout(readTimeoutMs) });
+          assert.equal(paint.done, false, 'Initial paint should be available outside market hours');
+          second = await engine!.subscribe([topic], ['LAST_PRICE', 'ASK']);
+          const late = await second.next({ signal: AbortSignal.timeout(readTimeoutMs) });
+          assert.equal(late.done, false);
+          assert.equal(late.value?.str('MKTDATA_EVENT_TYPE'), 'SUMMARY');
+          assert.equal(late.value?.str('MKTDATA_EVENT_SUBTYPE'), 'INITPAINT');
+          const shared = feeds();
+          assert.equal(shared.length, 1);
+          assert.equal(shared[0]?.consumers, 2);
+          assert.ok(shared[0]?.fields.includes('BID'));
+          assert.ok(shared[0]?.fields.includes('ASK'));
+
+          isolated = await engine!.subscribe([topic], ['BID'], { isolated: true });
+          await waitForState(() => feeds().length === 2, 'isolated feed');
+          assert.equal(feeds().find((feed) => feed.isolated)?.consumers, 1);
+          assert.equal(feeds().find((feed) => !feed.isolated)?.consumers, 2);
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          const cleanup = await Promise.allSettled(
+            [first, second, isolated].map(async (sub) => sub?.unsubscribe()),
+          );
+          for (const result of cleanup) {
+            if (result.status === 'rejected') {
+              failures.push(result.reason);
+            }
+          }
+        }
+        try {
+          await waitForState(() => feeds().length === 0, 'feed retirement after the last consumer');
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, 'Shared-feed lifecycle failed');
+        }
+      }));
+
+    it('grows fields and exposes image metadata after initial paint', async (t) =>
+      runCase(t, 'subscription addFields and latest', async () => {
+        const sub = await engine!.subscribe([topic], ['LAST_PRICE', 'BID']);
+        try {
+          const paint = await sub.next({ signal: AbortSignal.timeout(readTimeoutMs) });
+          assert.equal(paint.done, false);
+          await sub.addFields(['ASK']);
+          assert.ok(sub.fields.includes('ASK'));
+          await waitForState(
+            () => typeof sub.topicStates[topic]?.delayed === 'boolean',
+            'delayed flag from initial paint',
+          );
+          const image = sub.latest() as Table;
+          assertArrowTable(image, ['topic', 'last_update', 'live', 'delayed', 'BID', 'ASK']);
+          assert.equal(image.numRows, 1);
+          assert.equal(stringCell(image, 'topic', 0), topic);
+          assert.equal(typeof cellValue(image, 'live', 0), 'boolean');
+          assert.equal(typeof cellValue(image, 'delayed', 0), 'boolean');
+          assert.notEqual(cellValue(image, 'last_update', 0), null);
+        } finally {
+          await sub.unsubscribe();
+        }
+      }));
+
+    it('updates an image-only board through latest without reading tick rows', async (t) =>
+      runCase(t, 'image-only subscription board', async () => {
+        const sub = await engine!.subscribe([topic], ['LAST_PRICE', 'BID'], { rows: false });
+        try {
+          let image = sub.latest() as Table;
+          await waitForState(() => {
+            image = sub.latest() as Table;
+            const lastUpdate = cellValue(image, 'last_update', 0);
+            const lastPrice = numberCell(image, 'LAST_PRICE', 0);
+            return (
+              lastUpdate !== null &&
+              lastUpdate !== undefined &&
+              lastPrice !== null &&
+              Number.isFinite(lastPrice)
+            );
+          }, 'image-only initial paint with a known LAST_PRICE');
+          assertArrowTable(image, ['topic', 'last_update', 'live', 'delayed', 'LAST_PRICE', 'BID']);
+          assert.equal(image.numRows, 1);
+          assert.equal(stringCell(image, 'topic', 0), topic);
+          assert.equal(typeof cellValue(image, 'live', 0), 'boolean');
+          assert.ok(sub.isActive, 'Reading the image must leave the subscription active');
+        } finally {
+          await sub.unsubscribe();
+        }
+      }));
+
+    it('surfaces a rejected static field through Node warnings and fieldErrors', async (t) =>
+      runCase(t, 'subscription field warning', async () => {
+        const warnings: Error[] = [];
+        const listener = (warning: Error): void => {
+          warnings.push(warning);
+        };
+        process.on('warning', listener);
+        let sub: Subscription | undefined;
+        try {
+          sub = await engine!.subscribe([topic], ['LAST_PRICE', 'BID', 'PX_BID']);
+          const paint = await sub.next({ signal: AbortSignal.timeout(readTimeoutMs) });
+          assert.equal(paint.done, false);
+          await waitForState(() => {
+            sub!.latest(); // Drains warnings without depending on another market tick.
+            return (
+              sub!.fieldErrors[topic]?.PX_BID === 'BAD_FLD' &&
+              warnings.some(
+                (warning) =>
+                  warning.name === 'BlpFieldWarning' &&
+                  'code' in warning &&
+                  warning.code === 'XBBG_FIELD_EXCEPTION',
+              )
+            );
+          }, 'field warning and BAD_FLD status');
+        } finally {
+          try {
+            await sub?.unsubscribe();
+          } finally {
+            process.removeListener('warning', listener);
+          }
+        }
+      }));
+
+    it('fails a rejected field with onFieldError raise without waiting for trades', async (t) =>
+      runCase(t, 'subscription field-error raise', async () => {
+        const sub = await engine!.subscribe([topic], ['LAST_PRICE', 'PX_BID'], {
+          rows: false,
+          onFieldError: 'raise',
+        });
+        try {
+          await waitForState(
+            () =>
+              sub.fieldErrors[topic]?.PX_BID === 'BAD_FLD' &&
+              sub.topicStates[topic]?.state === 'failed' &&
+              !sub.isActive,
+            'rejected field category and failed topic',
+          );
+          assert.ok(sub.failedTickers.includes(topic));
+          const failure = sub.failures.find((entry) => entry.topic === topic);
+          assert.ok(failure, 'Expected a topic failure for the rejected field');
+          assert.match(failure.reason, /PX_BID/u);
+          assert.match(failure.reason, /BAD_FLD/u);
+          assert.throws(() => sub.latest(), /subscription already closed/iu);
+        } finally {
+          await sub.unsubscribe();
+        }
+      }));
+
+    it('labels auction ticks with the input and keeps the upstream venue in status', async (t) =>
+      runCase(t, 'auction subscription alias', async () => {
+        const sub = await engine!.subscribeAuction([topic], { fields: ['LAST_PRICE', 'BID'] });
+        try {
+          const paint = await sub.next({ signal: AbortSignal.timeout(readTimeoutMs) });
+          assert.equal(paint.done, false);
+          assert.equal(paint.value?.topic, topic);
+          assert.equal(sub.topicStates[topic]?.feedTopic, 'IBM UN Equity');
+        } finally {
+          await sub.unsubscribe();
+        }
+      }));
+
+    it('masks observed zero auction-price sentinels by default while an explicit empty list preserves them', async (t) =>
+      runCase(t, 'auction default zero-price masking', async () => {
+        const securities = [topic, 'AAPL US Equity'];
+        const fields = ['THEO_PRICE', 'INDICATIVE_NEAR', 'INDICATIVE_FAR'];
+        const subscriptions: Subscription[] = [];
+        const failures: unknown[] = [];
+        let observedZero = false;
+        try {
+          const raw = await engine!.subscribeAuction(securities, {
+            fields,
+            rows: false,
+            zeroAsNull: [],
+          });
+          subscriptions.push(raw);
+          const masked = await engine!.subscribeAuction(securities, { fields, rows: false });
+          subscriptions.push(masked);
+
+          const deadline = Date.now() + readTimeoutMs;
+          while (Date.now() < deadline) {
+            const rawImage = raw.latest() as Table;
+            const maskedImage = masked.latest() as Table;
+            for (const image of [rawImage, maskedImage]) {
+              assertArrowTable(image, ['topic', 'last_update', ...fields], securities.length);
+              assert.equal(image.numRows, securities.length);
+            }
+            for (let row = 0; row < securities.length; row += 1) {
+              assert.equal(stringCell(rawImage, 'topic', row), securities[row]);
+              assert.equal(stringCell(maskedImage, 'topic', row), securities[row]);
+              const updatedAt = toMillis(cellValue(rawImage, 'last_update', row));
+              // Compare the same shared-feed image, not values separated by a market update.
+              if (
+                !Number.isFinite(updatedAt) ||
+                updatedAt !== toMillis(cellValue(maskedImage, 'last_update', row))
+              ) {
+                continue;
+              }
+              const zeroFields = fields.filter((field) => {
+                const value = cellValue(rawImage, field, row);
+                return value === 0 || value === 0n;
+              });
+              observedZero ||= zeroFields.length > 0;
+              for (const field of zeroFields) {
+                assert.equal(
+                  cellValue(maskedImage, field, row),
+                  null,
+                  'Default auction board must mask a zero price sentinel',
+                );
+              }
+            }
+            if (observedZero) {
+              break;
+            }
+            await sleep(Math.min(50, Math.max(0, deadline - Date.now())));
+          }
+        } catch (error) {
+          failures.push(error);
+        } finally {
+          const cleanup = await Promise.allSettled(
+            subscriptions.map(async (sub) => sub.unsubscribe()),
+          );
+          for (const result of cleanup) {
+            if (result.status === 'rejected') {
+              failures.push(result.reason);
+            }
+          }
+        }
+        if (failures.length > 0) {
+          throw new AggregateError(failures, 'Auction zero-price masking failed');
+        }
+        if (!observedZero) {
+          t.skip('No comparable zero auction-price sentinel observed within the 10s live window');
+        }
+      }));
+
+    it('optionally validates an environment-supplied preferred route', async (t) =>
+      runCase(t, 'optional preferred venue routing', async () => {
+        const isin = process.env.XBBG_LIVE_PFD_ISIN;
+        if (isin === undefined || isin.trim().length === 0) {
+          t.skip('Set XBBG_LIVE_PFD_ISIN to test preferred venue routing');
+          return;
+        }
+        let table: Table;
+        try {
+          table = (await withTimeout(
+            engine!.resolveVenues([isin]),
+            15_000,
+            'preferred venue',
+          )) as Table;
+        } catch {
+          // Native errors may contain the private input; do not retain their message or cause.
+          throw new Error('Environment-supplied preferred venue request failed');
+        }
+        // Do not print the environment-supplied security or venue.
+        assert.ok(stringCell(table, 'kind', 0) === 'pfd', 'Expected a preferred security');
+        assert.ok(stringCell(table, 'status', 0) === 'resolved', 'Preferred venue must validate');
+        assert.ok(stringCell(table, 'venue_topic', 0) !== null, 'Expected a venue topic');
       }));
   });
 });

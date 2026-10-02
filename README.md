@@ -33,6 +33,7 @@ Latest release: xbbg==1.4.12 (release: [notes](https://github.com/underloam/xbbg
 - [Why xbbg?](#why-xbbg)
 - [Installation](#installation)
 - [Quickstart](#quickstart)
+- [Exchange auctions and imbalance](#exchange-auctions-and-imbalance)
 - [JavaScript and Node](#javascript-and-node)
 - [Configuration and engines](#configuration-and-engines)
 - [Common API surface](#common-api-surface)
@@ -207,9 +208,58 @@ await sub.unsubscribe()
 
 For longer walkthroughs and example output shapes, use the [examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) or [xbbg.org](https://xbbg.org/).
 
+## Exchange auctions and imbalance
+
+Bloomberg publishes auction imbalance data (buy/sell imbalance, paired shares, indicative and theoretical prices, auction state) and auction results only on the listing where the auction runs. Composite tickers such as `SPY US Equity` return none of it from reference data and only part of it in streams, and a pricing-source suffix on an equity ISIN (`/isin/<ISIN>@UP`) is silently ignored. `xbbg.ext` routes each input to its auction venue and checks Bloomberg's answer before returning data:
+
+```python
+from xbbg import ext
+
+# SPY US Equity -> SPY UP Equity, IBM US Equity -> IBM UN Equity,
+# US0378331005 (Apple's ISIN) -> AAPL UW Equity
+venues = ext.resolve_venues(["SPY US Equity", "IBM US Equity", "US0378331005"])
+
+# Default auction fields for each venue in one validated reference-data request
+snap = ext.auction_snapshot(["SPY US Equity", "IBM US Equity"])
+
+# Live: resolves every input first, then subscribes the venues;
+# rows and status keep the identifiers you passed
+sub = await ext.asubscribe_auction(["SPY US Equity", "IBM US Equity"])
+async for table in sub:
+    print(table.to_pylist())
+    break
+await sub.unsubscribe()
+
+# A board you poll instead of iterating: rows=False keeps only current values
+board = await ext.asubscribe_auction(["SPY US Equity", "IBM US Equity"], rows=False)
+print(board.latest())  # current value of every field, one row per security
+await board.unsubscribe()
+```
+
+| Input | Auction venue | Checked against |
+| --- | --- | --- |
+| Equity or ETF composite ticker, or its ISIN | `{TICKER} {EQY_PRIM_EXCH_SHRT} Equity` | venue `EXCH_CODE` |
+| Explicit exchange ticker (`SPY UP Equity`) | unchanged | venue `EXCH_CODE` |
+| Preferred (`Pfd`) ISIN | `/isin/<ISIN>@<PCS>`, from a packaged exchange table (`NEW YORK` → `SNY2`, Nasdaq → `NASP`, `NYSE AMERICAN` → `AMEX`) or `pcs_overrides={...}` | venue `PRICING_SOURCE` |
+
+Rows that cannot be routed or validated come back as `unresolved`, `unsupported`, or `mismatch` and never carry data. `subscribe_auction`/`stream_auction` raise `BlpValidationError` before subscribing if any input fails or two inputs route to the same venue. Routing lookups are cached for 12 hours per input; the venue is still checked against Bloomberg on every call.
+
+`ext.AUCTION` groups the fields: `IMBALANCE`, `INDICATIVE`, `STATE`, `HALTS`, `RESULTS`, `COMPOSITE`, `QUOTES`; `DEFAULT` is the first five. They use streaming names such as `THEO_PRICE` and `BID`, which reference data also accepts; live subscriptions reject static names such as `PX_THEO` and `PX_BID`.
+
+Reading the data:
+
+- Values are raw and venue-specific. `INDICATIVE_NEAR`/`INDICATIVE_FAR` are NYSE's continuous-book and closing-only clearing prices but Nasdaq's near/far indicative prices; `IMBALANCE_CROSS_TYPE_RT` codes differ by venue.
+- `IMBALANCE_BUY` and `IMBALANCE_SELL` are prices, not quantities. `ext.imbalance_side(code)` maps `BUY`/`MBUY`/`RBUY` to `"buy"`, `SELL`/`MSEL`/`RSEL` to `"sell"`, and `NOIM`/`NIMB` to `"none"`.
+- `THEO_PRICE` and `VOLUME_THEO` reset to 0 at the start of each auction call, and Bloomberg sends 0 for a price it does not have. Auction subscriptions therefore show 0 in `THEO_PRICE`, `INDICATIVE_NEAR`, `INDICATIVE_FAR`, `IMBALANCE_BUY`, `IMBALANCE_SELL`, and `REFERENCE_PRICE_RT` (`ext.AUCTION.ZERO_PRICE_FIELDS`) as missing in `latest()`; pass `zero_as_null=()` to keep the zeros. Rows always carry the raw values. Imbalance values can persist after an auction ends: use `AUCTION_TYPE_REALTIME`, `IN_AUCTION_RT`, and the `live` column of `latest()` to tell current values from leftovers.
+- Time-of-day fields such as `IMBALANCE_TIMESTAMP_RT` are times without a date, in the terminal's local time zone, in snapshots and streams alike. Date fields such as `CLOSING_AUCTION_VOLUME_DATE_RT` are dates.
+- Bloomberg keeps no imbalance history; record the stream to keep it (see [Recording a stream](#recording-a-stream)). Auction results do have history on the venue listing, for example `blp.bdh("IBM UN Equity", "OFFICIAL_CLOSE_AUCTION_VOLUME", ...)`; the composite returns none.
+- Reference data has no delayed/real-time flag; live subscriptions warn when a stream is delayed (see [Subscriptions](#subscriptions-raw-tick-mode-and-all-fields)).
+
+Node exposes `engine.resolveVenues()`, `engine.auctionSnapshot()`, `engine.subscribeAuction()`, `engine.streamAuction()`, `AuctionFields`, and `imbalanceSide()`. The LangGraph adapters add `xbbg_resolve_venues` and `xbbg_auction_snapshot`, and the MCP server adds `resolve_venues` and `auction_snapshot`.
+
 ## Python LangChain and LangGraph
 
-[`py-xbbg-langgraph`](py-xbbg-langgraph/) provides the separate `xbbg-langgraph` distribution, imported as `xbbg_langgraph`. It exposes the same 32 tool names as the JavaScript adapter: 21 Bloomberg request/recipe/snapshot tools and 11 extension helpers, including inline Vega-Lite chart specifications. Python arguments and factory names use `snake_case`.
+[`py-xbbg-langgraph`](py-xbbg-langgraph/) provides the separate `xbbg-langgraph` distribution, imported as `xbbg_langgraph`. It exposes the same 34 tool names as the JavaScript adapter: 23 Bloomberg request/recipe/snapshot tools and 11 extension helpers, including inline Vega-Lite chart specifications. Python arguments and factory names use `snake_case`.
 
 Install from this checkout (the new distribution has not yet been published):
 
@@ -247,7 +297,7 @@ result = agent.invoke({
 })
 ```
 
-For custom LangGraph workflows, pass these tools to `langgraph.prebuilt.ToolNode` and bind the same list to your model. `create_bloomberg_tools()` returns only the 21 core tools; `create_bloomberg_ext_tools()` returns the 11 helpers. Individual factories such as `create_bdp_tool()` are also exported. Factories accept either keyword options or one `BloombergToolsOptions` instance, not both.
+For custom LangGraph workflows, pass these tools to `langgraph.prebuilt.ToolNode` and bind the same list to your model. `create_bloomberg_tools()` returns only the 23 core tools; `create_bloomberg_ext_tools()` returns the 11 helpers. Individual factories such as `create_bdp_tool()` are also exported. Factories accept either keyword options or one `BloombergToolsOptions` instance, not both.
 
 All tools support `.invoke()` and `.ainvoke()`. Use `.ainvoke()` inside a running event loop. A full LangChain tool call produces a `ToolMessage` with independently bounded content and artifact:
 
@@ -381,7 +431,7 @@ The engine uses separate worker pools for request/response calls and subscriptio
 - subscription sessions are isolated from request workers, so live streams do not share a single blocking session with batch requests
 - field validation, field-type caching, SDK logging, retry policy, keep-alive, slow-consumer thresholds, TLS, SOCKS5, and failover servers are configuration options rather than per-call ad hoc code
 
-`runtime_worker_threads` defaults to **2** (minimum **1**) and controls the engine's shared Tokio runtime, not the total process thread count. `subscription_pool_size` is the pre-warm count (default **1**, minimum **0**); `max_subscription_sessions` caps concurrent subscription sessions (default **32**, minimum **1**, and at least `subscription_pool_size`). Native subscription admission waits for capacity instead of allocating unbounded sessions. Node uses the corresponding `runtimeWorkerThreads`, `subscriptionPoolSize`, and `maxSubscriptionSessions` fields.
+`runtime_worker_threads` defaults to **2** (minimum **1**) and controls the engine's shared Tokio runtime, not the total process thread count. `subscription_pool_size` is the pre-warm count (default **1**, minimum **0**); `max_subscription_sessions` caps concurrent subscription sessions (default **32**, minimum **1**, and at least `subscription_pool_size`). Native subscription admission waits for capacity instead of allocating unbounded sessions. Sessions host shared market-data feeds (see [Subscriptions](#subscriptions-raw-tick-mode-and-all-fields)): a subscription that only joins existing feeds uses no session, and a session returns to the pool once it hosts no feeds. Node uses the corresponding `runtimeWorkerThreads`, `subscriptionPoolSize`, and `maxSubscriptionSessions` fields.
 
 Use `Engine(...)` when an application needs a scoped engine with its own connection settings instead of mutating global configuration.
 
@@ -398,7 +448,8 @@ Field-cache snapshots are published atomically. On Windows this uses `FileRename
 | Intraday data | `bdib`, `bdtick` |
 | Query and screening | `bql`, `beqs`, `bsrch`, `bqr`, `bcurves`, `bgovts`, `etf_holdings`, `index_members` |
 | Analytics and utilities | `yas`, `bta`, `ta_studies`, `ta_study_params`, `convert_ccy`, `fut_ticker`, `active_futures`, `futures_curve`, `vol_surface`, `resolve_isins`, `issuer_isins`, `cdx_ticker`, `active_cdx` |
-| Real-time data | `subscribe`, `stream`, `vwap`, `mktbar`, `depth`, `chains` |
+| Exchange auctions (`xbbg.ext`) | `resolve_venues`, `auction_snapshot`, `subscribe_auction`, `stream_auction`, `AUCTION`, `imbalance_side` |
+| Real-time data | `subscribe`, `stream`, `vwap`, `mktbar`, `depth`, `chains`, `subscription_feeds` |
 | Generic requests | `request`, `Service`, `Operation`, `RequestParams`, `OutputMode` |
 | Schema and diagnostics | `bops`, `bschema`, `get_sdk_info`, `enable_sdk_logging`, `print_backend_status` |
 | Testing helpers | `xbbg.testing.create_mock_response`, `xbbg.testing.mock_engine` |
@@ -526,18 +577,51 @@ Key behaviors:
 - `tick_mode=True`, `output="dict"`, or `output="tick"` returns native dict ticks and implies raw subscription mode
 - `output="backend"` returns the configured backend output, the same as default iteration without `raw=True`
 - `all_fields=True` exposes all top-level scalar Bloomberg subscription fields; unrequested arrays/complex fields are omitted, while explicitly requested unsupported shapes fail rather than being truncated
-- filtered mode keeps requested fields plus `MKTDATA_EVENT_TYPE` and `MKTDATA_EVENT_SUBTYPE`
+- filtered mode keeps requested fields plus `MKTDATA_EVENT_TYPE` and `MKTDATA_EVENT_SUBTYPE`; market-data rows that contain none of the requested fields are skipped, except the one-row initial image described under shared feeds
 - `conflate=True` requests Bloomberg-conflated quote updates on `//blp/mktdata`; trades are still delivered as received
-- `sub.add(...)`, `sub.remove(...)`, `sub.status`, `sub.events`, `sub.failed_tickers`, and `sub.stats` expose runtime control and diagnostics
+- `sub.add(...)`, `sub.remove(...)`, `sub.add_fields(...)`, `sub.latest()`, `sub.status`, `sub.events`, `sub.failed_tickers`, `sub.field_errors`, and `sub.stats` expose runtime control and diagnostics
 - use `async with` on an acquired subscription or `try`/`finally` with `await sub.unsubscribe()` for deterministic cleanup; `unsubscribe(drain=True)` returns a list in the same dict/raw/backend representation as iteration (an empty drain is `[]`). An unread stream failure is raised after cleanup, never hidden by a successful partial drain.
 
 Subscription rows are **deltas, not complete images**. In dict ticks, a missing key means unchanged; a present `None` means an explicit Bloomberg clear. Arrow batches retain nullable data columns and append non-null binary `__xbbg_present`: bit `i` (least-significant bit first) marks whether schema column `i + 2` is present, after `timestamp` and `topic`. A set bit plus a null cell is a clear; an unset bit is unchanged. Use each batch's current schema because all-fields layouts can grow or promote types. Schema metadata key `xbbg.subscription_presence` documents the encoding and mapping.
 
 Native queues fail closed on any continuity gap: Bloomberg `DATALOSS`, a full `drop_newest` buffer, or overflow/timeout of the bounded `block` forwarder. Already committed queue data is followed by one `BlpSubscriptionDataLossError`, then EOF; no post-gap deltas are delivered. Its `topic` and `detail` identify the gap (`topic="*"` denotes unattributed/session-wide loss). **Resubscribe for a fresh image** before applying further deltas. Terminal session errors also wake pending reads, including handles whose topics were all removed. Ordinary connection-down notifications remain nonterminal, and a single rejected topic does not terminate healthy siblings.
 
-Python `stream()` producers share one managed background event-loop thread, not a thread per stream. Each sync bridge has a bounded queue (`stream_capacity`, default **256**, minimum **1**) and asynchronously waits for consumer space; native overflow policy remains separate. Active sync producers are admitted per global/scoped engine up to `max_subscription_sessions`; excess producers raise `RuntimeError` rather than creating more tasks. Callbacks run on the consuming thread. Close the generator explicitly when stopping early: close cancels and waits for producer cleanup, and a cleanup timeout is reported while the producer remains tracked against its admission limit. In async applications use `astream()` directly and close it explicitly when retaining the generator after an early exit.
+**Shared feeds.** Within one engine, `//blp/mktdata` subscriptions to the same security with the same options share one Bloomberg subscription that requests the union of their fields, so a second subscription to a security does not open a second feed. A subscription that joins an existing feed immediately receives one `SUMMARY`/`INITPAINT` row built from the feed's current values (with no data columns present if none of its fields have a value yet). Asking for fields the feed lacks (a new subscription, `add(...)`, or `add_fields(...)`) re-subscribes the feed once. The requesting subscription receives Bloomberg's full repaint shortly after the call returns; subscriptions that already had the image receive one `SUMMARY`/`INITPAINT` row only if the repaint changes one of their fields, containing just the changed values and clears. Because filtered subscriptions skip rows without their fields, their output does not depend on who else shares the feed; `all_fields=True` subscriptions see every scalar field the feed receives, including fields other subscriptions requested. Pass `isolated=True` to keep a subscription on its own feeds and session. `vwap`, `mktbar`, `depth`, `chains`, and other non-`//blp/mktdata` services are never shared. When a session terminates, only the securities on that session fail; a stream ends with the session error once none of its securities remain. `xbbg.subscription_feeds()` returns one dict per feed with its service, topic, options, field union, consumer count, `delayed` flag, state, and field errors.
+
+**Current values and labels.** `sub.latest()` returns one row per security with the current value of each field plus `last_update`, `live` (a non-initial update has arrived), and `delayed`. Column types start from Bloomberg's field metadata when you subscribe, so `latest()` and stream columns are typed before any value arrives; if the first value Bloomberg sends has a different type, that type wins. `zero_as_null=[...]` shows 0 as missing in `latest()` for the listed fields (rows keep the raw value). Once a subscription has ended, `latest()` raises instead of returning an empty table. `aliases={"SPY UP Equity": "SPY US Equity"}` makes rows, status, and `remove(...)` use your label instead of the Bloomberg topic.
+
+**Boards without rows.** `asubscribe(..., rows=False)` keeps only current values for `latest()`: nothing is queued, so a subscription you only poll cannot overflow, and iterating it raises `RuntimeError`. If Bloomberg reports `DATALOSS`, xbbg re-subscribes the feed for a fresh image instead of ending the subscription: `live` turns false and a `DataLoss` event is recorded, then the image is rebuilt from Bloomberg's new paint and a `FeedRecovered` event follows. Subscriptions that read rows still fail closed on data loss, because they must see the gap.
+
+**Delayed data and rejected fields.** Bloomberg marks delayed streams with `IS_DELAYED_STREAM`; xbbg reads it for every subscription, records `sub.topic_states[topic]["delayed"]`, and by default warns once per security with `BlpDelayedDataWarning` (Node: `process.emitWarning` with type `BlpDelayedDataWarning`). `on_delayed="raise"` fails that security instead while its siblings keep streaming; `on_delayed="ignore"` only records the flag. Fields Bloomberg rejects when the subscription starts (for example static-only `PX_BID`, which live subscriptions call `BAD_FLD`) are listed in `sub.field_errors` and reported once with `BlpFieldWarning`, instead of silently staying empty. `on_field_error="raise"` fails the securities that requested a rejected field while their siblings keep streaming; `on_field_error="ignore"` records the error without a warning.
+
+Python `stream()` producers share one managed background event-loop thread, not a thread per stream. Each sync bridge has a bounded queue (`stream_capacity`, default **256**, minimum **1**) and asynchronously waits for consumer space; native overflow policy remains separate. A sync stream that only joins existing shared feeds needs no subscription session; one that needs a session waits up to 5 seconds for capacity when all `max_subscription_sessions` are in use and then raises `RuntimeError` instead of blocking forever. Callbacks run on the consuming thread. Close the generator explicitly when stopping early: close cancels and waits for producer cleanup, and a cleanup timeout is reported. In async applications use `astream()` directly and close it explicitly when retaining the generator after an early exit.
 
 In Node, pass `{ allFields: true }` to `stream()` / `subscribe()` helpers for the same top-level field expansion. Default iteration yields scalar `Tick` objects; `sub.arrow()` constructs Arrow JS tables without IPC for supported schemas. Exposed mutable buffers are JS-owned snapshots: exclusive bounded allocations can be transferred, while shared/sliced/oversized storage is copied or canonicalized first. This is not a universal zero-copy Rust/JS boundary. Choose scalar or Arrow reads once per subscription; see the [Node lifecycle and benchmark contracts](js-xbbg/README.md).
+
+### Recording a stream
+
+Bloomberg keeps no history for imbalance and other auction-call fields, so record the stream if you need it later. Raw batches convert to PyArrow record batches that can be appended to Parquet. Keep `__xbbg_present` so a reader can tell unchanged fields from explicit clears, and start a new file when the schema changes:
+
+```python
+import pyarrow.parquet as pq
+from xbbg import ext
+
+sub = await ext.asubscribe_auction(["IBM US Equity"], raw=True)
+writer, part = None, 0
+try:
+    async for batch in sub:
+        batch = batch.to_pyarrow()
+        if writer is None or batch.schema != writer.schema:
+            if writer is not None:
+                writer.close()
+            part += 1
+            writer = pq.ParquetWriter(f"ibm-auction-{part}.parquet", batch.schema)
+        writer.write_batch(batch)
+finally:
+    await sub.unsubscribe()
+    if writer is not None:
+        writer.close()
+```
 
 ## MCP server
 

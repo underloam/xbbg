@@ -3,7 +3,8 @@
 Canonical exception classes are defined by the Rust extension module
 (`xbbg._core`) and re-exported here for a stable Python import path.
 
-Python-only exceptions should be additive and inherit from the Rust base.
+Python-only exceptions inherit from the Rust base; subscription warnings are
+ordinary ``UserWarning`` subclasses and can be filtered with ``warnings``.
 """
 
 from __future__ import annotations
@@ -15,6 +16,18 @@ BlpError = _core.BlpError
 BlpSessionError = _core.BlpSessionError
 BlpTimeoutError = _core.BlpTimeoutError
 BlpInternalError = _core.BlpInternalError
+
+
+class BlpSubscriptionWarning(UserWarning):
+    """Non-fatal subscription diagnostic."""
+
+
+class BlpDelayedDataWarning(BlpSubscriptionWarning):
+    """A subscribed topic is receiving delayed rather than real-time data."""
+
+
+class BlpFieldWarning(BlpSubscriptionWarning):
+    """Bloomberg rejected an explicitly requested subscription field."""
 
 
 class BlpRequestError(_core.BlpRequestError):
@@ -122,6 +135,9 @@ __all__ = [
     "BlpSessionError",
     "BlpRequestError",
     "BlpSubscriptionDataLossError",
+    "BlpSubscriptionWarning",
+    "BlpDelayedDataWarning",
+    "BlpFieldWarning",
     "BlpLimitError",
     "BlpSecurityError",
     "BlpFieldError",

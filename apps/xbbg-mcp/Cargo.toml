@@ -23,5 +23,7 @@ tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi
 # The workspace entries set `default-features = false`, so `live` must be named
 # explicitly here: this binary previously inherited it via default features.
 xbbg-async = { workspace = true, features = ["live"] }
+xbbg-ext = { workspace = true }
+xbbg-recipes = { workspace = true }
 xbbg_core = { workspace = true, features = ["live"] }
 xbbg-log = { workspace = true }

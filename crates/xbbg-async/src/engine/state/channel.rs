@@ -2,7 +2,7 @@
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::Mutex;
 use tokio::sync::mpsc::error::{SendError, TryRecvError, TrySendError};
@@ -29,10 +29,11 @@ pub fn subscription_channel(capacity: usize) -> (SubscriptionSender, Subscriptio
         sender_count: AtomicUsize::new(1),
         slots: Semaphore::new(capacity),
         ready: Notify::new(),
+        on_closed: OnceLock::new(),
     });
     (
         SubscriptionSender {
-            shared: Arc::clone(&shared),
+            shared: SenderShared::Channel(Arc::clone(&shared)),
         },
         SubscriptionReceiver { shared },
     )
@@ -44,6 +45,7 @@ struct Shared {
     slots: Semaphore,
     sender_count: AtomicUsize,
     ready: Notify,
+    on_closed: OnceLock<Arc<dyn Fn() + Send + Sync>>,
 }
 
 struct ChannelState {
@@ -60,6 +62,12 @@ impl ChannelState {
 }
 
 impl Shared {
+    fn notify_closed(&self) {
+        if let Some(callback) = self.on_closed.get() {
+            callback();
+        }
+    }
+
     fn send_terminal(&self, error: BlpError) -> Result<(), Result<SubscriptionUpdate, BlpError>> {
         let mut state = self.state.lock();
         if self.sender_count.load(Ordering::Acquire) == 0 || !state.accepts_data() {
@@ -70,33 +78,165 @@ impl Shared {
         drop(state);
         self.slots.close();
         self.ready.notify_one();
+        self.notify_closed();
+        Ok(())
+    }
+
+    fn close(&self) {
+        let mut state = self.state.lock();
+        if state.receiver_closed {
+            return;
+        }
+        state.receiver_closed = true;
+        self.accepting.store(false, Ordering::Release);
+        drop(state);
+        self.slots.close();
+        self.ready.notify_one();
+        self.notify_closed();
+    }
+}
+
+type FieldErrorCallback = dyn Fn(&BlpError, bool) + Send + Sync;
+
+struct CallbackShared {
+    callback: Arc<dyn Fn(Result<SubscriptionUpdate, BlpError>) + Send + Sync>,
+    accepting: AtomicBool,
+    keep_open_on_data_loss: AtomicBool,
+    sender_count: AtomicUsize,
+    /// Serialize delivery with terminal failure so no update follows the error.
+    delivery: Mutex<()>,
+    field_error: OnceLock<Arc<FieldErrorCallback>>,
+}
+
+impl CallbackShared {
+    fn send(
+        &self,
+        item: Result<SubscriptionUpdate, BlpError>,
+    ) -> Result<(), Result<SubscriptionUpdate, BlpError>> {
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(item);
+        }
+        let _delivery = self.delivery.lock();
+        if !self.accepting.load(Ordering::Acquire) {
+            return Err(item);
+        }
+        if item.is_err()
+            && !(matches!(&item, Err(BlpError::SubscriptionDataLoss { .. }))
+                && self.keep_open_on_data_loss.load(Ordering::Relaxed))
+        {
+            self.accepting.store(false, Ordering::Release);
+        }
+        (self.callback)(item);
         Ok(())
     }
 }
 
-/// Sending half of a subscription channel.
-pub struct SubscriptionSender {
-    shared: Arc<Shared>,
+enum SenderShared {
+    Channel(Arc<Shared>),
+    Callback(Arc<CallbackShared>),
 }
 
-/// Weak capability that can only publish a terminal subscription failure.
+/// Sending half of a subscription channel, or an inline engine callback.
+pub struct SubscriptionSender {
+    shared: SenderShared,
+}
+
+/// Weak capability that can only publish subscription failures.
 ///
 /// It is deliberately not a sender: retaining it neither keeps the channel
 /// connected nor permits data publication.
 #[derive(Clone)]
 pub(crate) struct SubscriptionTerminator {
-    shared: Weak<Shared>,
+    shared: TerminatorShared,
+}
+
+#[derive(Clone)]
+enum TerminatorShared {
+    Channel(Weak<Shared>),
+    Callback(Weak<CallbackShared>),
 }
 
 impl SubscriptionTerminator {
+    pub(crate) fn is_callback(&self) -> bool {
+        matches!(self.shared, TerminatorShared::Callback(_))
+    }
+
     pub(crate) fn fail(&self, error: BlpError) {
-        if let Some(shared) = self.shared.upgrade() {
-            let _ = shared.send_terminal(error);
+        match &self.shared {
+            TerminatorShared::Channel(shared) => {
+                if let Some(shared) = shared.upgrade() {
+                    let _ = shared.send_terminal(error);
+                }
+            }
+            TerminatorShared::Callback(shared) => {
+                if let Some(shared) = shared.upgrade() {
+                    let _ = shared.send(Err(error));
+                }
+            }
         }
     }
 }
 
 impl SubscriptionSender {
+    /// Notify engine ownership when a queue fails asynchronously (notably a
+    /// Block-policy timeout). Installed before the first consumer is attached.
+    pub(crate) fn on_closed(&self, callback: Arc<dyn Fn() + Send + Sync>) {
+        if let SenderShared::Channel(shared) = &self.shared {
+            let _ = shared.on_closed.set(callback);
+            if !shared.accepting.load(Ordering::Acquire) {
+                shared.notify_closed();
+            }
+        }
+    }
+
+    /// Deliver inline without a queue. The callback must not re-enter this sender.
+    pub(crate) fn callback(
+        callback: Arc<dyn Fn(Result<SubscriptionUpdate, BlpError>) + Send + Sync>,
+    ) -> Self {
+        Self {
+            shared: SenderShared::Callback(Arc::new(CallbackShared {
+                callback,
+                accepting: AtomicBool::new(true),
+                keep_open_on_data_loss: AtomicBool::new(false),
+                sender_count: AtomicUsize::new(1),
+                delivery: Mutex::new(()),
+                field_error: OnceLock::new(),
+            })),
+        }
+    }
+
+    pub(crate) fn is_callback(&self) -> bool {
+        matches!(self.shared, SenderShared::Callback(_))
+    }
+
+    pub(crate) fn on_field_error(&self, callback: Arc<FieldErrorCallback>) {
+        if let SenderShared::Callback(shared) = &self.shared {
+            let _ = shared.field_error.set(callback);
+        }
+    }
+
+    /// Let an inline feed callback own DATALOSS recovery and teardown.
+    ///
+    /// Install before delivery starts; like delivery, this must not re-enter the
+    /// callback sender. Other errors stay terminal and bounded queues are unchanged.
+    pub(crate) fn keep_open_on_data_loss(&self) {
+        if let SenderShared::Callback(shared) = &self.shared {
+            let _delivery = shared.delivery.lock();
+            shared.keep_open_on_data_loss.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Return true when the engine attributed a decode error to consumers.
+    pub(crate) fn report_field_error(&self, error: &BlpError, scalar: bool) -> bool {
+        if let SenderShared::Callback(shared) = &self.shared {
+            if let Some(callback) = shared.field_error.get() {
+                callback(error, scalar);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Send an update, waiting for bounded capacity when necessary.
     ///
     /// Sending an `Err` terminates the channel through [`Self::fail`] semantics
@@ -105,7 +245,11 @@ impl SubscriptionSender {
         &self,
         item: Result<SubscriptionUpdate, BlpError>,
     ) -> Result<(), SendError<Result<SubscriptionUpdate, BlpError>>> {
-        if !self.shared.accepting.load(Ordering::Acquire) {
+        let shared = match &self.shared {
+            SenderShared::Channel(shared) => shared,
+            SenderShared::Callback(shared) => return shared.send(item).map_err(SendError),
+        };
+        if !shared.accepting.load(Ordering::Acquire) {
             return Err(SendError(item));
         }
         let update = match item {
@@ -113,18 +257,18 @@ impl SubscriptionSender {
             Err(error) => return self.send_terminal(error).map_err(SendError),
         };
 
-        let permit = match self.shared.slots.acquire().await {
+        let permit = match shared.slots.acquire().await {
             Ok(permit) => permit,
             Err(_) => return Err(SendError(Ok(update))),
         };
-        let mut state = self.shared.state.lock();
+        let mut state = shared.state.lock();
         if !state.accepts_data() {
             return Err(SendError(Ok(update)));
         }
         state.queue.push_back(update);
         permit.forget();
         drop(state);
-        self.shared.ready.notify_one();
+        shared.ready.notify_one();
         Ok(())
     }
 
@@ -136,7 +280,13 @@ impl SubscriptionSender {
         &self,
         item: Result<SubscriptionUpdate, BlpError>,
     ) -> Result<(), TrySendError<Result<SubscriptionUpdate, BlpError>>> {
-        if !self.shared.accepting.load(Ordering::Acquire) {
+        let shared = match &self.shared {
+            SenderShared::Channel(shared) => shared,
+            SenderShared::Callback(shared) => {
+                return shared.send(item).map_err(TrySendError::Closed);
+            }
+        };
+        if !shared.accepting.load(Ordering::Acquire) {
             return Err(TrySendError::Closed(item));
         }
         let update = match item {
@@ -144,7 +294,7 @@ impl SubscriptionSender {
             Err(error) => return self.send_terminal(error).map_err(TrySendError::Closed),
         };
 
-        let permit = match self.shared.slots.try_acquire() {
+        let permit = match shared.slots.try_acquire() {
             Ok(permit) => permit,
             Err(TryAcquireError::Closed) => return Err(TrySendError::Closed(Ok(update))),
             Err(TryAcquireError::NoPermits) => {
@@ -154,14 +304,14 @@ impl SubscriptionSender {
                 return Err(TrySendError::Full(Ok(update)));
             }
         };
-        let mut state = self.shared.state.lock();
+        let mut state = shared.state.lock();
         if !state.accepts_data() {
             return Err(TrySendError::Closed(Ok(update)));
         }
         state.queue.push_back(update);
         permit.forget();
         drop(state);
-        self.shared.ready.notify_one();
+        shared.ready.notify_one();
         Ok(())
     }
 
@@ -175,35 +325,77 @@ impl SubscriptionSender {
 
     pub(crate) fn terminator(&self) -> SubscriptionTerminator {
         SubscriptionTerminator {
-            shared: Arc::downgrade(&self.shared),
+            shared: match &self.shared {
+                SenderShared::Channel(shared) => TerminatorShared::Channel(Arc::downgrade(shared)),
+                SenderShared::Callback(shared) => {
+                    TerminatorShared::Callback(Arc::downgrade(shared))
+                }
+            },
+        }
+    }
+
+    /// Reject future sends and wake the receiver to drain accepted data and any
+    /// terminal error, then reach EOF even while senders remain alive.
+    ///
+    /// Callback sinks close without an error and must not re-enter this sender.
+    pub(crate) fn close(&self) {
+        match &self.shared {
+            SenderShared::Channel(shared) => shared.close(),
+            SenderShared::Callback(shared) => {
+                let _delivery = shared.delivery.lock();
+                shared.accepting.store(false, Ordering::Release);
+            }
         }
     }
 
     /// Whether this sender can no longer accept data.
     pub fn is_closed(&self) -> bool {
-        !self.shared.accepting.load(Ordering::Acquire)
+        match &self.shared {
+            SenderShared::Channel(shared) => !shared.accepting.load(Ordering::Acquire),
+            SenderShared::Callback(shared) => !shared.accepting.load(Ordering::Acquire),
+        }
     }
 
     fn send_terminal(&self, error: BlpError) -> Result<(), Result<SubscriptionUpdate, BlpError>> {
-        self.shared.send_terminal(error)
+        match &self.shared {
+            SenderShared::Channel(shared) => shared.send_terminal(error),
+            SenderShared::Callback(shared) => shared.send(Err(error)),
+        }
     }
 }
 
 impl Clone for SubscriptionSender {
     fn clone(&self) -> Self {
-        self.shared.sender_count.fetch_add(1, Ordering::Relaxed);
-        Self {
-            shared: Arc::clone(&self.shared),
-        }
+        let shared = match &self.shared {
+            SenderShared::Channel(shared) => {
+                shared.sender_count.fetch_add(1, Ordering::Relaxed);
+                SenderShared::Channel(Arc::clone(shared))
+            }
+            SenderShared::Callback(shared) => {
+                shared.sender_count.fetch_add(1, Ordering::Relaxed);
+                SenderShared::Callback(Arc::clone(shared))
+            }
+        };
+        Self { shared }
     }
 }
 
 impl Drop for SubscriptionSender {
     fn drop(&mut self) {
-        let last = self.shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1;
-        if last {
-            self.shared.accepting.store(false, Ordering::Release);
-            self.shared.ready.notify_one();
+        match &self.shared {
+            SenderShared::Channel(shared) => {
+                let last = shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1;
+                if last {
+                    shared.accepting.store(false, Ordering::Release);
+                    shared.ready.notify_one();
+                    shared.notify_closed();
+                }
+            }
+            SenderShared::Callback(shared) => {
+                if shared.sender_count.fetch_sub(1, Ordering::AcqRel) == 1 {
+                    shared.accepting.store(false, Ordering::Release);
+                }
+            }
         }
     }
 }
@@ -267,15 +459,7 @@ impl SubscriptionReceiver {
 
     /// Reject future sends while retaining already accepted data for draining.
     pub fn close(&mut self) {
-        let mut state = self.shared.state.lock();
-        if state.receiver_closed {
-            return;
-        }
-        state.receiver_closed = true;
-        self.shared.accepting.store(false, Ordering::Release);
-        drop(state);
-        self.shared.slots.close();
-        self.shared.ready.notify_one();
+        self.shared.close();
     }
 
     /// Whether no further values can be accepted into this receiver.
@@ -304,6 +488,7 @@ impl Drop for SubscriptionReceiver {
         drop(state);
         self.shared.slots.close();
         self.shared.ready.notify_one();
+        self.shared.notify_closed();
     }
 }
 
@@ -329,6 +514,200 @@ mod tests {
         BlpError::Internal {
             detail: detail.to_string(),
         }
+    }
+
+    #[tokio::test]
+    async fn callback_delivers_inline_and_closes_all_sender_clones_on_first_failure() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&received);
+        let tx = SubscriptionSender::callback(Arc::new(move |item| {
+            output.lock().push(item);
+        }));
+        let retained = tx.clone();
+        let terminator = tx.terminator();
+
+        tx.try_send(Ok(update(1))).expect("inline delivery");
+        assert_eq!(received.lock()[0].as_ref().unwrap().topic_id, 1);
+        retained.send(Ok(update(2))).await.expect("async sender");
+        terminator.fail(BlpError::Timeout);
+        tx.fail(failure("second failure"));
+
+        assert!(tx.is_closed());
+        assert!(retained.is_closed());
+        assert!(matches!(
+            tx.try_send(Ok(update(3))),
+            Err(TrySendError::Closed(Ok(_)))
+        ));
+        assert!(retained.send(Ok(update(4))).await.is_err());
+        let received = received.lock();
+        assert_eq!(received.len(), 3);
+        assert_eq!(received[1].as_ref().unwrap().topic_id, 2);
+        assert!(matches!(received[2], Err(BlpError::Timeout)));
+    }
+
+    #[tokio::test]
+    async fn callback_data_loss_opt_in_allows_recovery_until_a_terminal_error() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&received);
+        let tx = SubscriptionSender::callback(Arc::new(move |item| {
+            output.lock().push(item);
+        }));
+        let retained = tx.clone();
+        retained.keep_open_on_data_loss();
+        let terminator = tx.terminator();
+
+        tx.try_send(Ok(update(1))).expect("initial data");
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "TEST".into(),
+            detail: "synthetic data loss".into(),
+        });
+        assert!(!tx.is_closed());
+        assert!(!retained.is_closed());
+        retained.send(Ok(update(2))).await.expect("recovery data");
+        terminator.fail(BlpError::Timeout);
+        tx.fail(failure("later failure"));
+        tx.keep_open_on_data_loss();
+
+        assert!(tx.is_closed());
+        assert!(retained.is_closed());
+        assert!(matches!(
+            tx.try_send(Ok(update(3))),
+            Err(TrySendError::Closed(Ok(_)))
+        ));
+        let received = received.lock();
+        assert_eq!(received.len(), 4);
+        assert_eq!(received[0].as_ref().unwrap().topic_id, 1);
+        assert!(matches!(
+            &received[1],
+            Err(BlpError::SubscriptionDataLoss { topic, .. }) if topic == "TEST"
+        ));
+        assert_eq!(received[2].as_ref().unwrap().topic_id, 2);
+        assert!(matches!(received[3], Err(BlpError::Timeout)));
+    }
+
+    #[test]
+    fn callback_data_loss_remains_terminal_without_opt_in() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&received);
+        let tx = SubscriptionSender::callback(Arc::new(move |item| {
+            output.lock().push(item);
+        }));
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "TEST".into(),
+            detail: "synthetic data loss".into(),
+        });
+        tx.keep_open_on_data_loss();
+        assert!(tx.is_closed());
+        assert!(matches!(
+            tx.try_send(Ok(update(1))),
+            Err(TrySendError::Closed(Ok(_)))
+        ));
+        let received = received.lock();
+        assert_eq!(received.len(), 1);
+        assert!(matches!(
+            received[0],
+            Err(BlpError::SubscriptionDataLoss { .. })
+        ));
+    }
+
+    #[test]
+    fn bounded_queue_dataloss_stays_terminal_despite_callback_recovery_opt_in() {
+        let (tx, mut rx) = subscription_channel(1);
+        tx.keep_open_on_data_loss();
+        tx.try_send(Ok(update(1))).expect("fill bounded queue");
+        tx.fail(BlpError::SubscriptionDataLoss {
+            topic: "TEST".into(),
+            detail: "synthetic data loss".into(),
+        });
+
+        assert!(tx.is_closed());
+        assert!(matches!(
+            tx.try_send(Ok(update(2))),
+            Err(TrySendError::Closed(Ok(_)))
+        ));
+        assert_eq!(rx.try_recv().unwrap().unwrap().topic_id, 1);
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            Err(BlpError::SubscriptionDataLoss { .. })
+        ));
+        assert!(matches!(rx.try_recv(), Err(TryRecvError::Disconnected)));
+    }
+
+    #[tokio::test]
+    async fn sender_close_drains_accepted_data_and_preserves_a_pending_terminal_error() {
+        for with_error in [false, true] {
+            let (tx, mut rx) = subscription_channel(1);
+            let retained = tx.clone();
+            tx.try_send(Ok(update(1))).expect("accepted data");
+            if with_error {
+                tx.fail(BlpError::Timeout);
+            }
+
+            tx.close();
+            retained.close();
+            retained.fail(failure("after close"));
+            assert!(retained.is_closed());
+            assert!(matches!(
+                retained.try_send(Ok(update(2))),
+                Err(TrySendError::Closed(Ok(_)))
+            ));
+            assert_eq!(rx.recv().await.unwrap().unwrap().topic_id, 1);
+            if with_error {
+                assert!(matches!(rx.recv().await.unwrap(), Err(BlpError::Timeout)));
+            }
+            assert!(rx.recv().await.is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn sender_close_wakes_a_pending_reader_with_senders_alive() {
+        let (tx, mut rx) = subscription_channel(1);
+        let close = async {
+            tokio::task::yield_now().await;
+            tx.close();
+        };
+        let (item, ()) = tokio::join!(rx.recv(), close);
+        assert!(item.is_none());
+        assert!(tx.is_closed());
+    }
+
+    #[test]
+    fn callback_close_rejects_future_delivery_without_publishing_an_error() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&received);
+        let tx = SubscriptionSender::callback(Arc::new(move |item| {
+            output.lock().push(item);
+        }));
+        tx.keep_open_on_data_loss();
+        tx.try_send(Ok(update(1))).expect("accepted data");
+        tx.close();
+        tx.fail(BlpError::Timeout);
+        assert!(matches!(
+            tx.try_send(Ok(update(2))),
+            Err(TrySendError::Closed(Ok(_)))
+        ));
+        let received = received.lock();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].as_ref().unwrap().topic_id, 1);
+    }
+
+    #[test]
+    fn callback_weak_terminator_cannot_deliver_after_last_sender_drops() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&received);
+        let tx = SubscriptionSender::callback(Arc::new(move |item| {
+            output.lock().push(item);
+        }));
+        let retained = tx.clone();
+        let terminator = tx.terminator();
+        drop(tx);
+        retained.try_send(Ok(update(1))).expect("retained sender");
+        drop(retained);
+        terminator.fail(BlpError::Timeout);
+
+        let received = received.lock();
+        assert_eq!(received.len(), 1);
+        assert_eq!(received[0].as_ref().unwrap().topic_id, 1);
     }
 
     #[tokio::test]

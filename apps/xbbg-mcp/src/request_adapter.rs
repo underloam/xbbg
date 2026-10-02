@@ -6,6 +6,7 @@ use schemars::JsonSchema;
 use serde::Deserialize;
 use xbbg_async::engine::{ExtractorType, RequestParams, RequestParamsInput};
 use xbbg_async::services::Operation;
+use xbbg_ext::auction;
 
 use crate::serialization::{bounded_error_display, ResultLimits};
 
@@ -213,6 +214,60 @@ pub(crate) struct CheckEntitlementsArgs {
     /// Bloomberg service used for the check. Defaults to `//blp/refdata`.
     #[serde(default)]
     service: Option<String>,
+}
+
+const MAX_AUCTION_FIELDS: usize = 256;
+const MAX_AUCTION_GROUPS: usize = 8;
+const MAX_PCS_OVERRIDES: usize = 128;
+const MAX_AUCTION_STRING_BYTES: usize = 1_024;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct ResolveVenuesArgs {
+    /// One or more securities, at most 1,024 UTF-8 bytes each. Input order and duplicates are
+    /// kept; there is no count limit (output size is bounded by the result limits).
+    #[schemars(length(min = 1))]
+    securities: Vec<String>,
+    /// Up to 128 preferred exchange-name to pricing-source overrides; each key/value is at most
+    /// 1,024 UTF-8 bytes. Exchange names and pricing sources are normalized to uppercase.
+    /// A blank pricing-source value disables the built-in mapping for that exchange.
+    #[serde(default)]
+    pcs_overrides: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct AuctionSnapshotArgs {
+    /// One or more securities, at most 1,024 UTF-8 bytes each. Input order and duplicates are
+    /// kept; there is no count limit (output size is bounded by the result limits).
+    #[schemars(length(min = 1))]
+    securities: Vec<String>,
+    /// Up to 256 field mnemonics, trimmed and uppercased. Groups are expanded first, then fields
+    /// are appended in order with duplicates removed. An empty selection uses the default group.
+    #[serde(default)]
+    #[schemars(length(max = MAX_AUCTION_FIELDS))]
+    fields: Option<Vec<String>>,
+    /// Up to eight groups, expanded in order: imbalance, indicative, state, halts, results,
+    /// composite, quotes, default. Names are trimmed and case-insensitive.
+    #[serde(default)]
+    #[schemars(length(max = MAX_AUCTION_GROUPS))]
+    groups: Option<Vec<String>>,
+    /// Up to 128 preferred exchange-name to pricing-source overrides; each key/value is at most
+    /// 1,024 UTF-8 bytes. Exchange names and pricing sources are normalized to uppercase.
+    /// A blank pricing-source value disables the built-in mapping for that exchange.
+    #[serde(default)]
+    pcs_overrides: Option<BTreeMap<String, String>>,
+}
+
+#[derive(Debug)]
+pub(crate) struct ResolveVenuesParams {
+    pub(crate) securities: Vec<String>,
+    pub(crate) pcs_overrides: HashMap<String, String>,
+}
+
+#[derive(Debug)]
+pub(crate) struct AuctionSnapshotParams {
+    pub(crate) securities: Vec<String>,
+    pub(crate) fields: Vec<String>,
+    pub(crate) pcs_overrides: HashMap<String, String>,
 }
 
 fn build_request_params(input: RequestParamsInput) -> Result<RequestParams, ErrorData> {
@@ -459,6 +514,128 @@ pub(crate) fn check_entitlements_params(
         None => "//blp/refdata".to_string(),
     };
     Ok((service, eids))
+}
+
+pub(crate) fn resolve_venues_params(
+    args: ResolveVenuesArgs,
+) -> Result<ResolveVenuesParams, ErrorData> {
+    validate_auction_securities(&args.securities)?;
+    Ok(ResolveVenuesParams {
+        securities: args.securities,
+        pcs_overrides: normalize_pcs_overrides(args.pcs_overrides)?,
+    })
+}
+
+pub(crate) fn auction_snapshot_params(
+    args: AuctionSnapshotArgs,
+) -> Result<AuctionSnapshotParams, ErrorData> {
+    validate_auction_securities(&args.securities)?;
+    let mut explicit_fields = args.fields.unwrap_or_default();
+    let groups = args.groups.unwrap_or_default();
+    validate_auction_count("fields", explicit_fields.len(), MAX_AUCTION_FIELDS)?;
+    validate_auction_count("groups", groups.len(), MAX_AUCTION_GROUPS)?;
+    for field in &mut explicit_fields {
+        validate_auction_string("fields", field)?;
+        field.make_ascii_uppercase();
+    }
+
+    let mut seen = HashSet::new();
+    let mut fields = Vec::new();
+    for name in groups {
+        validate_auction_string("groups", &name)?;
+        let group = auction::field_group(&name).ok_or_else(|| {
+            ErrorData::invalid_params(
+                "unknown auction group; use imbalance, indicative, state, halts, results, composite, quotes, or default",
+                None,
+            )
+        })?;
+        for &field in group {
+            if seen.insert(field) {
+                fields.push(field.to_string());
+            }
+        }
+    }
+    for field in &explicit_fields {
+        let field = field.trim();
+        if seen.insert(field) {
+            fields.push(field.to_string());
+        }
+    }
+    if fields.is_empty() {
+        fields.extend(auction::DEFAULT.iter().map(|field| (*field).to_string()));
+    }
+    validate_auction_count("expanded fields", fields.len(), MAX_AUCTION_FIELDS)?;
+    Ok(AuctionSnapshotParams {
+        securities: args.securities,
+        fields,
+        pcs_overrides: normalize_pcs_overrides(args.pcs_overrides)?,
+    })
+}
+
+fn validate_auction_count(field: &str, count: usize, maximum: usize) -> Result<(), ErrorData> {
+    if count > maximum {
+        return Err(ErrorData::invalid_params(
+            format!("{field} must contain at most {maximum} entries"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_auction_string(field: &str, value: &str) -> Result<(), ErrorData> {
+    if value.len() > MAX_AUCTION_STRING_BYTES || value.trim().is_empty() {
+        return Err(ErrorData::invalid_params(
+            format!("{field} must contain non-empty strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"),
+            None,
+        ));
+    }
+    Ok(())
+}
+
+fn validate_auction_securities(securities: &[String]) -> Result<(), ErrorData> {
+    if securities.is_empty() {
+        return Err(ErrorData::invalid_params(
+            "securities must contain at least one non-empty value",
+            None,
+        ));
+    }
+    for security in securities {
+        validate_auction_string("securities", security)?;
+    }
+    // Recipes trim/normalize lookups separately, preserving each original input in the result.
+    Ok(())
+}
+
+fn normalize_pcs_overrides(
+    overrides: Option<BTreeMap<String, String>>,
+) -> Result<HashMap<String, String>, ErrorData> {
+    let Some(overrides) = overrides else {
+        return Ok(HashMap::new());
+    };
+    validate_auction_count("pcs_overrides", overrides.len(), MAX_PCS_OVERRIDES)?;
+    let mut normalized = HashMap::with_capacity(overrides.len());
+    for (exchange, pcs) in overrides {
+        validate_auction_string("pcs_overrides keys", &exchange)?;
+        if pcs.len() > MAX_AUCTION_STRING_BYTES {
+            return Err(ErrorData::invalid_params(
+                format!("pcs_overrides values must contain strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"),
+                None,
+            ));
+        }
+        let exchange = exchange
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+            .to_ascii_uppercase();
+        let pcs = pcs.trim().to_ascii_uppercase();
+        if normalized.insert(exchange, pcs).is_some() {
+            return Err(ErrorData::invalid_params(
+                "pcs_overrides contains duplicate normalized exchange names",
+                None,
+            ));
+        }
+    }
+    Ok(normalized)
 }
 
 fn normalize_required_string(field: &str, value: String) -> Result<String, ErrorData> {
@@ -788,6 +965,212 @@ mod tests {
                 service: None,
             })
             .is_err());
+        }
+    }
+
+    #[test]
+    fn venue_arguments_preserve_inputs_and_normalize_pricing_sources() {
+        let args = serde_json::from_value(serde_json::json!({
+            "securities": [" SYNTH US Equity ", "SYNTH US Equity", " SYNTH US Equity "],
+            "pcs_overrides": {"  synthetic   exchange ": " pcs1 "}
+        }))
+        .unwrap();
+        let resolved = resolve_venues_params(args).unwrap();
+        assert_eq!(
+            resolved.securities,
+            [" SYNTH US Equity ", "SYNTH US Equity", " SYNTH US Equity "]
+        );
+        assert_eq!(
+            resolved.pcs_overrides,
+            HashMap::from([("SYNTHETIC EXCHANGE".to_string(), "PCS1".to_string())])
+        );
+    }
+
+    #[test]
+    fn auction_empty_selections_use_default_fields() {
+        for selection in [
+            serde_json::json!({"securities": ["SYNTH US Equity"]}),
+            serde_json::json!({"securities": ["SYNTH US Equity"], "fields": [], "groups": []}),
+        ] {
+            let snapshot =
+                auction_snapshot_params(serde_json::from_value(selection).unwrap()).unwrap();
+            assert_eq!(snapshot.fields, auction::DEFAULT);
+            assert!(snapshot.pcs_overrides.is_empty());
+        }
+    }
+
+    #[test]
+    fn auction_groups_expand_in_order_before_unique_explicit_fields() {
+        let args = serde_json::from_value(serde_json::json!({
+            "securities": ["SYNTH US Equity"],
+            "groups": [" quotes ", "HALTS", "quotes"],
+            "fields": [" ask ", "custom_field", "CUSTOM_FIELD", " bid "]
+        }))
+        .unwrap();
+        let snapshot = auction_snapshot_params(args).unwrap();
+        assert_eq!(
+            snapshot.fields,
+            [
+                "BID",
+                "ASK",
+                "BID_SIZE",
+                "ASK_SIZE",
+                "TRADING_HALT_REASON_TYPE_RT",
+                "LULD_EVENT_CODE_RT",
+                "INTRADAY_AUCTION_VOLUME_RT",
+                "CUSTOM_FIELD",
+            ]
+        );
+    }
+
+    #[test]
+    fn auction_explicit_fields_replace_default_selection() {
+        let args = serde_json::from_value(serde_json::json!({
+            "securities": ["SYNTH US Equity"],
+            "fields": [" ask ", "bid", "ASK"],
+            "pcs_overrides": {" synthetic   exchange ": " pcs1 "}
+        }))
+        .unwrap();
+        let snapshot = auction_snapshot_params(args).unwrap();
+        assert_eq!(snapshot.fields, ["ASK", "BID"]);
+        assert_eq!(
+            snapshot.pcs_overrides,
+            HashMap::from([("SYNTHETIC EXCHANGE".to_string(), "PCS1".to_string())])
+        );
+    }
+
+    #[test]
+    fn auction_unknown_groups_are_invalid_parameters() {
+        let args = serde_json::from_value(serde_json::json!({
+            "securities": ["SYNTH US Equity"],
+            "groups": ["not_an_auction_group"],
+            "fields": ["BID"]
+        }))
+        .unwrap();
+        let error = auction_snapshot_params(args).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+    }
+
+    #[test]
+    fn auction_securities_are_bounded_without_dropping_blank_rows() {
+        // No count cap: well above any former limit is accepted unchanged.
+        let securities = vec!["SYNTH US Equity".to_string(); 10_001];
+        let accepted = resolve_venues_params(ResolveVenuesArgs {
+            securities: securities.clone(),
+            pcs_overrides: None,
+        })
+        .unwrap();
+        assert_eq!(accepted.securities, securities);
+        let at_byte_limit = "x".repeat(MAX_AUCTION_STRING_BYTES);
+        assert_eq!(
+            resolve_venues_params(ResolveVenuesArgs {
+                securities: vec![at_byte_limit.clone()],
+                pcs_overrides: None,
+            })
+            .unwrap()
+            .securities,
+            [at_byte_limit]
+        );
+
+        for securities in [
+            Vec::new(),
+            vec!["SYNTH US Equity".to_string(), " ".to_string()],
+            vec!["x".repeat(MAX_AUCTION_STRING_BYTES + 1)],
+            vec!["é".repeat(MAX_AUCTION_STRING_BYTES / 2 + 1)],
+        ] {
+            let error = resolve_venues_params(ResolveVenuesArgs {
+                securities: securities.clone(),
+                pcs_overrides: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+            let error = auction_snapshot_params(AuctionSnapshotArgs {
+                securities,
+                fields: None,
+                groups: None,
+                pcs_overrides: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    #[test]
+    fn auction_pricing_source_overrides_are_bounded_and_unambiguous() {
+        let overrides: BTreeMap<_, _> = (0..MAX_PCS_OVERRIDES)
+            .map(|index| (format!("EXCHANGE {index}"), format!("PCS{index}")))
+            .collect();
+        assert_eq!(
+            normalize_pcs_overrides(Some(overrides.clone())).unwrap(),
+            overrides.into_iter().collect::<HashMap<_, _>>()
+        );
+        for overrides in [
+            (0..=MAX_PCS_OVERRIDES)
+                .map(|index| (format!("EXCHANGE {index}"), "PCS1".to_string()))
+                .collect(),
+            params(&[(" ", "PCS1")]),
+            params(&[(" exchange ", "PCS1"), ("EXCHANGE", "PCS2")]),
+            params(&[(&"x".repeat(MAX_AUCTION_STRING_BYTES + 1), "PCS1")]),
+            params(&[("EXCHANGE", &"x".repeat(MAX_AUCTION_STRING_BYTES + 1))]),
+        ] {
+            let error = normalize_pcs_overrides(Some(overrides)).unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        }
+    }
+
+    #[test]
+    fn auction_empty_pricing_source_overrides_disable_packaged_routes() {
+        for value in ["", "   ", "N.A."] {
+            let args = serde_json::from_value(serde_json::json!({
+                "securities": ["SYNTH Pfd"],
+                "pcs_overrides": {" new   york ": value}
+            }))
+            .unwrap();
+            let venues = resolve_venues_params(args).unwrap();
+            assert_eq!(
+                venues.pcs_overrides.get("NEW YORK"),
+                Some(&value.trim().to_ascii_uppercase())
+            );
+            assert_eq!(
+                auction::pfd_pricing_source("NEW YORK", &venues.pcs_overrides),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn auction_field_selection_limits_apply_before_and_after_expansion() {
+        let explicit: Vec<_> = (0..MAX_AUCTION_FIELDS)
+            .map(|index| format!("FIELD_{index}"))
+            .collect();
+        let accepted = auction_snapshot_params(AuctionSnapshotArgs {
+            securities: vec!["SYNTH US Equity".to_string()],
+            fields: Some(explicit.clone()),
+            groups: None,
+            pcs_overrides: None,
+        })
+        .unwrap();
+        assert_eq!(accepted.fields, explicit);
+        for (fields, groups) in [
+            (Some(explicit), Some(vec!["quotes".to_string()])),
+            (Some(vec!["BID".to_string(); MAX_AUCTION_FIELDS + 1]), None),
+            (Some(vec![" ".to_string()]), None),
+            (Some(vec!["x".repeat(MAX_AUCTION_STRING_BYTES + 1)]), None),
+            (
+                None,
+                Some(vec!["quotes".to_string(); MAX_AUCTION_GROUPS + 1]),
+            ),
+            (None, Some(vec![" ".to_string()])),
+            (None, Some(vec!["x".repeat(MAX_AUCTION_STRING_BYTES + 1)])),
+        ] {
+            let error = auction_snapshot_params(AuctionSnapshotArgs {
+                securities: vec!["SYNTH US Equity".to_string()],
+                fields,
+                groups,
+                pcs_overrides: None,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         }
     }
 

@@ -6,10 +6,11 @@ use crate::native_arrow::{record_batch_to_arrow_record_batch, ArrowRecordBatch};
 use chrono::Datelike;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyDict;
+use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
 
+use xbbg_ext::auction::{field_group, field_group_names, imbalance_side, ZERO_PRICE_FIELDS};
 use xbbg_ext::constants::{DVD_TYPES, FUTURES_MONTHS, MONTH_CODES};
 use xbbg_ext::resolvers::cdx::{
     cdx_series_from_ticker, gen_to_specific, parse_cdx_ticker, previous_series_ticker,
@@ -335,6 +336,39 @@ fn ext_get_dvd_types(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
 }
 
 // =============================================================================
+// Auction Utilities
+// =============================================================================
+
+/// Get named auction field groups as lists in their canonical field order.
+#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+#[pyfunction]
+fn ext_auction_field_groups(py: Python<'_>) -> PyResult<Bound<'_, PyDict>> {
+    let groups = PyDict::new(py);
+    for &name in field_group_names() {
+        let fields = field_group(name).expect("auction group names must resolve");
+        groups.set_item(name, PyList::new(py, fields.iter().copied())?)?;
+    }
+    Ok(groups)
+}
+
+/// Get auction price fields whose numeric zeros mean no price, not a named field group.
+#[cfg_attr(
+    feature = "stub-gen",
+    gen_stub_pyfunction(python = "def ext_auction_zero_price_fields() -> list[str]: ...")
+)]
+#[pyfunction]
+fn ext_auction_zero_price_fields() -> &'static [&'static str] {
+    ZERO_PRICE_FIELDS
+}
+
+/// Normalize a Bloomberg imbalance indicator to buy, sell, none, or None.
+#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+#[pyfunction]
+fn ext_imbalance_side(code: &str) -> Option<&'static str> {
+    imbalance_side(code).map(|side| side.as_str())
+}
+
+// =============================================================================
 // Futures Filtering
 // =============================================================================
 
@@ -576,6 +610,9 @@ pub fn register_ext_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         ext_get_futures_months,
         ext_get_dvd_type,
         ext_get_dvd_types,
+        ext_auction_field_groups,
+        ext_auction_zero_price_fields,
+        ext_imbalance_side,
         ext_filter_candidates_by_cycle,
         ext_filter_valid_contracts,
         ext_build_yas_overrides,

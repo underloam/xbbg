@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from langchain_core.tools import StructuredTool
+from langchain_core.tools import StructuredTool, ToolException
 
 from ._bql import build_query
 from ._runtime import ToolInput, make_tool
@@ -30,6 +30,8 @@ _DESCRIPTIONS = {
     "xbbg_index_members": "Native Bloomberg index constituent recipe with optional as-of date. Supply the exact qualified Index ticker, never a guessed ticker or unresolved identifier.",
     "xbbg_resolve_isins": "Resolve user-supplied raw ISIN strings through Bloomberg's identifier recipe. Do not add /isin/ prefixes; never infer an ISIN or ticker.",
     "xbbg_issuer_isins": "Resolve supplied raw bond ISIN strings to issuer equity ISINs through Bloomberg's native recipe.",
+    "xbbg_resolve_venues": "Resolve and validate exchange-auction venues for supplied tickers, bare ISINs, /isin/ or /bbgid/ topics. Preserve explicit venues; never guess an exchange or pricing source. Optional pcs_overrides maps preferred-stock exchange names to pricing-source codes. Inspect each row's status and error.",
+    "xbbg_auction_snapshot": "Fetch a finite reference-data auction snapshot from validated primary venues, not composite listings or an open stream. Supply exact securities and optional fields; omitted or empty fields select AUCTION.DEFAULT. Optional pcs_overrides maps preferred-stock exchange names to pricing-source codes. Unresolved, unsupported, or mismatched venues retain status/error rows with null data fields. Time-of-day values are terminal-local; the snapshot does not establish stream delay or real-time entitlement.",
     "xbbg_etf_holdings": "Fetch bounded ETF holdings for the exact qualified Equity ticker. Resolve supplied identifiers first; never guess the ETF ticker.",
     "xbbg_stream_snapshot": "Bounded live //blp/mktdata snapshot. Requires max_updates; collects until that count, timeout, or stream completion, then always unsubscribes. Returns finite updates, not an open subscription.",
     "xbbg_mktbar_snapshot": "Bounded live //blp/mktbar snapshot for one security. Requires max_updates. Native market bars require LAST_PRICE and a bar_size subscription option (default 1 minute). Always unsubscribes.",
@@ -244,6 +246,17 @@ async def _execute(name: str, input: ToolInput, options: BloombergToolsOptions) 
         from xbbg.ext.identifiers import aissuer_isins
 
         return await aissuer_isins(backend="native", **data)
+    if name in {"xbbg_resolve_venues", "xbbg_auction_snapshot"}:
+        from xbbg import ext
+
+        symbol = "aresolve_venues" if name == "xbbg_resolve_venues" else "aauction_snapshot"
+        recipe = getattr(ext, symbol, None)
+        if recipe is None:
+            raise ToolException(
+                f"{name} requires xbbg.ext.{symbol}, which is missing from the installed xbbg. "
+                "Upgrade xbbg to a release that includes the auction helpers."
+            )
+        return await recipe(backend="native", **data)
     if name == "xbbg_etf_holdings":
         from xbbg.ext.historical import aetf_holdings
 
@@ -336,6 +349,14 @@ def create_issuer_isins_tool(options: BloombergToolsOptions | None = None, **kwa
     return _build_tool("xbbg_issuer_isins", resolve_options(options, kwargs))
 
 
+def create_resolve_venues_tool(options: BloombergToolsOptions | None = None, **kwargs: Any) -> StructuredTool:
+    return _build_tool("xbbg_resolve_venues", resolve_options(options, kwargs))
+
+
+def create_auction_snapshot_tool(options: BloombergToolsOptions | None = None, **kwargs: Any) -> StructuredTool:
+    return _build_tool("xbbg_auction_snapshot", resolve_options(options, kwargs))
+
+
 def create_etf_holdings_tool(options: BloombergToolsOptions | None = None, **kwargs: Any) -> StructuredTool:
     return _build_tool("xbbg_etf_holdings", resolve_options(options, kwargs))
 
@@ -377,6 +398,8 @@ __all__ = [
     "create_index_members_tool",
     "create_resolve_isins_tool",
     "create_issuer_isins_tool",
+    "create_resolve_venues_tool",
+    "create_auction_snapshot_tool",
     "create_etf_holdings_tool",
     "create_stream_snapshot_tool",
     "create_mktbar_snapshot_tool",

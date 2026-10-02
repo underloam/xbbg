@@ -128,7 +128,10 @@ class RequestParams:
         format: Output format: ``Format.LONG`` (wire value ``"long"``, default),
             ``Format.LONG_TYPED`` (``"long_typed"``),
             ``Format.LONG_WITH_METADATA`` (``"long_metadata"``), or
-            ``Format.SEMI_LONG`` (``"semi_long"``).
+            ``Format.SEMI_LONG`` (``"semi_long"``). LONG_TYPED separates values
+            into ``value_f64``, ``value_i64``, ``value_str``, ``value_bool``,
+            ``value_date`` (Date32), ``value_ts`` (UTC timestamp), and
+            ``value_time`` (Time64 microseconds, with no date or timezone).
         include_security_errors: When True for ReferenceData requests, include
             ``__SECURITY_ERROR__`` rows for securities that failed.
         return_eids: When True for ReferenceDataRequest (including BDS bulk

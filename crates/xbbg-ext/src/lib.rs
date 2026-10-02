@@ -3,11 +3,13 @@
 //! This crate provides high-performance Rust implementations of common
 //! Bloomberg data transformations and utilities:
 //!
+//! - **auction**: Stream-valid auction fields and validated venue-routing decisions
 //! - **constants**: Compile-time maps for futures months, dividend types, etc.
 //! - **utils**: Date parsing, DataFrame pivoting, ticker normalization
 //! - **resolvers**: Futures and CDX ticker resolution
 //! - **transforms**: Currency adjustment, historical data processing
 
+pub mod auction;
 pub mod constants;
 pub mod error;
 pub mod markets;
@@ -18,6 +20,11 @@ pub mod utils;
 pub use error::{ExtError, Result};
 
 // Re-export commonly used items
+pub use auction::{
+    equity_venue_ticker, field_group, field_group_names, imbalance_side, is_valid_isin,
+    normalize_security_input, pcs_isin_topic, pfd_pricing_source, route_venue, validate_venue,
+    ImbalanceSide, VenueDecision, VenueMethod, VenueReference, VenueStatus,
+};
 pub use constants::{DVD_COLS, DVD_TYPES, ETF_COLS, FUTURES_MONTHS, MONTH_CODES};
 pub use markets::sessions::{
     derive_sessions, get_market_rule, infer_timezone_from_country, MarketRule, SessionWindows,

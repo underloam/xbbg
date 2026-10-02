@@ -19,14 +19,19 @@ use napi_derive::napi;
 use tokio::sync::{watch, Mutex};
 use tokio::time::Instant;
 use xbbg_async::engine::state::{
-    FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionReceiver, SubscriptionSender,
-    SubscriptionUpdate, UpdateValue,
+    FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionReceiver, SubscriptionUpdate,
+    UpdateValue,
 };
 use xbbg_async::engine::{
-    Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr, SharedSubscriptionStatus,
-    Socks5Proxy, TlsConfig, Transport,
+    AdminStatusInfo, Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr,
+    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, Socks5Proxy,
+    SubscriptionEventInfo, SubscriptionFailureInfo, SubscriptionStatusState, TlsConfig,
+    TopicStatusInfo, Transport,
 };
-use xbbg_async::{BlpAsyncError, ValidationMode};
+use xbbg_async::{
+    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle,
+    ValidationMode,
+};
 use xbbg_core::{AuthConfig, BlpError};
 
 type StreamBatchResult = std::result::Result<SubscriptionUpdate, BlpError>;
@@ -61,18 +66,6 @@ fn init_async_runtime() {
         .build()
         .expect("create NAPI async bridge runtime");
     create_custom_tokio_runtime(runtime);
-}
-
-struct SubscriptionStreamHandle {
-    tx: SubscriptionSender,
-    claim: Option<xbbg_async::engine::SessionClaim>,
-    fields: Vec<String>,
-    all_fields: bool,
-    service: String,
-    options: Vec<String>,
-    flush_threshold: Option<usize>,
-    overflow_policy: Option<OverflowPolicy>,
-    status: SharedSubscriptionStatus,
 }
 
 #[napi(object)]
@@ -225,6 +218,86 @@ pub struct SubscriptionStats {
 }
 
 #[napi(object)]
+pub struct SubscriptionEventOutput {
+    pub at_us: i64,
+    pub category: String,
+    pub level: String,
+    pub message_type: String,
+    pub topic: Option<String>,
+    pub detail: Option<String>,
+}
+
+#[napi(object)]
+pub struct SubscriptionFailureOutput {
+    pub topic: String,
+    pub reason: String,
+    pub kind: String,
+    pub at_us: i64,
+}
+
+#[napi(object)]
+pub struct TopicStateOutput {
+    pub topic: String,
+    pub feed_topic: String,
+    pub delayed: Option<bool>,
+    pub state: String,
+    pub last_change_us: i64,
+    pub streams_active: bool,
+    pub streams_changed_us: i64,
+}
+
+#[napi(object)]
+pub struct SessionStatusOutput {
+    pub state: String,
+    pub last_change_us: i64,
+    pub disconnect_count: i64,
+    pub reconnect_count: i64,
+}
+
+#[napi(object)]
+pub struct ServiceStatusOutput {
+    pub service: String,
+    pub up: bool,
+    pub last_change_us: i64,
+}
+
+#[napi(object)]
+pub struct AdminStatusOutput {
+    pub slow_consumer_warning_active: bool,
+    pub slow_consumer_warning_count: i64,
+    pub slow_consumer_cleared_count: i64,
+    pub data_loss_count: i64,
+    pub last_warning_us: Option<i64>,
+    pub last_cleared_us: Option<i64>,
+    pub last_data_loss_us: Option<i64>,
+}
+
+#[napi(object)]
+pub struct SubscriptionStatusOutput {
+    pub events: Vec<SubscriptionEventOutput>,
+    pub failures: Vec<SubscriptionFailureOutput>,
+    pub failed_tickers: Vec<String>,
+    pub topic_states: HashMap<String, TopicStateOutput>,
+    pub field_errors: HashMap<String, HashMap<String, String>>,
+    pub session: SessionStatusOutput,
+    pub services: HashMap<String, ServiceStatusOutput>,
+    pub admin: AdminStatusOutput,
+}
+
+#[napi(object)]
+pub struct FeedInfoOutput {
+    pub service: String,
+    pub topic: String,
+    pub options: Vec<String>,
+    pub fields: Vec<String>,
+    pub consumers: i64,
+    pub delayed: Option<bool>,
+    pub state: String,
+    pub isolated: bool,
+    pub field_errors: HashMap<String, String>,
+}
+
+#[napi(object)]
 pub struct NativeSubscriptionLayout {
     pub version: u32,
     pub fields: Vec<String>,
@@ -263,6 +336,122 @@ fn to_i64_saturating(value: u64) -> i64 {
         i64::MAX
     } else {
         value as i64
+    }
+}
+
+impl From<SubscriptionEventInfo> for SubscriptionEventOutput {
+    fn from(event: SubscriptionEventInfo) -> Self {
+        Self {
+            at_us: event.at_us,
+            category: event.category.as_str().to_string(),
+            level: event.level.as_str().to_string(),
+            message_type: event.message_type,
+            topic: event.topic,
+            detail: event.detail,
+        }
+    }
+}
+
+impl From<&SubscriptionFailureInfo> for SubscriptionFailureOutput {
+    fn from(failure: &SubscriptionFailureInfo) -> Self {
+        Self {
+            topic: failure.topic.clone(),
+            reason: failure.reason.clone(),
+            kind: failure.kind.as_str().to_string(),
+            at_us: failure.at_us,
+        }
+    }
+}
+
+impl From<&TopicStatusInfo> for TopicStateOutput {
+    fn from(topic: &TopicStatusInfo) -> Self {
+        Self {
+            topic: topic.topic.clone(),
+            feed_topic: topic.feed_topic.clone(),
+            delayed: topic.delayed,
+            state: topic.state.as_str().to_string(),
+            last_change_us: topic.last_change_us,
+            streams_active: topic.streams_active,
+            streams_changed_us: topic.streams_changed_us,
+        }
+    }
+}
+
+impl From<&SessionStatusInfo> for SessionStatusOutput {
+    fn from(session: &SessionStatusInfo) -> Self {
+        Self {
+            state: session.state.as_str().to_string(),
+            last_change_us: session.last_change_us,
+            disconnect_count: to_i64_saturating(session.disconnect_count),
+            reconnect_count: to_i64_saturating(session.reconnect_count),
+        }
+    }
+}
+
+impl From<&ServiceStatusInfo> for ServiceStatusOutput {
+    fn from(service: &ServiceStatusInfo) -> Self {
+        Self {
+            service: service.service.clone(),
+            up: service.up,
+            last_change_us: service.last_change_us,
+        }
+    }
+}
+
+impl From<&AdminStatusInfo> for AdminStatusOutput {
+    fn from(admin: &AdminStatusInfo) -> Self {
+        Self {
+            slow_consumer_warning_active: admin.slow_consumer_warning_active,
+            slow_consumer_warning_count: to_i64_saturating(admin.slow_consumer_warning_count),
+            slow_consumer_cleared_count: to_i64_saturating(admin.slow_consumer_cleared_count),
+            data_loss_count: to_i64_saturating(admin.data_loss_count),
+            last_warning_us: admin.last_warning_us,
+            last_cleared_us: admin.last_cleared_us,
+            last_data_loss_us: admin.last_data_loss_us,
+        }
+    }
+}
+
+impl From<&SubscriptionStatusState> for SubscriptionStatusOutput {
+    fn from(status: &SubscriptionStatusState) -> Self {
+        Self {
+            events: status.events().iter().cloned().map(Into::into).collect(),
+            failures: status.failures().iter().map(Into::into).collect(),
+            failed_tickers: status
+                .failures()
+                .iter()
+                .map(|failure| failure.topic.clone())
+                .collect(),
+            topic_states: status
+                .topic_statuses()
+                .iter()
+                .map(|(label, topic)| (label.clone(), topic.into()))
+                .collect(),
+            field_errors: status.field_errors().clone(),
+            session: status.session().into(),
+            services: status
+                .services()
+                .iter()
+                .map(|(name, service)| (name.clone(), service.into()))
+                .collect(),
+            admin: status.admin().into(),
+        }
+    }
+}
+
+impl From<FeedInfo> for FeedInfoOutput {
+    fn from(feed: FeedInfo) -> Self {
+        Self {
+            service: feed.service,
+            topic: feed.topic,
+            options: feed.options,
+            fields: feed.fields,
+            consumers: to_i64_saturating(feed.consumers as u64),
+            delayed: feed.delayed,
+            state: feed.state,
+            isolated: feed.isolated,
+            field_errors: feed.field_errors,
+        }
     }
 }
 
@@ -951,11 +1140,11 @@ async fn receive_subscription_updates(
 }
 
 async fn drain_forwarder_into_pending(
-    claim: &xbbg_async::engine::SessionClaim,
+    handle: &SubscriptionHandle,
     rx: &mut SubscriptionReceiver,
     pending: &StdMutex<VecDeque<StreamBatchResult>>,
 ) -> Result<(), Box<BlpAsyncError>> {
-    let barrier = claim.drain_forwarder();
+    let barrier = handle.drain_forwarder();
     tokio::pin!(barrier);
     let barrier_result = loop {
         tokio::select! {
@@ -1160,6 +1349,37 @@ fn blp_async_error_to_napi(e: BlpAsyncError) -> Error {
             format!("All {pool_size} request workers are down"),
         ),
         BlpAsyncError::Internal(msg) => coded(Status::GenericFailure, "INTERNAL", msg),
+    }
+}
+
+fn delayed_policy_from_input(on_delayed: Option<&str>) -> napi::Result<DelayedPolicy> {
+    on_delayed
+        .map(DelayedPolicy::from_str)
+        .transpose()
+        .map(|policy| policy.unwrap_or_default())
+        .map_err(blp_async_error_to_napi)
+}
+
+fn field_error_policy_from_input(on_field_error: Option<&str>) -> napi::Result<FieldErrorPolicy> {
+    on_field_error
+        .map(FieldErrorPolicy::from_str)
+        .transpose()
+        .map(|policy| policy.unwrap_or_default())
+        .map_err(blp_async_error_to_napi)
+}
+
+fn subscription_closed_error() -> Error {
+    coded(
+        Status::InvalidArg,
+        "VALIDATION",
+        "subscription already closed",
+    )
+}
+
+fn subscription_control_error_to_napi(error: BlpAsyncError) -> Error {
+    match error {
+        BlpAsyncError::ChannelClosed => subscription_closed_error(),
+        error => blp_async_error_to_napi(error),
     }
 }
 
@@ -1569,29 +1789,43 @@ impl JsEngine {
     }
 
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub async fn subscribe(
         &self,
         tickers: Vec<String>,
         fields: Vec<String>,
         all_fields: Option<bool>,
+        aliases: Option<HashMap<String, String>>,
+        on_delayed: Option<String>,
+        isolated: Option<bool>,
+        rows: Option<bool>,
+        on_field_error: Option<String>,
+        zero_as_null: Option<Vec<String>>,
     ) -> napi::Result<JsSubscription> {
         let all_fields = all_fields.unwrap_or(false);
+        let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
+        let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
         let stream = self
             .engine
-            .subscribe_with_options(
-                "//blp/mktdata".to_string(),
-                tickers.clone(),
-                fields.clone(),
+            .subscribe(SubscribeRequest {
+                topics: tickers,
+                fields,
                 all_fields,
-                vec![],
-                None,
-                None,
-                None,
-            )
+                aliases: aliases.unwrap_or_default().into_iter().collect(),
+                delayed_policy,
+                field_error_policy,
+                deliver_rows: rows.unwrap_or(true),
+                zero_as_null: zero_as_null.unwrap_or_default(),
+                isolated: isolated.unwrap_or(false),
+                ..SubscribeRequest::default()
+            })
             .await
             .map_err(blp_async_error_to_napi)?;
 
-        JsSubscription::from_stream(stream, tickers, fields, self.subscription_batch_items)
+        Ok(JsSubscription::from_stream(
+            stream,
+            self.subscription_batch_items,
+        ))
     }
 
     #[napi]
@@ -1606,6 +1840,12 @@ impl JsEngine {
         overflow_policy: Option<String>,
         stream_capacity: Option<u32>,
         all_fields: Option<bool>,
+        aliases: Option<HashMap<String, String>>,
+        on_delayed: Option<String>,
+        isolated: Option<bool>,
+        rows: Option<bool>,
+        on_field_error: Option<String>,
+        zero_as_null: Option<Vec<String>>,
     ) -> napi::Result<JsSubscription> {
         let overflow = match overflow_policy {
             Some(policy) => Some(
@@ -1615,6 +1855,8 @@ impl JsEngine {
             None => None,
         };
         let all_fields = all_fields.unwrap_or(false);
+        let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
+        let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
 
         if stream_capacity == Some(0) {
             return Err(Error::new(
@@ -1634,20 +1876,37 @@ impl JsEngine {
 
         let stream = self
             .engine
-            .subscribe_with_options(
+            .subscribe(SubscribeRequest {
                 service,
-                tickers.clone(),
-                fields.clone(),
+                topics: tickers,
+                fields,
                 all_fields,
-                options.unwrap_or_default(),
-                stream_capacity.map(|v| v as usize),
-                flush_threshold.map(|v| v as usize),
-                overflow,
-            )
+                options: options.unwrap_or_default(),
+                aliases: aliases.unwrap_or_default().into_iter().collect(),
+                delayed_policy,
+                field_error_policy,
+                deliver_rows: rows.unwrap_or(true),
+                zero_as_null: zero_as_null.unwrap_or_default(),
+                isolated: isolated.unwrap_or(false),
+                stream_capacity: stream_capacity.map(|v| v as usize),
+                flush_threshold: flush_threshold.map(|v| v as usize),
+                overflow_policy: overflow,
+                ..SubscribeRequest::default()
+            })
             .await
             .map_err(blp_async_error_to_napi)?;
 
-        JsSubscription::from_stream(stream, tickers, fields, consumer_batch_items)
+        Ok(JsSubscription::from_stream(stream, consumer_batch_items))
+    }
+
+    /// Current shared-feed diagnostics, without identity or transport configuration.
+    #[napi]
+    pub fn subscription_feeds(&self) -> Vec<FeedInfoOutput> {
+        self.engine
+            .subscription_feeds()
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     #[napi]
@@ -1964,6 +2223,42 @@ impl JsEngine {
         to_native_record_batch(batch)
     }
 
+    /// Resolve each input to its validated primary auction venue.
+    #[napi]
+    pub async fn recipe_resolve_venues(
+        &self,
+        securities: Vec<String>,
+        pcs_overrides: Option<HashMap<String, String>>,
+    ) -> napi::Result<NativeArrowBatch> {
+        let batch = xbbg_recipes::recipe_resolve_venues(
+            &self.engine,
+            securities,
+            pcs_overrides.unwrap_or_default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
+        to_native_record_batch(batch)
+    }
+
+    /// Request auction fields only from validated primary venues.
+    #[napi]
+    pub async fn recipe_auction_snapshot(
+        &self,
+        securities: Vec<String>,
+        fields: Option<Vec<String>>,
+        pcs_overrides: Option<HashMap<String, String>>,
+    ) -> napi::Result<NativeArrowBatch> {
+        let batch = xbbg_recipes::recipe_auction_snapshot(
+            &self.engine,
+            securities,
+            fields.unwrap_or_default(),
+            pcs_overrides.unwrap_or_default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
+        to_native_record_batch(batch)
+    }
+
     #[napi]
     pub async fn recipe_issuer_isins(
         &self,
@@ -2069,49 +2364,30 @@ pub struct JsSubscription {
     close_signal: watch::Sender<bool>,
     closed: Arc<AtomicBool>,
     mutation: Arc<Mutex<()>>,
-    stream: Arc<Mutex<Option<SubscriptionStreamHandle>>>,
-    stream_sender: SubscriptionSender,
+    // Short control snapshots only; the mutation lock serializes async operations.
+    stream: Arc<StdMutex<Option<SubscriptionHandle>>>,
     pending: SharedPendingStreamItems,
     scalar_layout: Arc<StdMutex<Option<Arc<FieldLayout>>>>,
     arrow_batcher: Arc<StdMutex<(usize, SubscriptionArrowBatcher)>>,
     arrow_ready: Arc<StdMutex<VecDeque<RecordBatch>>>,
     batch_items: usize,
-    fields_snapshot: Arc<Vec<String>>,
+    deliver_rows: bool,
     status: SharedSubscriptionStatus,
 }
 
 #[napi]
 impl JsSubscription {
-    fn from_stream(
-        stream: xbbg_async::engine::SubscriptionStream,
-        _tickers: Vec<String>,
-        fields: Vec<String>,
-        batch_items: usize,
-    ) -> napi::Result<Self> {
-        let (rx, tx, claim, status, ft, op_policy, service, options, all_fields) =
-            stream.into_parts().map_err(blp_error_to_napi)?;
-        let fields_snapshot = Arc::new(fields.clone());
-        let status_snapshot = status.clone();
-        let stream_sender = tx.clone();
-        let handle = SubscriptionStreamHandle {
-            tx,
-            claim: Some(claim),
-            fields,
-            all_fields,
-            service,
-            options,
-            flush_threshold: ft,
-            overflow_policy: op_policy,
-            status,
-        };
+    fn from_stream(stream: xbbg_async::engine::SubscriptionStream, batch_items: usize) -> Self {
+        let (rx, handle) = stream.into_parts();
+        let status = handle.status();
+        let deliver_rows = handle.delivers_rows();
         let (close_signal, _) = watch::channel(false);
-        Ok(Self {
+        Self {
             rx: Arc::new(Mutex::new(Some(rx))),
             close_signal,
             closed: Arc::new(AtomicBool::new(false)),
             mutation: Arc::new(Mutex::new(())),
-            stream: Arc::new(Mutex::new(Some(handle))),
-            stream_sender,
+            stream: Arc::new(StdMutex::new(Some(handle))),
             pending: Arc::new(StdMutex::new(VecDeque::new())),
             scalar_layout: Arc::new(StdMutex::new(None)),
             arrow_batcher: Arc::new(StdMutex::new((
@@ -2122,9 +2398,9 @@ impl JsSubscription {
             ))),
             arrow_ready: Arc::new(StdMutex::new(VecDeque::new())),
             batch_items,
-            fields_snapshot,
-            status: status_snapshot,
-        })
+            deliver_rows,
+            status,
+        }
     }
 
     #[napi]
@@ -2133,6 +2409,7 @@ impl JsSubscription {
         max_items: Option<u32>,
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeSubscriptionUpdateBatch>> {
+        self.require_rows()?;
         if self.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -2172,6 +2449,7 @@ impl JsSubscription {
         max_rows: Option<u32>,
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeArrowBatch>> {
+        self.require_rows()?;
         if self.closed.load(Ordering::Acquire) {
             return Ok(None);
         }
@@ -2245,140 +2523,66 @@ impl JsSubscription {
     }
 
     #[napi]
-    pub async fn add(&self, tickers: Vec<String>) -> napi::Result<()> {
+    pub async fn add(
+        &self,
+        tickers: Vec<String>,
+        aliases: Option<HashMap<String, String>>,
+    ) -> napi::Result<()> {
         let _mutation = self.mutation.lock().await;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(Error::new(Status::GenericFailure, "subscription closed"));
-        }
-        let (
-            command,
-            new_topics,
-            service,
-            fields,
-            all_fields,
-            options,
-            flush_threshold,
-            overflow_policy,
-            tx,
-            status,
-        ) = {
-            let guard = self.stream.lock().await;
-            let handle = guard
-                .as_ref()
-                .ok_or_else(|| Error::new(Status::GenericFailure, "subscription closed"))?;
-            if handle.tx.is_closed() {
-                return Err(coded(
-                    Status::GenericFailure,
-                    "INTERNAL",
-                    "subscription stream is closed",
-                ));
-            }
-
-            let new_topics: Vec<String> = {
-                let snapshot = handle.status.load();
-                let mut seen = std::collections::HashSet::new();
-                tickers
-                    .into_iter()
-                    .filter(|ticker| {
-                        seen.insert(ticker.clone()) && !snapshot.topic_to_key().contains_key(ticker)
-                    })
-                    .collect()
-            };
-            if new_topics.is_empty() {
-                return Ok(());
-            }
-
-            let command = handle
-                .claim
-                .as_ref()
-                .ok_or_else(|| Error::new(Status::GenericFailure, "subscription already closed"))?
-                .command_handle()
-                .map_err(blp_async_error_to_napi)?;
-
-            (
-                command,
-                new_topics,
-                handle.service.clone(),
-                handle.fields.clone(),
-                handle.all_fields,
-                handle.options.clone(),
-                handle.flush_threshold,
-                handle.overflow_policy,
-                handle.tx.clone(),
-                handle.status.clone(),
-            )
-        };
-
-        command
-            .add_topics(
-                service,
-                new_topics,
-                fields,
-                all_fields,
-                options,
-                flush_threshold,
-                overflow_policy,
-                tx,
-                status,
-            )
+        let handle = self.open_handle()?;
+        handle
+            .add(tickers, aliases.unwrap_or_default().into_iter().collect())
             .await
-            .map_err(blp_async_error_to_napi)?;
-        Ok(())
+            .map_err(subscription_control_error_to_napi)
+    }
+
+    /// Grow this consumer's field projection and the shared feed's field union.
+    #[napi]
+    pub async fn add_fields(&self, fields: Vec<String>) -> napi::Result<()> {
+        let _mutation = self.mutation.lock().await;
+        let handle = self.open_handle()?;
+        handle
+            .add_fields(fields)
+            .await
+            .map_err(subscription_control_error_to_napi)
+    }
+
+    /// Materialized latest values for active consumer labels.
+    #[napi]
+    pub fn latest(&self) -> napi::Result<NativeArrowBatch> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(subscription_closed_error());
+        }
+        let batch = self
+            .stream
+            .lock()
+            .expect("subscription control poisoned")
+            .as_ref()
+            .ok_or_else(subscription_closed_error)?
+            .latest()
+            .map_err(subscription_control_error_to_napi)?;
+        to_native_record_batch(batch)
+    }
+
+    /// Drain new delayed-data and rejected-field warnings without clearing history.
+    #[napi]
+    pub fn take_warnings(&self) -> Vec<SubscriptionEventOutput> {
+        // No lock, clone, or publication when nothing is pending; survives control close.
+        self.status
+            .take_warnings()
+            .into_iter()
+            .map(Into::into)
+            .collect()
     }
 
     #[napi]
     pub async fn remove(&self, tickers: Vec<String>) -> napi::Result<()> {
         let _mutation = self.mutation.lock().await;
-        if self.closed.load(Ordering::Acquire) {
-            return Err(Error::new(Status::GenericFailure, "subscription closed"));
-        }
-        let (command, status) = {
-            let guard = self.stream.lock().await;
-            let handle = guard
-                .as_ref()
-                .ok_or_else(|| Error::new(Status::GenericFailure, "subscription closed"))?;
-            let command = handle
-                .claim
-                .as_ref()
-                .ok_or_else(|| Error::new(Status::GenericFailure, "subscription already closed"))?
-                .command_handle()
-                .map_err(blp_async_error_to_napi)?;
-            (command, handle.status.clone())
-        };
-
-        let (keys_to_remove, topics_to_remove) = {
-            let snapshot = status.load();
-            let mut seen_keys = std::collections::HashSet::new();
-            let mut keys_to_remove = Vec::new();
-            let mut topics_to_remove = Vec::new();
-            for ticker in tickers {
-                if let Some(&key) = snapshot.topic_to_key().get(&ticker) {
-                    if seen_keys.insert(key) {
-                        keys_to_remove.push(key);
-                        topics_to_remove.push(ticker);
-                    }
-                }
-            }
-            (keys_to_remove, topics_to_remove)
-        };
-        if keys_to_remove.is_empty() {
-            return Ok(());
-        }
-
-        command
-            .unsubscribe(keys_to_remove)
+        let handle = self.open_handle()?;
+        handle
+            .remove(tickers)
             .await
-            .map_err(blp_async_error_to_napi)?;
-
-        if self.stream.lock().await.is_some() {
-            status.update(|state| {
-                for ticker in &topics_to_remove {
-                    state.drop_topic(ticker);
-                }
-            });
-        }
-
-        Ok(())
+            .map_err(subscription_control_error_to_napi)
     }
 
     #[napi(getter)]
@@ -2388,14 +2592,100 @@ impl JsSubscription {
 
     #[napi(getter)]
     pub fn fields(&self) -> Vec<String> {
-        self.fields_snapshot.as_ref().clone()
+        self.stream
+            .lock()
+            .expect("subscription control poisoned")
+            .as_ref()
+            .map(SubscriptionHandle::fields)
+            .unwrap_or_default()
+    }
+
+    /// Whether this consumer delivers rows; unchanged after close.
+    #[napi(getter)]
+    pub fn delivers_rows(&self) -> bool {
+        self.deliver_rows
     }
 
     #[napi(getter)]
     pub fn is_active(&self) -> bool {
         !self.closed.load(Ordering::Acquire)
-            && !self.stream_sender.is_closed()
-            && self.status.load().has_active_topics()
+            && self
+                .stream
+                .lock()
+                .expect("subscription control poisoned")
+                .as_ref()
+                .is_some_and(SubscriptionHandle::is_active)
+    }
+
+    #[napi(getter)]
+    pub fn status(&self) -> SubscriptionStatusOutput {
+        self.status.load().as_ref().into()
+    }
+
+    #[napi(getter)]
+    pub fn events(&self) -> Vec<SubscriptionEventOutput> {
+        self.status
+            .load()
+            .events()
+            .iter()
+            .cloned()
+            .map(Into::into)
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn failures(&self) -> Vec<SubscriptionFailureOutput> {
+        self.status
+            .load()
+            .failures()
+            .iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn failed_tickers(&self) -> Vec<String> {
+        self.status
+            .load()
+            .failures()
+            .iter()
+            .map(|failure| failure.topic.clone())
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn topic_states(&self) -> HashMap<String, TopicStateOutput> {
+        self.status
+            .load()
+            .topic_statuses()
+            .iter()
+            .map(|(label, topic)| (label.clone(), topic.into()))
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn field_errors(&self) -> HashMap<String, HashMap<String, String>> {
+        self.status.load().field_errors().clone()
+    }
+
+    #[napi(getter)]
+    pub fn session_status(&self) -> SessionStatusOutput {
+        self.status.load().session().into()
+    }
+
+    #[napi(getter)]
+    pub fn service_status(&self) -> HashMap<String, ServiceStatusOutput> {
+        self.status
+            .load()
+            .services()
+            .iter()
+            .map(|(name, service)| (name.clone(), service.into()))
+            .collect()
+    }
+
+    #[napi(getter)]
+    pub fn admin_status(&self) -> AdminStatusOutput {
+        self.status.load().admin().into()
     }
 
     #[napi(getter)]
@@ -2553,6 +2843,30 @@ impl JsSubscription {
 }
 
 impl JsSubscription {
+    fn require_rows(&self) -> napi::Result<()> {
+        if self.deliver_rows {
+            Ok(())
+        } else {
+            Err(coded(
+                Status::InvalidArg,
+                "VALIDATION",
+                "image-only subscription (rows: false) does not deliver rows; use latest() instead",
+            ))
+        }
+    }
+
+    fn open_handle(&self) -> napi::Result<SubscriptionHandle> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(subscription_closed_error());
+        }
+        self.stream
+            .lock()
+            .expect("subscription control poisoned")
+            .as_ref()
+            .cloned()
+            .ok_or_else(subscription_closed_error)
+    }
+
     async fn close_for_unsubscribe(
         &self,
         drain: bool,
@@ -2560,45 +2874,32 @@ impl JsSubscription {
         self.closed.store(true, Ordering::Release);
         self.close_signal.send_replace(true);
         let mutation = self.mutation.clone().lock_owned().await;
-        let mut stream_guard = self.stream.lock().await;
-        let mut close_result = if let Some(handle) = stream_guard.as_ref() {
-            if let Some(claim) = handle.claim.as_ref() {
-                let keys = handle.status.load().keys().to_vec();
-                if keys.is_empty() {
-                    Ok(())
-                } else {
-                    claim
-                        .unsubscribe(keys)
-                        .await
-                        .map_err(blp_async_error_to_napi)
-                }
-            } else {
-                Ok(())
-            }
+        // Keep the owning handle in shared state until every close await
+        // completes, allowing a cancelled close to resume later.
+        let handle = self
+            .stream
+            .lock()
+            .expect("subscription control poisoned")
+            .clone();
+        let mut close_result = if let Some(handle) = handle.as_ref() {
+            handle.unsubscribe().await.map_err(blp_async_error_to_napi)
         } else {
             Ok(())
         };
 
-        if close_result.is_ok() {
-            if let Some(handle) = stream_guard.as_mut() {
-                handle.status.update(|state| state.clear_active());
-            }
-        }
         if drain {
-            if let Some(claim) = stream_guard
-                .as_ref()
-                .and_then(|handle| handle.claim.as_ref())
-            {
+            if let Some(handle) = handle.as_ref() {
                 let mut rx_guard = self.rx.lock().await;
                 let forwarding_result = match rx_guard.as_mut() {
                     Some(rx) => {
-                        let result = drain_forwarder_into_pending(claim, rx, self.pending.as_ref())
-                            .await
-                            .map_err(|error| blp_async_error_to_napi(*error));
+                        let result =
+                            drain_forwarder_into_pending(handle, rx, self.pending.as_ref())
+                                .await
+                                .map_err(|error| blp_async_error_to_napi(*error));
                         rx.close();
                         result
                     }
-                    None => claim
+                    None => handle
                         .drain_forwarder()
                         .await
                         .map_err(blp_async_error_to_napi),
@@ -2609,12 +2910,12 @@ impl JsSubscription {
             }
         }
 
-        // Reaching here means every started await completed. On success the
-        // claim is spent; on error dropping it quarantines the dead worker and
-        // releases its session permit. Cancellation retains the shared handle
-        // and receiver so a later close can resume cleanup.
-        stream_guard.take();
-        drop(stream_guard);
+        // Releasing the last control after completed awaits detaches any
+        // memberships left behind by a failed close.
+        self.stream
+            .lock()
+            .expect("subscription control poisoned")
+            .take();
         (mutation, close_result)
     }
 
@@ -2662,6 +2963,7 @@ impl JsSubscription {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::future::Future;
     use xbbg_async::engine::state::{subscription_channel, FieldLayout, FieldMeta, UpdateField};
     use xbbg_async::services::ExtractorType;
 
@@ -2735,6 +3037,170 @@ mod tests {
             layout,
             values: Default::default(),
         }
+    }
+
+    fn subscription_with_receiver(rx: SubscriptionReceiver, deliver_rows: bool) -> JsSubscription {
+        let batch_items = 1;
+        let (close_signal, _) = watch::channel(false);
+        JsSubscription {
+            rx: Arc::new(Mutex::new(Some(rx))),
+            close_signal,
+            closed: Arc::new(AtomicBool::new(false)),
+            mutation: Arc::new(Mutex::new(())),
+            stream: Arc::new(StdMutex::new(None)),
+            pending: Arc::new(StdMutex::new(VecDeque::new())),
+            scalar_layout: Arc::new(StdMutex::new(None)),
+            arrow_batcher: Arc::new(StdMutex::new((
+                batch_items,
+                SubscriptionArrowBatcher::with_capacity(batch_items),
+            ))),
+            arrow_ready: Arc::new(StdMutex::new(VecDeque::new())),
+            batch_items,
+            deliver_rows,
+            status: SharedSubscriptionStatus::default(),
+        }
+    }
+
+    #[test]
+    fn delayed_policy_input_normalizes_valid_values_and_rejects_unknown_values() {
+        assert_eq!(
+            delayed_policy_from_input(Some(" WARN ")).unwrap(),
+            DelayedPolicy::Warn
+        );
+        assert_eq!(
+            delayed_policy_from_input(Some("Raise")).unwrap(),
+            DelayedPolicy::Raise
+        );
+        assert_eq!(
+            delayed_policy_from_input(Some(" ignore ")).unwrap(),
+            DelayedPolicy::Ignore
+        );
+        for invalid in ["", "warning", "silent"] {
+            let error = delayed_policy_from_input(Some(invalid)).unwrap_err();
+            assert_eq!(error.status, Status::InvalidArg);
+            assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
+        }
+    }
+
+    #[test]
+    fn field_error_policy_input_normalizes_values_and_rejects_unknown_values() {
+        for (input, expected) in [
+            (None, FieldErrorPolicy::Warn),
+            (Some(" WARN "), FieldErrorPolicy::Warn),
+            (Some("Raise"), FieldErrorPolicy::Raise),
+            (Some(" ignore "), FieldErrorPolicy::Ignore),
+        ] {
+            assert_eq!(field_error_policy_from_input(input).unwrap(), expected);
+        }
+        for invalid in ["", "warning", "silent"] {
+            let error = field_error_policy_from_input(Some(invalid)).unwrap_err();
+            assert_eq!(error.status, Status::InvalidArg);
+            assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
+        }
+    }
+
+    #[test]
+    fn image_only_reads_reject_without_receiving_or_discarding_terminal_errors() {
+        use std::task::Poll;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel(1);
+            let subscription = subscription_with_receiver(rx, false);
+            tx.fail(BlpError::SubscriptionDataLoss {
+                topic: "SYNTHETIC Equity".to_string(),
+                detail: "synthetic terminal failure".to_string(),
+            });
+            // A row read must fail before taking the receive lock or doing cleanup.
+            let rx_guard = subscription.rx.lock().await;
+            let mut scalar_read = Box::pin(subscription.next_updates(None, None));
+            let mut arrow_read = Box::pin(subscription.next_arrow_batch(None, None));
+            std::future::poll_fn(|cx| {
+                let scalar_error = match scalar_read.as_mut().poll(cx) {
+                    Poll::Ready(Err(error)) => error,
+                    _ => panic!("image-only scalar reads must reject immediately"),
+                };
+                let arrow_error = match arrow_read.as_mut().poll(cx) {
+                    Poll::Ready(Err(error)) => error,
+                    _ => panic!("image-only Arrow reads must reject immediately"),
+                };
+                for error in [scalar_error, arrow_error] {
+                    assert_eq!(error.status, Status::InvalidArg);
+                    assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
+                    assert!(error.reason.contains("rows: false"));
+                    assert!(error.reason.contains("latest()"));
+                }
+                Poll::Ready(())
+            })
+            .await;
+            assert!(!subscription.delivers_rows());
+            assert!(!subscription.closed.load(Ordering::Acquire));
+            assert!(!*subscription.close_signal.borrow());
+            drop(rx_guard);
+
+            let error = match subscription.unsubscribe(Some(true)).await {
+                Err(error) => error,
+                Ok(_) => panic!("drain must retain the unread terminal error"),
+            };
+            assert_eq!(error.status, Status::GenericFailure);
+            assert!(error.reason.starts_with("[XBBG:DATALOSS]"));
+            assert!(error.reason.contains("synthetic terminal failure"));
+            assert!(!subscription.delivers_rows());
+        });
+    }
+
+    #[test]
+    fn row_subscription_reads_updates_and_retains_mode_after_unsubscribe() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel(1);
+            let subscription = subscription_with_receiver(rx, true);
+            tx.send(Ok(subscription_update(1, 42)))
+                .await
+                .expect("synthetic update");
+            let batch = subscription
+                .next_updates(None, None)
+                .await
+                .expect("row read")
+                .expect("update batch");
+            assert_eq!(batch.updates[0].timestamp_us, 42);
+            assert!(subscription.delivers_rows());
+            subscription.unsubscribe(Some(false)).await.expect("close");
+            assert!(subscription.delivers_rows());
+            assert!(subscription
+                .next_updates(None, None)
+                .await
+                .unwrap()
+                .is_none());
+        });
+    }
+
+    #[test]
+    fn closed_subscription_controls_are_validation_errors_without_masking_other_errors() {
+        let error = subscription_control_error_to_napi(BlpAsyncError::ChannelClosed);
+        assert_eq!(error.status, Status::InvalidArg);
+        assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
+        assert!(error.reason.contains("already closed"));
+
+        let error = subscription_control_error_to_napi(BlpAsyncError::Timeout);
+        assert_eq!(error.status, Status::GenericFailure);
+        assert!(error.reason.starts_with("[XBBG:TIMEOUT]"));
+
+        let error = subscription_control_error_to_napi(BlpAsyncError::Blp(
+            BlpError::SubscriptionDataLoss {
+                topic: "SYNTHETIC Equity".to_string(),
+                detail: "synthetic terminal failure".to_string(),
+            },
+        ));
+        assert_eq!(error.status, Status::GenericFailure);
+        assert!(error.reason.starts_with("[XBBG:DATALOSS]"));
+        assert!(error.reason.contains("synthetic terminal failure"));
     }
 
     #[test]
@@ -3321,8 +3787,6 @@ mod tests {
 
     #[test]
     fn cancelled_partial_read_restores_consumed_updates() {
-        use std::future::Future;
-
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

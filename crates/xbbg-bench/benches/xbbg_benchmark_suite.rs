@@ -32,7 +32,7 @@ use xbbg_async::engine::{
     BqlState, BulkDataState, Engine, EngineConfig, ExtractorType, HistDataState, IntradayTickState,
     LongMode, OutputFormat, RefDataState, RequestParams, ServerAddr, SubscriptionState, Transport,
 };
-use xbbg_async::BlpAsyncError;
+use xbbg_async::{BlpAsyncError, SubscribeRequest};
 use xbbg_bench::{open_service, setup_session};
 use xbbg_core::{
     BlpError, CorrelationId, DataType as BlpDataType, Element, Event, EventType, Message, Name,
@@ -3221,9 +3221,15 @@ async fn live_subscription(engine: &Engine, collect_ms: u64) -> BenchRecord {
         "BID".to_string(),
         "ASK".to_string(),
     ];
+    let topic_count = topics.len();
+    let field_count = fields.len();
     let start = Instant::now();
     let mut stream = match engine
-        .subscribe(topics.clone(), fields.clone(), false)
+        .subscribe(SubscribeRequest {
+            topics,
+            fields,
+            ..SubscribeRequest::default()
+        })
         .await
     {
         Ok(stream) => stream,
@@ -3267,15 +3273,12 @@ async fn live_subscription(engine: &Engine, collect_ms: u64) -> BenchRecord {
         "sub_3_topics_3_fields",
         elapsed,
         rows,
-        fields.len(),
+        field_count,
         rows,
         "rows",
         format!(
             "topics={}, fields={}, batches={}, collect_ms={}",
-            topics.len(),
-            fields.len(),
-            batches,
-            collect_ms
+            topic_count, field_count, batches, collect_ms
         ),
     )
 }
