@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.5.0] - 2026-10-02
+
 ### Added
 
 - **Python LangChain/LangGraph adapter.** The separate `xbbg-langgraph` package in `py-xbbg-langgraph/` exposes 23 Bloomberg request/recipe/snapshot tools and 11 native helper/chart tools. It supports sync/async invocation, bounded content-and-artifact results, application-owned engines, and cancellation-safe subscription cleanup without adding LangChain dependencies to ordinary xbbg installs. Includes Python matrix and dependency-floor CI coverage; installation is from the checkout pending its first package publication.
@@ -1661,7 +1663,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.4.12...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/underloam/xbbg/compare/v1.4.12...v1.5.0
 [1.4.12]: https://github.com/underloam/xbbg/compare/v1.4.11...v1.4.12
 [1.4.11]: https://github.com/underloam/xbbg/compare/v1.4.10...v1.4.11
 [1.4.10]: https://github.com/underloam/xbbg/compare/v1.4.9...v1.4.10
