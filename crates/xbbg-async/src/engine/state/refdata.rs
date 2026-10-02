@@ -35,7 +35,8 @@ pub enum LongMode {
     String,
     /// String values with dtype column containing Arrow type name
     WithMetadata,
-    /// Multi-value columns: value_f64, value_i64, value_str, value_bool, value_date, value_ts
+    /// Multi-value columns: value_f64, value_i64, value_str, value_bool,
+    /// value_date, value_ts (full datetimes), value_time (time-only microseconds).
     Typed,
 }
 
@@ -568,4 +569,235 @@ fn dtype_from_hints(
     }
     // Otherwise infer from value
     ArrowType::from_value(value).type_name()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::state::HistDataState;
+    use crate::field_cache::BlpFieldType;
+    use arrow_array::{
+        Array, Date32Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+    };
+    use arrow_schema::{DataType, TimeUnit};
+    use xbbg_core::test_support::TestEvent;
+    use xbbg_core::EventType;
+
+    fn temporal_response(historical: bool) -> TestEvent {
+        let (message_type, securities_array, data_array) = if historical {
+            ("HistoricalDataResponse", "", "maxOccurs=\"unbounded\"")
+        } else {
+            ("ReferenceDataResponse", "maxOccurs=\"unbounded\"", "")
+        };
+        let schema = format!(
+            r#"<ServiceDefinition name="xbbg.test.{message_type}" version="1.0.0.0">
+            <service name="//xbbg/test/{message_type}" version="1.0.0.0">
+                <event name="{message_type}" eventType="Response{message_type}"/>
+            </service>
+            <schema>
+                <sequenceType name="Response{message_type}">
+                    <element name="securityData" type="SecurityData{message_type}" {securities_array}/>
+                </sequenceType>
+                <sequenceType name="SecurityData{message_type}">
+                    <element name="security" type="String"/>
+                    <element name="fieldData" type="FieldData{message_type}" {data_array}/>
+                </sequenceType>
+                <sequenceType name="FieldData{message_type}">
+                    <element name="date" type="Date" minOccurs="0"/>
+                    <element name="SYNTHETIC_TIME" type="Time"/>
+                    <element name="SYNTHETIC_DATE" type="Date"/>
+                    <element name="SYNTHETIC_STAMP" type="Datetime"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#
+        );
+        let data = serde_json::json!({
+            "date": "2026-01-01",
+            "SYNTHETIC_TIME": "15:59:01.123456",
+            "SYNTHETIC_DATE": "2026-01-02",
+            "SYNTHETIC_STAMP": "2026-01-02T15:59:01.123456Z"
+        });
+        let security = serde_json::json!({
+            "security": "IBM US Equity",
+            "fieldData": if historical { serde_json::json!([data]) } else { data }
+        });
+        let response = serde_json::json!({
+            "securityData": if historical { security } else { serde_json::json!([security]) }
+        });
+        TestEvent::with_schema(
+            &schema,
+            EventType::Response,
+            message_type,
+            &[],
+            |formatter| {
+                formatter.json(&response.to_string());
+            },
+        )
+    }
+
+    fn temporal_batch(historical: bool, format: OutputFormat, mode: LongMode) -> RecordBatch {
+        let event = temporal_response(historical);
+        // Keep the SDK iterator alive while consuming its borrowed message.
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let fields = [
+            "SYNTHETIC_TIME",
+            "SYNTHETIC_DATE",
+            "SYNTHETIC_STAMP",
+            "SYNTHETIC_MISSING_TIME",
+        ]
+        .map(str::to_string)
+        .to_vec();
+        let hints = fields
+            .iter()
+            .zip(["Time", "Date", "Datetime", "Time"])
+            .map(|(field, ftype)| {
+                (
+                    field.clone(),
+                    BlpFieldType::from_metadata(Some("Datetime"), Some(ftype))
+                        .to_arrow_type_str()
+                        .to_string(),
+                )
+            })
+            .collect();
+        let (sender, mut receiver) = oneshot::channel();
+        if historical {
+            HistDataState::with_format(fields, format, mode, Some(hints), sender).finish(&message);
+        } else {
+            RefDataState::with_format(fields, format, mode, Some(hints), false, sender)
+                .finish(&message);
+        }
+        receiver.try_recv().unwrap().unwrap()
+    }
+
+    #[test]
+    fn typed_long_refdata_and_history_separate_times_from_timestamps() {
+        for historical in [false, true] {
+            let batch = temporal_batch(historical, OutputFormat::Long, LongMode::Typed);
+            let times = batch
+                .column_by_name("value_time")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            let dates = batch
+                .column_by_name("value_date")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap();
+            let timestamps = batch
+                .column_by_name("value_ts")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            assert_eq!(
+                times.iter().collect::<Vec<_>>(),
+                [Some(57_541_123_456), None, None, None]
+            );
+            assert_eq!(
+                dates.iter().collect::<Vec<_>>(),
+                [None, Some(20_455), None, None]
+            );
+            assert_eq!(
+                timestamps.iter().collect::<Vec<_>>(),
+                [None, None, Some(1_767_369_541_123_456), None]
+            );
+            if historical {
+                assert_eq!(
+                    batch
+                        .column_by_name("date")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<Date32Array>()
+                        .unwrap()
+                        .value(0),
+                    20_454
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn semi_long_refdata_and_history_keep_typed_temporal_fields_and_nulls() {
+        for historical in [false, true] {
+            let batch = temporal_batch(historical, OutputFormat::Wide, LongMode::String);
+            assert_eq!(batch.num_rows(), 1);
+            let times = batch
+                .column_by_name("SYNTHETIC_TIME")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Time64MicrosecondArray>()
+                .unwrap();
+            assert_eq!(times.value(0), 57_541_123_456);
+            let date = batch
+                .column_by_name("SYNTHETIC_DATE")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap();
+            assert_eq!(date.value(0), 20_455);
+            let stamp = batch.column_by_name("SYNTHETIC_STAMP").unwrap();
+            assert_eq!(
+                stamp.data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            );
+            assert_eq!(
+                stamp
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .unwrap()
+                    .value(0),
+                1_767_369_541_123_456
+            );
+            let missing = batch.column_by_name("SYNTHETIC_MISSING_TIME").unwrap();
+            assert_eq!(
+                missing.data_type(),
+                &DataType::Time64(TimeUnit::Microsecond)
+            );
+            assert!(missing.is_null(0));
+        }
+    }
+
+    #[test]
+    fn long_temporal_values_stay_text_and_metadata_reports_correct_kinds() {
+        for historical in [false, true] {
+            for mode in [LongMode::String, LongMode::WithMetadata] {
+                let batch = temporal_batch(historical, OutputFormat::Long, mode);
+                let values = batch
+                    .column_by_name("value")
+                    .unwrap()
+                    .as_any()
+                    .downcast_ref::<StringArray>()
+                    .unwrap();
+                assert_eq!(
+                    values.iter().collect::<Vec<_>>(),
+                    [
+                        Some("15:59:01.123456"),
+                        Some("2026-01-02"),
+                        Some("2026-01-02T15:59:01.123456Z"),
+                        None,
+                    ]
+                );
+                if mode == LongMode::WithMetadata {
+                    let types = batch
+                        .column_by_name("dtype")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    assert_eq!(
+                        types.iter().collect::<Vec<_>>(),
+                        [
+                            Some("time64"),
+                            Some("date32"),
+                            Some("timestamp"),
+                            Some("null")
+                        ]
+                    );
+                }
+            }
+        }
+    }
 }

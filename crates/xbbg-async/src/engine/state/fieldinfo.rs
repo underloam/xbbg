@@ -115,15 +115,14 @@ impl FieldInfoState {
                 continue;
             }
 
-            // Get type - prefer datatype over ftype
-            let type_str = field_info
-                .get_by_str("datatype")
-                .and_then(|e| e.get_str(0))
-                .or_else(|| field_info.get_by_str("ftype").and_then(|e| e.get_str(0)))
-                .unwrap_or("String");
-
-            // Convert to Arrow type
-            let blp_type = BlpFieldType::parse(type_str);
+            // apiflds uses Datetime for Date, Time and full timestamps; ftype
+            // disambiguates those without overriding other concrete datatypes.
+            let datatype = field_info.get_by_str("datatype");
+            let ftype = field_info.get_by_str("ftype");
+            let blp_type = BlpFieldType::from_metadata(
+                datatype.as_ref().and_then(|element| element.get_str(0)),
+                ftype.as_ref().and_then(|element| element.get_str(0)),
+            );
             let arrow_type = blp_type.to_arrow_type_str();
 
             // Get description
@@ -171,5 +170,87 @@ impl FieldInfoState {
         .map_err(|e| BlpError::Internal {
             detail: format!("build RecordBatch: {e}"),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::field_cache::FieldTypeResolver;
+    use arrow_array::StringArray;
+    use xbbg_core::test_support::TestEvent;
+    use xbbg_core::EventType;
+
+    #[test]
+    fn apiflds_datetime_ftype_reaches_the_field_cache() {
+        let schema = r#"<ServiceDefinition name="xbbg.test.fieldinfo" version="1.0.0.0">
+            <service name="//xbbg/test/fieldinfo" version="1.0.0.0">
+                <event name="FieldInfoResponse" eventType="FieldInfoResponseType"/>
+            </service>
+            <schema>
+                <sequenceType name="FieldInfoResponseType">
+                    <element name="fieldData" type="FieldInfoDataType" minOccurs="0" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="FieldInfoDataType">
+                    <element name="fieldInfo" type="FieldMetadataType"/>
+                </sequenceType>
+                <sequenceType name="FieldMetadataType">
+                    <element name="mnemonic" type="String"/>
+                    <element name="datatype" type="String" minOccurs="0"/>
+                    <element name="ftype" type="String" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let event = TestEvent::with_schema(
+            schema,
+            EventType::Response,
+            "FieldInfoResponse",
+            &[],
+            |formatter| {
+                formatter.json(r#"{"fieldData":[
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_TIME","datatype":"Datetime","ftype":"Time"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_DATE","datatype":"Datetime","ftype":"Date"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_STAMP","datatype":"Datetime","ftype":"Datetime"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_MIXED","datatype":"Datetime","ftype":"DateOrTime"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_PRICE","datatype":"Double","ftype":"Price"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_FALLBACK","ftype":"Time"}}
+            ]}"#);
+            },
+        );
+        let (sender, mut receiver) = oneshot::channel();
+        FieldInfoState::new(sender).finish(&event.event().messages().next().unwrap());
+        let batch = receiver.try_recv().unwrap().unwrap();
+        let types = batch
+            .column_by_name("type")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            types.iter().collect::<Vec<_>>(),
+            [
+                Some("time64"),
+                Some("date32"),
+                Some("timestamp"),
+                Some("string"),
+                Some("float64"),
+                Some("time64")
+            ]
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let resolver = FieldTypeResolver::with_cache_path(dir.path().join("field_cache.json"));
+        resolver.insert_from_response(&batch);
+        assert_eq!(
+            resolver.get_arrow_type("SYNTHETIC_TIME").as_deref(),
+            Some("time64")
+        );
+        assert_eq!(
+            resolver.get_arrow_type("SYNTHETIC_DATE").as_deref(),
+            Some("date32")
+        );
+        assert_eq!(
+            resolver.get_arrow_type("SYNTHETIC_STAMP").as_deref(),
+            Some("timestamp")
+        );
     }
 }

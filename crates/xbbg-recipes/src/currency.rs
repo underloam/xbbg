@@ -150,6 +150,7 @@ fn is_value_column(name: &str) -> bool {
         || name.eq_ignore_ascii_case("value_bool")
         || name.eq_ignore_ascii_case("value_date")
         || name.eq_ignore_ascii_case("value_ts")
+        || name.eq_ignore_ascii_case("value_time")
         || name.eq_ignore_ascii_case("dtype"))
 }
 

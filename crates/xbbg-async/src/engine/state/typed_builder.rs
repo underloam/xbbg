@@ -428,17 +428,6 @@ pub struct ColumnSet {
 }
 
 impl ColumnSet {
-    fn default_order_type(name: &str) -> ArrowType {
-        match name {
-            "value_f64" => ArrowType::Float64,
-            "value_i64" => ArrowType::Int64,
-            "value_bool" => ArrowType::Bool,
-            "value_date" => ArrowType::Date32,
-            "value_ts" => ArrowType::TimestampMicros,
-            _ => ArrowType::String,
-        }
-    }
-
     fn build_empty_with_order(&self, order: &[&str]) -> Result<RecordBatch, BlpError> {
         if order.is_empty() {
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
@@ -452,7 +441,7 @@ impl ColumnSet {
                 .type_hints
                 .get(name)
                 .copied()
-                .unwrap_or_else(|| Self::default_order_type(name));
+                .unwrap_or(ArrowType::String);
             fields.push(Field::new(name, arrow_type.to_arrow_datatype(), true));
             arrays.push(TypedBuilder::new(arrow_type).finish());
         }
@@ -526,7 +515,7 @@ impl ColumnSet {
                 .type_hints
                 .get(name)
                 .copied()
-                .unwrap_or_else(|| Self::default_order_type(name));
+                .unwrap_or(ArrowType::String);
             let mut builder = TypedBuilder::new(arrow_type);
             for _ in 0..=self.row_count {
                 builder.append_null();

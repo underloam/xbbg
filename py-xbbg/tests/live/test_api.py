@@ -587,6 +587,7 @@ class TestOutputFormats:
             "value_bool",
             "value_date",
             "value_ts",
+            "value_time",
         ]
         assert len(df) == len(CONFIG.equity_multi)
 
@@ -704,6 +705,7 @@ class TestOutputFormats:
             "value_bool",
             "value_date",
             "value_ts",
+            "value_time",
         ]
 
     def test_bdh_long_metadata(self):

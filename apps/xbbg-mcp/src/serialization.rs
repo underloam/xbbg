@@ -202,6 +202,9 @@ pub(crate) fn record_batch_to_json(
             .min(limits.max_cells.checked_div(returned_columns).unwrap_or(0))
     };
 
+    // Keep Time64 and Timestamp on the reusable Arrow formatter path: it preserves
+    // fractional seconds, leaves time-only values without a date or timezone, and
+    // retains timestamp offsets (UTC as Z) without inventing one for naive values.
     let format_options = FormatOptions::default().with_display_error(true);
     let column_formatters = selected_columns
         .iter()
@@ -1399,7 +1402,11 @@ impl ComponentBudget {
 mod tests {
     use std::sync::Arc;
 
-    use arrow::array::{BinaryArray, Int32Array, ListArray, StringArray};
+    use arrow::array::{
+        BinaryArray, Int32Array, ListArray, StringArray, Time64MicrosecondArray,
+        Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
+        TimestampNanosecondArray, TimestampSecondArray,
+    };
     use arrow::datatypes::{Field, Int32Type, Schema};
     use arrow::record_batch::RecordBatchOptions;
 
@@ -1464,6 +1471,127 @@ mod tests {
         );
         assert_eq!(payload["truncated"]["rows"], false);
         assert_eq!(payload["truncated"]["metadata"], false);
+    }
+
+    #[test]
+    fn temporal_values_preserve_microseconds_nulls_and_epoch_boundaries() {
+        let batch = batch_with_metadata(
+            vec![
+                (
+                    "value_time",
+                    Arc::new(Time64MicrosecondArray::from(vec![
+                        Some(57_541_123_456),
+                        None,
+                        Some(0),
+                        Some(86_399_999_999),
+                    ])),
+                ),
+                (
+                    "value_date",
+                    Arc::new(Date32Array::from(vec![Some(1), None, Some(0), Some(-1)])),
+                ),
+                (
+                    "value_ts",
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![
+                            Some(86_399_123_456),
+                            None,
+                            Some(0),
+                            Some(-1),
+                        ])
+                        .with_timezone("UTC"),
+                    ),
+                ),
+            ],
+            HashMap::new(),
+        );
+
+        let payload = record_batch_to_json(&batch, &limits()).unwrap();
+
+        assert_eq!(
+            payload["rows"],
+            json!([
+                {
+                    "value_time": "15:59:01.123456",
+                    "value_date": "1970-01-02",
+                    "value_ts": "1970-01-01T23:59:59.123456Z",
+                },
+                {"value_time": null, "value_date": null, "value_ts": null},
+                {
+                    "value_time": "00:00:00",
+                    "value_date": "1970-01-01",
+                    "value_ts": "1970-01-01T00:00:00Z",
+                },
+                {
+                    "value_time": "23:59:59.999999",
+                    "value_date": "1969-12-31",
+                    "value_ts": "1969-12-31T23:59:59.999999Z",
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn timestamp_timezones_do_not_invent_or_discard_offsets() {
+        let batch = batch_with_metadata(
+            vec![
+                ("naive", Arc::new(TimestampMicrosecondArray::from(vec![-1]))),
+                (
+                    "east",
+                    Arc::new(TimestampMicrosecondArray::from(vec![-1]).with_timezone("+05:30")),
+                ),
+                (
+                    "west",
+                    Arc::new(TimestampMicrosecondArray::from(vec![-1]).with_timezone("-05:00")),
+                ),
+            ],
+            HashMap::new(),
+        );
+
+        let payload = record_batch_to_json(&batch, &limits()).unwrap();
+
+        assert_eq!(
+            payload["rows"],
+            json!([{
+                "naive": "1969-12-31T23:59:59.999999",
+                "east": "1970-01-01T05:29:59.999999+05:30",
+                "west": "1969-12-31T18:59:59.999999-05:00",
+            }])
+        );
+    }
+
+    #[test]
+    fn temporal_units_keep_their_subsecond_precision() {
+        let batch = batch_with_metadata(
+            vec![
+                ("time_ns", Arc::new(Time64NanosecondArray::from(vec![1]))),
+                (
+                    "timestamp_s",
+                    Arc::new(TimestampSecondArray::from(vec![-1]).with_timezone("UTC")),
+                ),
+                (
+                    "timestamp_ms",
+                    Arc::new(TimestampMillisecondArray::from(vec![-1]).with_timezone("UTC")),
+                ),
+                (
+                    "timestamp_ns",
+                    Arc::new(TimestampNanosecondArray::from(vec![-1]).with_timezone("UTC")),
+                ),
+            ],
+            HashMap::new(),
+        );
+
+        let payload = record_batch_to_json(&batch, &limits()).unwrap();
+
+        assert_eq!(
+            payload["rows"],
+            json!([{
+                "time_ns": "00:00:00.000000001",
+                "timestamp_s": "1969-12-31T23:59:59Z",
+                "timestamp_ms": "1969-12-31T23:59:59.999Z",
+                "timestamp_ns": "1969-12-31T23:59:59.999999999Z",
+            }])
+        );
     }
 
     #[test]

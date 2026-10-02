@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use arrow_array::{Array, RecordBatch, StringArray};
-use arrow_schema::DataType;
+use arrow_schema::{DataType, TimeUnit};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use xbbg_log::{debug, info, warn};
@@ -29,6 +29,7 @@ pub enum BlpFieldType {
     Character,
     Date,
     DateOrTime,
+    Datetime,
     Double,
     Float,
     Int32,
@@ -44,11 +45,12 @@ pub enum BlpFieldType {
 impl BlpFieldType {
     /// Parse from Bloomberg field type string.
     pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+        match s.trim().to_ascii_lowercase().as_str() {
             "boolean" | "bool" => BlpFieldType::Boolean,
             "character" | "char" => BlpFieldType::Character,
             "date" => BlpFieldType::Date,
             "dateortime" | "date_or_time" => BlpFieldType::DateOrTime,
+            "datetime" | "timestamp" => BlpFieldType::Datetime,
             "double" | "real" | "price" => BlpFieldType::Double,
             "float" => BlpFieldType::Float,
             "int32" | "integer" => BlpFieldType::Int32,
@@ -60,6 +62,20 @@ impl BlpFieldType {
         }
     }
 
+    /// Resolve apiflds metadata, whose generic Datetime datatype needs the ftype.
+    pub fn from_metadata(datatype: Option<&str>, ftype: Option<&str>) -> Self {
+        let datatype = datatype.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(datatype) = datatype.filter(|value| !value.eq_ignore_ascii_case("Datetime")) {
+            return Self::parse(datatype);
+        }
+        match Self::parse(ftype.unwrap_or("")) {
+            Self::Date => Self::Date,
+            Self::Time => Self::Time,
+            Self::DateOrTime => Self::DateOrTime,
+            _ => Self::Datetime,
+        }
+    }
+
     /// Convert to Arrow DataType.
     pub fn to_arrow_type(&self) -> DataType {
         match self {
@@ -67,11 +83,14 @@ impl BlpFieldType {
             BlpFieldType::Character => DataType::Utf8,
             BlpFieldType::Date => DataType::Date32,
             BlpFieldType::DateOrTime => DataType::Utf8, // Could be either, use string
+            BlpFieldType::Datetime => {
+                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            }
             BlpFieldType::Double | BlpFieldType::Float => DataType::Float64,
             BlpFieldType::Int32 => DataType::Int32,
             BlpFieldType::Int64 => DataType::Int64,
             BlpFieldType::String => DataType::Utf8,
-            BlpFieldType::Time => DataType::Utf8, // Time as string for now
+            BlpFieldType::Time => DataType::Time64(TimeUnit::Microsecond),
             BlpFieldType::BulkFormat => DataType::Utf8, // Bulk data as JSON string
             BlpFieldType::Unknown(_) => DataType::Utf8,
         }
@@ -79,18 +98,19 @@ impl BlpFieldType {
 
     /// Convert to Arrow type string (for serialization).
     ///
-    /// Matches Python's FTYPE_TO_ARROW mapping exactly.
+    /// Int32 is normalised to Int64; time-only values have no date or timezone.
     pub fn to_arrow_type_str(&self) -> &'static str {
         match self {
             BlpFieldType::Boolean => "bool", // Python uses "bool" not "boolean"
             BlpFieldType::Character => "string",
             BlpFieldType::Date => "date32",
             BlpFieldType::DateOrTime => "string",
+            BlpFieldType::Datetime => "timestamp",
             BlpFieldType::Double | BlpFieldType::Float => "float64",
             BlpFieldType::Int32 => "int64", // Python normalizes Int32 → int64
             BlpFieldType::Int64 => "int64",
             BlpFieldType::String => "string",
-            BlpFieldType::Time => "timestamp", // Python maps Time → timestamp
+            BlpFieldType::Time => "time64",
             BlpFieldType::BulkFormat => "string",
             BlpFieldType::Unknown(_) => "string",
         }
@@ -110,6 +130,20 @@ pub struct FieldInfo {
 
 const DEFAULT_MAX_FIELD_CACHE_ENTRIES: usize = 65_536;
 const MAX_FIELD_CACHE_FILE_BYTES: u64 = 64 * 1024 * 1024;
+// Bump when metadata interpretation changes. Legacy unversioned snapshots can
+// contain Datetime -> string / Time -> timestamp mappings; any non-current
+// entry discards the whole snapshot. The next metadata query atomically saves
+// a current-version snapshot at the same configured path.
+const FIELD_CACHE_SCHEMA_VERSION: u32 = 2;
+
+/// Keep the public FieldInfo unchanged while versioning every persisted entry.
+#[derive(Serialize, Deserialize)]
+struct PersistedFieldInfo {
+    #[serde(default)]
+    schema_version: u32,
+    #[serde(flatten)]
+    info: FieldInfo,
+}
 
 #[derive(Clone, Debug)]
 struct FieldCacheEntry {
@@ -282,7 +316,7 @@ impl FieldTypeResolver {
             return;
         }
 
-        let entries: Vec<FieldInfo> = match read_json_array_bounded(
+        let entries: Vec<PersistedFieldInfo> = match read_json_array_bounded(
             &self.cache_path,
             MAX_FIELD_CACHE_FILE_BYTES,
             self.max_entries,
@@ -297,10 +331,17 @@ impl FieldTypeResolver {
                 return;
             }
         };
+        if entries
+            .iter()
+            .any(|entry| entry.schema_version != FIELD_CACHE_SCHEMA_VERSION)
+        {
+            info!("Ignoring stale field-type cache; metadata will be refreshed");
+            return;
+        }
 
         let pairs: Vec<(String, FieldInfo)> = entries
             .into_iter()
-            .map(|info| (info.field_id.to_uppercase(), info))
+            .map(|entry| (entry.info.field_id.to_uppercase(), entry.info))
             .collect();
 
         if !pairs.is_empty() {
@@ -321,7 +362,13 @@ impl FieldTypeResolver {
             (self.publisher.begin(), self.cache.load_full())
         };
 
-        let entries: Vec<FieldInfo> = snapshot.values().cloned().collect();
+        let entries: Vec<PersistedFieldInfo> = snapshot
+            .values()
+            .map(|info| PersistedFieldInfo {
+                schema_version: FIELD_CACHE_SCHEMA_VERSION,
+                info: info.clone(),
+            })
+            .collect();
         match publication.publish(&self.cache_path, &entries)? {
             PublicationOutcome::Published => {
                 info!(count = entries.len(), path = %self.cache_path.display(), "Saved field cache");
@@ -763,11 +810,15 @@ mod tests {
     fn cold_load_rejects_more_than_configured_entry_bound() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("field_cache.json");
-        let entries = vec![
+        let entries = [
             field_info("FIRST", "float64"),
             field_info("SECOND", "int64"),
             field_info("THIRD", "string"),
-        ];
+        ]
+        .map(|info| PersistedFieldInfo {
+            schema_version: FIELD_CACHE_SCHEMA_VERSION,
+            info,
+        });
         fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
         let resolver = FieldTypeResolver::with_cache_path_and_max_entries(path, 2);
 
@@ -775,5 +826,60 @@ mod tests {
 
         assert_eq!(resolver.stats().0, 0);
         assert!(resolver.get("FIRST").is_none());
+    }
+
+    #[test]
+    fn metadata_disambiguates_datetime_without_overriding_concrete_types() {
+        for datatype in [Some("Datetime"), Some(" DATETIME "), None, Some("")] {
+            for (ftype, expected) in [
+                (Some("Date"), BlpFieldType::Date),
+                (Some("time"), BlpFieldType::Time),
+                (Some("DateOrTime"), BlpFieldType::DateOrTime),
+                (Some("Datetime"), BlpFieldType::Datetime),
+                (Some("Other"), BlpFieldType::Datetime),
+                (None, BlpFieldType::Datetime),
+            ] {
+                assert_eq!(BlpFieldType::from_metadata(datatype, ftype), expected);
+            }
+        }
+        assert_eq!(
+            BlpFieldType::from_metadata(Some("Double"), Some("Time")),
+            BlpFieldType::Double
+        );
+        assert_eq!(
+            BlpFieldType::Time.to_arrow_type(),
+            DataType::Time64(TimeUnit::Microsecond)
+        );
+        assert_eq!(BlpFieldType::Time.to_arrow_type_str(), "time64");
+        assert_eq!(BlpFieldType::Date.to_arrow_type_str(), "date32");
+        assert_eq!(
+            BlpFieldType::Datetime.to_arrow_type(),
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+    }
+
+    #[test]
+    fn stale_field_cache_entries_are_refetched_instead_of_reused_as_strings() {
+        for schema_version in [None, Some(1), Some(FIELD_CACHE_SCHEMA_VERSION + 1)] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("field_cache.json");
+            let mut entry = serde_json::to_value(field_info("SYNTHETIC_TIME", "string")).unwrap();
+            if let Some(version) = schema_version {
+                entry["schema_version"] = serde_json::json!(version);
+            }
+            fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+            let resolver = FieldTypeResolver::with_cache_path(path.clone());
+            let fields = vec!["SYNTHETIC_TIME".to_string()];
+            assert_eq!(resolver.get_uncached_fields(&fields), fields);
+            assert!(resolver.resolve_cached_types(&fields, None).is_empty());
+
+            resolver.insert(field_info("SYNTHETIC_TIME", "time64"));
+            resolver.save_to_disk().unwrap();
+            let current = FieldTypeResolver::with_cache_path(path);
+            assert_eq!(
+                current.get_arrow_type("SYNTHETIC_TIME").as_deref(),
+                Some("time64")
+            );
+        }
     }
 }
