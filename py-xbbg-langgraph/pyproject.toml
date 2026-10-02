@@ -23,7 +23,7 @@ classifiers = [
     "Typing :: Typed",
 ]
 dependencies = [
-    "xbbg>=1.4.12,<2",
+    "xbbg>=1.5.0,<2",
     # LangGraph 1.2 requires this floor; includes GHSA-pjwx-r37v-7724 hardening.
     "langchain-core>=1.4.0,<2",
     "pydantic>=2.10,<3",
