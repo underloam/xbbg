@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Bun 1.4+ is a tested runtime for `@xbbg/core`.** CI now runs the offline suite under Bun against the real native addon on Linux, Windows, and macOS, and installs the packed packages with `bun add` before loading them, so the loader is checked against Bun's `node_modules` layout. `@xbbg/langgraph` still targets Node.js 24+.
+
 ### Changed
 
 - **The Python LangGraph adapter requires xbbg 1.5.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.5.0,<2`, the first release with the `resolve_venues()` and `auction_snapshot()` recipes behind its `xbbg_resolve_venues` and `xbbg_auction_snapshot` tools.

@@ -40,7 +40,7 @@ npm install @xbbg/core
 bun add @xbbg/core
 ```
 
-`@xbbg/core` runs on Node.js 24+ servers, not in browsers. npm installs the matching prebuilt addon automatically. You also need Bloomberg access (Terminal/DAPI, B-PIPE, SAPI, or ZFP) and Bloomberg's SDK runtime library on the same machine; on Windows, standard Terminal installs such as `C:\blp\DAPI` are found automatically.
+`@xbbg/core` runs on Node.js 24+ and Bun 1.4+ servers, not in browsers. npm and Bun install the matching prebuilt addon automatically. You also need Bloomberg access (Terminal/DAPI, B-PIPE, SAPI, or ZFP) and Bloomberg's SDK runtime library on the same machine; on Windows, standard Terminal installs such as `C:\blp\DAPI` are found automatically.
 
 ## Quickstart
 

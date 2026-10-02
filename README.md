@@ -342,7 +342,7 @@ npm install @xbbg/core
 bun add @xbbg/core
 ```
 
-The packages target Node.js 24+ server runtimes. Packaged native addons are provided for macOS arm64, Linux x64 (glibc 2.28+), and Windows x64. You still need Bloomberg access plus Bloomberg SDK runtime libraries on the target system.
+`@xbbg/core` targets Node.js 24+ and Bun 1.4+ server runtimes; `@xbbg/langgraph` targets Node.js 24+. Packaged native addons are provided for macOS arm64, Linux x64 (glibc 2.28+), and Windows x64. You still need Bloomberg access plus Bloomberg SDK runtime libraries on the target system.
 
 ```ts
 import * as xbbg from '@xbbg/core';
