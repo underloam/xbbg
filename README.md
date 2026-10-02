@@ -353,7 +353,7 @@ const hist = await xbbg.blp.abdh(['AAPL US Equity'], ['PX_LAST'], '2024-01-01', 
 const ref = await xbbg.blp.abdp(['AAPL US Equity'], ['PX_LAST', 'SECURITY_NAME']);
 ```
 
-See [`js-xbbg/README.md`](js-xbbg/README.md) for platform packaging, runtime prerequisites, and the supported JavaScript API surface.
+See [`js-xbbg/README.md`](js-xbbg/README.md) for installation and a quickstart, and [`js-xbbg/REFERENCE.md`](js-xbbg/REFERENCE.md) for the full JavaScript API notes.
 
 For LangChain and LangGraph agents, use the supported [`@xbbg/langgraph`](js-xbbg-langgraph/README.md) adapter. It exposes reusable server-side Bloomberg tools backed by `@xbbg/core` without making MCP, a chat app, or a browser integration the core path:
 
@@ -596,7 +596,7 @@ Native queues fail closed on any continuity gap: Bloomberg `DATALOSS`, a full `d
 
 Python `stream()` producers share one managed background event-loop thread, not a thread per stream. Each sync bridge has a bounded queue (`stream_capacity`, default **256**, minimum **1**) and asynchronously waits for consumer space; native overflow policy remains separate. A sync stream that only joins existing shared feeds needs no subscription session; one that needs a session waits up to 5 seconds for capacity when all `max_subscription_sessions` are in use and then raises `RuntimeError` instead of blocking forever. Callbacks run on the consuming thread. Close the generator explicitly when stopping early: close cancels and waits for producer cleanup, and a cleanup timeout is reported. In async applications use `astream()` directly and close it explicitly when retaining the generator after an early exit.
 
-In Node, pass `{ allFields: true }` to `stream()` / `subscribe()` helpers for the same top-level field expansion. Default iteration yields scalar `Tick` objects; `sub.arrow()` constructs Arrow JS tables without IPC for supported schemas. Exposed mutable buffers are JS-owned snapshots: exclusive bounded allocations can be transferred, while shared/sliced/oversized storage is copied or canonicalized first. This is not a universal zero-copy Rust/JS boundary. Choose scalar or Arrow reads once per subscription; see the [Node lifecycle and benchmark contracts](js-xbbg/README.md).
+In Node, pass `{ allFields: true }` to `stream()` / `subscribe()` helpers for the same top-level field expansion. Default iteration yields scalar `Tick` objects; `sub.arrow()` constructs Arrow JS tables without IPC for supported schemas. Exposed mutable buffers are JS-owned snapshots: exclusive bounded allocations can be transferred, while shared/sliced/oversized storage is copied or canonicalized first. This is not a universal zero-copy Rust/JS boundary. Choose scalar or Arrow reads once per subscription; see the [Node lifecycle and benchmark contracts](js-xbbg/REFERENCE.md).
 
 ### Recording a stream
 

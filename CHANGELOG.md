@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Changed
 
 - **The Python LangGraph adapter requires xbbg 1.5.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.5.0,<2`, the first release with the `resolve_venues()` and `auction_snapshot()` recipes behind its `xbbg_resolve_venues` and `xbbg_auction_snapshot` tools.
+- **Shorter npm package pages.** The `@xbbg/core` and `@xbbg/langgraph` READMEs now follow the GitHub README: banner, badges, why, install, quickstart, and highlights. Their detailed behavior notes moved to `js-xbbg/REFERENCE.md` and `js-xbbg-langgraph/REFERENCE.md`.
 
 ## [1.5.0] - 2026-10-02
 
