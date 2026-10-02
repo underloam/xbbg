@@ -7,16 +7,17 @@ import type { NativeAddon } from '../src/napi';
 
 const nativePath = path.join(__dirname, '..', 'napi_xbbg.node');
 
-// Pure native helpers only: no engine/session is constructed. Native-free installs
-// Still run the mocked subscription/preflight suite; js-build enables this parity suite.
+// Pure native helpers only: no engine/session is constructed.
+// Installs without the addon skip this suite and still run the mocked preflight suite.
 describe.skipIf(!existsSync(nativePath))('native auction definitions', () => {
   let api: typeof Core;
   let native: NativeAddon;
 
   beforeAll(async () => {
-    native = createRequire(__filename)(nativePath) as NativeAddon;
-    // Delay package loading: the native addon may not exist in native-free test installs.
+    // Not a static import: the package loads the addon on import and throws without one.
+    // Import the package first: on Windows it adds Bloomberg's DLL directory to the search path.
     api = await import('../src/index.js');
+    native = createRequire(__filename)(nativePath) as NativeAddon;
   });
 
   test('exports immutable native field groups with the default auction projection', () => {
