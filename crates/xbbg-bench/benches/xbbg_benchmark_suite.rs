@@ -33,7 +33,7 @@ use xbbg_async::engine::{
     LongMode, OutputFormat, RefDataState, RequestParams, ServerAddr, SubscriptionState, Transport,
 };
 use xbbg_async::{BlpAsyncError, SubscribeRequest};
-use xbbg_bench::{open_service, setup_session};
+use xbbg_bench::{message_count, open_service, setup_session};
 use xbbg_core::{
     BlpError, CorrelationId, DataType as BlpDataType, Element, Event, EventType, Message, Name,
     SubscriptionList,
@@ -1466,7 +1466,8 @@ fn analyze_bdtick_events(events: &[Event]) -> BdtickReplayDiagnostics {
             continue;
         }
 
-        for msg in event.messages() {
+        let mut messages = event.messages();
+        while let Some(msg) = messages.next() {
             for_each_bdtick_row(&msg, |tick| {
                 rows += 1;
                 let mut names = Vec::with_capacity(tick.num_children());
@@ -1622,7 +1623,8 @@ fn replay_bdtick_prod_events(
             match event.event_type() {
                 EventType::PartialResponse => {
                     let phase_start = Instant::now();
-                    for msg in event.messages() {
+                    let mut messages = event.messages();
+                    while let Some(msg) = messages.next() {
                         state.on_partial(&msg);
                     }
                     phases.partial_process += phase_start.elapsed();
@@ -2057,14 +2059,16 @@ fn replay_bdtick_variant_events(
             match event.event_type() {
                 EventType::PartialResponse => {
                     let phase_start = Instant::now();
-                    for msg in event.messages() {
+                    let mut messages = event.messages();
+                    while let Some(msg) = messages.next() {
                         state.process_message(&msg);
                     }
                     phases.partial_process += phase_start.elapsed();
                 }
                 EventType::Response => {
                     let phase_start = Instant::now();
-                    for msg in event.messages() {
+                    let mut messages = event.messages();
+                    while let Some(msg) = messages.next() {
                         state.process_message(&msg);
                         finished = true;
                     }
@@ -2244,7 +2248,8 @@ where
             match event.event_type() {
                 EventType::PartialResponse => {
                     let phase_start = Instant::now();
-                    for msg in event.messages() {
+                    let mut messages = event.messages();
+                    while let Some(msg) = messages.next() {
                         state.on_partial(&msg);
                     }
                     phases.partial_process += phase_start.elapsed();
@@ -2458,11 +2463,7 @@ fn fetch_subscription_events(
 }
 
 fn subscription_cached_message_count(events: &[Event]) -> usize {
-    events
-        .iter()
-        .map(|event| event.messages().count())
-        .sum::<usize>()
-        .max(1)
+    events.iter().map(message_count).sum::<usize>().max(1)
 }
 
 fn subscription_repeats_per_message(events: &[Event], target_messages: usize) -> usize {
@@ -2481,7 +2482,8 @@ where
     let mut processed = 0usize;
     while processed < target_messages {
         for event in events {
-            for msg in event.messages() {
+            let mut messages = event.messages();
+            while let Some(msg) = messages.next() {
                 for _ in 0..repeats_per_message {
                     f(&msg);
                     processed += 1;
@@ -2513,10 +2515,9 @@ fn component_should_capture_field(element: &Element<'_>) -> bool {
 }
 
 fn estimate_all_field_count(events: &[Event]) -> usize {
-    events
-        .iter()
-        .flat_map(|event| event.messages())
-        .find_map(|msg| {
+    for event in events {
+        let mut messages = event.messages();
+        while let Some(msg) = messages.next() {
             let elem = msg.elements();
             let mut count = 0usize;
             for child_idx in 0..elem.num_children() {
@@ -2527,9 +2528,12 @@ fn estimate_all_field_count(events: &[Event]) -> usize {
                     count += 1;
                 }
             }
-            (count > 0).then_some(count)
-        })
-        .unwrap_or(1)
+            if count > 0 {
+                return count;
+            }
+        }
+    }
+    1
 }
 
 fn component_layout(field_count: usize) -> Arc<FieldLayout> {
@@ -2727,7 +2731,8 @@ fn profile_subscription_components(
     let mut iterated = 0usize;
     while iterated < target_messages {
         for event in events {
-            for _msg in event.messages() {
+            let mut messages = event.messages();
+            while messages.next().is_some() {
                 for _ in 0..repeats_per_message {
                     iterated += 1;
                     if iterated >= target_messages {
@@ -3013,10 +3018,7 @@ fn replay_subscription_events(
         );
     }
 
-    let cached_messages = events
-        .iter()
-        .map(|event| event.messages().count())
-        .sum::<usize>();
+    let cached_messages = events.iter().map(message_count).sum::<usize>();
     if cached_messages == 0 {
         return BenchRecord::error(
             "subscription_replay",
@@ -3053,7 +3055,8 @@ fn replay_subscription_events(
     let mut drain = SubscriptionReplayDrain::default();
     'produce: while processed < target_messages {
         for event in events {
-            for msg in event.messages() {
+            let mut messages = event.messages();
+            while let Some(msg) = messages.next() {
                 for _ in 0..repeats_per_message {
                     let idx = processed % topic_count;
                     let outcome = states[idx].on_message(&msg);

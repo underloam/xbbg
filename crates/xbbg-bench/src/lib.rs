@@ -46,7 +46,8 @@ pub fn open_service(sess: &Session, uri: &str) {
         if event.event_type() != EventType::ServiceStatus {
             continue;
         }
-        for message in event.iter() {
+        let mut messages = event.messages();
+        while let Some(message) = messages.next() {
             match message.message_type().as_str() {
                 "ServiceOpened" => return,
                 "ServiceOpenFailure" => panic!("Bloomberg rejected service open for {uri}"),
@@ -55,6 +56,16 @@ pub fn open_service(sess: &Session, uri: &str) {
         }
     }
     panic!("timed out after 30 seconds waiting for service {uri}");
+}
+
+/// Number of messages in `event`.
+pub fn message_count(event: &xbbg_core::Event) -> usize {
+    let mut messages = event.messages();
+    let mut count = 0;
+    while messages.next().is_some() {
+        count += 1;
+    }
+    count
 }
 
 // ---------------------------------------------------------------------------

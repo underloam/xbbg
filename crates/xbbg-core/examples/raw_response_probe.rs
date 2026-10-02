@@ -75,7 +75,8 @@ fn main() -> xbbg_core::Result<()> {
         let ev_type = ev.event_type();
         println!("--- event: {ev_type:?} ---");
 
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             println!("message type: {}", msg.message_type().as_str());
             for elem in msg.elements().children() {
                 dump_element(&elem, 1);

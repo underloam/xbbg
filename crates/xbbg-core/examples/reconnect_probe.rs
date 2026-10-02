@@ -111,7 +111,8 @@ fn main() -> xbbg_core::Result<()> {
         }
         if let Ok(ev) = sess.next_event(Some(500)) {
             if ev.event_type() == EventType::SessionStatus {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     let mt = msg.message_type();
                     eprintln!("[{}] session :: {}", ts(start), mt.as_str());
                     if mt.as_str() == "SessionStarted" {
@@ -137,7 +138,8 @@ fn main() -> xbbg_core::Result<()> {
         }
         if let Ok(ev) = sess.next_event(Some(500)) {
             if ev.event_type() == EventType::ServiceStatus {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     eprintln!("[{}] service :: {}", ts(start), msg.message_type().as_str());
                     if msg.message_type().as_str() == "ServiceOpened" {
                         break 'wait_svc;
@@ -189,7 +191,8 @@ fn main() -> xbbg_core::Result<()> {
         };
 
         let et = ev.event_type();
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             let mt_name = msg.message_type();
             let mt = mt_name.as_str();
 

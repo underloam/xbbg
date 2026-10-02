@@ -101,7 +101,8 @@ fn main() -> xbbg_core::Result<()> {
     loop {
         let ev = sess.next_event(Some(15000)).unwrap();
         let ev_type = ev.event_type();
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             println!("msg_type: {}", msg.message_type().as_str());
             dump_element(&msg.elements(), 0);
         }
@@ -134,7 +135,8 @@ fn main() -> xbbg_core::Result<()> {
     loop {
         let ev = sess.next_event(Some(15000)).unwrap();
         let ev_type = ev.event_type();
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             println!("msg_type: {}", msg.message_type().as_str());
             dump_element(&msg.elements(), 0);
         }

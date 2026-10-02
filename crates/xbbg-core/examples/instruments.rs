@@ -66,7 +66,8 @@ fn send_and_dump(sess: &Session, req: &xbbg_core::Request) {
     loop {
         let ev = sess.next_event(Some(10000)).unwrap();
         let ev_type = ev.event_type();
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             println!("msg_type: {}", msg.message_type().as_str());
             let root = msg.elements();
             if let Some(results) = root.get_by_str("results") {

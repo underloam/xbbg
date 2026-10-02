@@ -21,7 +21,7 @@ use xbbg_async::engine::state::{
     SubscriptionReceiver, SubscriptionState,
 };
 use xbbg_async::engine::OverflowPolicy;
-use xbbg_bench::write_json;
+use xbbg_bench::{message_count, write_json};
 use xbbg_core::{CorrelationId, Event, EventType, Session, SessionOptions, SubscriptionList};
 
 const DEFAULT_TICKER: &str = "XBTUSD Curncy";
@@ -309,7 +309,7 @@ fn capture_subscription_events(
         };
 
         if event.event_type() == EventType::SubscriptionData {
-            let event_messages = event.messages().count();
+            let event_messages = message_count(&event);
             if event_messages > 0 {
                 messages += event_messages;
                 events.push(event);
@@ -406,7 +406,8 @@ fn replay_cached_events(iteration: usize, config: &BenchConfig, events: &[Event]
 
     'produce: for _ in 0..config.replay_loops {
         for event in events {
-            for message in event.messages() {
+            let mut messages = event.messages();
+            while let Some(message) = messages.next() {
                 let outcome = state.on_message(&message);
                 processed_messages += 1;
                 saw_drop |= state.dropped_batches > 0;

@@ -3,8 +3,8 @@
 //! Messages are the primary data containers in Bloomberg responses.
 //! Each message contains a root element with field data.
 //!
-//! **Zero allocation**: Messages are borrowed from Events and provide
-//! zero-cost access to their contents.
+//! **Zero allocation**: Messages are borrowed from the event's message
+//! iterator and provide zero-cost access to their contents.
 
 use crate::{ffi, CorrelationId, Element, Name};
 use std::marker::PhantomData;
@@ -14,12 +14,13 @@ use std::rc::Rc;
 
 /// Bloomberg message wrapper.
 ///
-/// Borrowed from Event, valid only while Event is alive.
-/// NOT thread-safe - must be consumed on receiving thread.
+/// Borrowed from the [`MessageIterator`](crate::event::MessageIterator) that
+/// yielded it. NOT thread-safe - must be consumed on receiving thread.
 ///
 /// # Lifetime
-/// The lifetime `'a` ties this Message to its parent Event.
-/// Do not store Messages - extract data immediately.
+/// The lifetime `'a` is the borrow of that iterator: Bloomberg keeps a message
+/// valid only until its iterator advances or is destroyed. Elements and strings
+/// read from the message share `'a`, so extract owned data before advancing.
 ///
 /// # Thread Safety
 /// Messages are `!Send + !Sync` because:
@@ -41,8 +42,9 @@ impl<'a> Message<'a> {
     /// # Safety
     /// Caller must ensure:
     /// - `ptr` is a valid `blpapi_Message_t` pointer
-    /// - The lifetime `'a` does not outlive the parent Event
-    /// - The pointer remains valid for the lifetime `'a`
+    /// - The pointer remains valid for the lifetime `'a`; for a message from a
+    ///   `MessageIterator`, `'a` must end before the iterator advances or is
+    ///   destroyed
     #[inline]
     pub(crate) unsafe fn from_raw(ptr: *mut ffi::blpapi_Message_t) -> Self {
         Self {

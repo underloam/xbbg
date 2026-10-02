@@ -842,7 +842,8 @@ impl WorkerShared {
         let et = ev.event_type();
 
         // CRITICAL: iterate ALL messages, never break early
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             match et {
                 EventType::PartialResponse => {
                     self.handle_partial_response(&msg);

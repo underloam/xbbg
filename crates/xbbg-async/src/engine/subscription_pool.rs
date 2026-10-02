@@ -858,7 +858,8 @@ impl SubscriptionWorkerState {
         let et = ev.event_type();
         if et == EventType::SubscriptionStatus {
             let mut mutations = Vec::new();
-            for msg in ev.iter() {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
                 self.collect_subscription_status(&msg, &mut mutations);
             }
             if let Some(status) = &self.status {
@@ -877,7 +878,8 @@ impl SubscriptionWorkerState {
             let mut data_loss_topics = Vec::new();
             let mut streaming_topics = Vec::new();
             let mut channel_closed = false;
-            for msg in ev.iter() {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
                 self.collect_subscription_data(
                     &msg,
                     &mut data_loss_topics,
@@ -937,7 +939,8 @@ impl SubscriptionWorkerState {
             }
             return;
         }
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             match et {
                 EventType::SessionStatus | EventType::AuthorizationStatus => {
                     self.handle_session_status(&msg, shared);

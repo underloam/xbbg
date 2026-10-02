@@ -38,7 +38,8 @@ fn main() -> xbbg_core::Result<()> {
     loop {
         let ev = sess.next_event(Some(5000))?;
         if ev.event_type() == EventType::SessionStatus {
-            for msg in ev.iter() {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
                 let mt = msg.message_type();
                 eprintln!("[session] {}", mt.as_str());
             }
@@ -51,7 +52,8 @@ fn main() -> xbbg_core::Result<()> {
     loop {
         let ev = sess.next_event(Some(5000))?;
         if ev.event_type() == EventType::ServiceStatus {
-            for msg in ev.iter() {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
                 eprintln!("[service] {}", msg.message_type().as_str());
             }
             break;
@@ -77,7 +79,8 @@ fn main() -> xbbg_core::Result<()> {
         let ev = sess.next_event(Some(3000))?;
         let et = ev.event_type();
 
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             if et == EventType::SubscriptionData {
                 msg_count += 1;
                 let cid = msg.correlation_id(0);

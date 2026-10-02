@@ -19,7 +19,8 @@ fn main() -> xbbg_core::Result<()> {
     loop {
         let ev = sess.next_event(Some(5000))?;
         if ev.event_type() == EventType::SessionStatus {
-            for msg in ev.messages() {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
                 let msg_type = msg.message_type();
                 if msg_type.as_str() == "SessionStarted"
                     || msg_type.as_str() == "SessionConnectionUp"
@@ -60,7 +61,8 @@ fn main() -> xbbg_core::Result<()> {
         let ev = sess.next_event(Some(10000))?;
         let ev_type = ev.event_type();
 
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             // Navigate to securityData array using string-based lookups
             if let Some(security_data) = msg.elements().get_by_str("securityData") {
                 for i in 0..security_data.len() {

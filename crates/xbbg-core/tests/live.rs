@@ -41,7 +41,8 @@ fn wait_for_session_started(sess: &Session, timeout_ms: u64) {
     while Instant::now() < deadline {
         if let Some(ev) = sess.try_next_event() {
             if ev.event_type() == EventType::SessionStatus {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     let ty = msg.message_type();
                     let name = ty.as_str();
                     if name == "SessionStarted" {
@@ -132,7 +133,8 @@ fn live_bdp_single_field() {
     while Instant::now() < deadline && !got_response {
         if let Ok(ev) = sess.next_event(Some(1000)) {
             if ev.event_type() == EventType::Response {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     println!("Message type: {}", msg.message_type().as_str());
 
                     let root = msg.elements();
@@ -201,7 +203,8 @@ fn live_bdp_multiple_fields() {
     while Instant::now() < deadline && !(got_px_last && got_name) {
         if let Ok(ev) = sess.next_event(Some(1000)) {
             if ev.event_type() == EventType::Response {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     let root = msg.elements();
                     if let Some(sd) = root.get(&security_data) {
                         if let Some(first) = sd.get_element(0) {
@@ -279,7 +282,8 @@ fn live_get_value_dynamic_extraction() {
     while Instant::now() < deadline && !got_response {
         if let Ok(ev) = sess.next_event(Some(1000)) {
             if ev.event_type() == EventType::Response {
-                for msg in ev.iter() {
+                let mut messages = ev.messages();
+                while let Some(msg) = messages.next() {
                     let root = msg.elements();
                     if let Some(sd) = root.get(&security_data) {
                         if let Some(first) = sd.get_element(0) {
@@ -531,7 +535,8 @@ fn live_probe_classic_token_authorization() {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         };
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             let ty = msg.message_type();
             let name = ty.as_str();
             println!("[token pump] event={:?} message={name}", ev.event_type());
@@ -592,7 +597,8 @@ fn live_probe_classic_token_authorization() {
             std::thread::sleep(Duration::from_millis(50));
             continue;
         };
-        for msg in ev.iter() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             let ty = msg.message_type();
             let name = ty.as_str();
             println!("[auth pump] event={:?} message={name}", ev.event_type());

@@ -63,7 +63,8 @@ pub use crate::options::SessionOptions;
 /// loop {
 ///     if let Ok(ev) = sess.next_event(Some(5000)) {
 ///         if ev.event_type() == EventType::Response {
-///             for msg in ev.messages() {
+///             let mut messages = ev.messages();
+///             while let Some(msg) = messages.next() {
 ///                 // Extract data...
 ///             }
 ///             break;
@@ -160,7 +161,8 @@ impl Session {
             let poll_timeout = poll_timeout.max(1);
             let event = self.next_event(Some(poll_timeout))?;
             let mut saw_session_started = false;
-            for msg in event.messages() {
+            let mut messages = event.messages();
+            while let Some(msg) = messages.next() {
                 match msg.message_type().as_str() {
                     "SessionStarted" => saw_session_started = true,
                     "SessionStartupFailure" => {

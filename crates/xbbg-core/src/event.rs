@@ -4,7 +4,8 @@
 //! Each event contains one or more messages with data.
 //!
 //! **Ownership**: Events OWN their event pointer and release it on Drop.
-//! Messages borrow from Events with lifetime tracking.
+//! Messages borrow the [`MessageIterator`] that yields them and are valid only
+//! until it advances or is dropped.
 
 use crate::{ffi, Message};
 use std::marker::PhantomData;
@@ -16,8 +17,8 @@ use std::rc::Rc;
 /// NOT thread-safe - must be consumed on receiving thread.
 ///
 /// # Ownership
-/// Event owns the `blpapi_Event_t` pointer. Messages returned by `messages()`
-/// borrow from the Event with lifetime tracking.
+/// Event owns the `blpapi_Event_t` pointer. Messages read through
+/// [`messages()`](Self::messages) borrow that iterator, not the Event.
 ///
 /// # Thread Safety
 /// Events are `!Send + !Sync` because:
@@ -64,10 +65,10 @@ impl Event {
         EventType::from_raw(ty)
     }
 
-    /// Iterator over messages in this event.
+    /// Cursor over the messages in this event.
     ///
-    /// Returns an iterator that yields all messages in this event.
-    /// Messages borrow from this Event, so the Event must outlive them.
+    /// Each message borrows the returned [`MessageIterator`] and is valid only
+    /// until the next [`MessageIterator::next`] call.
     ///
     /// # Performance
     /// Zero allocation - creates a Bloomberg message iterator that
@@ -75,7 +76,8 @@ impl Event {
     ///
     /// # Example
     /// ```ignore
-    /// for msg in event.messages() {
+    /// let mut messages = event.messages();
+    /// while let Some(msg) = messages.next() {
     ///     let root = msg.elements();
     ///     // Process message...
     /// }
@@ -91,15 +93,6 @@ impl Event {
             _life: PhantomData,
             _marker: PhantomData,
         }
-    }
-
-    /// Alias for `messages()` for compatibility.
-    ///
-    /// This is provided for code that expects `event.iter()` syntax.
-    /// Prefer `messages()` for clarity in new code.
-    #[inline]
-    pub fn iter(&self) -> MessageIterator<'_> {
-        self.messages()
     }
 
     /// Get raw pointer (internal use).
@@ -220,10 +213,42 @@ impl EventType {
     }
 }
 
-/// Iterator over messages in an event.
+/// Cursor over the messages in an event.
 ///
-/// Created by `Event::messages()`. Yields messages on demand with zero allocation.
-/// Messages borrow from the parent Event.
+/// Created by [`Event::messages`]. Bloomberg keeps a message valid only until
+/// its iterator advances or is destroyed, so each [`Message`] returned by
+/// [`next`](Self::next) borrows this cursor, and the compiler rejects any use
+/// after the following `next()` call or after the cursor is dropped. That
+/// borrow is why this is not an [`Iterator`]; loop with `while let`:
+///
+/// ```no_run
+/// # fn process(event: &xbbg_core::Event) {
+/// let mut messages = event.messages();
+/// while let Some(msg) = messages.next() {
+///     println!("{}", msg.type_str());
+/// }
+/// # }
+/// ```
+///
+/// A message cannot be used after the cursor advances:
+///
+/// ```compile_fail,E0499
+/// # fn process(event: &xbbg_core::Event) {
+/// let mut messages = event.messages();
+/// let first = messages.next().unwrap();
+/// let _second = messages.next();
+/// let _root = first.elements();
+/// # }
+/// ```
+///
+/// or after the cursor is dropped:
+///
+/// ```compile_fail,E0716
+/// # fn process(event: &xbbg_core::Event) {
+/// let first = event.messages().next().unwrap();
+/// let _root = first.elements();
+/// # }
+/// ```
 ///
 /// # Thread Safety
 /// MessageIterator is `!Send + !Sync` because:
@@ -235,19 +260,26 @@ pub struct MessageIterator<'a> {
     _marker: PhantomData<Rc<()>>, // Makes !Send + !Sync
 }
 
-impl<'a> Iterator for MessageIterator<'a> {
-    type Item = Message<'a>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        // SAFETY: blpapi_MessageIterator_next returns 0 on SUCCESS (next message available),
-        // non-zero when there are no more messages.
-        // It writes a valid message pointer to msg_ptr on success.
-        // The message pointer is valid for the lifetime of the event (lifetime 'a).
+impl MessageIterator<'_> {
+    /// Advance to the next message, or `None` once the event has no more.
+    ///
+    /// The message borrows this cursor, so it must be dropped before the next
+    /// call.
+    #[expect(
+        clippy::should_implement_trait,
+        reason = "Iterator::next cannot return a message that borrows the iterator"
+    )]
+    pub fn next(&mut self) -> Option<Message<'_>> {
         let mut msg_ptr: *mut ffi::blpapi_Message_t = std::ptr::null_mut();
+        // SAFETY: `self.ptr` came from blpapi_MessageIterator_create and is
+        // destroyed only in Drop. The call returns 0 and writes a message
+        // pointer when another message is available, non-zero otherwise.
         let rc = unsafe { ffi::blpapi_MessageIterator_next(self.ptr, &mut msg_ptr) };
         if rc == 0 && !msg_ptr.is_null() {
-            // SAFETY: msg_ptr is valid, lifetime 'a is tied to Event.
-            // Message::from_raw is safe to call with a valid pointer.
+            // SAFETY: Bloomberg keeps this message valid until the iterator
+            // advances or is destroyed (blpapi_event.h, MessageIterator::message).
+            // The returned Message borrows `self` mutably, so neither can
+            // happen while it is alive.
             Some(unsafe { Message::from_raw(msg_ptr) })
         } else {
             None

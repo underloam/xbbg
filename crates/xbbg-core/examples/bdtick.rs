@@ -55,7 +55,8 @@ fn main() -> xbbg_core::Result<()> {
         let ev = sess.next_event(Some(30000))?;
         let ev_type = ev.event_type();
 
-        for msg in ev.messages() {
+        let mut messages = ev.messages();
+        while let Some(msg) = messages.next() {
             let root = msg.elements();
 
             // Print raw message structure for first message

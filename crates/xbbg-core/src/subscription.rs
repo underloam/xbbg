@@ -31,7 +31,8 @@ use crate::errors::{BlpError, Result};
 /// loop {
 ///     if let Ok(ev) = session.next_event(None) {
 ///         if ev.event_type() == EventType::SubscriptionData {
-///             for msg in ev.messages() {
+///             let mut messages = ev.messages();
+///             while let Some(msg) = messages.next() {
 ///                 // Process real-time update...
 ///             }
 ///         }
