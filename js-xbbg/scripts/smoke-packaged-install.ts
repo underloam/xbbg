@@ -20,6 +20,10 @@ interface NpmInvocation {
 const repoRoot = path.resolve(__dirname, '..', '..');
 const npmExecPath = process.env.npm_execpath;
 const packedMode = process.argv.includes('--packed');
+const bunMode = process.argv.includes('--bun');
+
+const LOAD_PACKAGE_SCRIPT =
+  "const resolved = require.resolve('@xbbg/core'); if (!resolved.includes('dist')) throw new Error(`expected packaged dist entrypoint, got ${resolved}`); const core = require('@xbbg/core'); console.log(resolved, typeof core.connect, typeof core.version, core.version());";
 
 function fail(message: string): never {
   console.error(`js-xbbg packaged-install smoke failed: ${message}`);
@@ -131,15 +135,8 @@ function smokeRuntimeEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-function smokeRequire(appDir: string): void {
-  run(
-    process.execPath,
-    [
-      '-e',
-      "const resolved = require.resolve('@xbbg/core'); if (!resolved.includes('dist')) throw new Error(`expected packaged dist entrypoint, got ${resolved}`); const core = require('@xbbg/core'); console.log(resolved, typeof core.connect, typeof core.version, core.version());",
-    ],
-    { cwd: appDir, env: smokeRuntimeEnv() },
-  );
+function smokeRequire(appDir: string, runtime: string = process.execPath): void {
+  run(runtime, ['-e', LOAD_PACKAGE_SCRIPT], { cwd: appDir, env: smokeRuntimeEnv() });
 }
 
 function smokeSourceInstall(jsPackageDir: string): void {
@@ -149,7 +146,10 @@ function smokeSourceInstall(jsPackageDir: string): void {
   smokeRequire(appDir);
 }
 
-function smokePackedInstall(jsPackageDir: string, platformPackageDir: string): void {
+function packTarballs(
+  jsPackageDir: string,
+  platformPackageDir: string,
+): { core: string; platform: string } {
   const packDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-packaged-install-'));
   const coreTarball = runNpmCapture(['pack', jsPackageDir, '--pack-destination', packDir], {
     cwd: repoRoot,
@@ -159,14 +159,28 @@ function smokePackedInstall(jsPackageDir: string, platformPackageDir: string): v
     ['pack', platformPackageDir, '--pack-destination', packDir],
     { cwd: repoRoot, env: process.env },
   );
+  return { core: path.join(packDir, coreTarball), platform: path.join(packDir, platformTarball) };
+}
 
+function smokePackedInstall(jsPackageDir: string, platformPackageDir: string): void {
+  const tarballs = packTarballs(jsPackageDir, platformPackageDir);
   const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-packed-install-'));
   runNpm(['init', '-y'], { cwd: appDir, env: process.env });
-  runNpm(['install', path.join(packDir, platformTarball), path.join(packDir, coreTarball)], {
-    cwd: appDir,
-    env: process.env,
-  });
+  runNpm(['install', tarballs.platform, tarballs.core], { cwd: appDir, env: process.env });
   smokeRequire(appDir);
+}
+
+// Bun's installer and node_modules layout differ most from npm's; the native loader
+// (`src/native/resolve-native.ts`) must still find the platform package Bun installed.
+function smokeBunPackedInstall(jsPackageDir: string, platformPackageDir: string): void {
+  const tarballs = packTarballs(jsPackageDir, platformPackageDir);
+  const appDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-bun-packed-install-'));
+  fs.writeFileSync(
+    path.join(appDir, 'package.json'),
+    `${JSON.stringify({ name: 'xbbg-bun-smoke', private: true }, null, 2)}\n`,
+  );
+  run('bun', ['add', tarballs.platform, tarballs.core], { cwd: appDir, env: process.env });
+  smokeRequire(appDir, 'bun');
 }
 
 function main(): void {
@@ -184,6 +198,11 @@ function main(): void {
     fail(
       `expected staged native package binary at ${stagedBinary}; run stage:native-package first`,
     );
+  }
+
+  if (bunMode) {
+    smokeBunPackedInstall(jsPackageDir, platformPackageDir);
+    return;
   }
 
   if (packedMode) {

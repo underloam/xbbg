@@ -517,6 +517,23 @@ jobs:
         run: |
           node -e "const addon = require('./${{ matrix.core_package_dir }}'); console.log(addon.binaryPath);"
 
+      # Only this job builds the real addon on Linux, Windows, and macOS; the
+      # Ubuntu JS quality job has none, so native-dependent suites such as
+      # auction-native skip there. Run them under Bun while the local
+      # js-xbbg/napi_xbbg.node still exists.
+      - name: Install unzip for Bun setup (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v unzip >/dev/null || dnf install -y unzip
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+
+      - name: Run offline JS suite under Bun
+        working-directory: js-xbbg
+        run: bun --bun run test
+
       - name: Remove local js-xbbg build artifact (Unix)
         if: runner.os != 'Windows'
         run: rm -f js-xbbg/napi_xbbg.node
@@ -529,6 +546,10 @@ jobs:
       - name: Smoke test packaged @xbbg/core install
         shell: bash
         run: npm --prefix js-xbbg run smoke:packaged-install -- 0.0.0-ci
+
+      - name: Smoke test packaged @xbbg/core install under Bun
+        shell: bash
+        run: npm --prefix js-xbbg run smoke:packaged-install -- --bun
 
 
       - name: Upload staged core package artifact

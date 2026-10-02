@@ -28,9 +28,14 @@ npm --prefix js-xbbg run stage:native-package
 
 # Run package smoke tests from js-xbbg/
 npm run test:smoke
+
+# Pack @xbbg/core and the staged platform package, install the tarballs, and load them:
+# with npm and Node, then with bun add and bun -e
+npm run smoke:packaged-install
+npm run smoke:packaged-install -- --bun
 ```
 
-`npm test` runs the offline unit suite, excluding the live and session smoke suites. `npm run test:live` explicitly connects to Bloomberg. Its auction/shared-feed cases cover initial-paint behavior without requiring an active auction or new trades; the optional preferred-routing case requires `XBBG_LIVE_PFD_ISIN`. Live tests are intended for an entitled environment and always close their new subscriptions.
+`npm test` runs the offline unit suite, excluding the live and session smoke suites; `bun --bun run test` runs the same suite under Bun, where the native build-tooling tests skip because that tooling only runs under Node. `npm run test:live` explicitly connects to Bloomberg. Its auction/shared-feed cases cover initial-paint behavior without requiring an active auction or new trades; the optional preferred-routing case requires `XBBG_LIVE_PFD_ISIN`. Live tests are intended for an entitled environment and always close their new subscriptions.
 
 The JS package automatically loads a local `js-xbbg/napi_xbbg.node` addon first, then falls back to packaged optional native dependencies for supported platforms.
 

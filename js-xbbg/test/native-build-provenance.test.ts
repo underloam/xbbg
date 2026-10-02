@@ -107,8 +107,9 @@ function fixtureTool(directory: string, name: string, code: string): void {
   }
 }
 
-describe('native artifact provenance', () => {
-  it('publishes exactly the attested portable release over an existing artifact', () => {
+// These fixtures drive the native build/staging tooling, which only ever runs under Node.
+describe.skipIf(process.versions.bun !== undefined)('native artifact provenance', () => {
+  test('publishes exactly the attested portable release over an existing artifact', () => {
     withNativeRepo((fixture) => {
       prepareArtifact(fixture, 'portable-release');
       const result = stage(fixture);
@@ -117,7 +118,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('does not promote a host-tuned artifact even when its hash matches', () => {
+  test('does not promote a host-tuned artifact even when its hash matches', () => {
     withNativeRepo((fixture) => {
       prepareArtifact(fixture, 'host-tuned-release', { rustFlags: ['-C', 'target-cpu=native'] });
       const result = stage(fixture);
@@ -126,7 +127,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('recognizes rustc long codegen spellings when enforcing release portability', () => {
+  test('recognizes rustc long codegen spellings when enforcing release portability', () => {
     withNativeRepo((fixture) => {
       for (const rustFlags of [
         ['--codegen', 'target-cpu=native'],
@@ -139,7 +140,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('requires debug opt-in and still checks the bytes on every staging attempt', () => {
+  test('requires debug opt-in and still checks the bytes on every staging attempt', () => {
     withNativeRepo((fixture) => {
       prepareArtifact(fixture, 'debug-artifact', { optLevel: '0', profile: 'debug' });
       expect(stage(fixture).status).toBe(1);
@@ -153,7 +154,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('refuses a matching artifact compiled for a different package target', () => {
+  test('refuses a matching artifact compiled for a different package target', () => {
     withNativeRepo((fixture) => {
       prepareArtifact(fixture, 'foreign-artifact', { target: 'aarch64-unknown-linux-gnu' });
       expect(stage(fixture).status).toBe(1);
@@ -161,7 +162,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('keeps the packaged artifact when debug provenance is missing', () => {
+  test('keeps the packaged artifact when debug provenance is missing', () => {
     withNativeRepo((fixture) => {
       fs.writeFileSync(path.join(fixture.packageDir, nativeBinaryName), 'unattested-artifact');
       expect(stage(fixture, ['--debug']).status).toBe(1);
@@ -169,7 +170,7 @@ describe('native artifact provenance', () => {
     });
   });
 
-  it('selects Cargo-reported target artifacts and SDK link inputs instead of stale conventional paths', () => {
+  test('selects Cargo-reported target artifacts and SDK link inputs instead of stale conventional paths', () => {
     withNativeRepo((fixture) => {
       const toolDir = path.join(fixture.root, 'tools');
       const sdkRoot = path.join(fixture.root, 'sdk');
