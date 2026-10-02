@@ -21,7 +21,10 @@
     "sourceMap": true,
     "outDir": "dist",
     "rootDir": ".",
-    "isolatedModules": true
+    "isolatedModules": true,
+    "paths": {
+      "@xbbg/core": ["../js-xbbg/dist/index.d.ts"]
+    }
   },
   "include": ["src/**/*", "test/**/*"],
   "exclude": ["dist", "node_modules"]
