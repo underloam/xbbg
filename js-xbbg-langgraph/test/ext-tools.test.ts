@@ -3,6 +3,7 @@ import { ToolMessage } from "@langchain/core/messages";
 
 import { createBloombergExtTools, createExtChartSpecTool } from "../src";
 import type { XbbgCoreLike, XbbgEngineLike } from "../src/core-loader";
+import { CDX_INFO_FIELDS, CDX_PRICING_FIELDS, CDX_RISK_FIELDS } from "../src/_defs_gen";
 
 type CoreSubscription = Awaited<ReturnType<XbbgEngineLike["stream"]>>;
 
@@ -190,7 +191,7 @@ describe("Bloomberg extension tools", () => {
     await invokeJson(cdx, { operation: "cdx_info", ticker: "CDX IG CDSI GEN 5Y Corp" });
     await invokeJson(cdx, {
       operation: "cdx_pricing",
-      recoveryRate: 0.4,
+      recoveryRate: 40,
       ticker: "CDX IG CDSI GEN 5Y Corp",
     });
     await invokeJson(cdx, { operation: "cdx_risk", ticker: "CDX IG CDSI GEN 5Y Corp" });
@@ -199,6 +200,11 @@ describe("Bloomberg extension tools", () => {
       ["CDX IG CDSI GEN 5Y Corp"],
       expect.arrayContaining(["PX_LAST"]),
       expect.objectContaining({ backend: "json" }),
+    );
+    expect(fakeEngine.bdp).toHaveBeenCalledWith(
+      ["CDX IG CDSI GEN 5Y Corp"],
+      CDX_PRICING_FIELDS,
+      expect.objectContaining({ overrides: { CDS_RR: 40 } }),
     );
 
     const currency = byName(tools, "xbbg_ext_currency");
@@ -250,7 +256,6 @@ describe("Bloomberg extension tools", () => {
     });
     await invokeJson(bql, { equityTicker: "AAPL US Equity", operation: "build_preferreds_query" });
     await invokeJson(bql, {
-      activeOnly: true,
       ccy: "USD",
       operation: "build_corporate_bonds_query",
       ticker: "AAPL US Equity",
@@ -260,7 +265,6 @@ describe("Bloomberg extension tools", () => {
       "AAPL US Equity",
       "USD",
       undefined,
-      true,
     );
 
     const session = byName(tools, "xbbg_ext_market_session");
@@ -352,7 +356,7 @@ describe("Bloomberg extension tools", () => {
     await expect(
       cdx.invoke({
         operation: "cdx_pricing",
-        recoveryRate: 1.5,
+        recoveryRate: 150,
         ticker: "CDX IG CDSI GEN 5Y Corp",
       }),
     ).rejects.toThrow();
@@ -504,5 +508,66 @@ describe("Bloomberg extension tools", () => {
         yFields: ["a", "b"],
       }),
     ).rejects.toThrow();
+  });
+  it.each([
+    ["cdx_info", CDX_INFO_FIELDS],
+    ["cdx_pricing", CDX_PRICING_FIELDS],
+    ["cdx_risk", CDX_RISK_FIELDS],
+  ] as const)("enforces the fixed %s bundle limit before connecting", async (operation, fields) => {
+    const fakeEngine = engine();
+    const fakeCore = core(fakeEngine);
+    const cdx = byName(
+      createBloombergExtTools({ core: fakeCore, maxFields: fields.length - 1 }),
+      "xbbg_ext_cdx",
+    );
+    await expect(cdx.invoke({ operation, ticker: "SYNTH CDSI GEN 5Y Corp" })).rejects.toThrow(
+      /xbbg_ext_cdx failed:.*maxFields/u,
+    );
+    expect(fakeCore.connect).not.toHaveBeenCalled();
+    expect(fakeEngine.bdp).not.toHaveBeenCalled();
+
+    for (const validateFields of [true, false, undefined]) {
+      const exact = byName(
+        createBloombergExtTools({ core: fakeCore, maxFields: fields.length, validateFields }),
+        "xbbg_ext_cdx",
+      );
+      await exact.invoke({ operation, ticker: "SYNTH CDSI GEN 5Y Corp" });
+      expect(fakeEngine.bdp).toHaveBeenLastCalledWith(["SYNTH CDSI GEN 5Y Corp"], fields, {
+        backend: "json",
+        overrides: undefined,
+        validateFields,
+      });
+    }
+  });
+
+  it.each([0, 40, 100])(
+    "forwards recovery rate %s in percent without scaling",
+    async (recoveryRate) => {
+      const fakeEngine = engine();
+      const cdx = byName(createBloombergExtTools({ core: core(fakeEngine) }), "xbbg_ext_cdx");
+      await cdx.invoke({
+        operation: "cdx_pricing",
+        ticker: "SYNTH CDSI GEN 5Y Corp",
+        recoveryRate,
+      });
+      expect(fakeEngine.bdp).toHaveBeenCalledWith(
+        ["SYNTH CDSI GEN 5Y Corp"],
+        CDX_PRICING_FIELDS,
+        expect.objectContaining({ overrides: { CDS_RR: recoveryRate } }),
+      );
+    },
+  );
+
+  it("rejects the removed activeOnly query-builder option", async () => {
+    const fakeCore = core(engine());
+    const builder = byName(createBloombergExtTools({ core: fakeCore }), "xbbg_ext_bql_builder");
+    await expect(
+      builder.invoke({
+        operation: "build_corporate_bonds_query",
+        ticker: "SYNTH US Equity",
+        activeOnly: true,
+      }),
+    ).rejects.toThrow();
+    expect(fakeCore.ext.buildCorporateBondsQuery).not.toHaveBeenCalled();
   });
 });

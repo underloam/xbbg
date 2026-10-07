@@ -119,6 +119,9 @@ Core Bloomberg request tools:
 - `xbbg_mktbar_snapshot` - bounded `//blp/mktbar` live bar observation for one ticker.
 - `xbbg_depth_snapshot` - bounded `//blp/mktdepthdata` market-depth observation for one ticker.
 
+Corporate-bond tools do not promise active-only filtering. The former `activeOnly`
+option was a no-op and is no longer part of their schemas or request mapping.
+
 ### Auction recipes
 
 Both auction tools take a bounded `securities` array of Bloomberg tickers, valid bare ISINs, `/isin/<ISIN>`, or `/bbgid/<FIGI>` inputs. The core routes composite equities to their primary exchange listing and preferreds to a pricing-source-qualified venue, validates the returned `EXCH_CODE` or `PRICING_SOURCE`, and respects explicitly supplied venues. Never guess a venue ticker or accept a silent composite fallback.
@@ -200,6 +203,11 @@ Extension helper tools:
 - `xbbg_ext_calculate` - small numeric helper for level percentage calculations.
 - `xbbg_ext_chart_spec` - renderer-neutral chart specs for frontend generative UI; converts bounded rows from `xbbg_bdh`, `xbbg_bdib`, holdings, depth, or already-shaped row data into Vega-Lite JSON.
 
+CDX `recoveryRate` is a percentage from 0 to 100: pass `40` for 40%, not `0.4`.
+The predefined info, pricing, and risk bundles contain 8, 10, and 6 fields,
+respectively. They honor `maxFields` (rejecting before connecting when the bundle
+does not fit) and the configured `validateFields`.
+
 ```ts
 import { createBloombergExtTools, createAllBloombergTools } from "@xbbg/langgraph";
 
@@ -273,6 +281,22 @@ Numeric options must be positive safe integers. Defaults and minima:
 | `maxSearchSpecChars` |     1,000 |       1 | Search specification input length                                                             |
 | `maxStreamUpdates`   |        10 |       1 | Snapshot updates                                                                              |
 | `maxStreamWaitMs`    |    15,000 |       1 | Snapshot wait in milliseconds                                                                 |
+
+Request map keys and string values in `kwargs` and `overrides` are trimmed and
+bounded by `maxStringChars`. Flat kwargs and each nested override map allow at
+most `maxFields` entries; the outer overrides map allows `maxFields + maxSecurities`
+entries for global fields and per-security overrides. Oversized maps, oversized
+strings, empty keys/strings, and keys that collide after trimming are rejected
+before Bloomberg work starts. Older JavaScript adapters accepted oversized maps
+and values without these bounds.
+
+The JavaScript and Python LangGraph packages generate their shared vocabulary
+from `defs/bloomberg.toml`, but keep language-specific execution contracts:
+Python's `request_timeout` bounds each tool call in seconds, whereas JavaScript's
+`engineConfig.requestTimeoutMs` configures only lazily created engines. Python
+projects Arrow/native metadata (including snake_case error keys); JavaScript
+also reports accessor omission and entitlement-projection truncation. These are
+intentional differences, not unit conversions or interchangeable runtime options.
 
 Artifact and content limits are independent, not successive cuts of the artifact. A smaller model preview does not shrink the application artifact; conversely, `maxRows: 1` and `maxContentRows: 3` can retain one artifact row and three model rows when the other budgets permit. Both projections come from a shared bounded preparation of the original result, so exhausted shared node or string limits can affect both. These are ceilings, not promises to fill every row or byte allowance.
 

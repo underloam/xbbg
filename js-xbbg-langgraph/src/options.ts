@@ -1,45 +1,23 @@
 import type * as xbbg from "@xbbg/core";
+import {
+  DEFAULT_MAX_SECURITIES,
+  DEFAULT_MAX_FIELDS,
+  DEFAULT_MAX_ROWS,
+  DEFAULT_MAX_STRING_CHARS,
+  DEFAULT_MAX_RESULT_BYTES,
+  DEFAULT_MAX_RESULT_NODES,
+  DEFAULT_MAX_CONTENT_BYTES,
+  DEFAULT_MAX_CONTENT_ROWS,
+  DEFAULT_MAX_BQL_QUERY_CHARS,
+  DEFAULT_MAX_SEARCH_SPEC_CHARS,
+  DEFAULT_MAX_STREAM_UPDATES,
+  DEFAULT_MAX_STREAM_WAIT_MS,
+  MIN_TOOL_RESULT_BYTES as MIN_RESULT_BYTE_BUDGET,
+  MIN_TOOL_RESULT_NODES as MIN_RESULT_NODE_BUDGET,
+  type BloombergToolName,
+} from "./_defs_gen";
 
 import type { XbbgCoreLike, XbbgEngineLike } from "./core-loader";
-
-export const BLOOMBERG_TOOL_NAMES = [
-  "xbbg_bdp",
-  "xbbg_bdh",
-  "xbbg_bds",
-  "xbbg_bdib",
-  "xbbg_bdtick",
-  "xbbg_check_entitlements",
-  "xbbg_bql",
-  "xbbg_bsrch",
-  "xbbg_bqr",
-  "xbbg_bflds",
-  "xbbg_beqs",
-  "xbbg_yas",
-  "xbbg_preferreds",
-  "xbbg_corporate_bonds",
-  "xbbg_index_members",
-  "xbbg_resolve_isins",
-  "xbbg_resolve_venues",
-  "xbbg_auction_snapshot",
-  "xbbg_issuer_isins",
-  "xbbg_etf_holdings",
-  "xbbg_stream_snapshot",
-  "xbbg_mktbar_snapshot",
-  "xbbg_depth_snapshot",
-  "xbbg_ext_ticker",
-  "xbbg_ext_futures",
-  "xbbg_ext_cdx",
-  "xbbg_ext_currency",
-  "xbbg_ext_bql_builder",
-  "xbbg_ext_chart_spec",
-  "xbbg_ext_market_session",
-  "xbbg_ext_yas_overrides",
-  "xbbg_ext_constants",
-  "xbbg_ext_columns",
-  "xbbg_ext_calculate",
-] as const;
-
-export type BloombergToolName = (typeof BLOOMBERG_TOOL_NAMES)[number];
 
 export interface BloombergToolsOptions {
   readonly engine?: XbbgEngineLike;
@@ -85,21 +63,6 @@ export interface NormalizedBloombergToolsOptions {
   readonly validateFields: boolean | undefined;
   readonly disabledTools: ReadonlySet<BloombergToolName>;
 }
-
-const DEFAULT_MAX_SECURITIES = 25;
-const DEFAULT_MAX_FIELDS = 25;
-const DEFAULT_MAX_ROWS = 500;
-const DEFAULT_MAX_STRING_CHARS = 2000;
-const DEFAULT_MAX_RESULT_BYTES = 1_048_576;
-const DEFAULT_MAX_RESULT_NODES = 50_000;
-const DEFAULT_MAX_CONTENT_BYTES = 65_536;
-const DEFAULT_MAX_CONTENT_ROWS = 50;
-const MIN_RESULT_BYTE_BUDGET = 256;
-const MIN_RESULT_NODE_BUDGET = 10;
-const DEFAULT_MAX_BQL_QUERY_CHARS = 4000;
-const DEFAULT_MAX_SEARCH_SPEC_CHARS = 1000;
-const DEFAULT_MAX_STREAM_UPDATES = 10;
-const DEFAULT_MAX_STREAM_WAIT_MS = 15_000;
 
 /**
  * Default hard per-request timeout applied to lazily connected engines.

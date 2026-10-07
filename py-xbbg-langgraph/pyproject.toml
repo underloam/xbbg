@@ -59,3 +59,41 @@ extend = "../pyproject.toml"
 
 [tool.ruff.lint.isort]
 known-first-party = ["xbbg", "xbbg_langgraph"]
+
+[tool.vulture]
+paths = ["src/xbbg_langgraph", "tests", "vulture_whitelist.py"]
+min_confidence = 60
+# Pydantic invokes these registrations; their arguments and bodies remain checked.
+ignore_decorators = ["@field_validator", "@model_validator", "@model_serializer"]
+
+[tool.importlinter]
+# Run from this directory with PYTHONPATH=src; no installed package is required.
+root_package = "xbbg_langgraph"
+
+[[tool.importlinter.contracts]]
+name = "LangGraph modules remain acyclic"
+type = "acyclic_siblings"
+ancestors = ["xbbg_langgraph"]
+
+[[tool.importlinter.contracts]]
+name = "Tool factories depend on schemas and runtime, not the reverse"
+type = "layers"
+containers = ["xbbg_langgraph"]
+exhaustive = true
+layers = [
+    "core_tools | ext_tools",
+    "_schemas | _ext_schemas",
+    "_bounded_schemas",
+    "_runtime",
+    "results",
+    "options | chart_spec | _bql | instructions",
+    "_defs_gen",
+]
+
+[[tool.importlinter.contracts]]
+name = "Implementation modules do not import the public package root"
+type = "forbidden"
+source_modules = ["xbbg_langgraph.*"]
+forbidden_modules = ["xbbg_langgraph"]
+as_packages = false
+allow_indirect_imports = true

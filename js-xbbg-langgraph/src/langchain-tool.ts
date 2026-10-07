@@ -2,8 +2,13 @@ import { tool, type StructuredToolInterface } from "@langchain/core/tools";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type * as z from "zod/v3";
 
-import type { BloombergToolName } from "./options";
-import { throwWithToolContext, type ToolContentAndArtifact } from "./result-limits";
+import type { BloombergToolName } from "./_defs_gen";
+import {
+  createToolResult,
+  throwWithToolContext,
+  type ToolContentAndArtifact,
+  type ToolResultLimitOptions,
+} from "./result-envelope";
 
 type ZodOutput<T> = z.ZodType<T, z.ZodTypeDef, unknown>;
 
@@ -16,10 +21,16 @@ export interface ToolInvocationConfig {
   readonly signal?: AbortSignal;
 }
 
+export interface BloombergToolResult {
+  readonly value: unknown;
+  /** Work already spent materializing Arrow rows before result traversal. */
+  readonly materializedNodes?: number;
+}
+
 interface BloombergStructuredToolFields<Input> {
   readonly description: string;
   readonly name: BloombergToolName;
-  readonly responseFormat: "content_and_artifact";
+  readonly limits: ToolResultLimitOptions;
   readonly schema: ZodOutput<Input>;
 }
 
@@ -136,7 +147,10 @@ export function toolParameterJsonSchema(
 }
 
 export function createBloombergStructuredTool<Input>(
-  func: (input: Input, config?: ToolInvocationConfig) => Promise<ToolContentAndArtifact>,
+  func: (
+    input: Input,
+    config?: ToolInvocationConfig,
+  ) => BloombergToolResult | Promise<BloombergToolResult>,
   fields: BloombergStructuredToolFields<Input>,
 ): StructuredToolInterface {
   const providerToolDefinition = {
@@ -155,16 +169,26 @@ export function createBloombergStructuredTool<Input>(
     try {
       // Refuse to start Bloomberg work for calls that are already cancelled.
       config?.signal?.throwIfAborted();
+      const result = await func(input, config);
+      return createToolResult(
+        fields.name,
+        result.value,
+        result.materializedNodes === undefined
+          ? fields.limits
+          : { ...fields.limits, materializedNodes: result.materializedNodes },
+      );
     } catch (error) {
       throwWithToolContext(fields.name, error);
     }
-    return await func(input, config);
   };
 
   return tool(
     guarded as never,
     {
-      ...fields,
+      description: fields.description,
+      name: fields.name,
+      responseFormat: "content_and_artifact",
+      schema: fields.schema,
       extras: { providerToolDefinition },
     } as never,
   ) as StructuredToolInterface;

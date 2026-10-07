@@ -1,54 +1,45 @@
 import * as z from "zod/v3";
 
+import { CHART_KINDS, CHART_SOURCES } from "./_defs_gen";
+import { boundedArray, boundedString, type ZodOutput } from "./bounded-schemas";
 import type { NormalizedBloombergToolsOptions } from "./options";
-type ZodOutput<T> = z.ZodType<T, z.ZodTypeDef, unknown>;
 
-export interface StringPair {
+interface StringPair {
   readonly key: string;
   readonly value: string;
 }
 
-export interface FuturesCandidate {
+interface FuturesCandidate {
   readonly ticker: string;
   readonly year: number;
   readonly month: number;
 }
 
-export type PrimitiveMap = Readonly<Record<string, string | number | boolean>>;
-
-export type TickerOperation =
+type TickerOperation =
   | "parse_ticker"
   | "normalize_tickers"
   | "filter_equity_tickers"
   | "is_specific_contract"
   | "validate_generic_ticker";
 
-export type SingleTickerOperation = Exclude<
+type SingleTickerOperation = Exclude<
   TickerOperation,
   "normalize_tickers" | "filter_equity_tickers"
 >;
 
-export interface SingleTickerInput {
+interface SingleTickerInput {
   readonly operation: SingleTickerOperation;
   readonly ticker: string;
 }
 
-export interface TickerListInput {
+interface TickerListInput {
   readonly operation: "normalize_tickers" | "filter_equity_tickers";
   readonly tickers: readonly string[];
 }
 
 export type TickerInput = SingleTickerInput | TickerListInput;
 
-export type FuturesOperation =
-  | "build_futures_ticker"
-  | "generate_candidates"
-  | "contract_index"
-  | "filter_candidates_by_cycle"
-  | "filter_valid_contracts"
-  | "get_futures_months";
-
-export interface FuturesBuildTickerInput {
+interface FuturesBuildTickerInput {
   readonly operation: "build_futures_ticker";
   readonly prefix: string;
   readonly monthCode: string;
@@ -56,7 +47,7 @@ export interface FuturesBuildTickerInput {
   readonly asset: string;
 }
 
-export interface FuturesGenerateCandidatesInput {
+interface FuturesGenerateCandidatesInput {
   readonly operation: "generate_candidates";
   readonly genTicker: string;
   readonly year: number;
@@ -66,18 +57,18 @@ export interface FuturesGenerateCandidatesInput {
   readonly count?: number;
 }
 
-export interface FuturesContractIndexInput {
+interface FuturesContractIndexInput {
   readonly operation: "contract_index";
   readonly genTicker: string;
 }
 
-export interface FuturesFilterCandidatesByCycleInput {
+interface FuturesFilterCandidatesByCycleInput {
   readonly operation: "filter_candidates_by_cycle";
   readonly candidates: readonly FuturesCandidate[];
   readonly cycle: string;
 }
 
-export interface FuturesFilterValidContractsInput {
+interface FuturesFilterValidContractsInput {
   readonly operation: "filter_valid_contracts";
   readonly contracts: readonly StringPair[];
   readonly year: number;
@@ -85,7 +76,7 @@ export interface FuturesFilterValidContractsInput {
   readonly day: number;
 }
 
-export interface FuturesMonthsInput {
+interface FuturesMonthsInput {
   readonly operation: "get_futures_months";
 }
 
@@ -97,26 +88,18 @@ export type FuturesInput =
   | FuturesFilterValidContractsInput
   | FuturesMonthsInput;
 
-export type CdxOperation =
-  | "parse_cdx_ticker"
-  | "previous_cdx_series"
-  | "cdx_gen_to_specific"
-  | "cdx_info"
-  | "cdx_pricing"
-  | "cdx_risk";
-
-export interface CdxTickerInput {
+interface CdxTickerInput {
   readonly operation: "parse_cdx_ticker" | "previous_cdx_series" | "cdx_info";
   readonly ticker: string;
 }
 
-export interface CdxMarketDataInput {
+interface CdxMarketDataInput {
   readonly operation: "cdx_pricing" | "cdx_risk";
   readonly ticker: string;
   readonly recoveryRate?: number;
 }
 
-export interface CdxGenToSpecificInput {
+interface CdxGenToSpecificInput {
   readonly operation: "cdx_gen_to_specific";
   readonly genTicker: string;
   readonly series: number;
@@ -124,21 +107,19 @@ export interface CdxGenToSpecificInput {
 
 export type CdxInput = CdxTickerInput | CdxMarketDataInput | CdxGenToSpecificInput;
 
-export type CurrencyOperation = "build_fx_pair" | "same_currency" | "currencies_needing_conversion";
-
-export interface FxPairInput {
+interface FxPairInput {
   readonly operation: "build_fx_pair";
   readonly fromCcy: string;
   readonly toCcy: string;
 }
 
-export interface SameCurrencyInput {
+interface SameCurrencyInput {
   readonly operation: "same_currency";
   readonly ccy1: string;
   readonly ccy2: string;
 }
 
-export interface CurrencyConversionInput {
+interface CurrencyConversionInput {
   readonly operation: "currencies_needing_conversion";
   readonly currencies: readonly string[];
   readonly target: string;
@@ -146,26 +127,20 @@ export interface CurrencyConversionInput {
 
 export type CurrencyInput = FxPairInput | SameCurrencyInput | CurrencyConversionInput;
 
-export type BqlBuilderOperation =
-  | "build_preferreds_query"
-  | "build_corporate_bonds_query"
-  | "build_etf_holdings_query";
-
-export interface PreferredsQueryInput {
+interface PreferredsQueryInput {
   readonly operation: "build_preferreds_query";
   readonly equityTicker: string;
   readonly extraFields?: readonly string[];
 }
 
-export interface CorporateBondsQueryInput {
+interface CorporateBondsQueryInput {
   readonly operation: "build_corporate_bonds_query";
   readonly ticker: string;
   readonly ccy?: string;
   readonly extraFields?: readonly string[];
-  readonly activeOnly?: boolean;
 }
 
-export interface EtfHoldingsQueryInput {
+interface EtfHoldingsQueryInput {
   readonly operation: "build_etf_holdings_query";
   readonly etfTicker: string;
   readonly extraFields?: readonly string[];
@@ -176,17 +151,7 @@ export type BqlBuilderInput =
   | CorporateBondsQueryInput
   | EtfHoldingsQueryInput;
 
-export type MarketSessionOperation =
-  | "derive_sessions"
-  | "get_market_rule"
-  | "infer_timezone"
-  | "session_times_to_utc"
-  | "default_turnover_dates"
-  | "default_bqr_datetimes"
-  | "get_exchange_override"
-  | "list_exchange_overrides";
-
-export interface DeriveSessionsInput {
+interface DeriveSessionsInput {
   readonly operation: "derive_sessions";
   readonly dayStart: string;
   readonly dayEnd: string;
@@ -194,18 +159,18 @@ export interface DeriveSessionsInput {
   readonly exchCode?: string;
 }
 
-export interface MarketRuleInput {
+interface MarketRuleInput {
   readonly operation: "get_market_rule";
   readonly mic?: string;
   readonly exchCode?: string;
 }
 
-export interface InferTimezoneInput {
+interface InferTimezoneInput {
   readonly operation: "infer_timezone";
   readonly countryIso: string;
 }
 
-export interface SessionTimesToUtcInput {
+interface SessionTimesToUtcInput {
   readonly operation: "session_times_to_utc";
   readonly startTime: string;
   readonly endTime: string;
@@ -213,24 +178,24 @@ export interface SessionTimesToUtcInput {
   readonly date: string;
 }
 
-export interface TurnoverDatesInput {
+interface TurnoverDatesInput {
   readonly operation: "default_turnover_dates";
   readonly startDate?: string;
   readonly endDate?: string;
 }
 
-export interface BqrDatetimesInput {
+interface BqrDatetimesInput {
   readonly operation: "default_bqr_datetimes";
   readonly startDatetime?: string;
   readonly endDatetime?: string;
 }
 
-export interface ExchangeOverrideLookupInput {
+interface ExchangeOverrideLookupInput {
   readonly operation: "get_exchange_override";
   readonly ticker: string;
 }
 
-export interface ListExchangeOverridesInput {
+interface ListExchangeOverridesInput {
   readonly operation: "list_exchange_overrides";
 }
 
@@ -253,23 +218,12 @@ export interface YasOverridesInput {
   readonly benchmark?: string;
 }
 
-export type ConstantsOperation =
-  | "parse_date"
-  | "fmt_date"
-  | "get_month_code"
-  | "get_month_name"
-  | "get_futures_months"
-  | "get_dvd_type"
-  | "get_dvd_types"
-  | "get_dvd_cols"
-  | "get_etf_cols";
-
-export interface ParseDateInput {
+interface ParseDateInput {
   readonly operation: "parse_date";
   readonly dateStr: string;
 }
 
-export interface FmtDateInput {
+interface FmtDateInput {
   readonly operation: "fmt_date";
   readonly year: number;
   readonly month: number;
@@ -277,22 +231,22 @@ export interface FmtDateInput {
   readonly fmt?: string;
 }
 
-export interface MonthCodeInput {
+interface MonthCodeInput {
   readonly operation: "get_month_code";
   readonly monthName: string;
 }
 
-export interface MonthNameInput {
+interface MonthNameInput {
   readonly operation: "get_month_name";
   readonly code: string;
 }
 
-export interface DvdTypeInput {
+interface DvdTypeInput {
   readonly operation: "get_dvd_type";
   readonly dvdType: string;
 }
 
-export interface ConstantsLookupInput {
+interface ConstantsLookupInput {
   readonly operation: "get_futures_months" | "get_dvd_types" | "get_dvd_cols" | "get_etf_cols";
 }
 
@@ -304,17 +258,12 @@ export type ConstantsInput =
   | DvdTypeInput
   | ConstantsLookupInput;
 
-export type ColumnsOperation =
-  | "rename_dividend_columns"
-  | "rename_etf_columns"
-  | "build_earning_header_rename";
-
-export interface RenameColumnsInput {
+interface RenameColumnsInput {
   readonly operation: "rename_dividend_columns" | "rename_etf_columns";
   readonly columns: readonly string[];
 }
 
-export interface EarningHeaderRenameInput {
+interface EarningHeaderRenameInput {
   readonly operation: "build_earning_header_rename";
   readonly headerRow: readonly StringPair[];
   readonly dataColumns: readonly string[];
@@ -328,9 +277,9 @@ export interface CalculateInput {
   readonly levels: readonly (number | null)[];
 }
 
-export type BloombergChartSource = "bdh" | "bdib" | "holdings" | "depth" | "rows";
+export type BloombergChartSource = (typeof CHART_SOURCES)[number];
 
-export type ChartKind = "line" | "area" | "bar" | "scatter" | "candlestick" | "depth";
+export type ChartKind = (typeof CHART_KINDS)[number];
 
 export type ChartRenderer = "vega-lite";
 
@@ -370,40 +319,14 @@ const futuresCandidateSchema = z.object({
   year: z.number().int().min(1900).describe("Contract year."),
 });
 
-function nonEmptyString(
-  options: NormalizedBloombergToolsOptions,
-  description: string,
-): ZodOutput<string> {
-  return z
-    .string()
-    .trim()
-    .pipe(z.string().min(1).max(options.maxStringChars).describe(description));
-}
-
-function stringArray(
-  options: NormalizedBloombergToolsOptions,
-  description: string,
-  maxItems = options.maxFields,
-): ZodOutput<string[]> {
-  return z.array(nonEmptyString(options, description)).min(1).max(maxItems).describe(description);
-}
-
-function optionalString(
-  options: NormalizedBloombergToolsOptions,
-  description: string,
-): ZodOutput<string | undefined> {
-  return nonEmptyString(options, description).optional();
-}
 export function tickerSchema(options: NormalizedBloombergToolsOptions): ZodOutput<TickerInput> {
-  const ticker = nonEmptyString(
-    options,
+  const ticker = boundedString(options.maxStringChars).describe(
     "One generic futures-style Bloomberg ticker: <ROOT><N> ending in Index, Curncy, Comdty, or Corp, or <ROOT><N> <EXCHANGE> Equity. parse_ticker rejects other market sectors (Pfd, Govt, Muni, Mtge, M-Mkt) and non-futures securities.",
   );
-  const tickers = stringArray(
-    options,
-    "Bloomberg tickers to normalize or filter.",
+  const tickers = boundedArray(
+    boundedString(options.maxStringChars),
     options.maxSecurities,
-  );
+  ).describe("Bloomberg tickers to normalize or filter.");
   return z.discriminatedUnion("operation", [
     z.object({ operation: z.literal("parse_ticker"), ticker }).strict(),
     z.object({ operation: z.literal("is_specific_contract"), ticker }).strict(),
@@ -414,8 +337,7 @@ export function tickerSchema(options: NormalizedBloombergToolsOptions): ZodOutpu
 }
 
 export function futuresSchema(options: NormalizedBloombergToolsOptions): ZodOutput<FuturesInput> {
-  const genTicker = nonEmptyString(
-    options,
+  const genTicker = boundedString(options.maxStringChars).describe(
     "Generic Bloomberg futures ticker, for example ES1 Index.",
   );
   const year = z.number().int().describe("Contract year, for example 2024.");
@@ -424,13 +346,16 @@ export function futuresSchema(options: NormalizedBloombergToolsOptions): ZodOutp
   return z.discriminatedUnion("operation", [
     z
       .object({
-        asset: nonEmptyString(
-          options,
+        asset: boundedString(options.maxStringChars).describe(
           "Bloomberg asset class suffix, for example Index or Comdty.",
         ),
-        monthCode: nonEmptyString(options, "Bloomberg futures month code, for example H."),
+        monthCode: boundedString(options.maxStringChars).describe(
+          "Bloomberg futures month code, for example H.",
+        ),
         operation: z.literal("build_futures_ticker"),
-        prefix: nonEmptyString(options, "Futures ticker root prefix, for example ES."),
+        prefix: boundedString(options.maxStringChars).describe(
+          "Futures ticker root prefix, for example ES.",
+        ),
         year: z
           .union([z.string().trim().min(1), z.number().int().transform(String)])
           .describe("Contract year, full or abbreviated, as a string or integer."),
@@ -445,7 +370,9 @@ export function futuresSchema(options: NormalizedBloombergToolsOptions): ZodOutp
           .optional()
           .describe("Maximum number of futures candidates to generate."),
         day,
-        freq: optionalString(options, "Futures frequency/cycle hint."),
+        freq: boundedString(options.maxStringChars)
+          .optional()
+          .describe("Futures frequency/cycle hint."),
         genTicker,
         month,
         operation: z.literal("generate_candidates"),
@@ -455,22 +382,20 @@ export function futuresSchema(options: NormalizedBloombergToolsOptions): ZodOutp
     z.object({ genTicker, operation: z.literal("contract_index") }).strict(),
     z
       .object({
-        candidates: z
-          .array(futuresCandidateSchema)
-          .min(1)
-          .max(options.maxFields)
-          .describe("Candidate futures contracts."),
-        cycle: nonEmptyString(options, "Futures cycle code to filter candidates by."),
+        candidates: boundedArray(futuresCandidateSchema, options.maxFields).describe(
+          "Candidate futures contracts.",
+        ),
+        cycle: boundedString(options.maxStringChars).describe(
+          "Futures cycle code to filter candidates by.",
+        ),
         operation: z.literal("filter_candidates_by_cycle"),
       })
       .strict(),
     z
       .object({
-        contracts: z
-          .array(stringPairSchema)
-          .min(1)
-          .max(options.maxFields)
-          .describe("Contract pairs for validity filtering."),
+        contracts: boundedArray(stringPairSchema, options.maxFields).describe(
+          "Contract pairs for validity filtering.",
+        ),
         day,
         month,
         operation: z.literal("filter_valid_contracts"),
@@ -482,13 +407,13 @@ export function futuresSchema(options: NormalizedBloombergToolsOptions): ZodOutp
 }
 
 export function cdxSchema(options: NormalizedBloombergToolsOptions): ZodOutput<CdxInput> {
-  const ticker = nonEmptyString(options, "CDX ticker, generic or specific.");
+  const ticker = boundedString(options.maxStringChars).describe("CDX ticker, generic or specific.");
   const recoveryRate = z
     .number()
     .min(0)
-    .max(1)
+    .max(100)
     .optional()
-    .describe("Decimal recovery rate override, e.g. 0.4 for 40%; sent as the CDS_RR override.");
+    .describe("Recovery percentage override, e.g. 40 for 40%; sent as the CDS_RR override.");
   return z.discriminatedUnion("operation", [
     z.object({ operation: z.literal("parse_cdx_ticker"), ticker }).strict(),
     z.object({ operation: z.literal("previous_cdx_series"), ticker }).strict(),
@@ -497,8 +422,7 @@ export function cdxSchema(options: NormalizedBloombergToolsOptions): ZodOutput<C
     z.object({ operation: z.literal("cdx_risk"), recoveryRate, ticker }).strict(),
     z
       .object({
-        genTicker: nonEmptyString(
-          options,
+        genTicker: boundedString(options.maxStringChars).describe(
           "Generic CDX ticker, for example CDX IG CDSI GEN 5Y Corp.",
         ),
         operation: z.literal("cdx_gen_to_specific"),
@@ -512,23 +436,25 @@ export function currencySchema(options: NormalizedBloombergToolsOptions): ZodOut
   return z.discriminatedUnion("operation", [
     z
       .object({
-        fromCcy: nonEmptyString(options, "Source ISO currency code."),
+        fromCcy: boundedString(options.maxStringChars).describe("Source ISO currency code."),
         operation: z.literal("build_fx_pair"),
-        toCcy: nonEmptyString(options, "Destination ISO currency code."),
+        toCcy: boundedString(options.maxStringChars).describe("Destination ISO currency code."),
       })
       .strict(),
     z
       .object({
-        ccy1: nonEmptyString(options, "First ISO currency code."),
-        ccy2: nonEmptyString(options, "Second ISO currency code."),
+        ccy1: boundedString(options.maxStringChars).describe("First ISO currency code."),
+        ccy2: boundedString(options.maxStringChars).describe("Second ISO currency code."),
         operation: z.literal("same_currency"),
       })
       .strict(),
     z
       .object({
-        currencies: stringArray(options, "ISO currency codes to check."),
+        currencies: boundedArray(boundedString(options.maxStringChars), options.maxFields).describe(
+          "ISO currency codes to check.",
+        ),
         operation: z.literal("currencies_needing_conversion"),
-        target: nonEmptyString(options, "Target ISO currency code."),
+        target: boundedString(options.maxStringChars).describe("Target ISO currency code."),
       })
       .strict(),
   ]);
@@ -537,30 +463,32 @@ export function currencySchema(options: NormalizedBloombergToolsOptions): ZodOut
 export function bqlBuilderSchema(
   options: NormalizedBloombergToolsOptions,
 ): ZodOutput<BqlBuilderInput> {
-  const extraFields = stringArray(options, "Extra BQL fields to include.").optional();
+  const extraFields = boundedArray(boundedString(options.maxStringChars), options.maxFields)
+    .describe("Extra BQL fields to include.")
+    .optional();
   return z.discriminatedUnion("operation", [
     z
       .object({
-        equityTicker: nonEmptyString(options, "Equity ticker for preferreds query."),
+        equityTicker: boundedString(options.maxStringChars).describe(
+          "Equity ticker for preferreds query.",
+        ),
         extraFields,
         operation: z.literal("build_preferreds_query"),
       })
       .strict(),
     z
       .object({
-        activeOnly: z
-          .boolean()
+        ccy: boundedString(options.maxStringChars)
           .optional()
-          .describe("Restrict corporate bond query to active bonds."),
-        ccy: optionalString(options, "Currency filter for corporate bond query."),
+          .describe("Currency filter for corporate bond query."),
         extraFields,
         operation: z.literal("build_corporate_bonds_query"),
-        ticker: nonEmptyString(options, "Ticker for corporate bond query."),
+        ticker: boundedString(options.maxStringChars).describe("Ticker for corporate bond query."),
       })
       .strict(),
     z
       .object({
-        etfTicker: nonEmptyString(options, "ETF ticker for holdings query."),
+        etfTicker: boundedString(options.maxStringChars).describe("ETF ticker for holdings query."),
         extraFields,
         operation: z.literal("build_etf_holdings_query"),
       })
@@ -571,13 +499,21 @@ export function bqlBuilderSchema(
 export function marketSessionSchema(
   options: NormalizedBloombergToolsOptions,
 ): ZodOutput<MarketSessionInput> {
-  const mic = optionalString(options, "Market Identifier Code, for example XNYS.");
-  const exchCode = optionalString(options, "Bloomberg exchange code.");
+  const mic = boundedString(options.maxStringChars)
+    .optional()
+    .describe("Market Identifier Code, for example XNYS.");
+  const exchCode = boundedString(options.maxStringChars)
+    .optional()
+    .describe("Bloomberg exchange code.");
   return z.discriminatedUnion("operation", [
     z
       .object({
-        dayEnd: nonEmptyString(options, "Exchange day end time, for example 16:00."),
-        dayStart: nonEmptyString(options, "Exchange day start time, for example 09:30."),
+        dayEnd: boundedString(options.maxStringChars).describe(
+          "Exchange day end time, for example 16:00.",
+        ),
+        dayStart: boundedString(options.maxStringChars).describe(
+          "Exchange day start time, for example 09:30.",
+        ),
         exchCode,
         mic,
         operation: z.literal("derive_sessions"),
@@ -586,40 +522,55 @@ export function marketSessionSchema(
     z.object({ exchCode, mic, operation: z.literal("get_market_rule") }).strict(),
     z
       .object({
-        countryIso: nonEmptyString(options, "ISO country code for timezone inference."),
+        countryIso: boundedString(options.maxStringChars).describe(
+          "ISO country code for timezone inference.",
+        ),
         operation: z.literal("infer_timezone"),
       })
       .strict(),
     z
       .object({
-        date: nonEmptyString(options, "Date for UTC session conversion, YYYY-MM-DD or YYYYMMDD."),
-        endTime: nonEmptyString(options, "Session end time, for example 16:00."),
-        exchangeTz: nonEmptyString(
-          options,
+        date: boundedString(options.maxStringChars).describe(
+          "Date for UTC session conversion, YYYY-MM-DD or YYYYMMDD.",
+        ),
+        endTime: boundedString(options.maxStringChars).describe(
+          "Session end time, for example 16:00.",
+        ),
+        exchangeTz: boundedString(options.maxStringChars).describe(
           "IANA exchange timezone, for example America/New_York.",
         ),
         operation: z.literal("session_times_to_utc"),
-        startTime: nonEmptyString(options, "Session start time, for example 09:30."),
+        startTime: boundedString(options.maxStringChars).describe(
+          "Session start time, for example 09:30.",
+        ),
       })
       .strict(),
     z
       .object({
-        endDate: optionalString(options, "Optional end date."),
+        endDate: boundedString(options.maxStringChars).optional().describe("Optional end date."),
         operation: z.literal("default_turnover_dates"),
-        startDate: optionalString(options, "Optional start date."),
+        startDate: boundedString(options.maxStringChars)
+          .optional()
+          .describe("Optional start date."),
       })
       .strict(),
     z
       .object({
-        endDatetime: optionalString(options, "Optional end datetime."),
+        endDatetime: boundedString(options.maxStringChars)
+          .optional()
+          .describe("Optional end datetime."),
         operation: z.literal("default_bqr_datetimes"),
-        startDatetime: optionalString(options, "Optional start datetime."),
+        startDatetime: boundedString(options.maxStringChars)
+          .optional()
+          .describe("Optional start datetime."),
       })
       .strict(),
     z
       .object({
         operation: z.literal("get_exchange_override"),
-        ticker: nonEmptyString(options, "Ticker for exchange override lookup."),
+        ticker: boundedString(options.maxStringChars).describe(
+          "Ticker for exchange override lookup.",
+        ),
       })
       .strict(),
     z.object({ operation: z.literal("list_exchange_overrides") }).strict(),
@@ -631,9 +582,11 @@ export function yasOverridesSchema(
 ): ZodOutput<YasOverridesInput> {
   return z
     .object({
-      benchmark: optionalString(options, "Optional YAS benchmark."),
+      benchmark: boundedString(options.maxStringChars)
+        .optional()
+        .describe("Optional YAS benchmark."),
       price: z.number().optional().describe("YAS price override."),
-      settleDt: optionalString(options, "YAS settlement date."),
+      settleDt: boundedString(options.maxStringChars).optional().describe("YAS settlement date."),
       spread: z.number().optional().describe("YAS spread override."),
       yieldType: z.number().int().optional().describe("YAS yield type override."),
       yieldVal: z.number().optional().describe("YAS yield value override."),
@@ -647,14 +600,14 @@ export function constantsSchema(
   return z.discriminatedUnion("operation", [
     z
       .object({
-        dateStr: nonEmptyString(options, "Date string to parse."),
+        dateStr: boundedString(options.maxStringChars).describe("Date string to parse."),
         operation: z.literal("parse_date"),
       })
       .strict(),
     z
       .object({
         day: z.number().int().min(1).max(31).describe("Day number, 1-31."),
-        fmt: optionalString(options, "Date output format."),
+        fmt: boundedString(options.maxStringChars).optional().describe("Date output format."),
         month: z.number().int().min(1).max(12).describe("Month number, 1-12."),
         operation: z.literal("fmt_date"),
         year: z.number().int().min(1).describe("Year number."),
@@ -662,19 +615,19 @@ export function constantsSchema(
       .strict(),
     z
       .object({
-        monthName: nonEmptyString(options, "Month name, for example March."),
+        monthName: boundedString(options.maxStringChars).describe("Month name, for example March."),
         operation: z.literal("get_month_code"),
       })
       .strict(),
     z
       .object({
-        code: nonEmptyString(options, "Month code, for example H."),
+        code: boundedString(options.maxStringChars).describe("Month code, for example H."),
         operation: z.literal("get_month_name"),
       })
       .strict(),
     z
       .object({
-        dvdType: nonEmptyString(options, "Dividend type code or label."),
+        dvdType: boundedString(options.maxStringChars).describe("Dividend type code or label."),
         operation: z.literal("get_dvd_type"),
       })
       .strict(),
@@ -686,18 +639,21 @@ export function constantsSchema(
 }
 
 export function columnsSchema(options: NormalizedBloombergToolsOptions): ZodOutput<ColumnsInput> {
-  const columns = stringArray(options, "Column names to rename.");
+  const columns = boundedArray(boundedString(options.maxStringChars), options.maxFields).describe(
+    "Column names to rename.",
+  );
   return z.discriminatedUnion("operation", [
     z.object({ columns, operation: z.literal("rename_dividend_columns") }).strict(),
     z.object({ columns, operation: z.literal("rename_etf_columns") }).strict(),
     z
       .object({
-        dataColumns: stringArray(options, "Earnings data column names."),
-        headerRow: z
-          .array(stringPairSchema)
-          .min(1)
-          .max(options.maxFields)
-          .describe("Earnings header row key/value pairs."),
+        dataColumns: boundedArray(
+          boundedString(options.maxStringChars),
+          options.maxFields,
+        ).describe("Earnings data column names."),
+        headerRow: boundedArray(stringPairSchema, options.maxFields).describe(
+          "Earnings header row key/value pairs.",
+        ),
         operation: z.literal("build_earning_header_rename"),
       })
       .strict(),
@@ -709,19 +665,13 @@ export function calculateSchema(
 ): ZodOutput<CalculateInput> {
   return z
     .object({
-      levels: z
-        .array(z.number().nullable())
-        .min(1)
-        .max(options.maxFields)
-        .describe("Hierarchy level values; supported levels are 1, 2, or null."),
+      levels: boundedArray(z.number().nullable(), options.maxFields).describe(
+        "Hierarchy level values; supported levels are 1, 2, or null.",
+      ),
       operation: z
         .literal("calculate_level_percentages")
         .describe("Numeric helper operation to run."),
-      values: z
-        .array(z.number().nullable())
-        .min(1)
-        .max(options.maxFields)
-        .describe("Observed values."),
+      values: boundedArray(z.number().nullable(), options.maxFields).describe("Observed values."),
     })
     .strict()
     .superRefine((input, ctx) => {
@@ -747,16 +697,16 @@ export function chartSpecSchema(
   options: NormalizedBloombergToolsOptions,
 ): ZodOutput<ChartSpecInput> {
   const chartScalar = z.union([
-    z.string().trim().max(options.maxStringChars),
+    boundedString(options.maxStringChars, { minimum: 0 }),
     z.number(),
     z.boolean(),
     z.null(),
   ]);
-  const fieldName = nonEmptyString(options, "Input row field name.");
+  const fieldName = boundedString(options.maxStringChars).describe("Input row field name.");
   return z
     .object({
       chart: z
-        .enum(["line", "area", "bar", "scatter", "candlestick", "depth"])
+        .enum(CHART_KINDS)
         .optional()
         .describe("Chart shape to generate. Defaults from source."),
       closeField: fieldName.optional().describe("Candlestick close-value field."),
@@ -776,21 +726,19 @@ export function chartSpecSchema(
         .literal("vega-lite")
         .optional()
         .describe("Visualization spec renderer. Currently only vega-lite is generated."),
-      rows: z
-        .array(z.record(chartScalar))
-        .min(1)
-        .max(options.maxRows)
-        .describe("Chart data rows copied from a bounded Bloomberg tool result."),
+      rows: boundedArray(z.record(chartScalar), options.maxRows).describe(
+        "Chart data rows copied from a bounded Bloomberg tool result.",
+      ),
       seriesField: fieldName.optional().describe("Optional series/color field."),
       sideField: fieldName.optional().describe("Market-depth bid/ask side field."),
       sizeField: fieldName.optional().describe("Market-depth size field."),
-      source: z
-        .enum(["bdh", "bdib", "holdings", "depth", "rows"])
-        .describe("Bloomberg result shape that produced rows."),
-      title: nonEmptyString(options, "Chart title.").optional(),
+      source: z.enum(CHART_SOURCES).describe("Bloomberg result shape that produced rows."),
+      title: boundedString(options.maxStringChars).describe("Chart title.").optional(),
       valueField: fieldName.optional().describe("Primary numeric value field."),
       xField: fieldName.optional().describe("X-axis field."),
-      yFields: stringArray(options, "Numeric value fields to plot.").optional(),
+      yFields: boundedArray(boundedString(options.maxStringChars), options.maxFields)
+        .describe("Numeric value fields to plot.")
+        .optional(),
     })
     .strict();
 }

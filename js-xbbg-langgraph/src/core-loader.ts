@@ -3,8 +3,8 @@ import type * as xbbg from "@xbbg/core";
 import type { BloombergToolsOptions, NormalizedBloombergToolsOptions } from "./options";
 import { normalizeBloombergToolsOptions } from "./options";
 
-export type XbbgCoreModule = typeof xbbg;
-export interface EntitlementReport {
+type XbbgCoreModule = typeof xbbg;
+interface EntitlementReport {
   readonly entitled: boolean;
   readonly failedEids: readonly number[];
 }

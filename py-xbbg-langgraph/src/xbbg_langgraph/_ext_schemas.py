@@ -9,37 +9,29 @@ from pydantic import (
     BaseModel,
     BeforeValidator,
     Field,
-    StringConstraints,
     create_model,
     model_serializer,
     model_validator,
 )
 
+from ._bounded_schemas import (
+    FiniteNumber,
+    bounded_array,
+    bounded_map,
+    bounded_primitive,
+    bounded_strings,
+    bounded_text,
+)
 from ._bql import currency, equity_ticker, field_expression
+from ._defs_gen import ChartKind, ChartSource
 from ._runtime import ToolInput
 from .options import BloombergToolsOptions
 
 FieldDefinition = tuple[Any, Any]
 Fields = dict[str, FieldDefinition]
-_FINITE = Annotated[float, Field(strict=True, allow_inf_nan=False)]
 _YEAR = Annotated[int, Field(strict=True, ge=1, le=9999)]
 _MONTH = Annotated[int, Field(strict=True, ge=1, le=12)]
 _DAY = Annotated[int, Field(strict=True, ge=1, le=31)]
-
-
-def _text(options: BloombergToolsOptions) -> Any:
-    return Annotated[
-        str,
-        StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=options.max_string_chars),
-    ]
-
-
-def _array(item: Any, maximum: int, *, minimum: int = 1) -> Any:
-    return Annotated[list[item], Field(min_length=minimum, max_length=maximum)]
-
-
-def _strings(options: BloombergToolsOptions, maximum: int | None = None, *, minimum: int = 1) -> Any:
-    return _array(_text(options), options.max_fields if maximum is None else maximum, minimum=minimum)
 
 
 def _optional(annotation: Any) -> FieldDefinition:
@@ -67,7 +59,7 @@ def _action_schema(
     class ActionInput(ToolInput):
         @model_validator(mode="before")
         @classmethod
-        def validate_operation(cls, value: Any) -> Any:
+        def validate_operation(_cls, value: Any) -> Any:
             if isinstance(value, BaseModel):
                 value = value.model_dump(exclude_unset=True)
             if not isinstance(value, dict):
@@ -107,8 +99,8 @@ def _action_schema(
 
 
 def ticker_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    ticker = (_text(options), ...)
-    tickers = (_strings(options, options.max_securities), ...)
+    ticker = (bounded_text(options), ...)
+    tickers = (bounded_strings(options, options.max_securities), ...)
     return _action_schema(
         "TickerInput",
         {
@@ -122,7 +114,7 @@ def ticker_schema(options: BloombergToolsOptions) -> type[BaseModel]:
 
 
 def futures_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = _text(options)
+    text = bounded_text(options)
     date_parts: Fields = {"year": (_YEAR, ...), "month": (_MONTH, ...), "day": (_DAY, ...)}
     candidate = create_model(
         "FuturesCandidate",
@@ -152,11 +144,11 @@ def futures_schema(options: BloombergToolsOptions) -> type[BaseModel]:
             },
             "contract_index": {"gen_ticker": (text, ...)},
             "filter_candidates_by_cycle": {
-                "candidates": (_array(candidate, options.max_fields), ...),
+                "candidates": (bounded_array(candidate, options.max_fields), ...),
                 "cycle": (text, ...),
             },
             "filter_valid_contracts": {
-                "contracts": (_array(pair, options.max_fields), ...),
+                "contracts": (bounded_array(pair, options.max_fields), ...),
                 **date_parts,
             },
             "get_futures_months": {},
@@ -165,7 +157,7 @@ def futures_schema(options: BloombergToolsOptions) -> type[BaseModel]:
 
 
 def cdx_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    ticker = (_text(options), ...)
+    ticker = (bounded_text(options), ...)
     recovery = (
         Annotated[
             float | None,
@@ -192,22 +184,22 @@ def cdx_schema(options: BloombergToolsOptions) -> type[BaseModel]:
 
 
 def currency_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = (_text(options), ...)
+    text = (bounded_text(options), ...)
     return _action_schema(
         "CurrencyInput",
         {
             "build_fx_pair": {"from_ccy": text, "to_ccy": text},
             "same_currency": {"ccy1": text, "ccy2": text},
-            "currencies_needing_conversion": {"currencies": (_strings(options), ...), "target": text},
+            "currencies_needing_conversion": {"currencies": (bounded_strings(options), ...), "target": text},
         },
     )
 
 
 def bql_builder_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = _text(options)
+    text = bounded_text(options)
     equity = Annotated[text, AfterValidator(equity_ticker)]
     field = Annotated[text, AfterValidator(field_expression)]
-    extra_fields = (_array(field, options.max_fields, minimum=0), Field(default_factory=list))
+    extra_fields = (bounded_array(field, options.max_fields, minimum=0), Field(default_factory=list))
     return _action_schema(
         "BqlBuilderInput",
         {
@@ -229,7 +221,7 @@ def _market_rule_input(value: BaseModel) -> BaseModel:
 
 
 def market_session_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = _text(options)
+    text = bounded_text(options)
     optional = _optional(text)
     market = {"mic": optional, "exch_code": optional}
     return _action_schema(
@@ -257,20 +249,20 @@ def yas_overrides_schema(options: BloombergToolsOptions) -> type[BaseModel]:
     return create_model(
         "YasOverridesInput",
         __base__=ToolInput,
-        settle_dt=_optional(_text(options)),
+        settle_dt=_optional(bounded_text(options)),
         yield_type=_optional(Annotated[int, Field(strict=True, ge=1, le=9)]),
-        spread=(_FINITE | None, Field(default=None, description="Spread in basis points: 100 means 100 bps.")),
-        yield_val=(_FINITE | None, Field(default=None, description="Yield in percentage points: 4.5 means 4.5%.")),
+        spread=(FiniteNumber | None, Field(default=None, description="Spread in basis points: 100 means 100 bps.")),
+        yield_val=(FiniteNumber | None, Field(default=None, description="Yield in percentage points: 4.5 means 4.5%.")),
         price=(
-            _FINITE | None,
+            FiniteNumber | None,
             Field(default=None, description="Price in the security's Bloomberg quotation convention."),
         ),
-        benchmark=_optional(_text(options)),
+        benchmark=_optional(bounded_text(options)),
     )
 
 
 def constants_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = _text(options)
+    text = bounded_text(options)
     return _action_schema(
         "ConstantsInput",
         {
@@ -293,18 +285,20 @@ def constants_schema(options: BloombergToolsOptions) -> type[BaseModel]:
 
 
 def _pair_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    return create_model("StringPair", __base__=ToolInput, key=(_text(options), ...), value=(_text(options), ...))
+    return create_model(
+        "StringPair", __base__=ToolInput, key=(bounded_text(options), ...), value=(bounded_text(options), ...)
+    )
 
 
 def columns_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    columns = (_strings(options), ...)
+    columns = (bounded_strings(options), ...)
     return _action_schema(
         "ColumnsInput",
         {
             "rename_dividend_columns": {"columns": columns},
             "rename_etf_columns": {"columns": columns},
             "build_earning_header_rename": {
-                "header_row": (_array(_pair_schema(options), options.max_fields), ...),
+                "header_row": (bounded_array(_pair_schema(options), options.max_fields), ...),
                 "data_columns": columns,
             },
         },
@@ -324,8 +318,8 @@ def calculate_schema(options: BloombergToolsOptions) -> type[BaseModel]:
         "CalculateInput",
         __base__=CalculateInput,
         operation=(Literal["calculate_level_percentages"], ...),
-        values=(_array(_FINITE | None, options.max_fields), ...),
-        levels=(_array(level | None, options.max_fields), ...),
+        values=(bounded_array(FiniteNumber | None, options.max_fields), ...),
+        levels=(bounded_array(level | None, options.max_fields), ...),
     )
 
 
@@ -336,24 +330,17 @@ def _chart_scalar(value: Any) -> Any:
 
 
 def chart_spec_schema(options: BloombergToolsOptions) -> type[BaseModel]:
-    text = _text(options)
-    key = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=options.max_string_chars)]
-    scalar = (
-        Annotated[str, StringConstraints(strict=True, max_length=options.max_string_chars)]
-        | Annotated[int, Field(strict=True)]
-        | _FINITE
-        | Annotated[bool, Field(strict=True)]
-        | None
-    )
-    scalar = Annotated[scalar, BeforeValidator(_chart_scalar)]
-    row = Annotated[dict[key, scalar], Field(min_length=1, max_length=options.max_fields)]
+    text = bounded_text(options)
+    key = bounded_text(options, trim=False)
+    scalar = Annotated[bounded_primitive(options, minimum=0, trim=False) | None, BeforeValidator(_chart_scalar)]
+    row = bounded_map(key, scalar, options.max_fields, minimum=1, trim_keys=False)
     fields: Fields = {
-        "source": (Literal["bdh", "bdib", "holdings", "depth", "rows"], ...),
-        "rows": (_array(row, options.max_rows), ...),
+        "source": (ChartSource, ...),
+        "rows": (bounded_array(row, options.max_rows), ...),
         "renderer": (Literal["vega-lite"], "vega-lite"),
-        "chart": _optional(Literal["line", "area", "bar", "scatter", "candlestick", "depth"]),
+        "chart": _optional(ChartKind),
         "title": _optional(text),
-        "y_fields": _optional(_strings(options)),
+        "y_fields": _optional(bounded_strings(options)),
         "max_points": _optional(Annotated[int, Field(strict=True, ge=1, le=options.max_rows)]),
     }
     for field in (

@@ -2,35 +2,32 @@ import * as z from "zod/v3";
 
 import type { OverflowPolicy } from "./_defs_gen";
 import {
-  FORMAT_BY_NAME,
-  FORMATS,
+  HISTORICAL_FORMATS,
+  MAX_BLOOMBERG_EID,
+  MAX_ENTITLEMENT_EIDS,
   OVERFLOW_POLICIES,
   OVERFLOW_POLICY_DEFAULT,
   OVERFLOW_POLICY_DOCS,
   OVERFLOW_POLICY_VALUES,
+  REFERENCE_FORMATS,
 } from "./_defs_gen";
+import {
+  boundedArray,
+  nonEmptyString,
+  overridesMap,
+  primitiveMap,
+  stringArray,
+  type OverrideMap,
+  type PrimitiveMap,
+  type ZodOutput,
+} from "./bounded-schemas";
 
 import type { NormalizedBloombergToolsOptions } from "./options";
-import { MAX_BLOOMBERG_EID, MAX_ENTITLEMENT_EIDS } from "./result-limits";
-type ZodOutput<T> = z.ZodType<T, z.ZodTypeDef, unknown>;
 
-export type PrimitiveValue = string | number | boolean;
-export type PrimitiveMap = Record<string, PrimitiveValue>;
-export type OverrideMap = Record<string, PrimitiveValue | PrimitiveMap>;
-
-// Reference data has no date axis, so the semi-long shape is meaningless there;
-// this is a deliberate narrowing of the generated set, not a separate vocabulary.
-export const REFERENCE_FORMATS = [
-  FORMAT_BY_NAME.LONG,
-  FORMAT_BY_NAME.LONG_TYPED,
-  FORMAT_BY_NAME.LONG_WITH_METADATA,
-] as const;
-
-export const HISTORICAL_FORMATS = FORMATS;
-
-export type ReferenceFormat = (typeof REFERENCE_FORMATS)[number];
-export type HistoricalFormat = (typeof HISTORICAL_FORMATS)[number];
-export interface ReferenceCallOptions {
+type ReferenceFormat = (typeof REFERENCE_FORMATS)[number];
+type HistoricalFormat = (typeof HISTORICAL_FORMATS)[number];
+interface ReferenceCallOptions {
+  readonly securities: readonly string[];
   readonly overrides?: OverrideMap;
   readonly kwargs?: PrimitiveMap;
   readonly returnEids?: boolean;
@@ -38,27 +35,20 @@ export interface ReferenceCallOptions {
 }
 
 export interface BdpInput extends ReferenceCallOptions {
-  readonly securities: readonly string[];
   readonly fields: readonly string[];
   readonly format?: ReferenceFormat;
   readonly includeSecurityErrors?: boolean;
 }
 
 export interface BdsInput extends ReferenceCallOptions {
-  readonly securities: readonly string[];
   readonly field: string;
 }
 
-export interface BdhInput {
-  readonly securities: readonly string[];
+export interface BdhInput extends ReferenceCallOptions {
   readonly fields: readonly string[];
   readonly start: string;
   readonly end: string;
-  readonly overrides?: OverrideMap;
-  readonly kwargs?: PrimitiveMap;
   readonly format?: HistoricalFormat;
-  readonly validateFields?: boolean;
-  readonly returnEids?: boolean;
 }
 
 export interface BdibInput {
@@ -150,7 +140,6 @@ export interface CorporateBondsInput {
   readonly ticker: string;
   readonly ccy?: string;
   readonly fields?: readonly string[];
-  readonly activeOnly?: boolean;
 }
 
 export interface IndexMembersInput {
@@ -234,12 +223,6 @@ const MIN_NUMERIC_BBG_DATE = 19_000_101;
 const MAX_NUMERIC_BBG_DATE = 29_991_231;
 /** Smallest numeric value interpreted as epoch milliseconds (~1973-03-03). */
 const MIN_EPOCH_MS = 100_000_000_000;
-
-const primitiveSchema = z.union([
-  z.string().transform((value) => value.trim()),
-  z.number(),
-  z.boolean(),
-]);
 
 function dateFromParts(year: string, month: string, day: string): string {
   const formatted = `${year}${month}${day}`;
@@ -337,39 +320,6 @@ function normalizeDateTime(value: string | number): string {
   return text.replace(" ", "T");
 }
 
-function nonEmptyString(
-  tool: string,
-  field: string,
-  maxChars: number,
-  example: string,
-): ZodOutput<string> {
-  return z
-    .string()
-    .transform((value) => value.trim())
-    .pipe(
-      z
-        .string()
-        .min(1, `${tool}: ${field} must be a non-empty string. Example: ${example}`)
-        .max(
-          maxChars,
-          `${tool}: ${field} is too long; expected at most ${maxChars} characters. Example: ${example}`,
-        ),
-    );
-}
-
-function stringArray(
-  tool: string,
-  field: string,
-  maxItems: number,
-  maxChars: number,
-  example: string,
-): ZodOutput<string[]> {
-  return z
-    .array(nonEmptyString(tool, field, maxChars, example))
-    .min(1, `${tool}: ${field} must contain at least one non-empty string. Example: ${example}`)
-    .max(maxItems, `${tool}: ${field} can contain at most ${maxItems} values`);
-}
-
 /**
  * Reports a normalization failure as a zod issue. Errors *thrown* from
  * transforms reach LangChain as bare exceptions, which it masks with a
@@ -387,93 +337,6 @@ function normalizationIssue(
     message: `${tool}: ${field}: ${error instanceof Error ? error.message : String(error)}`,
   });
   return z.NEVER;
-}
-
-function primitiveMap(tool: string, field: string): ZodOutput<PrimitiveMap | undefined> {
-  return z
-    .record(z.string().min(1), primitiveSchema)
-    .optional()
-    .transform((value, context) => {
-      if (value === undefined) {
-        return undefined;
-      }
-      const normalized: PrimitiveMap = {};
-      for (const [key, entry] of Object.entries(value)) {
-        const normalizedKey = key.trim();
-        if (normalizedKey.length === 0) {
-          return normalizationIssue(context, tool, field, new TypeError("contains an empty key"));
-        }
-        if (typeof entry === "string" && entry.length === 0) {
-          return normalizationIssue(
-            context,
-            tool,
-            field,
-            new TypeError(`${normalizedKey} must not be an empty string`),
-          );
-        }
-        normalized[normalizedKey] = entry;
-      }
-      return normalized;
-    });
-}
-
-function overridesMap(tool: string, field: string): ZodOutput<OverrideMap | undefined> {
-  return z
-    .record(
-      z.string().min(1),
-      z.union([primitiveSchema, z.record(z.string().min(1), primitiveSchema)]),
-    )
-    .optional()
-    .transform((value, context) => {
-      if (value === undefined) {
-        return undefined;
-      }
-      const normalized: OverrideMap = {};
-      for (const [key, entry] of Object.entries(value)) {
-        const normalizedKey = key.trim();
-        if (normalizedKey.length === 0) {
-          return normalizationIssue(context, tool, field, new TypeError("contains an empty key"));
-        }
-        if (typeof entry !== "object") {
-          if (typeof entry === "string" && entry.length === 0) {
-            return normalizationIssue(
-              context,
-              tool,
-              field,
-              new TypeError(`${normalizedKey} must not be an empty string`),
-            );
-          }
-          normalized[normalizedKey] = entry;
-          continue;
-        }
-
-        const normalizedOverrides: PrimitiveMap = {};
-        for (const [overrideKey, overrideValue] of Object.entries(entry)) {
-          const normalizedOverrideKey = overrideKey.trim();
-          if (normalizedOverrideKey.length === 0) {
-            return normalizationIssue(
-              context,
-              tool,
-              field,
-              new TypeError(`${normalizedKey} contains an empty override key`),
-            );
-          }
-          if (typeof overrideValue === "string" && overrideValue.length === 0) {
-            return normalizationIssue(
-              context,
-              tool,
-              field,
-              new TypeError(
-                `${normalizedKey}.${normalizedOverrideKey} must not be an empty string`,
-              ),
-            );
-          }
-          normalizedOverrides[normalizedOverrideKey] = overrideValue;
-        }
-        normalized[normalizedKey] = normalizedOverrides;
-      }
-      return normalized;
-    });
 }
 
 function dateField(tool: string, field: string): ZodOutput<string> {
@@ -560,27 +423,23 @@ function overflowPolicy(tool: string): ZodOutput<OverflowPolicy | undefined> {
     );
 }
 
-export function createBdpSchema(options: NormalizedBloombergToolsOptions): ZodOutput<BdpInput> {
-  const tool = "xbbg_bdp";
-  return z.object({
-    fields: stringArray(
-      tool,
-      "fields",
-      options.maxFields,
-      options.maxStringChars,
-      '["<FIELD>"]',
-    ).describe("Bloomberg field mnemonics to retrieve. Use xbbg_bflds first if uncertain."),
-    format: referenceFormat(tool).describe(
-      "JSON output shape. Usually omit; use long_typed if downstream needs Bloomberg value types.",
-    ),
-    includeSecurityErrors: z
-      .boolean()
-      .optional()
-      .describe("Include Bloomberg security errors in the response when supported."),
-    kwargs: primitiveMap(tool, "kwargs").describe(
+interface ReferenceRequestShape {
+  readonly kwargs: ZodOutput<PrimitiveMap | undefined>;
+  readonly overrides: ZodOutput<OverrideMap | undefined>;
+  readonly returnEids: ZodOutput<boolean | undefined>;
+  readonly securities: ZodOutput<string[]>;
+  readonly validateFields: ZodOutput<boolean | undefined>;
+}
+
+function referenceRequestFields(
+  tool: string,
+  options: NormalizedBloombergToolsOptions,
+): ReferenceRequestShape {
+  return {
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
     ),
-    overrides: overridesMap(tool, "overrides").describe(
+    overrides: overridesMap(tool, "overrides", options).describe(
       "Bloomberg field overrides. Use primitive values for global overrides and nested primitive maps keyed by exact security for per-security overrides.",
     ),
     returnEids: z
@@ -597,6 +456,27 @@ export function createBdpSchema(options: NormalizedBloombergToolsOptions): ZodOu
       "Securities exactly as the user supplied them: '<TICKER> <MARKET_SECTOR>' for Bloomberg tickers, '/isin/<ISIN>' for raw ISINs, '/cusip/<CUSIP>' for raw CUSIPs. Never invent, guess, or convert identifiers into tickers.",
     ),
     validateFields: z.boolean().optional().describe("Override field validation for this request."),
+  };
+}
+
+export function createBdpSchema(options: NormalizedBloombergToolsOptions): ZodOutput<BdpInput> {
+  const tool = "xbbg_bdp";
+  return z.object({
+    ...referenceRequestFields(tool, options),
+    fields: stringArray(
+      tool,
+      "fields",
+      options.maxFields,
+      options.maxStringChars,
+      '["<FIELD>"]',
+    ).describe("Bloomberg field mnemonics to retrieve. Use xbbg_bflds first if uncertain."),
+    format: referenceFormat(tool).describe(
+      "JSON output shape. Usually omit; use long_typed if downstream needs Bloomberg value types.",
+    ),
+    includeSecurityErrors: z
+      .boolean()
+      .optional()
+      .describe("Include Bloomberg security errors in the response when supported."),
   });
 }
 
@@ -604,6 +484,7 @@ export function createBdhSchema(options: NormalizedBloombergToolsOptions): ZodOu
   const tool = "xbbg_bdh";
   return z
     .object({
+      ...referenceRequestFields(tool, options),
       end: dateField(tool, "end").describe("Required end date. Use YYYY-MM-DD or YYYYMMDD."),
       fields: stringArray(
         tool,
@@ -615,30 +496,7 @@ export function createBdhSchema(options: NormalizedBloombergToolsOptions): ZodOu
       format: historicalFormat(tool).describe(
         "Historical JSON output shape. Use semi_long only when the user asks for a table by date.",
       ),
-      kwargs: primitiveMap(tool, "kwargs").describe(
-        "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
-      ),
-      overrides: overridesMap(tool, "overrides").describe(
-        "Bloomberg overrides. Use primitive values for global overrides and nested primitive maps keyed by exact security for per-security overrides.",
-      ),
-      securities: stringArray(
-        tool,
-        "securities",
-        options.maxSecurities,
-        options.maxStringChars,
-        '["<TICKER> <MARKET_SECTOR>"]',
-      ).describe(
-        "Securities exactly as the user supplied them: '<TICKER> <MARKET_SECTOR>' for Bloomberg tickers, '/isin/<ISIN>' for raw ISINs, '/cusip/<CUSIP>' for raw CUSIPs. Never invent, guess, or convert identifiers into tickers.",
-      ),
       start: dateField(tool, "start").describe("Required start date. Use YYYY-MM-DD or YYYYMMDD."),
-      returnEids: z
-        .boolean()
-        .optional()
-        .describe("Request Bloomberg entitlement IDs and retain them in result metadata."),
-      validateFields: z
-        .boolean()
-        .optional()
-        .describe("Override field validation for this request."),
     })
     .superRefine((value, ctx) => {
       if (value.start > value.end) {
@@ -654,29 +512,10 @@ export function createBdhSchema(options: NormalizedBloombergToolsOptions): ZodOu
 export function createBdsSchema(options: NormalizedBloombergToolsOptions): ZodOutput<BdsInput> {
   const tool = "xbbg_bds";
   return z.object({
+    ...referenceRequestFields(tool, options),
     field: nonEmptyString(tool, "field", options.maxStringChars, "<BULK_FIELD>").describe(
       "Exactly one Bloomberg bulk/table field supplied by the user.",
     ),
-    kwargs: primitiveMap(tool, "kwargs").describe(
-      "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
-    ),
-    overrides: overridesMap(tool, "overrides").describe(
-      "Bloomberg overrides. Use primitive values for global overrides and nested primitive maps keyed by exact security for per-security overrides.",
-    ),
-    returnEids: z
-      .boolean()
-      .optional()
-      .describe("Request Bloomberg entitlement IDs and retain them in result metadata."),
-    securities: stringArray(
-      tool,
-      "securities",
-      options.maxSecurities,
-      options.maxStringChars,
-      '["<INDEX_TICKER> <MARKET_SECTOR>"]',
-    ).describe(
-      "Securities exactly as the user supplied them: '<TICKER> <MARKET_SECTOR>' for Bloomberg tickers, '/isin/<ISIN>' for raw ISINs, '/cusip/<CUSIP>' for raw CUSIPs. Never invent, guess, or convert identifiers into tickers.",
-    ),
-    validateFields: z.boolean().optional().describe("Override field validation for this request."),
   });
 }
 
@@ -694,7 +533,7 @@ export function createBdibSchema(options: NormalizedBloombergToolsOptions): ZodO
       .int(`${tool}: interval must be a positive integer number of minutes. Example: 5`)
       .positive(`${tool}: interval must be greater than zero. Example: 5`)
       .describe("Bar interval in minutes. Must be a positive integer."),
-    kwargs: primitiveMap(tool, "kwargs").describe(
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
     ),
     outputTz: nonEmptyString(tool, "outputTz", options.maxStringChars, "<TIMEZONE>")
@@ -746,7 +585,7 @@ export function createBdtickSchema(
     includeExchangeCodes: includeFlag,
     includeNonPlottableEvents: includeFlag,
     includeRpsCodes: includeFlag,
-    kwargs: primitiveMap(tool, "kwargs").describe(
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced IntradayTickRequest kwargs as flat string/number/boolean values only.",
     ),
     outputTz: nonEmptyString(tool, "outputTz", options.maxStringChars, "<TIMEZONE>")
@@ -802,7 +641,7 @@ export function createCheckEntitlementsSchema(
 export function createBqlSchema(options: NormalizedBloombergToolsOptions): ZodOutput<BqlInput> {
   const tool = "xbbg_bql";
   return z.object({
-    kwargs: primitiveMap(tool, "kwargs").describe(
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
     ),
     query: nonEmptyString(tool, "query", options.maxBqlQueryChars, "<BQL_QUERY>").describe(
@@ -847,10 +686,10 @@ export function createBqrSchema(options: NormalizedBloombergToolsOptions): ZodOu
 export function createBsrchSchema(options: NormalizedBloombergToolsOptions): ZodOutput<BsrchInput> {
   const tool = "xbbg_bsrch";
   return z.object({
-    kwargs: primitiveMap(tool, "kwargs").describe(
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Search-grid kwargs as flat string/number/boolean values only.",
     ),
-    overrides: primitiveMap(tool, "overrides").describe(
+    overrides: primitiveMap(tool, "overrides", options).describe(
       "Search-grid overrides as flat string/number/boolean values only.",
     ),
     searchSpec: nonEmptyString(
@@ -873,7 +712,7 @@ export function createBfldsSchema(options: NormalizedBloombergToolsOptions): Zod
         .describe(
           "Specific field mnemonics to inspect. Provide either fields or searchSpec, not both.",
         ),
-      kwargs: primitiveMap(tool, "kwargs").describe(
+      kwargs: primitiveMap(tool, "kwargs", options).describe(
         "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
       ),
       searchSpec: nonEmptyString(
@@ -907,10 +746,10 @@ export function createBeqsSchema(options: NormalizedBloombergToolsOptions): ZodO
     group: nonEmptyString(tool, "group", options.maxStringChars, "<BEQS_GROUP>")
       .optional()
       .describe("Bloomberg BEQS group when required by the screen."),
-    kwargs: primitiveMap(tool, "kwargs").describe(
+    kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced BEQS request kwargs as flat string/number/boolean values only.",
     ),
-    overrides: primitiveMap(tool, "overrides").describe(
+    overrides: primitiveMap(tool, "overrides", options).describe(
       "BEQS overrides as flat string/number/boolean values only.",
     ),
     screen: nonEmptyString(tool, "screen", options.maxStringChars, "<BEQS_SCREEN>").describe(
@@ -965,9 +804,14 @@ export function createPreferredsSchema(
     ).describe(
       "The issuer's common equity ticker as '<TICKER> <MARKET_SECTOR>', never a preferred ('Pfd') ticker and never a guessed one. Resolve a supplied ISIN/CUSIP with xbbg_resolve_isins first.",
     ),
-    fields: z
-      .array(nonEmptyString(tool, "fields", options.maxStringChars, '["<FIELD>"]'))
-      .max(options.maxFields, `${tool}: fields can contain at most ${options.maxFields} values`)
+    fields: boundedArray(
+      nonEmptyString(tool, "fields", options.maxStringChars, '["<FIELD>"]'),
+      options.maxFields,
+      {
+        minimum: 0,
+        maximumMessage: `${tool}: fields can contain at most ${options.maxFields} values`,
+      },
+    )
       .transform((fields) => (fields.length === 0 ? undefined : fields))
       .optional()
       .describe("Optional fields to include in the preferreds recipe result."),
@@ -979,10 +823,6 @@ export function createCorporateBondsSchema(
 ): ZodOutput<CorporateBondsInput> {
   const tool = "xbbg_corporate_bonds";
   return z.object({
-    activeOnly: z
-      .boolean()
-      .optional()
-      .describe("Restrict to active bonds. Defaults to true in @xbbg/core."),
     ccy: nonEmptyString(tool, "ccy", options.maxStringChars, "<CCY>")
       .optional()
       .describe("Optional currency filter supplied by the user."),
@@ -1079,9 +919,14 @@ export function createAuctionSnapshotSchema(
   const tool = "xbbg_auction_snapshot";
   return z.object({
     ...venueResolutionFields(tool, options),
-    fields: z
-      .array(nonEmptyString(tool, "fields", options.maxStringChars, '["IMBALANCE_INDIC_RT"]'))
-      .max(options.maxFields, `${tool}: fields can contain at most ${options.maxFields} values`)
+    fields: boundedArray(
+      nonEmptyString(tool, "fields", options.maxStringChars, '["IMBALANCE_INDIC_RT"]'),
+      options.maxFields,
+      {
+        minimum: 0,
+        maximumMessage: `${tool}: fields can contain at most ${options.maxFields} values`,
+      },
+    )
       .optional()
       .describe(
         "Optional auction fields in requested column order. Omit or pass [] for AuctionFields.default. Values are returned only for validated venues; unresolved, unsupported, or mismatched rows retain status/error and have null field values.",
