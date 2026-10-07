@@ -22,6 +22,8 @@ src/
 │
 ├── Session API
 │   ├── session.rs      Session lifecycle (create, start, stop, events)
+│   ├── async_session.rs Callback-driven session lifecycle
+│   ├── session_operations.rs Private shared FFI marshalling and error handling
 │   ├── service.rs      Service wrapper (open, create request, schema)
 │   ├── request.rs      Request builder + schema validation
 │   ├── options.rs      SessionOptions (connection, tuning, keep-alive)
@@ -43,6 +45,16 @@ src/
 | Feature | Description |
 |---------|-------------|
 | `live` (default) | Real Bloomberg SDK via `blpapi-sys` |
+| `test-support` | SDK-backed synthetic message fixtures; no Bloomberg session needed |
+
+The `live` feature is required to build this crate; it selects the SDK, not
+whether tests connect to Bloomberg. `cargo test --workspace` runs offline tests
+and leaves connection-dependent tests compiled but ignored. With a configured
+Bloomberg session, run those tests with:
+
+```sh
+cargo test -p xbbg_core --test live -- --ignored
+```
 
 ## Design principles
 

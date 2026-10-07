@@ -1991,18 +1991,12 @@ impl JsEngine {
         ticker: String,
         ccy: Option<String>,
         fields: Option<Vec<String>>,
-        active_only: Option<bool>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch = xbbg_recipes::fixed_income::recipe_corporate_bonds(
-            &engine,
-            ticker,
-            ccy,
-            fields,
-            active_only.unwrap_or(true),
-        )
-        .await
-        .map_err(recipe_error_to_napi)?;
+        let batch =
+            xbbg_recipes::fixed_income::recipe_corporate_bonds(&engine, ticker, ccy, fields)
+                .await
+                .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 

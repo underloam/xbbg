@@ -36,8 +36,4 @@ pub enum ArrowCoreError {
     /// A supplied column has a different length than the table row count.
     #[error("column length {actual} does not match table row count {expected}")]
     ColumnLengthMismatch { actual: usize, expected: usize },
-
-    /// A sort direction string did not match the accepted aliases.
-    #[error("unsupported sort direction for {column}: {direction}")]
-    InvalidSortDirection { column: String, direction: String },
 }

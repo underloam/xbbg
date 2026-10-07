@@ -507,20 +507,18 @@ fn ext_build_preferreds_query(equity_ticker: &str, extra_fields: Vec<String>) ->
 ///     ticker: Company ticker without suffix (e.g., "AAPL").
 ///     ccy: Currency filter (None for all currencies).
 ///     extra_fields: Additional fields beyond default (id).
-///     active_only: If true, only return active bonds.
 ///
 /// Returns: Complete BQL query string.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-#[pyo3(signature = (ticker, ccy=None, extra_fields=vec![], active_only=true))]
+#[pyo3(signature = (ticker, ccy=None, extra_fields=vec![]))]
 fn ext_build_corporate_bonds_query(
     ticker: &str,
     ccy: Option<&str>,
     extra_fields: Vec<String>,
-    active_only: bool,
 ) -> String {
     let refs = string_refs(&extra_fields);
-    build_corporate_bonds_query(ticker, ccy, &refs, active_only)
+    build_corporate_bonds_query(ticker, ccy, &refs)
 }
 
 /// Build a BQL query for ETF holdings.

@@ -1,6 +1,5 @@
 //! Bloomberg session management
 
-use std::ffi::CString;
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
@@ -12,6 +11,7 @@ use crate::identity::Identity;
 use crate::message::Message;
 use crate::request::Request;
 use crate::service::Service;
+use crate::session_operations::SessionOperations;
 use crate::subscription::SubscriptionList;
 
 // Re-export SessionOptions from options module
@@ -85,6 +85,12 @@ pub struct Session {
 
 impl Session {
     const STARTUP_POLL_TIMEOUT_MS: u32 = 250;
+
+    fn operations(&self) -> SessionOperations<'_> {
+        // SAFETY: the borrowed handle outlives each operation, and Session's
+        // !Send + !Sync contract keeps calls on its owning thread.
+        unsafe { SessionOperations::new(&self.ptr) }
+    }
 
     /// Create a new session with the given options.
     ///
@@ -282,22 +288,7 @@ impl Session {
     /// # Arguments
     /// * `name` - The service name (e.g., "//blp/refdata")
     pub fn open_service(&self, name: &str) -> Result<()> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe { crate::ffi::blpapi_Session_openService(self.ptr, c_name.as_ptr()) };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Ok(())
+        self.operations().open_service(name)
     }
 
     /// Open a service asynchronously.
@@ -316,27 +307,7 @@ impl Session {
     /// * `cid`  - Correlation ID to tag the reply with. Use `CorrelationId::Int`
     ///   with a value distinct from any in-flight subscription / request CID.
     pub fn open_service_async(&self, name: &str, cid: &CorrelationId) -> Result<CorrelationId> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        let mut cid_ffi = cid.to_ffi();
-
-        // SAFETY: Calling the Bloomberg API with valid pointers. The cid_ffi
-        // out-parameter is filled with the actual CID assigned by the SDK.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_openServiceAsync(self.ptr, c_name.as_ptr(), &mut cid_ffi)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations().open_service_async(name, cid)
     }
 
     /// Get a service handle.
@@ -344,26 +315,7 @@ impl Session {
     /// The service must have been opened first. The returned handle is borrowed
     /// from this session and cannot outlive it.
     pub fn get_service(&self, name: &str) -> Result<Service<'_>> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        let mut service_ptr: *mut crate::ffi::blpapi_Service_t = std::ptr::null_mut();
-
-        // SAFETY: We pass a valid session pointer, service name, and out-parameter.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_getService(self.ptr, &mut service_ptr, c_name.as_ptr())
-        };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Service::from_raw(service_ptr)
+        self.operations().get_service(name)
     }
 
     /// Send a request
@@ -391,48 +343,7 @@ impl Session {
         cid: Option<&CorrelationId>,
         label: Option<&str>,
     ) -> Result<CorrelationId> {
-        // Prepare correlation ID
-        let mut cid_ffi = match cid {
-            Some(c) => c.to_ffi(),
-            None => CorrelationId::default().to_ffi(),
-        };
-
-        // Get identity pointer
-        let identity_ptr = match identity {
-            Some(id) => id.as_ptr(),
-            None => std::ptr::null_mut(),
-        };
-
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(value) => {
-                let cstring = CString::new(value).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid request label: {e}"),
-                })?;
-                (cstring.as_ptr(), value.len() as i32, Some(cstring))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_sendRequest(
-                self.ptr,
-                req.as_ptr(),
-                &mut cid_ffi,
-                identity_ptr,
-                std::ptr::null_mut(), // eventQueue (null = use session's queue)
-                label_ptr,
-                label_len,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_sendRequest failed with rc={}", rc),
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations().send_request(req, identity, cid, label)
     }
 
     /// Subscribe to market data
@@ -444,35 +355,7 @@ impl Session {
     /// # Returns
     /// Ok(()) on success, Err on failure
     pub fn subscribe(&self, subs: &SubscriptionList, label: Option<&str>) -> Result<()> {
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(l) => {
-                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid label: {}", e),
-                })?;
-                let len = l.len() as i32;
-                (cs.as_ptr(), len, Some(cs))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_subscribe(
-                self.ptr,
-                subs.as_ptr(),
-                std::ptr::null(), // identity
-                label_ptr,
-                label_len,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_subscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations().subscribe(subs, None, label, "label")
     }
 
     /// Update existing subscriptions, matched by their correlation IDs.
@@ -481,29 +364,7 @@ impl Session {
     /// Use the complete desired list, not only newly added fields.
     /// `label` is an optional diagnostic label, as in [`Session::subscribe`].
     pub fn resubscribe(&self, subs: &SubscriptionList, label: Option<&str>) -> Result<()> {
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(l) => {
-                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid label: {}", e),
-                })?;
-                (cs.as_ptr(), l.len() as i32, Some(cs))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: valid session/list pointers; the optional label remains alive
-        // for the duration of the SDK call.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_resubscribe(self.ptr, subs.as_ptr(), label_ptr, label_len)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_resubscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations().resubscribe(subs, label, "label")
     }
 
     /// Unsubscribe from market data
@@ -514,66 +375,19 @@ impl Session {
     /// # Returns
     /// Ok(()) on success, Err on failure
     pub fn unsubscribe(&self, subs: &SubscriptionList) -> Result<()> {
-        // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_unsubscribe(
-                self.ptr,
-                subs.as_ptr(),
-                std::ptr::null(), // requestLabel
-                0,                // requestLabelLen
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_unsubscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations().unsubscribe(subs)
     }
 
     pub fn cancel(&self, cid: &CorrelationId) -> Result<()> {
-        let cid_ffi = cid.to_ffi();
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_cancel(self.ptr, &cid_ffi, 1, std::ptr::null(), 0)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_cancel failed with rc={rc}"),
-            });
-        }
-
-        Ok(())
+        self.operations().cancel(cid)
     }
 
     pub fn create_identity(&self) -> Result<Identity> {
-        let identity_ptr = unsafe { crate::ffi::blpapi_Session_createIdentity(self.ptr) };
-        Identity::from_raw(identity_ptr)
+        self.operations().create_identity()
     }
 
     pub fn generate_token(&self, cid: Option<&CorrelationId>) -> Result<CorrelationId> {
-        let mut cid_ffi = match cid {
-            Some(c) => c.to_ffi(),
-            None => CorrelationId::default().to_ffi(),
-        };
-
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_generateToken(
-                self.ptr,
-                &mut cid_ffi,
-                std::ptr::null_mut(), // eventQueue (null = use session's queue)
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_generateToken failed with rc={rc}"),
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations().generate_token(cid)
     }
 
     pub fn send_authorization_request(
@@ -582,30 +396,8 @@ impl Session {
         identity: &mut Identity,
         cid: Option<&CorrelationId>,
     ) -> Result<CorrelationId> {
-        let mut cid_ffi = match cid {
-            Some(c) => c.to_ffi(),
-            None => CorrelationId::default().to_ffi(),
-        };
-
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_sendAuthorizationRequest(
-                self.ptr,
-                request.as_ptr(),
-                identity.as_ptr(),
-                &mut cid_ffi,
-                std::ptr::null_mut(), // eventQueue
-                std::ptr::null(),     // requestLabel
-                0,                    // requestLabelLen
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_sendAuthorizationRequest failed with rc={rc}"),
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations()
+            .send_authorization_request(request, identity, cid)
     }
 
     pub fn subscribe_with_identity(
@@ -614,34 +406,8 @@ impl Session {
         identity: &Identity,
         label: Option<&str>,
     ) -> Result<()> {
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(l) => {
-                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid label: {e}"),
-                })?;
-                let len = l.len() as i32;
-                (cs.as_ptr(), len, Some(cs))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_subscribe(
-                self.ptr,
-                subs.as_ptr(),
-                identity.as_ptr(),
-                label_ptr,
-                label_len,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_subscribe (with identity) failed with rc={rc}"),
-            });
-        }
-
-        Ok(())
+        self.operations()
+            .subscribe(subs, Some(identity), label, "label")
     }
 }
 

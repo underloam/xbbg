@@ -1243,8 +1243,8 @@ mod tests {
         </ServiceDefinition>"#;
         // The JSON formatter rejects incomplete Datetime strings; construct the
         // SDK's actual time-only Datetime representation with its typed setter.
-        let datetime = blpapi_sys::blpapi_HighPrecisionDatetime_t {
-            datetime: blpapi_sys::blpapi_Datetime_t {
+        let datetime = xbbg_core::ffi::SdkHighPrecisionDatetime {
+            datetime: xbbg_core::ffi::SdkDatetime {
                 parts: 112, // hour, minute and second, with no date bits
                 hours: 15,
                 minutes: 59,

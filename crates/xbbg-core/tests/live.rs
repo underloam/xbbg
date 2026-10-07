@@ -1,14 +1,12 @@
 //! Live integration tests for xbbg-core.
 //!
-//! These tests require a Bloomberg connection and are gated behind the `live` feature.
+//! Tests needing a Bloomberg connection are ignored by default.
 //!
-//! Run with: cargo test --package xbbg_core --features live -- --nocapture
+//! Run live tests with: cargo test --package xbbg_core --test live -- --ignored --nocapture
 //!
 //! Environment variables:
 //! - BLP_HOST: Bloomberg API host (default: 127.0.0.1)
 //! - BLP_PORT: Bloomberg API port (default: 8194)
-
-#![cfg(feature = "live")]
 
 use std::time::{Duration, Instant};
 use xbbg_core::{EventType, Name, Session, SessionOptions};
@@ -68,6 +66,7 @@ fn live_builds() {
 }
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_session_start_stop() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -76,6 +75,7 @@ fn live_session_start_stop() {
 }
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_open_refdata_service() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -95,6 +95,7 @@ fn live_open_refdata_service() {
 // ============================================================================
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_bdp_single_field() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -161,6 +162,7 @@ fn live_bdp_single_field() {
 }
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_bdp_multiple_fields() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -242,6 +244,7 @@ fn live_bdp_multiple_fields() {
 // ============================================================================
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_get_value_dynamic_extraction() {
     use xbbg_core::Value;
 
@@ -347,6 +350,7 @@ fn live_name_cache_works() {
 // ============================================================================
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_schema_introspection_service() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -379,6 +383,7 @@ fn live_schema_introspection_service() {
 }
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_schema_introspection_operations() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -455,6 +460,7 @@ fn live_schema_introspection_operations() {
 }
 
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_schema_introspection_element_details() {
     let sess = create_session();
     sess.start().expect("failed to start session");
@@ -515,6 +521,7 @@ fn live_schema_introspection_element_details() {
 /// token generation; SAPI/B-PIPE succeeds and yields a real seat type and
 /// entitlement answers. Prints every step — run with --nocapture.
 #[test]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 fn live_probe_classic_token_authorization() {
     use xbbg_core::CorrelationId;
 

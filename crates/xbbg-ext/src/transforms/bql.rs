@@ -70,7 +70,6 @@ pub fn build_preferreds_query(equity_ticker: &str, extra_fields: &[&str]) -> Str
 /// * `ccy` - Currency filter (None for all currencies).
 /// * `extra_fields` - Optional additional fields to retrieve.
 ///   Default field is: id.
-/// * `active_only` - If true, only return active bonds.
 ///
 /// # Returns
 ///
@@ -81,13 +80,13 @@ pub fn build_preferreds_query(equity_ticker: &str, extra_fields: &[&str]) -> Str
 /// ```
 /// use xbbg_ext::transforms::bql::build_corporate_bonds_query;
 ///
-/// let query = build_corporate_bonds_query("AAPL", Some("USD"), &[], true);
+/// let query = build_corporate_bonds_query("AAPL", Some("USD"), &[]);
 /// assert!(query.contains("debt("));
 /// assert!(query.contains("AAPL US Equity"));
 /// assert!(query.contains("Corporates"));
 /// assert!(query.contains("CRNCY=='USD'"));
 ///
-/// let query2 = build_corporate_bonds_query("9984 JT Equity", None, &["name", "cpn"], false);
+/// let query2 = build_corporate_bonds_query("9984 JT Equity", None, &["name", "cpn"]);
 /// assert!(query2.contains("9984 JT Equity"));
 /// assert!(!query2.contains("CRNCY"));
 /// assert!(query2.contains("name"));
@@ -96,7 +95,6 @@ pub fn build_corporate_bonds_query(
     ticker: &str,
     ccy: Option<&str>,
     extra_fields: &[&str],
-    active_only: bool,
 ) -> String {
     // Normalize ticker — append " US Equity" if no suffix provided
     let equity_ticker = if ticker.contains(' ') {
@@ -124,11 +122,6 @@ pub fn build_corporate_bonds_query(
     }
 
     let filter_str = conditions.join(" AND ");
-
-    let _active = if active_only { "active" } else { "all" };
-    // Note: debt() doesn't take an active/all parameter like bondsuniv.
-    // Active filtering is handled via the filter conditions.
-    // TODO: add active_only filter condition if Bloomberg supports it in debt()
 
     format!(
         "get({}) for(filter(debt(['{}'], CONSOLIDATEDUPLICATES='N'), {}))",
@@ -228,7 +221,7 @@ mod tests {
 
     #[test]
     fn test_build_corporate_bonds_query_basic() {
-        let query = build_corporate_bonds_query("AAPL", Some("USD"), &[], true);
+        let query = build_corporate_bonds_query("AAPL", Some("USD"), &[]);
         assert!(query.contains("debt("));
         assert!(query.contains("AAPL US Equity"));
         assert!(query.contains("Corporates"));
@@ -237,20 +230,20 @@ mod tests {
 
     #[test]
     fn test_build_corporate_bonds_query_no_ccy() {
-        let query = build_corporate_bonds_query("AAPL", None, &[], true);
+        let query = build_corporate_bonds_query("AAPL", None, &[]);
         assert!(!query.contains("CRNCY"));
     }
 
     #[test]
     fn test_build_corporate_bonds_query_intl_ticker() {
-        let query = build_corporate_bonds_query("9984 JT Equity", None, &[], true);
+        let query = build_corporate_bonds_query("9984 JT Equity", None, &[]);
         assert!(query.contains("debt(['9984 JT Equity']"));
         assert!(!query.contains("TICKER"));
     }
 
     #[test]
     fn test_build_corporate_bonds_query_with_extra_fields() {
-        let query = build_corporate_bonds_query("MSFT", Some("EUR"), &["name"], false);
+        let query = build_corporate_bonds_query("MSFT", Some("EUR"), &["name"]);
         assert!(query.contains("debt("));
         assert!(query.contains("MSFT US Equity"));
         assert!(query.contains("CRNCY=='EUR'"));

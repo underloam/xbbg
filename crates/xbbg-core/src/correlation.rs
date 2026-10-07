@@ -57,14 +57,6 @@ impl CorrelationId {
         })
     }
 
-    /// Get the integer value if this is an Int variant.
-    pub fn as_int(&self) -> Option<i64> {
-        match self {
-            CorrelationId::Int(v) => Some(*v),
-            _ => None,
-        }
-    }
-
     /// Get the pointer value if this is a Ptr variant.
     pub fn as_ptr(&self) -> Option<*mut c_void> {
         match self {

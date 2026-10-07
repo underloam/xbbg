@@ -40,6 +40,7 @@ pub mod request;
 pub mod schema;
 pub mod service;
 pub mod session;
+mod session_operations;
 pub mod socks5;
 pub mod subscription;
 pub mod tls;

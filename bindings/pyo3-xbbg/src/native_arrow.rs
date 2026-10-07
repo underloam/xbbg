@@ -45,9 +45,6 @@ fn core_err_to_py(err: ArrowCoreError) -> PyErr {
         }
         ArrowCoreError::ColumnIndexOutOfRange => PyIndexError::new_err("column index out of range"),
         ArrowCoreError::RowIndexOutOfRange => PyIndexError::new_err("row index out of range"),
-        ArrowCoreError::InvalidSortDirection { column, direction } => PyValueError::new_err(
-            format!("unsupported sort direction for {column}: {direction}"),
-        ),
         other => PyValueError::new_err(other.to_string()),
     }
 }

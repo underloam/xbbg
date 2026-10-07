@@ -161,38 +161,6 @@ impl Request {
         Ok(())
     }
 
-    /// Set a string value on an element.
-    ///
-    /// Passes the interned [`Name`] pointer directly (the C++
-    /// `setElement(const Name&, ...)` fast path): no per-call allocation and
-    /// no Bloomberg-side name re-hash.
-    pub fn set_string(&mut self, name: &Name, value: &str) -> Result<()> {
-        let root = self.elements();
-
-        let c_value = CString::new(value).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid string value: {}", e),
-        })?;
-
-        // SAFETY: root and name are valid handles; nameString is null because
-        // the interned Name pointer identifies the element (blpapi_element.h).
-        let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementString(
-                root.as_ptr(),
-                std::ptr::null(),
-                name.as_ptr(),
-                c_value.as_ptr(),
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Element_setElementString failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
-    }
-
     /// Set a string value on a scalar element by string name.
     ///
     /// Use this for scalar elements like "startDate", "endDate", "currency".
@@ -228,81 +196,6 @@ impl Request {
         if rc != 0 {
             return Err(BlpError::Internal {
                 detail: format!("set_str('{}') failed with rc={}", name, rc),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Set an i32 value on an element via the interned [`Name`] pointer.
-    pub fn set_i32(&mut self, name: &Name, value: i32) -> Result<()> {
-        let root = self.elements();
-
-        // SAFETY: root and name are valid handles; nameString is null because
-        // the interned Name pointer identifies the element.
-        let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementInt32(
-                root.as_ptr(),
-                std::ptr::null(),
-                name.as_ptr(),
-                value,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Element_setElementInt32 failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Set an i64 value on an element by name.
-    ///
-    /// Gets the child element by name, then sets its value.
-    pub fn set_i64(&mut self, name: &Name, value: i64) -> Result<()> {
-        let root = self.elements();
-        let child = root.get(name).ok_or_else(|| BlpError::InvalidArgument {
-            detail: format!("element '{}' not found", name.as_str()),
-        })?;
-
-        // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe {
-            crate::ffi::blpapi_Element_setValueInt64(
-                child.as_ptr(),
-                value,
-                0, // index 0 for non-array elements
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Element_setValueInt64 failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Set an f64 value on an element via the interned [`Name`] pointer.
-    pub fn set_f64(&mut self, name: &Name, value: f64) -> Result<()> {
-        let root = self.elements();
-
-        // SAFETY: root and name are valid handles; nameString is null because
-        // the interned Name pointer identifies the element.
-        let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementFloat64(
-                root.as_ptr(),
-                std::ptr::null(),
-                name.as_ptr(),
-                value,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Element_setElementFloat64 failed with rc={}", rc),
             });
         }
 

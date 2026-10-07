@@ -1,6 +1,7 @@
 //! Live Bloomberg tests for the auction venue recipes.
 //!
-//! Enable with: cargo test -p xbbg-recipes --features live --test auction_live
+//! Ignored by default. Run with:
+//! cargo test -p xbbg-recipes --test auction_live -- --ignored
 //!
 //! Data usage summary:
 //! - Venue resolution: up to 3 securities x 10 routing fields, then 3 venues x 3 validation fields
@@ -9,8 +10,6 @@
 //!
 //! Assertions only rely on routing metadata and column types, so they hold during and
 //! outside market hours.
-
-#![cfg(feature = "live")]
 
 use std::collections::HashMap;
 
@@ -50,6 +49,7 @@ fn text(batch: &RecordBatch, column: &str, row: usize) -> Option<String> {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn resolve_venues_routes_composites_and_isins_to_primary_listings() {
     let engine = create_engine();
     let securities = vec![
@@ -113,6 +113,7 @@ async fn resolve_venues_routes_composites_and_isins_to_primary_listings() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn auction_snapshot_returns_validated_typed_columns() {
     let engine = create_engine();
     let fields = vec![
@@ -182,6 +183,7 @@ async fn auction_snapshot_returns_validated_typed_columns() {
 /// Preferred routing needs a real preferred ISIN, which this repository does not hard-code.
 /// Set `XBBG_LIVE_PFD_ISIN` to a New York-listed preferred to run it.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn preferred_isin_routes_through_venue_pricing_source() {
     let Ok(isin) = std::env::var("XBBG_LIVE_PFD_ISIN") else {
         eprintln!("skipping: XBBG_LIVE_PFD_ISIN is not set");

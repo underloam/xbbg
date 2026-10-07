@@ -336,7 +336,7 @@ impl<'a> Element<'a> {
     /// Returns `None` if null, type mismatch, out of bounds, or invalid UTF-8.
     ///
     /// # Performance
-    /// Target: < 50ns per call. For ASCII-only data, use `get_str_unchecked()` for ~20ns savings.
+    /// Target: < 50ns per call, including UTF-8 validation.
     #[must_use]
     #[inline(always)]
     pub fn get_str(&self, i: usize) -> Option<&'a str> {
@@ -352,59 +352,6 @@ impl<'a> Element<'a> {
             // SAFETY: Bloomberg guarantees null-terminated strings.
             // Use checked UTF-8 conversion in case of legacy encodings.
             unsafe { CStr::from_ptr(ptr) }.to_str().ok()
-        } else {
-            None
-        }
-    }
-
-    /// Get string as CStr (no UTF-8 validation).
-    ///
-    /// Returns the raw C string without UTF-8 validation. Use this when you need
-    /// to pass the string to other C APIs or when you'll handle encoding yourself.
-    ///
-    /// Returns `None` if null, type mismatch, or out of bounds.
-    ///
-    /// # Performance
-    /// Faster than `get_str()` - skips UTF-8 validation (~20-50ns savings).
-    #[must_use]
-    #[inline(always)]
-    pub fn get_cstr(&self, i: usize) -> Option<&'a CStr> {
-        let mut ptr = MaybeUninit::<*const i8>::uninit();
-        let rc = unsafe { ffi::blpapi_Element_getValueAsString(self.ptr, ptr.as_mut_ptr(), i) };
-        if rc == 0 {
-            let ptr = unsafe { ptr.assume_init() };
-            if ptr.is_null() {
-                return None;
-            }
-            // SAFETY: Bloomberg guarantees null-terminated strings.
-            Some(unsafe { CStr::from_ptr(ptr) })
-        } else {
-            None
-        }
-    }
-
-    /// Get string value without UTF-8 validation.
-    ///
-    /// # Safety
-    /// Caller must ensure the string contains valid UTF-8. Bloomberg field names
-    /// and most values are ASCII, but some fields (e.g., company names) may contain
-    /// non-ASCII characters.
-    ///
-    /// # Performance
-    /// ~20-50ns faster than `get_str()` for ASCII data.
-    #[must_use]
-    #[inline(always)]
-    pub unsafe fn get_str_unchecked(&self, i: usize) -> Option<&'a str> {
-        let mut ptr = MaybeUninit::<*const i8>::uninit();
-        let rc = ffi::blpapi_Element_getValueAsString(self.ptr, ptr.as_mut_ptr(), i);
-        if rc == 0 {
-            let ptr = ptr.assume_init();
-            if ptr.is_null() {
-                return None;
-            }
-            // SAFETY: Caller guarantees valid UTF-8. Bloomberg strings are null-terminated.
-            let cstr = CStr::from_ptr(ptr);
-            Some(std::str::from_utf8_unchecked(cstr.to_bytes()))
         } else {
             None
         }
@@ -533,7 +480,7 @@ impl<'a> Element<'a> {
     /// ```
     #[inline]
     pub fn get_value(&self, i: usize) -> Option<crate::Value<'a>> {
-        use crate::{DataType, Value};
+        use crate::Value;
 
         // Check null first
         if self.is_null() {
@@ -545,82 +492,6 @@ impl<'a> Element<'a> {
             return None;
         }
 
-        // Dispatch based on datatype
-        match self.datatype() {
-            DataType::Bool => self.get_bool(i).map(Value::Bool),
-            DataType::Char | DataType::Byte => {
-                // Bloomberg often stores boolean fields as Char ('Y'/'N').
-                // Single getValueAsChar call, then map — matches the documented
-                // coercion ('Y'→true, 'N'→false, other→Byte) with 1 FFI call
-                // instead of getValueAsBool + getValueAsInt32.
-                self.get_char(i).map(|c| match c {
-                    b'Y' => Value::Bool(true),
-                    b'N' => Value::Bool(false),
-                    other => Value::Byte(other),
-                })
-            }
-            DataType::Int32 => self.get_i32(i).map(Value::Int32),
-            DataType::Int64 => self.get_i64(i).map(Value::Int64),
-            DataType::Float32 | DataType::Float64 | DataType::Decimal => {
-                self.get_f64(i).map(Value::Float64)
-            }
-            DataType::String => self.get_str(i).map(Value::String),
-            DataType::Date => {
-                // Extract as datetime, convert to days since epoch
-                self.get_datetime(i).map(|dt| {
-                    let micros = dt.to_micros();
-                    let days = (micros / 86_400_000_000) as i32;
-                    Value::Date32(days)
-                })
-            }
-            DataType::Time => {
-                // Time-only: extract just hours/minutes/seconds as microseconds from midnight.
-                // Bloomberg Time fields have zeroed date parts — using to_micros() would
-                // produce garbage timestamps anchored to year 0.
-                self.get_datetime(i)
-                    .map(|dt| Value::Time64Micros(dt.to_time_micros()))
-            }
-            DataType::Datetime => self.get_datetime(i).map(|dt| {
-                // Some Bloomberg Datetime fields (e.g. LAST_UPDATE_BID_RT, RT_TIME_OF_TRADE)
-                // have zeroed date parts in certain messages. Check the parts bitmask to
-                // avoid producing garbage timestamps anchored to year 0.
-                if dt.has_date_parts() {
-                    Value::TimestampMicros(dt.to_micros())
-                } else {
-                    Value::Time64Micros(dt.to_time_micros())
-                }
-            }),
-            DataType::Enumeration => {
-                // Enums are stored as strings in Bloomberg
-                self.get_str(i).map(Value::Enum)
-            }
-            DataType::Sequence | DataType::Choice => {
-                // Complex types - return null, caller should iterate children
-                Some(Value::Null)
-            }
-            DataType::ByteArray | DataType::CorrelationId => {
-                // Not commonly used, return null
-                Some(Value::Null)
-            }
-        }
-    }
-
-    /// Fast value extraction - skips null and bounds checks.
-    ///
-    /// This is the hot-path version of `get_value()` that eliminates 2 FFI calls
-    /// (`is_null()` and `len()`) by assuming the caller has verified:
-    /// - The element is not null
-    /// - The index is in bounds
-    ///
-    /// # Safety
-    /// This is a safe function, but returns `None` for invalid indices (the typed
-    /// getters handle bounds checking internally). For maximum safety guarantees,
-    /// use `get_value()` instead.
-    ///
-    /// # Performance
-    /// ~2 fewer FFI calls per extraction compared to `get_value()`.
-    #[inline(always)]
-    pub fn get_value_fast(&self, i: usize) -> Option<crate::Value<'a>> {
         self.get_value_fast_with_datatype(i, self.datatype())
     }
 
@@ -628,6 +499,8 @@ impl<'a> Element<'a> {
     ///
     /// This avoids a duplicate Bloomberg datatype FFI call in loops that must
     /// inspect the datatype for filtering before extracting the value.
+    /// Like the typed getters, this skips the element-level null and bounds
+    /// checks performed by [`Element::get_value`].
     #[inline(always)]
     pub fn get_value_fast_with_datatype(
         &self,
@@ -638,6 +511,7 @@ impl<'a> Element<'a> {
 
         match datatype {
             DataType::Bool => self.get_bool(i).map(Value::Bool),
+            // Bloomberg represents some boolean fields as 'Y'/'N' characters.
             DataType::Char | DataType::Byte => self.get_char(i).map(|c| match c {
                 b'Y' => Value::Bool(true),
                 b'N' => Value::Bool(false),
@@ -657,6 +531,7 @@ impl<'a> Element<'a> {
                 .get_datetime(i)
                 .map(|dt| Value::Time64Micros(dt.to_time_micros())),
             DataType::Datetime => self.get_datetime(i).map(|dt| {
+                // Time-only Datetime values must not be anchored to year zero.
                 if dt.has_date_parts() {
                     Value::TimestampMicros(dt.to_micros())
                 } else {

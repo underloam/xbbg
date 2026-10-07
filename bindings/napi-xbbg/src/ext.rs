@@ -652,11 +652,10 @@ pub fn ext_build_corporate_bonds_query(
     ticker: String,
     ccy: Option<String>,
     extra_fields: Option<Vec<String>>,
-    active_only: Option<bool>,
 ) -> String {
     let fields = extra_fields.unwrap_or_default();
     let refs = string_refs(&fields);
-    build_corporate_bonds_query(&ticker, ccy.as_deref(), &refs, active_only.unwrap_or(true))
+    build_corporate_bonds_query(&ticker, ccy.as_deref(), &refs)
 }
 
 /// Build a BQL query for ETF holdings.

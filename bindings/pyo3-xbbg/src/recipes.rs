@@ -131,22 +131,19 @@ recipe_wrapper!(
     ///     ticker: Company ticker prefix (e.g., "AAPL")
     ///     ccy: Currency filter (e.g., "USD"). None for all currencies.
     ///     fields: Additional fields to retrieve (default: id)
-    ///     active_only: If true, only return active bonds (default: true)
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, ticker, ccy=None, fields=None, active_only=true))]
+    #[pyo3(signature = (engine, ticker, ccy=None, fields=None))]
     |eng|
     fn recipe_corporate_bonds(
         ticker: String,
         ccy: Option<String>,
         fields: Option<Vec<String>>,
-        active_only: bool,
     ) => xbbg_recipes::fixed_income::recipe_corporate_bonds(
         &eng,
         ticker,
         ccy,
         fields,
-        active_only,
     )
 );
 

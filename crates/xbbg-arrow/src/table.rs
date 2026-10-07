@@ -160,11 +160,6 @@ impl TableData {
         ColumnData::new(name, field, chunks)
     }
 
-    /// Extract a logical column by name.
-    pub fn column_by_name(&self, name: &str) -> Result<ColumnData> {
-        self.column_by_index(self.column_index(name)?)
-    }
-
     /// Select columns by name.
     pub fn select_names(&self, names: &[String]) -> Result<Self> {
         let indices = names
@@ -605,7 +600,9 @@ mod tests {
     #[test]
     fn extracts_column_chunks_without_materializing_python_values() {
         let table = sample_table();
-        let column = table.column_by_name("ticker").unwrap();
+        let column = table
+            .column_by_index(table.column_index("ticker").unwrap())
+            .unwrap();
         assert_eq!(column.name, "ticker");
         assert_eq!(column.len(), 3);
         assert_eq!(column.null_count(), 0);
@@ -637,7 +634,9 @@ mod tests {
         let sorted = table
             .sort_by(&[("volume".to_string(), SortDirection::Ascending)], false)
             .unwrap();
-        let column = sorted.column_by_name("ticker").unwrap();
+        let column = sorted
+            .column_by_index(sorted.column_index("ticker").unwrap())
+            .unwrap();
         let (chunk, _) = column.chunk_for_index(0).unwrap();
         let values = chunk.as_any().downcast_ref::<StringArray>().unwrap();
         assert_eq!(values.value(0), "IBM");
@@ -973,7 +972,9 @@ mod tests {
         assert!(payload.value(0).starts_with("0128-"));
         assert!(payload.is_null(1));
 
-        let retained_column = retained.column_by_name("payload").unwrap();
+        let retained_column = retained
+            .column_by_index(retained.column_index("payload").unwrap())
+            .unwrap();
         let compact_column = retained_column.compact().unwrap();
         assert_eq!(compact_column.field, retained_column.field);
         assert!(compact_column.nbytes() < retained_column.nbytes());

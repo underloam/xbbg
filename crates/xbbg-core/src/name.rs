@@ -177,28 +177,6 @@ impl Name {
         })
     }
 
-    /// Get or intern a name, returning None if interning fails.
-    ///
-    /// Like `get_or_intern` but returns `None` instead of panicking
-    /// if the string contains null bytes.
-    #[inline]
-    pub fn try_get_or_intern(s: &str) -> Option<Self> {
-        NAME_CACHE.with(|cache| {
-            // SAFETY: TLS guarantees single-threaded access. No borrow checking overhead.
-            let cache = unsafe { &mut *cache.get() };
-
-            // Fast path: return clone from cache
-            if let Some(name) = cache.get(s) {
-                return Some(name.clone());
-            }
-
-            // Slow path: create and cache
-            let name = Self::new(s)?;
-            cache.insert(s.into(), name.clone());
-            Some(name)
-        })
-    }
-
     /// String value. O(1) - just pointer arithmetic.
     ///
     /// # Performance

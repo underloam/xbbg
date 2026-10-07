@@ -130,7 +130,6 @@ pub async fn recipe_preferreds(
 ///   If no suffix is provided, " US Equity" is appended.
 /// * `ccy` - Currency filter (e.g., "USD"). None for all currencies.
 /// * `fields` - Fields to retrieve (default: id)
-/// * `active_only` - If true, only return active bonds
 ///
 /// # Returns
 ///
@@ -140,15 +139,13 @@ pub async fn recipe_corporate_bonds(
     ticker: String,
     ccy: Option<String>,
     fields: Option<Vec<String>>,
-    active_only: bool,
 ) -> Result<RecordBatch> {
     // Query construction lives in xbbg-ext (single source of truth). The
     // builder normalizes bare tickers, dedupes extra fields against the
-    // default (id), and applies the optional CRNCY filter. `active_only`
-    // remains a no-op pending debt() support.
+    // default (id), and applies the optional CRNCY filter.
     let extra = fields.unwrap_or_default();
     let extra_refs: Vec<&str> = extra.iter().map(String::as_str).collect();
-    let bql_query = build_corporate_bonds_query(&ticker, ccy.as_deref(), &extra_refs, active_only);
+    let bql_query = build_corporate_bonds_query(&ticker, ccy.as_deref(), &extra_refs);
 
     let params = RequestParams {
         service: Service::BqlSvc.to_string(),
@@ -185,6 +182,23 @@ pub async fn recipe_bqr(
     event_types: Option<Vec<String>>,
     include_broker_codes: bool,
 ) -> Result<RecordBatch> {
+    let params = bqr_request(
+        ticker,
+        start_datetime,
+        end_datetime,
+        event_types,
+        include_broker_codes,
+    );
+    engine.request(params).await.map_err(Into::into)
+}
+
+fn bqr_request(
+    ticker: String,
+    start_datetime: String,
+    end_datetime: String,
+    event_types: Option<Vec<String>>,
+    include_broker_codes: bool,
+) -> RequestParams {
     let evts = event_types.unwrap_or_else(|| vec!["BID".to_string(), "ASK".to_string()]);
 
     let mut options = vec![];
@@ -192,7 +206,7 @@ pub async fn recipe_bqr(
         options.push(("includeBrokerCodes".to_string(), "true".to_string()));
     }
 
-    let params = RequestParams {
+    RequestParams {
         service: Service::RefData.to_string(),
         operation: Operation::IntradayTick.to_string(),
         security: Some(ticker),
@@ -205,9 +219,7 @@ pub async fn recipe_bqr(
             Some(options)
         },
         ..Default::default()
-    };
-
-    engine.request(params).await.map_err(Into::into)
+    }
 }
 
 #[cfg(test)]
@@ -242,90 +254,69 @@ mod tests {
 
     #[test]
     fn test_recipe_preferreds_default_fields() {
-        // Verify that default fields are id and name
-        let fields: Option<Vec<String>> = None;
-        let all_fields = match fields {
-            Some(mut flds) => {
-                let mut defaults = vec!["id".to_string(), "name".to_string()];
-                defaults.append(&mut flds);
-                defaults
-            }
-            None => vec!["id".to_string(), "name".to_string()],
-        };
-        assert_eq!(all_fields, vec!["id", "name"]);
+        assert_eq!(
+            build_preferreds_query("BAC", &[]),
+            "get(id, name) for(filter(debt(['BAC US Equity'], CONSOLIDATEDUPLICATES='N'), SRCH_ASSET_CLASS=='Preferreds'))"
+        );
     }
 
     #[test]
     fn test_recipe_preferreds_custom_fields() {
-        let fields = Some(vec!["px_last".to_string(), "dvd_yld".to_string()]);
-        let all_fields = match fields {
-            Some(mut flds) => {
-                let mut defaults = vec!["id".to_string(), "name".to_string()];
-                defaults.append(&mut flds);
-                defaults
-            }
-            None => vec!["id".to_string(), "name".to_string()],
-        };
-        assert_eq!(all_fields, vec!["id", "name", "px_last", "dvd_yld"]);
+        let query = build_preferreds_query("BAC US Equity", &["ID", "px_last", "dvd_yld"]);
+        assert!(query.starts_with("get(id, name, px_last, dvd_yld)"));
+        assert!(query.contains("debt(['BAC US Equity']"));
     }
 
     #[test]
     fn test_recipe_corporate_bonds_filter_building() {
-        // Test that filter conditions are built correctly
-        let ticker = "AAPL".to_string();
-        let ccy = Some("USD".to_string());
-        let active_only = true;
-
-        let mut conditions = vec![
-            "SRCH_ASSET_CLASS=='Corporates'".to_string(),
-            format!("TICKER=='{ticker}'"),
-        ];
-        if let Some(c) = ccy {
-            conditions.push(format!("CRNCY=='{c}'"));
-        }
-        let filter_str = conditions.join(" AND ");
-        let universe = if active_only { "active" } else { "all" };
-
         assert_eq!(
-            filter_str,
-            "SRCH_ASSET_CLASS=='Corporates' AND TICKER=='AAPL' AND CRNCY=='USD'"
+            build_corporate_bonds_query("AAPL", Some("USD"), &["ID", "cpn"]),
+            "get(id, cpn) for(filter(debt(['AAPL US Equity'], CONSOLIDATEDUPLICATES='N'), SRCH_ASSET_CLASS=='Corporates' AND CRNCY=='USD'))"
         );
-        assert_eq!(universe, "active");
     }
 
     #[test]
     fn test_recipe_corporate_bonds_no_ccy() {
-        let ticker = "MSFT".to_string();
-        let ccy: Option<String> = None;
-
-        let mut conditions = vec![
-            "SRCH_ASSET_CLASS=='Corporates'".to_string(),
-            format!("TICKER=='{ticker}'"),
-        ];
-        if let Some(c) = ccy {
-            conditions.push(format!("CRNCY=='{c}'"));
-        }
-        let filter_str = conditions.join(" AND ");
-
         assert_eq!(
-            filter_str,
-            "SRCH_ASSET_CLASS=='Corporates' AND TICKER=='MSFT'"
+            build_corporate_bonds_query("9984 JT Equity", None, &[]),
+            "get(id) for(filter(debt(['9984 JT Equity'], CONSOLIDATEDUPLICATES='N'), SRCH_ASSET_CLASS=='Corporates'))"
         );
     }
 
     #[test]
-    fn test_recipe_bqr_default_event_types() {
-        let evts = resolve_event_types(None);
-        assert_eq!(evts, vec!["BID", "ASK"]);
+    fn test_recipe_bqr_default_request() {
+        let params = bqr_request(
+            "US912810TM69 Govt".to_string(),
+            "2024-01-15T09:00:00".to_string(),
+            "2024-01-15T10:00:00".to_string(),
+            None,
+            true,
+        );
+        assert_eq!(params.service, Service::RefData.as_str());
+        assert_eq!(params.operation, Operation::IntradayTick.as_str());
+        assert_eq!(params.security.as_deref(), Some("US912810TM69 Govt"));
+        assert_eq!(
+            params.start_datetime.as_deref(),
+            Some("2024-01-15T09:00:00")
+        );
+        assert_eq!(params.end_datetime.as_deref(), Some("2024-01-15T10:00:00"));
+        assert_eq!(params.event_types.unwrap(), ["BID", "ASK"]);
+        assert_eq!(
+            params.options.unwrap(),
+            [("includeBrokerCodes".to_string(), "true".to_string())]
+        );
     }
 
     #[test]
-    fn test_recipe_bqr_custom_event_types() {
-        let evts = resolve_event_types(Some(vec!["TRADE".to_string()]));
-        assert_eq!(evts, vec!["TRADE"]);
-    }
-
-    fn resolve_event_types(event_types: Option<Vec<String>>) -> Vec<String> {
-        event_types.unwrap_or_else(|| vec!["BID".to_string(), "ASK".to_string()])
+    fn test_recipe_bqr_custom_request() {
+        let params = bqr_request(
+            "US912810TM69 Govt".to_string(),
+            "2024-01-15T09:00:00".to_string(),
+            "2024-01-15T10:00:00".to_string(),
+            Some(vec!["TRADE".to_string()]),
+            false,
+        );
+        assert_eq!(params.event_types.unwrap(), ["TRADE"]);
+        assert!(params.options.is_none());
     }
 }

@@ -167,16 +167,6 @@ impl<'a> Message<'a> {
         Some(hpdt.to_micros())
     }
 
-    /// Get raw pointer for FFI calls (internal use).
-    ///
-    /// This is used internally by other xbbg-core types that need to call
-    /// Bloomberg C API functions.
-    #[inline(always)]
-    #[allow(dead_code)] // Used in integration, not unit tests
-    pub(crate) fn as_ptr(&self) -> *mut ffi::blpapi_Message_t {
-        self.ptr
-    }
-
     /// Get the number of correlation IDs on this message.
     ///
     /// Most messages have exactly one correlation ID, but multi-correlation

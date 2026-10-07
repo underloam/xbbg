@@ -10,6 +10,13 @@ pub use blpapi_sys::{
     blpapi_SessionOptions_t, blpapi_Session_t, blpapi_SubscriptionList_t, blpapi_TlsOptions_t,
 };
 
+// SDK-generated layouts required by the test message formatter. The core
+// datetime wrappers below intentionally expose a different Rust field layout.
+#[cfg(feature = "test-support")]
+pub use blpapi_sys::{
+    blpapi_Datetime_t as SdkDatetime, blpapi_HighPrecisionDatetime_t as SdkHighPrecisionDatetime,
+};
+
 // --- Auth functions ---
 pub use blpapi_sys::{
     blpapi_AuthApplication_create, blpapi_AuthApplication_destroy,
@@ -94,7 +101,6 @@ pub use blpapi_sys::{
     blpapi_SchemaElementDefinition_type,
 };
 
-#[cfg(feature = "live")]
 pub use blpapi_sys::blpapi_SchemaElementDefinition_status;
 
 // --- SchemaTypeDefinition functions ---
@@ -106,7 +112,6 @@ pub use blpapi_sys::{
     blpapi_SchemaTypeDefinition_numElementDefinitions,
 };
 
-#[cfg(feature = "live")]
 pub use blpapi_sys::blpapi_SchemaTypeDefinition_status;
 
 // --- ConstantList/Constant functions ---

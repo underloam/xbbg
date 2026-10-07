@@ -1988,8 +1988,8 @@ mod tests {
                 (true, UpdateValue::TimestampMicros(1_789_046_055_000_000)),
                 (false, UpdateValue::Time64Micros(47_655_000_000)),
             ] {
-                let datetime = blpapi_sys::blpapi_HighPrecisionDatetime_t {
-                    datetime: blpapi_sys::blpapi_Datetime_t {
+                let datetime = xbbg_core::ffi::SdkHighPrecisionDatetime {
+                    datetime: xbbg_core::ffi::SdkDatetime {
                         parts: if with_date {
                             xbbg_core::ffi::BLPAPI_DATETIME_TIME_PART
                                 | xbbg_core::ffi::BLPAPI_DATETIME_DATE_PART
