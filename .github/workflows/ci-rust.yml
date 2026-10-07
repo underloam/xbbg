@@ -1257,7 +1257,7 @@ jobs:
 
       - name: Commit stubs if changed
         run: |
-          git add py-xbbg/src/xbbg/_core/__init__.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
+          git add py-xbbg/src/xbbg/_core.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
           if git diff --cached --quiet; then
             echo "Type stubs are already up to date"
           else

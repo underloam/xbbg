@@ -341,7 +341,7 @@ jobs:
         git config user.name "github-actions[bot]"
         git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
         
-        git add Cargo.toml Cargo.lock py-xbbg/src/xbbg/_core/__init__.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
+        git add Cargo.toml Cargo.lock py-xbbg/src/xbbg/_core.pyi py-xbbg/src/xbbg/__init__.pyi py-xbbg/src/xbbg/py.typed
         if [ "${{ inputs.create_release }}" = "true" ]; then
           git add CHANGELOG.md README.md
         fi

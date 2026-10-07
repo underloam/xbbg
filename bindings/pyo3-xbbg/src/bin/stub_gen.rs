@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use pyo3_stub_gen::Result;
 const CORE_EXCEPTION_EXPORTS: &str = r#"    "BlpError",
@@ -200,21 +200,38 @@ __all__ = [
 fn main() -> Result<()> {
     let stub = _core::stub_info()?;
     stub.generate()?;
-    fix_generated_core_stub()?;
+    let core_stub = move_core_stub()?;
+    fix_generated_core_stub(&core_stub)?;
     write_top_level_stub()?;
     Ok(())
 }
 
-fn fix_generated_core_stub() -> Result<()> {
+fn package_dir() -> PathBuf {
     let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let workspace_root = manifest_dir
+    manifest_dir
         .parent()
         .and_then(|bindings_dir| bindings_dir.parent())
-        .expect("pyo3-xbbg must live under <workspace>/bindings/pyo3-xbbg");
-    let core_stub = workspace_root.join("py-xbbg/src/xbbg/_core/__init__.pyi");
-    let mut generated = std::fs::read_to_string(&core_stub)?;
+        .expect("pyo3-xbbg must live under <workspace>/bindings/pyo3-xbbg")
+        .join("py-xbbg/src/xbbg")
+}
+
+/// pyo3-stub-gen writes mixed-layout modules as `xbbg/_core/__init__.pyi`. A
+/// `_core/` directory beside the `_core` extension makes `xbbg._core` import as
+/// an empty namespace package whenever the binary is missing, so the stub is
+/// shipped as `xbbg/_core.pyi` instead.
+fn move_core_stub() -> Result<PathBuf> {
+    let package = package_dir();
+    let generated_dir = package.join("_core");
+    let core_stub = package.join("_core.pyi");
+    std::fs::rename(generated_dir.join("__init__.pyi"), &core_stub)?;
+    std::fs::remove_dir(&generated_dir)?;
+    Ok(core_stub)
+}
+
+fn fix_generated_core_stub(core_stub: &Path) -> Result<()> {
+    let mut generated = std::fs::read_to_string(core_stub)?;
 
     let all_marker = "__all__ = [\n";
     let class_marker = "@typing.final\nclass ArrowColumn:";
@@ -250,14 +267,6 @@ fn fix_generated_core_stub() -> Result<()> {
 }
 
 fn write_top_level_stub() -> Result<()> {
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")));
-    let workspace_root = manifest_dir
-        .parent()
-        .and_then(|bindings_dir| bindings_dir.parent())
-        .expect("pyo3-xbbg must live under <workspace>/bindings/pyo3-xbbg");
-    let init_stub = workspace_root.join("py-xbbg/src/xbbg/__init__.pyi");
-    std::fs::write(init_stub, TOP_LEVEL_STUB)?;
+    std::fs::write(package_dir().join("__init__.pyi"), TOP_LEVEL_STUB)?;
     Ok(())
 }
