@@ -19,7 +19,6 @@ xbbg-ext = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }
 xbbg-log = { workspace = true }
-once_cell = { workspace = true }
 slab = { workspace = true }
 arrow-array = { workspace = true, features = ["chrono-tz"] }
 arrow-schema = { workspace = true }
@@ -44,13 +43,8 @@ default = ["live"]
 live = ["xbbg_core/live"]
 bench-internals = []
 
-# cargo-udeps false positives (xbbg-log re-exports tracing macros)
-[package.metadata.cargo-udeps.ignore]
-normal = ["xbbg-log"]
-
 [dev-dependencies]
 xbbg_core = { workspace = true, features = ["test-support"] }
-blpapi-sys = { workspace = true }
 tempfile = { workspace = true }
 tracing = { workspace = true }
 # Restores tracing-subscriber's default set on top of the env-filter this uses.
