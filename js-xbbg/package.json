@@ -87,7 +87,7 @@
     "eslint-plugin-n": "^18.0.1",
     "globals": "^17.6.0",
     "jiti": "^2.7.0",
-    "oxfmt": "^0.63.0",
+    "oxfmt": "^0.72.0",
     "oxlint": "~1.74.0",
     "oxlint-tsgolint": "^0.24.0",
     "publint": "^0.3.21",

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Fixed
+
+- **Patched JavaScript dev tooling.** Both JavaScript packages now lock `tinypool` 2.2.0 through `oxfmt` 0.72.0 (#357), fixing the prototype-pollution remote code execution advisories [GHSA-5gmw-xhrv-c9v3](https://github.com/advisories/GHSA-5gmw-xhrv-c9v3) and [GHSA-85c8-ppgw-ccpr](https://github.com/advisories/GHSA-85c8-ppgw-ccpr), and `source-map-js` 1.2.2 (#356), fixing the indexed source map denial of service in [GHSA-68fv-2mgg-jv7q](https://github.com/advisories/GHSA-68fv-2mgg-jv7q). These are development dependencies and are not part of the published packages.
+
 ## [1.5.1] - 2026-10-07
 
 ### Added
