@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.5.1] - 2026-10-07
+
 ### Added
 
 - **Bun 1.4+ is a tested runtime for `@xbbg/core`.** CI now runs the offline suite under Bun against the real native addon on Linux, Windows, and macOS, and installs the packed packages with `bun add` before loading them, so the loader is checked against Bun's `node_modules` layout. `@xbbg/langgraph` still targets Node.js 24+.
@@ -1677,7 +1679,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.5.0...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/underloam/xbbg/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/underloam/xbbg/compare/v1.4.12...v1.5.0
 [1.4.12]: https://github.com/underloam/xbbg/compare/v1.4.11...v1.4.12
 [1.4.11]: https://github.com/underloam/xbbg/compare/v1.4.10...v1.4.11
