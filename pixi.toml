@@ -61,7 +61,7 @@ fmt-check-py = "ruff format --check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 fmt-check-rs = "cargo fmt --all -- --check"
 fmt-check = { depends-on = ["fmt-check-py", "fmt-check-rs"] }
 ci = { depends-on = ["fmt-check", "lint", "test"] }
-pre-commit = "pre-commit run --all-files"
+pre-commit-all = "pre-commit run --all-files"
 clean = "cargo clean && rm -rf dist build *.egg-info htmlcov .coverage"
 
 # ── Features ──────────────────────────────────────────────────────────────────
@@ -83,12 +83,18 @@ python = ">=3.10"
 [feature.lint.pypi-dependencies]
 ruff = ">=0.16.3"
 ty = ">=0.0.71"
+vulture = ">=2.15"
+import-linter = ">=2.6"
 
 [feature.lint.tasks]
 lint = "ruff check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 fmt = "ruff format py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 fmt-check = "ruff format --check py-xbbg/src py-xbbg/tests py-xbbg-langgraph"
 typecheck = "ty check --exclude benchmarks --exclude examples --exclude scripts"
+deadcode = "vulture"
+deadcode-langgraph = { cmd = "vulture", cwd = "py-xbbg-langgraph" }
+imports = { cmd = "lint-imports", env = { PYTHONPATH = "py-xbbg/src" } }
+imports-langgraph = { cmd = "lint-imports", cwd = "py-xbbg-langgraph", env = { PYTHONPATH = "src" } }
 
 [feature.dev.pypi-dependencies]
 pre-commit = ">=4.5"

@@ -1,15 +1,28 @@
 name: Setup Bloomberg SDK
-description: Restore or install the Bloomberg C++ SDK for the current runner OS
+description: Detect, install, and export the Bloomberg C++ SDK for the current runner OS
 
 inputs:
   version:
-    description: Bloomberg SDK version
-    required: true
+    description: Bloomberg SDK version (empty selects the latest downloadable version)
+    required: false
+    default: ""
   os:
     description: Target runner OS (Linux, macOS, or Windows)
-    required: true
+    required: false
+    default: ${{ runner.os }}
+  detect-only:
+    description: Detect the version without downloading or exporting SDK paths
+    required: false
+    default: "false"
+  detection-attempts:
+    description: Index detection attempts, with an increasing five-second retry delay
+    required: false
+    default: "1"
 
 outputs:
+  version:
+    description: Resolved Bloomberg SDK version
+    value: ${{ steps.version.outputs.version }}
   sdk-rel-root:
     description: SDK root relative to the workspace
     value: ${{ steps.paths.outputs.sdk-rel-root }}
@@ -23,25 +36,62 @@ outputs:
 runs:
   using: composite
   steps:
+    - id: version
+      shell: bash
+      env:
+        REQUESTED_VERSION: ${{ inputs.version }}
+        DETECTION_ATTEMPTS: ${{ inputs.detection-attempts }}
+      run: |
+        if [[ -n "$REQUESTED_VERSION" ]]; then
+          echo "version=$REQUESTED_VERSION" >> "$GITHUB_OUTPUT"
+          echo "BLPAPI_VERSION=$REQUESTED_VERSION" >> "$GITHUB_ENV"
+          exit 0
+        fi
+
+        index_url="https://blpapi.bloomberg.com/repository/releases/python/simple/blpapi/"
+        versions=""
+        for ((attempt = 1; attempt <= DETECTION_ATTEMPTS; attempt++)); do
+          versions=$(curl -fsSL --max-time 30 "$index_url" \
+            | python -c 'import re, sys; versions = set(re.findall(r"blpapi-([0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?)", sys.stdin.read())); print("\n".join(sorted(versions, key=lambda value: tuple(map(int, value.split("."))), reverse=True)))') || versions=""
+          [[ -n "$versions" ]] && break
+          if ((attempt < DETECTION_ATTEMPTS)); then
+            echo "::warning::BLPAPI SDK index attempt $attempt returned nothing; retrying."
+            sleep "$((attempt * 5))"
+          fi
+        done
+
+        for version in $versions; do
+          base_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${version}"
+          if curl -fsIL "${base_url}-linux.tar.gz" >/dev/null \
+            && curl -fsIL "${base_url}-macos-arm64.tar.gz" >/dev/null \
+            && curl -fsIL "${base_url}-windows.zip" >/dev/null; then
+            echo "Detected Bloomberg C++ SDK version: $version"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "BLPAPI_VERSION=$version" >> "$GITHUB_ENV"
+            exit 0
+          fi
+        done
+
+        echo "::error::No downloadable Bloomberg C++ SDK archives found" >&2
+        exit 1
+
     - id: paths
+      if: inputs.detect-only != 'true'
       shell: bash
       run: |
-        sdk_rel_root="vendor/blpapi-sdk/${{ inputs.version }}"
+        sdk_rel_root="vendor/blpapi-sdk/${{ steps.version.outputs.version }}"
         case "${{ inputs.os }}" in
           Linux)
             lib_rel_dir="$sdk_rel_root/Linux"
-            archive_file="blpapi_cpp_${{ inputs.version }}-linux.tar.gz"
-            extractor="tar.gz"
+            archive_file="blpapi_cpp_${{ steps.version.outputs.version }}-linux.tar.gz"
             ;;
           macOS)
             lib_rel_dir="$sdk_rel_root/Darwin"
-            archive_file="blpapi_cpp_${{ inputs.version }}-macos-arm64.tar.gz"
-            extractor="tar.gz"
+            archive_file="blpapi_cpp_${{ steps.version.outputs.version }}-macos-arm64.tar.gz"
             ;;
           Windows)
             lib_rel_dir="$sdk_rel_root/lib"
-            archive_file="blpapi_cpp_${{ inputs.version }}-windows.zip"
-            extractor="zip"
+            archive_file="blpapi_cpp_${{ steps.version.outputs.version }}-windows.zip"
             ;;
           *)
             echo "Unsupported workflow OS input: ${{ inputs.os }}" >&2
@@ -53,15 +103,15 @@ runs:
         echo "lib-rel-dir=$lib_rel_dir" >> "$GITHUB_OUTPUT"
         echo "bin-rel-dir=$sdk_rel_root/bin" >> "$GITHUB_OUTPUT"
         echo "archive-file=$archive_file" >> "$GITHUB_OUTPUT"
-        echo "extractor=$extractor" >> "$GITHUB_OUTPUT"
 
     - id: cache-sdk
+      if: inputs.detect-only != 'true'
       uses: actions/cache@v6
       with:
-        path: vendor/blpapi-sdk/${{ inputs.version }}
-        key: blpapi-${{ inputs.os }}-${{ runner.arch }}-${{ inputs.version }}
+        path: vendor/blpapi-sdk/${{ steps.version.outputs.version }}
+        key: blpapi-${{ inputs.os }}-${{ runner.arch }}-${{ steps.version.outputs.version }}
 
-    - if: inputs.os != 'Windows' && steps.cache-sdk.outputs.cache-hit != 'true'
+    - if: inputs.detect-only != 'true' && inputs.os != 'Windows' && steps.cache-sdk.outputs.cache-hit != 'true'
       shell: bash
       run: |
         archive_url="https://blpapi.bloomberg.com/download/releases/raw/files/${{ steps.paths.outputs.archive-file }}"
@@ -75,7 +125,7 @@ runs:
         inner_dir=$(find "$extract_root" -mindepth 1 -maxdepth 1 -type d | head -n 1)
         mv "$inner_dir" "$sdk_root"
 
-    - if: inputs.os == 'Windows' && steps.cache-sdk.outputs.cache-hit != 'true'
+    - if: inputs.detect-only != 'true' && inputs.os == 'Windows' && steps.cache-sdk.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
         $archiveName = '${{ steps.paths.outputs.archive-file }}'
@@ -91,3 +141,35 @@ runs:
         Expand-Archive -Path $archivePath -DestinationPath $extractRoot -Force
         $innerDir = (Get-ChildItem -Path $extractRoot -Directory | Select-Object -First 1).FullName
         Move-Item -Path $innerDir -Destination $sdkRoot -Force
+
+    - name: Export Bloomberg SDK env (Unix)
+      if: inputs.detect-only != 'true' && inputs.os != 'Windows'
+      shell: bash
+      env:
+        SDK_OS: ${{ inputs.os }}
+        SDK_REL_ROOT: ${{ steps.paths.outputs.sdk-rel-root }}
+        LIB_REL_DIR: ${{ steps.paths.outputs.lib-rel-dir }}
+      run: |
+        sdk_root="$GITHUB_WORKSPACE/$SDK_REL_ROOT"
+        lib_dir="$GITHUB_WORKSPACE/$LIB_REL_DIR"
+        {
+          echo "BLPAPI_ROOT=$sdk_root"
+          echo "LIBRARY_PATH=$lib_dir${LIBRARY_PATH:+:$LIBRARY_PATH}"
+          if [[ "$SDK_OS" == "Linux" ]]; then
+            echo "LD_LIBRARY_PATH=$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+          else
+            echo "DYLD_LIBRARY_PATH=$lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
+          fi
+        } >> "$GITHUB_ENV"
+
+    - name: Export Bloomberg SDK env (Windows)
+      if: inputs.detect-only != 'true' && inputs.os == 'Windows'
+      shell: pwsh
+      env:
+        SDK_REL_ROOT: ${{ steps.paths.outputs.sdk-rel-root }}
+        BIN_REL_DIR: ${{ steps.paths.outputs.bin-rel-dir }}
+      run: |
+        $sdkPath = Join-Path $env:GITHUB_WORKSPACE $env:SDK_REL_ROOT
+        $binPath = Join-Path $env:GITHUB_WORKSPACE $env:BIN_REL_DIR
+        "BLPAPI_ROOT=$sdkPath" >> $env:GITHUB_ENV
+        $binPath >> $env:GITHUB_PATH

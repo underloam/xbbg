@@ -9,6 +9,11 @@ from pathlib import Path
 import re
 import sys
 
+if __package__:
+    from .mcp_release_config import registry_environment_variables
+else:
+    from mcp_release_config import registry_environment_variables
+
 SHA256_PATTERN = re.compile(r"^[a-f0-9]{64}$")
 
 
@@ -41,95 +46,7 @@ def build_server_metadata(version: str, mcpb_url: str, sha256: str) -> dict[str,
                 "version": version,
                 "fileSha256": sha256,
                 "transport": {"type": "stdio"},
-                "environmentVariables": [
-                    {
-                        "name": "XBBG_MCP_LIB_DIR",
-                        "description": "Optional directory containing Bloomberg runtime libraries. Leave unset to use BLPAPI_ROOT, an authorized vendored SDK layout, or Python blpapi fallback.",
-                        "format": "filepath",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_HOST",
-                        "description": "Bloomberg API host. Defaults to localhost.",
-                        "default": "localhost",
-                        "format": "string",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_PORT",
-                        "description": "Bloomberg API port. Defaults to 8194.",
-                        "default": "8194",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_AUTH_METHOD",
-                        "description": "Bloomberg auth method: none, user, app, userapp, dir, manual, or token.",
-                        "default": "none",
-                        "format": "string",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_ROWS",
-                        "description": "Maximum rows returned to the MCP client per response. Defaults to 500.",
-                        "default": "500",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_CELLS",
-                        "description": "Maximum data cells across returned rows and columns. Defaults to 50000.",
-                        "default": "50000",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_METADATA_PROPERTIES",
-                        "description": "Maximum metadata properties retained per response. Defaults to 50000.",
-                        "default": "50000",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_METADATA_BYTES",
-                        "description": "Maximum metadata bytes parsed or returned per response. Defaults to 65536.",
-                        "default": "65536",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_STRING_CHARS",
-                        "description": "Maximum characters per string value returned to the MCP client. Defaults to 2048.",
-                        "default": "2048",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_STRING_BYTES",
-                        "description": "Maximum UTF-8 bytes per string value, including a truncation marker. Defaults to 8192; minimum 3.",
-                        "default": "8192",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                    {
-                        "name": "XBBG_MCP_MAX_RESULT_BYTES",
-                        "description": "Maximum compact-JSON bytes in the structured result, including diagnostics. Defaults to 1048576; minimum 2048.",
-                        "default": "1048576",
-                        "format": "number",
-                        "isRequired": False,
-                        "isSecret": False,
-                    },
-                ],
+                "environmentVariables": registry_environment_variables(),
             },
         ],
     }

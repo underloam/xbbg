@@ -275,47 +275,10 @@ jobs:
         echo "README.md release block updated:"
         sed -n '20,30p' README.md
 
-    - name: Detect latest downloadable Bloomberg C++ SDK version
-      id: sdk
-      run: |
-        INDEX_URL="https://blpapi.bloomberg.com/repository/releases/python/simple/blpapi/"
-        versions=$(curl -fsSL "$INDEX_URL" \
-          | grep -oP 'blpapi-\K[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?' \
-          | sort -Vr \
-          | uniq)
-
-        for VERSION in $versions; do
-          linux_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-linux.tar.gz"
-          macos_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-macos-arm64.tar.gz"
-          windows_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-windows.zip"
-          if curl -fsIL "$linux_url" >/dev/null \
-            && curl -fsIL "$macos_url" >/dev/null \
-            && curl -fsIL "$windows_url" >/dev/null; then
-            echo "Detected Bloomberg C++ SDK version: $VERSION"
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-        done
-
-        echo "No downloadable Bloomberg C++ SDK archives found" >&2
-        exit 1
-
-    - name: Setup Bloomberg SDK
-      id: sdk-setup
+    - name: Setup latest downloadable Bloomberg C++ SDK
       uses: ./.github/actions/setup-blpapi-sdk
       with:
-        version: ${{ steps.sdk.outputs.version }}
         os: Linux
-
-    - name: Export Bloomberg SDK env
-      run: |
-        SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-setup.outputs.sdk-rel-root }}"
-        LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-setup.outputs.lib-rel-dir }}"
-        {
-          echo "BLPAPI_ROOT=$SDK_ROOT"
-          echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-          echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-        } >> "$GITHUB_ENV"
 
     - name: Setup Rust
       uses: actions-rust-lang/setup-rust-toolchain@v1

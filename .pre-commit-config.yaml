@@ -4,32 +4,59 @@ repos:
     rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
-        files: ^(py-xbbg/src/|py-xbbg/tests/|src/|\\.github/|pyproject\\.toml|Cargo\\.toml|README\\.md|\\.pre-commit-config\\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
       - id: trailing-whitespace
-        files: ^(py-xbbg/src/|py-xbbg/tests/|src/|\\.github/|pyproject\\.toml|Cargo\\.toml|README\\.md|\\.pre-commit-config\\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
       - id: mixed-line-ending
         args: [--fix=lf]
-        files: ^(py-xbbg/src/|py-xbbg/tests/|src/|\\.github/|pyproject\\.toml|Cargo\\.toml|README\\.md|\\.pre-commit-config\\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
 
   # Local hooks — tools provided by the pixi environment
   - repo: local
     hooks:
       - id: ruff
         name: ruff
-        entry: ruff check py-xbbg/src py-xbbg/tests
+        entry: pixi run -e lint lint
         language: system
         types_or: [python]
-        files: ^(py-xbbg/src/|py-xbbg/tests/)
+        files: ^(py-xbbg/|py-xbbg-langgraph/)
         pass_filenames: false
 
       - id: ruff-format
         name: ruff-format
-        entry: ruff format --check py-xbbg/src py-xbbg/tests
+        entry: pixi run -e lint fmt-check
         language: system
         types_or: [python]
-        files: ^(py-xbbg/src/|py-xbbg/tests/)
+        files: ^(py-xbbg/|py-xbbg-langgraph/)
         pass_filenames: false
 
+      - id: python-deadcode
+        name: python-deadcode
+        entry: pixi run -e lint deadcode
+        language: system
+        files: ^(py-xbbg/|pyproject\.toml$)
+        pass_filenames: false
+
+      - id: python-langgraph-deadcode
+        name: python-langgraph-deadcode
+        entry: pixi run -e lint deadcode-langgraph
+        language: system
+        files: ^py-xbbg-langgraph/
+        pass_filenames: false
+
+      - id: python-imports
+        name: python-imports
+        entry: pixi run -e lint imports
+        language: system
+        files: ^(py-xbbg/|pyproject\.toml$)
+        pass_filenames: false
+
+      - id: python-langgraph-imports
+        name: python-langgraph-imports
+        entry: pixi run -e lint imports-langgraph
+        language: system
+        files: ^py-xbbg-langgraph/
+        pass_filenames: false
 
       - id: js-format-check
         name: js-format-check
@@ -45,18 +72,65 @@ repos:
         files: ^js-xbbg/
         pass_filenames: false
 
+      - id: js-deadcode
+        name: js-deadcode
+        entry: npm --prefix js-xbbg run lint:deadcode
+        language: system
+        files: ^js-xbbg/
+        pass_filenames: false
+
+      - id: js-imports
+        name: js-imports
+        entry: npm --prefix js-xbbg run lint:imports
+        language: system
+        files: ^js-xbbg/
+        pass_filenames: false
+
+      - id: js-langgraph-format-check
+        name: js-langgraph-format-check
+        entry: npm --prefix js-xbbg-langgraph run format:check
+        language: system
+        files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
+      - id: js-langgraph-lint
+        name: js-langgraph-lint
+        entry: npm --prefix js-xbbg-langgraph run lint
+        language: system
+        files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
+      - id: js-langgraph-deadcode
+        name: js-langgraph-deadcode
+        entry: npm --prefix js-xbbg-langgraph run lint:deadcode
+        language: system
+        files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
+      - id: js-langgraph-imports
+        name: js-langgraph-imports
+        entry: npm --prefix js-xbbg-langgraph run lint:imports
+        language: system
+        files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
       - id: cargo-fmt
         name: cargo-fmt
         entry: cargo fmt --all -- --check
         language: system
         types_or: [rust]
-        files: ^(crates/|src|tests|benches|examples)/
         pass_filenames: false
 
       - id: cargo-clippy
         name: cargo-clippy
-        entry: cargo clippy -- -D warnings
+        entry: cargo clippy --workspace --all-targets -- -D warnings
         language: system
         types_or: [rust]
-        files: ^(crates/|src|tests|benches|examples)/
+        pass_filenames: false
+
+      - id: cargo-shear
+        name: cargo-shear
+        entry: cargo shear
+        language: system
+        files: (\.rs$|(^|/)Cargo\.(toml|lock)$)
         pass_filenames: false
