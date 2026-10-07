@@ -125,3 +125,36 @@ export const SDK_LOG_LEVEL_BY_NAME = {
   TRACE: 'trace',
   WARN: 'warn',
 } as const;
+
+export const CDX_INFO_FIELDS = [
+  'ROLLING_SERIES',
+  'VERSION',
+  'ON_THE_RUN_CURRENT_BD_INDICATOR',
+  'CDS_FIRST_ACCRUAL_START_DATE',
+  'NAME',
+  'NUM_CURRENT_COMPANIES_CCY_TKR',
+  'NUM_ORIG_COMPANIES_CRNCY_TKR',
+  'PX_LAST',
+] as const;
+
+export const CDX_PRICING_FIELDS = [
+  'PX_LAST',
+  'PX_BID',
+  'PX_ASK',
+  'UPFRONT_LAST',
+  'UPFRONT_BID',
+  'UPFRONT_ASK',
+  'CDS_FLAT_SPREAD',
+  'UPFRONT_FEE',
+  'PV_CDS_PREMIUM_LEG',
+  'PV_CDS_DEFAULT_LEG',
+] as const;
+
+export const CDX_RISK_FIELDS = [
+  'SW_CNV_BPV',
+  'SW_EQV_BPV',
+  'CDS_SPREAD_MID_MODIFIED_DURATION',
+  'CDS_SPREAD_MID_CONVEXITY',
+  'RECOVERY_RATE_SEN',
+  'CDS_RECOVERY_RT',
+] as const;

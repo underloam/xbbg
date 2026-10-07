@@ -6,6 +6,42 @@ use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 
+/// Canonical cdx info fields bundle.
+pub const CDX_INFO_FIELDS: &[&str] = &[
+    "ROLLING_SERIES",
+    "VERSION",
+    "ON_THE_RUN_CURRENT_BD_INDICATOR",
+    "CDS_FIRST_ACCRUAL_START_DATE",
+    "NAME",
+    "NUM_CURRENT_COMPANIES_CCY_TKR",
+    "NUM_ORIG_COMPANIES_CRNCY_TKR",
+    "PX_LAST",
+];
+
+/// Canonical cdx pricing fields bundle.
+pub const CDX_PRICING_FIELDS: &[&str] = &[
+    "PX_LAST",
+    "PX_BID",
+    "PX_ASK",
+    "UPFRONT_LAST",
+    "UPFRONT_BID",
+    "UPFRONT_ASK",
+    "CDS_FLAT_SPREAD",
+    "UPFRONT_FEE",
+    "PV_CDS_PREMIUM_LEG",
+    "PV_CDS_DEFAULT_LEG",
+];
+
+/// Canonical cdx risk fields bundle.
+pub const CDX_RISK_FIELDS: &[&str] = &[
+    "SW_CNV_BPV",
+    "SW_EQV_BPV",
+    "CDS_SPREAD_MID_MODIFIED_DURATION",
+    "CDS_SPREAD_MID_CONVEXITY",
+    "RECOVERY_RATE_SEN",
+    "CDS_RECOVERY_RT",
+];
+
 /// Bloomberg service URIs.
 ///
 /// Common Bloomberg API services with URIs from the Bloomberg C++ SDK.

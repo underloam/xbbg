@@ -125,3 +125,226 @@ export const SDK_LOG_LEVEL_BY_NAME = {
   TRACE: "trace",
   WARN: "warn",
 } as const;
+
+export const CDX_INFO_FIELDS = [
+  "ROLLING_SERIES",
+  "VERSION",
+  "ON_THE_RUN_CURRENT_BD_INDICATOR",
+  "CDS_FIRST_ACCRUAL_START_DATE",
+  "NAME",
+  "NUM_CURRENT_COMPANIES_CCY_TKR",
+  "NUM_ORIG_COMPANIES_CRNCY_TKR",
+  "PX_LAST",
+] as const;
+
+export const CDX_PRICING_FIELDS = [
+  "PX_LAST",
+  "PX_BID",
+  "PX_ASK",
+  "UPFRONT_LAST",
+  "UPFRONT_BID",
+  "UPFRONT_ASK",
+  "CDS_FLAT_SPREAD",
+  "UPFRONT_FEE",
+  "PV_CDS_PREMIUM_LEG",
+  "PV_CDS_DEFAULT_LEG",
+] as const;
+
+export const CDX_RISK_FIELDS = [
+  "SW_CNV_BPV",
+  "SW_EQV_BPV",
+  "CDS_SPREAD_MID_MODIFIED_DURATION",
+  "CDS_SPREAD_MID_CONVEXITY",
+  "RECOVERY_RATE_SEN",
+  "CDS_RECOVERY_RT",
+] as const;
+
+export const BLOOMBERG_TOOL_NAMES = [
+  "xbbg_bdp",
+  "xbbg_bdh",
+  "xbbg_bds",
+  "xbbg_bdib",
+  "xbbg_bdtick",
+  "xbbg_check_entitlements",
+  "xbbg_bql",
+  "xbbg_bsrch",
+  "xbbg_bqr",
+  "xbbg_bflds",
+  "xbbg_beqs",
+  "xbbg_yas",
+  "xbbg_preferreds",
+  "xbbg_corporate_bonds",
+  "xbbg_index_members",
+  "xbbg_resolve_isins",
+  "xbbg_resolve_venues",
+  "xbbg_auction_snapshot",
+  "xbbg_issuer_isins",
+  "xbbg_etf_holdings",
+  "xbbg_stream_snapshot",
+  "xbbg_mktbar_snapshot",
+  "xbbg_depth_snapshot",
+  "xbbg_ext_ticker",
+  "xbbg_ext_futures",
+  "xbbg_ext_cdx",
+  "xbbg_ext_currency",
+  "xbbg_ext_bql_builder",
+  "xbbg_ext_chart_spec",
+  "xbbg_ext_market_session",
+  "xbbg_ext_yas_overrides",
+  "xbbg_ext_constants",
+  "xbbg_ext_columns",
+  "xbbg_ext_calculate",
+] as const;
+
+export const REFERENCE_FORMATS = ["long", "long_typed", "long_metadata"] as const;
+
+export const HISTORICAL_FORMATS = ["long", "long_typed", "long_metadata", "semi_long"] as const;
+
+export const DEFAULT_MAX_SECURITIES = 25;
+
+export const DEFAULT_MAX_FIELDS = 25;
+
+export const DEFAULT_MAX_ROWS = 500;
+
+export const DEFAULT_MAX_STRING_CHARS = 2_000;
+
+export const DEFAULT_MAX_RESULT_BYTES = 1_048_576;
+
+export const DEFAULT_MAX_RESULT_NODES = 50_000;
+
+export const DEFAULT_MAX_CONTENT_BYTES = 65_536;
+
+export const DEFAULT_MAX_CONTENT_ROWS = 50;
+
+export const DEFAULT_MAX_BQL_QUERY_CHARS = 4_000;
+
+export const DEFAULT_MAX_SEARCH_SPEC_CHARS = 1_000;
+
+export const DEFAULT_MAX_STREAM_UPDATES = 10;
+
+export const DEFAULT_MAX_STREAM_WAIT_MS = 15_000;
+
+export const MAX_RESULT_DEPTH = 32;
+
+export const MIN_TOOL_RESULT_NODES = 10;
+
+export const MAX_ERROR_DIAGNOSTICS = 8;
+
+export const RESULT_ENVELOPE_RESERVE_BYTES = 768;
+
+export const CONTENT_ENVELOPE_RESERVE_BYTES = 768;
+
+export const MIN_TOOL_RESULT_BYTES = 256;
+
+export const MAX_ENTITLEMENT_EIDS = 10_000;
+
+export const MAX_BLOOMBERG_EID = 2_147_483_647;
+
+export const MAX_EID_SECURITIES = 1_000;
+
+export const MAX_EID_SECURITY_NAME_BYTES = 65_536;
+
+export const ERROR_KEYS = [
+  "error",
+  "errors",
+  "responseError",
+  "responseErrors",
+  "securityError",
+  "securityErrors",
+  "fieldException",
+  "fieldExceptions",
+  "fieldErrors",
+  "unsubscribeError",
+] as const;
+
+export const PRIORITY_KEYS = [
+  "error",
+  "errors",
+  "responseError",
+  "responseErrors",
+  "securityError",
+  "securityErrors",
+  "fieldException",
+  "fieldExceptions",
+  "fieldErrors",
+  "unsubscribeError",
+  "truncated",
+  "truncatedInput",
+  "eidData",
+  "eidDataTruncation",
+  "diagnostics",
+  "metadata",
+] as const;
+
+export const TRUNCATION_REASON_ORDER = [
+  "max_rows",
+  "max_string_chars",
+  "max_result_bytes",
+  "max_result_nodes",
+  "max_result_depth",
+  "circular_reference",
+  "binary_data",
+  "accessor_omitted",
+  "unsupported_value",
+  "invalid_entitlement_data",
+  "entitlement_limit",
+  "upstream_truncation",
+] as const;
+
+export const CHART_SOURCES = ["bdh", "bdib", "holdings", "depth", "rows"] as const;
+
+export const CHART_KINDS = ["line", "area", "bar", "scatter", "candlestick", "depth"] as const;
+
+export const X_FIELD_CANDIDATES = ["date", "time", "datetime", "timestamp"] as const;
+
+export const LABEL_FIELD_CANDIDATES = ["ticker", "security", "member", "name", "label"] as const;
+
+export const SERIES_FIELD_CANDIDATES = ["ticker", "security", "field", "side", "category"] as const;
+
+export const VALUE_FIELD_CANDIDATES = [
+  "value",
+  "PX_LAST",
+  "close",
+  "price",
+  "weight",
+  "marketValue",
+  "market_value",
+] as const;
+
+export const OPEN_FIELD_CANDIDATES = ["open", "OPEN", "PX_OPEN"] as const;
+
+export const HIGH_FIELD_CANDIDATES = ["high", "HIGH", "PX_HIGH"] as const;
+
+export const LOW_FIELD_CANDIDATES = ["low", "LOW", "PX_LOW"] as const;
+
+export const CLOSE_FIELD_CANDIDATES = ["close", "CLOSE", "PX_LAST", "last", "value"] as const;
+
+export const SIDE_FIELD_CANDIDATES = ["side", "SIDE", "type"] as const;
+
+export const PRICE_FIELD_CANDIDATES = ["price", "PRICE", "px", "PX"] as const;
+
+export const SIZE_FIELD_CANDIDATES = ["size", "SIZE", "quantity", "qty", "volume"] as const;
+
+export const CHART_DEFAULTS = {
+  bdh: "line",
+  bdib: "candlestick",
+  holdings: "bar",
+  depth: "depth",
+  rows: "line",
+} as const;
+
+export const ERROR_SHAPE_KEYS = [
+  "error",
+  "errors",
+  "responseerror",
+  "responseerrors",
+  "securityerror",
+  "securityerrors",
+  "fieldexception",
+  "fieldexceptions",
+  "fielderrors",
+  "unsubscribeerror",
+] as const;
+
+export type BloombergToolName = (typeof BLOOMBERG_TOOL_NAMES)[number];
+export type ResultTruncationReason = (typeof TRUNCATION_REASON_ORDER)[number];

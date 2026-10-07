@@ -3,9 +3,11 @@
 # Single source of truth for all Bloomberg API names.
 #
 # Run `python defs/codegen/generate.py` to regenerate:
-#   - crates/xbbg-async/src/services.rs   (Rust enums + defs contract tests)
-#   - py-xbbg/src/xbbg/_services_gen.py   (Python enums)
-#   - js-xbbg/src/_defs_gen.ts            (TypeScript unions + value docs)
+#   - crates/xbbg-async/src/services.rs        (Rust enums, bundles + contract tests)
+#   - py-xbbg/src/xbbg/_services_gen.py        (Python enums + bundles)
+#   - js-xbbg/src/_defs_gen.ts                (TypeScript unions, docs + bundles)
+#   - js-xbbg-langgraph/src/_defs_gen.ts      (TypeScript LangGraph vocabulary)
+#   - py-xbbg-langgraph/src/xbbg_langgraph/_defs_gen.py (Python LangGraph vocabulary)
 #
 # Adding a new service or operation:
 #   1. Add the entry below
@@ -375,3 +377,136 @@ doc = "Debug messages and above."
 rust_name = "Trace"
 value = "trace"
 doc = "Most verbose SDK logging."
+
+
+# ============================================================================
+# CDX reference-data bundles
+# ============================================================================
+# Recovery-rate overrides use percent: 40 means 40%, in every adapter.
+[cdx_fields]
+CDX_INFO_FIELDS = [
+    "ROLLING_SERIES", "VERSION", "ON_THE_RUN_CURRENT_BD_INDICATOR",
+    "CDS_FIRST_ACCRUAL_START_DATE", "NAME", "NUM_CURRENT_COMPANIES_CCY_TKR",
+    "NUM_ORIG_COMPANIES_CRNCY_TKR", "PX_LAST",
+]
+CDX_PRICING_FIELDS = [
+    "PX_LAST", "PX_BID", "PX_ASK", "UPFRONT_LAST", "UPFRONT_BID", "UPFRONT_ASK",
+    "CDS_FLAT_SPREAD", "UPFRONT_FEE", "PV_CDS_PREMIUM_LEG", "PV_CDS_DEFAULT_LEG",
+]
+CDX_RISK_FIELDS = [
+    "SW_CNV_BPV", "SW_EQV_BPV", "CDS_SPREAD_MID_MODIFIED_DURATION",
+    "CDS_SPREAD_MID_CONVEXITY", "RECOVERY_RATE_SEN", "CDS_RECOVERY_RT",
+]
+
+
+# ============================================================================
+# LangGraph contract vocabulary
+# ============================================================================
+# These package-local copies must not import a native binding at module load.
+# Execution stays language-specific: Python's request_timeout is per call, in
+# seconds; JS's engineConfig.requestTimeoutMs configures lazily created engines.
+# Their 60-second defaults are intentionally not one lifecycle contract.
+[langgraph]
+tool_names = [
+    "xbbg_bdp", "xbbg_bdh", "xbbg_bds", "xbbg_bdib", "xbbg_bdtick",
+    "xbbg_check_entitlements", "xbbg_bql", "xbbg_bsrch", "xbbg_bqr", "xbbg_bflds",
+    "xbbg_beqs", "xbbg_yas", "xbbg_preferreds", "xbbg_corporate_bonds",
+    "xbbg_index_members", "xbbg_resolve_isins", "xbbg_resolve_venues",
+    "xbbg_auction_snapshot", "xbbg_issuer_isins", "xbbg_etf_holdings",
+    "xbbg_stream_snapshot", "xbbg_mktbar_snapshot", "xbbg_depth_snapshot",
+    "xbbg_ext_ticker", "xbbg_ext_futures", "xbbg_ext_cdx", "xbbg_ext_currency",
+    "xbbg_ext_bql_builder", "xbbg_ext_chart_spec", "xbbg_ext_market_session",
+    "xbbg_ext_yas_overrides", "xbbg_ext_constants", "xbbg_ext_columns",
+    "xbbg_ext_calculate",
+]
+# Preserve the published Python tuple order while sharing every tool identity.
+python_tool_order_before = { xbbg_issuer_isins = "xbbg_resolve_venues" }
+# Reference data excludes the historical-only pivot. Names reference [formats].
+reference_formats = ["LONG", "LONG_TYPED", "LONG_WITH_METADATA"]
+
+[langgraph.limits]
+max_securities = 25
+max_fields = 25
+max_rows = 500
+max_string_chars = 2000
+max_result_bytes = 1_048_576
+max_result_nodes = 50_000
+max_content_bytes = 65_536
+max_content_rows = 50
+max_bql_query_chars = 4000
+max_search_spec_chars = 1000
+max_stream_updates = 10
+max_stream_wait_ms = 15_000
+
+[langgraph.result]
+MAX_RESULT_DEPTH = 32
+MIN_TOOL_RESULT_NODES = 10
+MAX_ERROR_DIAGNOSTICS = 8
+RESULT_ENVELOPE_RESERVE_BYTES = 768
+CONTENT_ENVELOPE_RESERVE_BYTES = 768
+MIN_TOOL_RESULT_BYTES = 256
+MAX_ENTITLEMENT_EIDS = 10_000
+MAX_BLOOMBERG_EID = 2_147_483_647
+MAX_EID_SECURITIES = 1_000
+MAX_EID_SECURITY_NAME_BYTES = 65_536
+# These budgets belong to JS's descriptor/entitlement projection, not Arrow.
+javascript_only_limits = [
+    "MAX_ERROR_DIAGNOSTICS", "RESULT_ENVELOPE_RESERVE_BYTES",
+    "CONTENT_ENVELOPE_RESERVE_BYTES", "MAX_EID_SECURITIES",
+    "MAX_EID_SECURITY_NAME_BYTES",
+]
+error_keys = [
+    "error", "errors", "responseError", "responseErrors", "securityError",
+    "securityErrors", "fieldException", "fieldExceptions", "fieldErrors",
+    "unsubscribeError",
+]
+# Python also receives snake_case Arrow/native metadata; JS probes accessors
+# without invoking them and applies its own entitlement projection limits.
+python_error_keys = [
+    "response_error", "response_errors", "security_error", "security_errors",
+    "field_exception", "field_exceptions", "field_errors", "unsubscribe_error",
+]
+priority_keys = [
+    "truncated", "truncatedInput", "eidData", "eidDataTruncation", "diagnostics",
+    "metadata",
+]
+python_priority_keys = [
+    "hasErrors", "truncated", "truncatedInput", "eidData", "eidDataTruncation",
+    "entitled", "failedEids", "diagnostics", "metadata", "rowCount", "updateCount",
+    "renderable", "spec",
+]
+truncation_reasons = [
+    "max_rows", "max_string_chars", "max_result_bytes", "max_result_nodes",
+    "max_result_depth", "circular_reference", "binary_data", "accessor_omitted",
+    "unsupported_value", "invalid_entitlement_data", "entitlement_limit",
+    "upstream_truncation",
+]
+javascript_only_reasons = ["accessor_omitted", "invalid_entitlement_data", "entitlement_limit"]
+
+[langgraph.result.arrow_metadata_keys]
+"xbbg.security_errors" = "securityErrors"
+"xbbg.field_exceptions" = "fieldExceptions"
+"xbbg.eid_data" = "eidData"
+
+[langgraph.chart]
+kinds = ["line", "area", "bar", "scatter", "candlestick", "depth"]
+
+[langgraph.chart.fields]
+X_FIELD_CANDIDATES = ["date", "time", "datetime", "timestamp"]
+LABEL_FIELD_CANDIDATES = ["ticker", "security", "member", "name", "label"]
+SERIES_FIELD_CANDIDATES = ["ticker", "security", "field", "side", "category"]
+VALUE_FIELD_CANDIDATES = ["value", "PX_LAST", "close", "price", "weight", "marketValue", "market_value"]
+OPEN_FIELD_CANDIDATES = ["open", "OPEN", "PX_OPEN"]
+HIGH_FIELD_CANDIDATES = ["high", "HIGH", "PX_HIGH"]
+LOW_FIELD_CANDIDATES = ["low", "LOW", "PX_LOW"]
+CLOSE_FIELD_CANDIDATES = ["close", "CLOSE", "PX_LAST", "last", "value"]
+SIDE_FIELD_CANDIDATES = ["side", "SIDE", "type"]
+PRICE_FIELD_CANDIDATES = ["price", "PRICE", "px", "PX"]
+SIZE_FIELD_CANDIDATES = ["size", "SIZE", "quantity", "qty", "volume"]
+
+[langgraph.chart.defaults]
+bdh = "line"
+bdib = "candlestick"
+holdings = "bar"
+depth = "depth"
+rows = "line"
