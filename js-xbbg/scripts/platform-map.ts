@@ -3,13 +3,7 @@ import path from 'node:path';
 import { nativePackageForKey, platformPackages } from '../src/native/platform-map';
 import type { NativePackageDescriptor } from '../src/native/platform-map';
 
-export {
-  nativeBinaryName,
-  nativePackageForKey,
-  platformKey,
-  platformPackages,
-} from '../src/native/platform-map';
-export type { NativePackageDescriptor, PlatformKey } from '../src/native/platform-map';
+export { nativeBinaryName, platformKey, platformPackages } from '../src/native/platform-map';
 
 export type NativePackageSpec = NativePackageDescriptor & {
   readonly dirName: string;
@@ -34,8 +28,4 @@ export const nativePackageSpecs = Object.freeze(
 
 export function nativePackageSpecForKey(key: string): NativePackageSpec | null {
   return nativePackageSpecs.find((spec) => spec.key === key) ?? null;
-}
-
-export function nativePackageSpecForPackageName(packageName: string): NativePackageSpec | null {
-  return nativePackageSpecs.find((spec) => spec.packageName === packageName) ?? null;
 }

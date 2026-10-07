@@ -1,22 +1,16 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { runNpm } from './npm-process';
 import { nativeBinaryName, nativePackageSpecs } from './platform-map';
 import type { NativePackageSpec } from './platform-map';
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const packageDir = path.resolve(repoRoot, 'js-xbbg');
-const npmExecPath = process.env.npm_execpath;
 
 type ValidationMode = 'attw' | 'dry-run' | 'publint';
-
-interface NpmInvocation {
-  readonly args: readonly string[];
-  readonly command: string;
-}
 
 interface BasePackageSpec {
   readonly dir: string;
@@ -105,61 +99,6 @@ function setMode(current: ValidationMode | null, next: ValidationMode): Validati
   return next;
 }
 
-function npmCommand(args: readonly string[]): NpmInvocation {
-  if (npmExecPath !== undefined && npmExecPath.length > 0) {
-    return { args: [npmExecPath, ...args], command: process.execPath };
-  }
-  if (process.platform === 'win32') {
-    return {
-      args: ['/d', '/s', '/c', 'npm.cmd', ...args],
-      command: process.env.ComSpec ?? 'cmd.exe',
-    };
-  }
-  return { args, command: 'npm' };
-}
-
-function outputText(output: string | Buffer | null | undefined): string {
-  return typeof output === 'string' ? output : (output?.toString('utf8') ?? '');
-}
-
-function runNpmCapture(args: readonly string[], cwd: string): string {
-  const invocation = npmCommand(args);
-  const result = spawnSync(invocation.command, invocation.args, {
-    cwd,
-    encoding: 'utf8',
-    env: process.env,
-    windowsHide: true,
-  });
-  if (result.error) {
-    fail(`failed to run npm ${args.join(' ')}: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    process.stderr.write(outputText(result.stderr));
-    process.exit(result.status ?? 1);
-  }
-  return outputText(result.stdout);
-}
-
-function runNpm(args: readonly string[], cwd: string): void {
-  const invocation = npmCommand(args);
-  const result = spawnSync(invocation.command, invocation.args, {
-    cwd,
-    env: process.env,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) {
-    fail(`failed to run npm ${args.join(' ')}: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
-}
-
-function runLocalBin(command: string, args: readonly string[], cwd: string): void {
-  runNpm(['exec', '--', command, ...args], cwd);
-}
-
 function platformSpec(native: NativePackageSpec): NativeValidationSpec {
   return {
     dir: path.join(packageDir, native.packageDir),
@@ -231,10 +170,10 @@ function packFiles(result: PackResult, spec: PackageSpec): Set<string> {
 }
 
 function dryRunFiles(spec: PackageSpec): readonly string[] {
-  const raw = runNpmCapture(
-    ['pack', spec.dir, '--dry-run', '--json', '--ignore-scripts'],
-    repoRoot,
-  );
+  const raw = runNpm(['pack', spec.dir, '--dry-run', '--json', '--ignore-scripts'], {
+    capture: true,
+    cwd: repoRoot,
+  });
   return Object.freeze([...packFiles(parsePackJson(raw, spec), spec)].toSorted());
 }
 
@@ -257,7 +196,9 @@ function validateDryRun(spec: PackageSpec): void {
 }
 
 function validatePublint(spec: PackageSpec): void {
-  runLocalBin('publint', ['run', spec.dir, '--pack', 'npm', '--strict'], packageDir);
+  runNpm(['exec', '--', 'publint', 'run', spec.dir, '--pack', 'npm', '--strict'], {
+    cwd: packageDir,
+  });
 }
 
 function readPackageManifest(spec: PackageSpec): PackageManifest {

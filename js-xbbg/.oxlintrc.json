@@ -189,13 +189,18 @@
     {
       "files": ["src/index.ts"],
       "rules": {
+        "unicorn/prefer-export-from": "off"
+      }
+    },
+    {
+      "files": ["src/subscriptions.ts"],
+      "rules": {
         "typescript/promise-function-async": [
           "error",
           {
             "checkMethodDeclarations": false
           }
-        ],
-        "unicorn/prefer-export-from": "off"
+        ]
       }
     },
     {

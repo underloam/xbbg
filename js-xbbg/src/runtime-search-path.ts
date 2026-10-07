@@ -93,7 +93,7 @@ export function collectWindowsDapiRootCandidates(env: NodeJS.ProcessEnv = proces
   return candidates;
 }
 
-export function containsBlpapiRuntime(dir: string, exists: Exists = fs.existsSync): boolean {
+function containsBlpapiRuntime(dir: string, exists: Exists = fs.existsSync): boolean {
   if (dir.length === 0) {
     return false;
   }
@@ -105,7 +105,7 @@ function parseVersionParts(name: string): number[] | null {
   return parts.every((part) => Number.isInteger(part) && part >= 0) ? parts : null;
 }
 
-export function compareSdkRoots(left: string, right: string): number {
+function compareSdkRoots(left: string, right: string): number {
   const leftParts = parseVersionParts(path.basename(left));
   const rightParts = parseVersionParts(path.basename(right));
   if (leftParts !== null && rightParts !== null) {
@@ -127,7 +127,7 @@ export function compareSdkRoots(left: string, right: string): number {
   return right.localeCompare(left);
 }
 
-export function pushSdkRuntimeCandidates(candidates: string[], sdkRoot: string): void {
+function pushSdkRuntimeCandidates(candidates: string[], sdkRoot: string): void {
   const resolved = path.resolve(sdkRoot);
   candidates.push(
     resolved,
@@ -176,7 +176,7 @@ export function resolveVendorSdkRoot(
   );
 }
 
-export function collectRuntimeSearchCandidates(options: RuntimeSearchPathOptions = {}): string[] {
+function collectRuntimeSearchCandidates(options: RuntimeSearchPathOptions = {}): string[] {
   const env = options.env ?? process.env;
   const exists = options.exists ?? fs.existsSync;
   const platform = options.platform ?? process.platform;

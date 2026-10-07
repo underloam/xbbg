@@ -29,6 +29,7 @@ function withNativeRepo(check: (fixture: NativeFixture) => void): void {
       'scripts/build-native.ts',
       'scripts/stage-native-package.ts',
       'scripts/native-build-info.ts',
+      'scripts/npm-process.ts',
       'scripts/platform-map.ts',
       'src/native/platform-map.ts',
     ]) {

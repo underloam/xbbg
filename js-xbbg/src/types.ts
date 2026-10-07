@@ -272,7 +272,9 @@ export interface BdtickOptions {
 }
 
 export interface CdxOptions extends BdpOptions {
+  /** Recovery rate in percent (40 means 40%). */
   recoveryRate?: number;
+  /** Recovery rate in percent (40 means 40%). */
   recovery_rate?: number;
 }
 
@@ -465,7 +467,6 @@ export interface PreferredsOptions {
 export interface CorporateBondsOptions {
   ccy?: string;
   fields?: readonly string[];
-  activeOnly?: boolean;
   backend?: BackendKind;
 }
 

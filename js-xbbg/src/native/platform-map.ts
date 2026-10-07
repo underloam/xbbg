@@ -1,6 +1,6 @@
 export const nativeBinaryName = 'napi_xbbg.node';
 
-export const nativePackageFiles = Object.freeze([
+const nativePackageFiles = Object.freeze([
   'index.js',
   'index.d.ts',
   'README.md',
@@ -9,7 +9,7 @@ export const nativePackageFiles = Object.freeze([
   nativeBinaryName,
 ] as const);
 
-export const nativePackageDescriptors = Object.freeze({
+const nativePackageDescriptors = Object.freeze({
   'darwin-arm64': Object.freeze({
     binaryName: nativeBinaryName,
     cpu: 'arm64',
@@ -41,7 +41,6 @@ export const nativePackageDescriptors = Object.freeze({
 
 export type PlatformKey = keyof typeof nativePackageDescriptors;
 export type NativePackageDescriptor = (typeof nativePackageDescriptors)[PlatformKey];
-export type NativePackageName = NativePackageDescriptor['packageName'];
 
 export const platformPackages = Object.freeze({
   'darwin-arm64': nativePackageDescriptors['darwin-arm64'].packageName,

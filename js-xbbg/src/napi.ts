@@ -222,7 +222,6 @@ export interface NativeEngine {
     ticker: string,
     ccy: string | undefined,
     fields: readonly string[] | null,
-    activeOnly: boolean,
   ): Promise<NativeArrowZeroCopyBatch>;
   recipeFutTicker(
     genTicker: string,
@@ -424,7 +423,6 @@ export interface NativeAddon {
     ticker: string,
     ccy?: string,
     extraFields?: readonly string[],
-    activeOnly?: boolean,
   ) => string;
   extBuildEtfHoldingsQuery: (etfTicker: string, extraFields?: readonly string[]) => string;
 

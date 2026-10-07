@@ -1,10 +1,10 @@
 #!/usr/bin/env node
 
-import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 
 import { assertNativeBuildArtifact, readNativeBuildInfo } from './native-build-info';
+import { runNpm } from './npm-process';
 import { nativeBinaryName, nativePackageSpecForKey, platformKey } from './platform-map';
 import type { NativePackageSpec } from './platform-map';
 
@@ -24,13 +24,6 @@ interface StagePackageResult {
   readonly localPackageDir: string;
   readonly packageName: string;
 }
-
-interface NpmInvocation {
-  readonly command: string;
-  readonly args: readonly string[];
-}
-
-const npmExecPath = process.env.npm_execpath;
 
 function fail(message: string): never {
   throw new Error(message);
@@ -74,28 +67,12 @@ function parseArgs(argv: readonly string[]): StageOptions {
   return parsed;
 }
 
-function runNpm(args: readonly string[]): void {
-  const invocation = npmCommand(args);
-  const result = spawnSync(invocation.command, invocation.args, {
-    cwd: repoRoot,
-    env: process.env,
-    stdio: 'inherit',
-    windowsHide: true,
-  });
-  if (result.error) {
-    fail(`failed to run npm ${args.join(' ')}: ${result.error.message}`);
-  }
-  if (result.status !== 0) {
-    process.exit(result.status ?? 1);
-  }
-}
-
 function ensurePlatformLoader(localPackageDir: string): void {
   const loaderPath = path.join(localPackageDir, 'index.js');
   if (fs.existsSync(loaderPath)) {
     return;
   }
-  runNpm(['--prefix', packageDir, 'run', 'build:ts']);
+  runNpm(['--prefix', packageDir, 'run', 'build:ts'], { cwd: repoRoot });
   if (!fs.existsSync(loaderPath)) {
     fail(`expected generated platform loader at ${loaderPath}; build:ts did not produce it`);
   }
@@ -181,19 +158,6 @@ function stagePackage(release: boolean, version: string | null = null): StagePac
   return { destBinary, key, localPackageDir, packageName: spec.packageName };
 }
 
-function npmCommand(args: readonly string[]): NpmInvocation {
-  if (npmExecPath !== undefined && npmExecPath.length > 0) {
-    return { args: [npmExecPath, ...args], command: process.execPath };
-  }
-  if (process.platform === 'win32') {
-    return {
-      args: ['/d', '/s', '/c', 'npm.cmd', ...args],
-      command: process.env.ComSpec ?? 'cmd.exe',
-    };
-  }
-  return { args, command: 'npm' };
-}
-
 function maybeBuild({ build, release }: StageOptions): void {
   if (!build && fs.existsSync(sourceBinary)) {
     return;
@@ -202,6 +166,7 @@ function maybeBuild({ build, release }: StageOptions): void {
     release
       ? ['--prefix', packageDir, 'run', 'build:native', '--', '--release']
       : ['--prefix', packageDir, 'run', 'build:native', '--', '--debug'],
+    { cwd: repoRoot },
   );
 }
 
