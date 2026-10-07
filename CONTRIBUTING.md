@@ -34,6 +34,9 @@ Contributors must obtain and use the Bloomberg SDK under their own Bloomberg agr
    ```bash
    pixi install && pixi run install
    ```
+   `pixi run install` compiles the Rust extension into the source tree. Rerun it
+   after pulling or switching branches: importing xbbg warns when the extension
+   was built from a different commit than the checkout.
 
 4. Run tests:
    ```bash

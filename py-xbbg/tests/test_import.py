@@ -20,11 +20,13 @@ def test_imports():
     assert hasattr(xbbg._core, "__version__")
 
 
-def test_native_version_attribute_reports_the_compiled_crate():
-    """Release identity must not depend on whether Git metadata was available."""
+def test_native_extension_reports_the_distribution_version():
+    """The extension is stamped with the exact version of the distribution that built it."""
+    from importlib.metadata import version
+
     from xbbg import _core
 
-    assert _core.__version__ == _core.version()
+    assert _core.__version__ == version("xbbg")
 
 
 def test_public_python_surface_remains_importable():

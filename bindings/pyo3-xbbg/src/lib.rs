@@ -3016,9 +3016,12 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     info!("xbbg._core module initialized");
 
-    // Release identity comes from the stamped manifest, including source archives
-    // without Git metadata. Keep the Git description in build provenance only.
-    m.add("__version__", xbbg_core::version())?;
+    // The exact version of the xbbg distribution this binary was built for:
+    // setup.py exports the setuptools-scm version (dev builds name their commit),
+    // and plain Cargo builds fall back to the crate version. The Python package
+    // refuses an extension stamped for another distribution; `version()` keeps
+    // reporting the Rust crate version.
+    m.add("__version__", env!("XBBG_DIST_VERSION"))?;
     let build_info = PyDict::new(_py);
     build_info.set_item("profile", env!("XBBG_BUILD_PROFILE"))?;
     build_info.set_item("target", env!("XBBG_BUILD_TARGET"))?;

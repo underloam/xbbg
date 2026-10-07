@@ -672,7 +672,8 @@ Set up the development environment with [pixi](https://pixi.sh/):
 bash ./scripts/sdktool.sh               # macOS/Linux
 # .\scripts\sdktool.ps1                # Windows PowerShell
 
-# Install the environment and compile the Rust extension
+# Install the environment and compile the Rust extension (rerun `pixi run install`
+# after pulling; xbbg warns when the extension was built from another commit)
 pixi install
 pixi run install
 ```

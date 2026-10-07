@@ -11,6 +11,7 @@ from importlib.metadata import PackageNotFoundError, version
 import logging
 from typing import TYPE_CHECKING
 
+from . import _core_guard
 from ._exports import (
     BACKEND_EXPORTS,
     CORE_EXPORTS,
@@ -28,9 +29,14 @@ logger = logging.getLogger(__name__)
 
 # Version from git tags via setuptools_scm (same mechanism as release/0.x)
 try:
-    __version__ = version("xbbg")
+    _distribution_version: str | None = version("xbbg")
 except PackageNotFoundError:
-    __version__ = "0+unknown"
+    _distribution_version = None
+__version__ = _distribution_version or "0+unknown"
+
+# Every import of the native extension, including `from xbbg._core import X`
+# (which bypasses __getattr__), checks that it was built for this xbbg.
+_core_guard.install(_distribution_version)
 
 # Lazy import of the Rust module to avoid import errors when it's not built
 if TYPE_CHECKING:

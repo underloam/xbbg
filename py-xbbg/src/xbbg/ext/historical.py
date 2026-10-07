@@ -41,11 +41,10 @@ def _is_native_import_error(error: ImportError) -> bool:
     native_loader_error = any(marker in message for marker in _NATIVE_IMPORT_ERROR_MARKERS) and (
         "_core" in message or "xbbg" in message
     )
-    return (
-        error.name == "xbbg._core"
-        or "No module named 'xbbg._core'" in message
-        or ("xbbg._core" in message and "cannot import name 'ext_" in message)
-        or native_loader_error
+    # "cannot import name" also carries name="xbbg._core", but there the extension
+    # loaded and lacks a helper: it is outdated, not missing, so it must not degrade.
+    return not message.startswith("cannot import name") and (
+        error.name == "xbbg._core" or "No module named 'xbbg._core'" in message or native_loader_error
     )
 
 

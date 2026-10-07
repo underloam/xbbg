@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **The Python LangGraph adapter requires xbbg 1.5.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.5.0,<2`, the first release with the `resolve_venues()` and `auction_snapshot()` recipes behind its `xbbg_resolve_venues` and `xbbg_auction_snapshot` tools.
 - **Shorter npm package pages.** The `@xbbg/core` and `@xbbg/langgraph` READMEs now follow the GitHub README: banner, badges, why, install, quickstart, and highlights. Their detailed behavior notes moved to `js-xbbg/REFERENCE.md` and `js-xbbg-langgraph/REFERENCE.md`.
 
+### Fixed
+
+- **A native extension from another build no longer loads silently.** `xbbg._core.__version__` is now stamped at build time with the exact version of the xbbg distribution being built (a development build's version names its commit), and importing `xbbg._core`, directly or through any xbbg API, raises `ImportError` when an installed package's extension was built for a different version, for example after an interrupted upgrade or pip and conda installing over each other. In a source checkout, where an editable install keeps the extension last compiled into the tree while `git pull` updates the Python sources, xbbg compares the extension's build commit with the checkout's `HEAD` and emits a `RuntimeWarning` to rerun `pixi run install` when they differ. `xbbg.ext` still falls back when the extension is missing, but an outdated extension that lacks a helper now raises its `ImportError` instead of being replaced by "requires xbbg._core native helpers" placeholders. `_core.version()` still reports the Rust crate version.
+
 ## [1.5.0] - 2026-10-02
 
 ### Added
