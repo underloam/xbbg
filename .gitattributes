@@ -1,12 +1,14 @@
 * text=auto
 
-# JavaScript/TypeScript formatters require LF on Windows checkouts.
+# oxfmt checks JS/TS, JSON, and Markdown and requires LF on Windows checkouts.
 *.ts text eol=lf
 *.mts text eol=lf
 *.cts text eol=lf
 *.js text eol=lf
 *.mjs text eol=lf
 *.cjs text eol=lf
+*.json text eol=lf
+*.md text eol=lf
 
 # Pixi lock file (machine-generated)
 pixi.lock linguist-language=YAML linguist-generated
