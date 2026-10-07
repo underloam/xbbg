@@ -243,3 +243,57 @@ dev = [
     "ruff>=0.16.3",
 ]
 
+
+[tool.vulture]
+paths = ["py-xbbg/src/xbbg", "py-xbbg/tests", "py-xbbg/vulture_whitelist.py"]
+exclude = ["*/_services_gen.py", "*.pyi"]
+min_confidence = 60
+ignore_decorators = ["@pytest.fixture", "@pytest_asyncio.fixture"]
+
+[tool.importlinter]
+root_package = "xbbg"
+
+[[tool.importlinter.contracts]]
+name = "Package modules form an acyclic dependency graph"
+type = "acyclic_siblings"
+ancestors = ["xbbg"]
+
+[[tool.importlinter.contracts]]
+name = "Native-adjacent adapters never depend on high-level APIs"
+type = "forbidden"
+source_modules = [
+  "xbbg._core_guard",
+  "xbbg._sdk",
+  "xbbg._exports",
+  "xbbg._services_gen",
+  "xbbg._arrow",
+  "xbbg._dates",
+  "xbbg._engine",
+  "xbbg._sync",
+  "xbbg.services",
+  "xbbg.exceptions",
+  "xbbg.backend",
+]
+forbidden_modules = [
+  "xbbg.blp",
+  "xbbg.ext",
+  "xbbg.markets",
+  "xbbg.schema",
+  "xbbg.field_cache",
+  "xbbg.testing",
+  "xbbg._endpoints",
+  "xbbg._streaming",
+  "xbbg._technical",
+]
+
+[[tool.importlinter.contracts]]
+name = "Extension implementation modules stay behind their package seam"
+type = "protected"
+protected_modules = ["xbbg.ext.*"]
+allowed_importers = ["xbbg.ext"]
+
+[[tool.importlinter.contracts]]
+name = "Market implementation modules stay behind their package seam"
+type = "protected"
+protected_modules = ["xbbg.markets.*"]
+allowed_importers = ["xbbg.markets"]

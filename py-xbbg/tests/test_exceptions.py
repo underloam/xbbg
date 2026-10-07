@@ -152,8 +152,6 @@ class TestPythonExceptionHierarchy:
             except BlpError as e:
                 # Should catch all of them
                 assert str(e) in str(exc)
-            else:
-                pytest.fail(f"Failed to catch {type(exc).__name__} with BlpError")
 
 
 class TestRustCoreExceptions:

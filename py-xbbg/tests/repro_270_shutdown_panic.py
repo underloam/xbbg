@@ -25,7 +25,7 @@ SCENARIOS = ("engine-shutdown", "interpreter-finalization")
 
 
 async def run_scenario(scenario: str) -> None:
-    from xbbg import blp
+    from xbbg import _engine, blp
 
     engine = blp.Engine(
         request_pool_size=1,
@@ -38,7 +38,7 @@ async def run_scenario(scenario: str) -> None:
             sub = await blp.asubscribe(TICKER, ["LAST_PRICE"], tick_mode=True, stream_capacity=4)
         first = await asyncio.wait_for(anext(sub), timeout=30)
         assert first.get("LAST_PRICE") is not None, first
-        assert blp._engine is None, "scenario must exercise a non-global engine"
+        assert _engine._engine is None, "scenario must exercise a non-global engine"
 
         # An empty removal completes without waiting on SDK acknowledgements.
         await asyncio.wait_for(sub.remove([]), timeout=2)
@@ -62,7 +62,7 @@ async def run_scenario(scenario: str) -> None:
         else:
             # Exercise the actual atexit entry point while Python is still alive
             # so suppression is observable, rather than relying on a timing race.
-            blp._atexit_cleanup()
+            _engine._atexit_cleanup()
             try:
                 await asyncio.wait_for(sub.remove([]), timeout=0.25)
             except asyncio.TimeoutError:

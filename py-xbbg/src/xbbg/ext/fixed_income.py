@@ -29,7 +29,8 @@ from xbbg._core import (
     ext_build_yas_overrides,
     ext_normalize_tickers,
 )
-from xbbg.ext._utils import DateLike, _fmt_date, _syncify
+from xbbg._dates import DateLike, _fmt_date
+from xbbg.ext._utils import _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame
@@ -241,7 +242,6 @@ async def acorporate_bonds(
     *,
     ccy: str | None = "USD",
     fields: list[str] | None = None,
-    active_only: bool = True,
     **kwargs,
 ) -> IntoDataFrame:
     """Async find corporate bonds for a company using BQL.
@@ -255,7 +255,6 @@ async def acorporate_bonds(
         ccy: Currency filter (default: "USD"). Set to None for all currencies.
         fields: Optional list of additional fields to retrieve.
             Default field is: id.
-        active_only: If True (default), only return active bonds.
         **kwargs: Additional options passed to the underlying BQL query.
 
     Returns:
@@ -269,7 +268,7 @@ async def acorporate_bonds(
 
 
         async def main():
-            # Get active USD corporate bonds for Apple
+            # Get USD corporate bonds for Apple
             df = await acorporate_bonds("AAPL")
 
             # Get all currency bonds with additional fields
@@ -282,7 +281,7 @@ async def acorporate_bonds(
 
     # Build BQL query using Rust (handles field dedup, filter construction)
     extra = list(fields) if fields else []
-    bql_query = ext_build_corporate_bonds_query(ticker, ccy, extra, active_only)
+    bql_query = ext_build_corporate_bonds_query(ticker, ccy, extra)
 
     return await abql(bql_query, **kwargs)
 
@@ -341,7 +340,7 @@ async def abqr(
     """
     from xbbg import abdtick
     from xbbg._core import ext_default_bqr_datetimes
-    from xbbg.blp import _postprocess_bqr_result, _warn_bqr_dealer_input
+    from xbbg._endpoints import _postprocess_bqr_result, _warn_bqr_dealer_input
 
     backend = kwargs.pop("backend", None)
 

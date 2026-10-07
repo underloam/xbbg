@@ -5,7 +5,7 @@ from typing import Any
 
 import pytest
 
-from xbbg import blp
+from xbbg import _engine, _request_options, backend as backend_module, blp
 from xbbg._core import ArrowTable
 from xbbg.services import Operation, Service
 
@@ -54,10 +54,10 @@ def endpoint_capture(monkeypatch):
         captured["kwargs"] = kwargs
         return object()
 
-    blp._VALID_ELEMENTS_CACHE.clear()
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    _request_options._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda frame, _backend: frame)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda frame, _backend: frame)
     return captured
 
 
@@ -88,8 +88,8 @@ def arrow_endpoint(monkeypatch):
         captured["kwargs"] = kwargs
         return raw
 
-    blp._VALID_ELEMENTS_CACHE.clear()
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    _request_options._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     monkeypatch.setattr(blp, "arequest", fake_arequest)
     return captured
 
@@ -177,7 +177,7 @@ VALUE_ALIAS_CASES = [
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("canonical", "alias", "expected"), VALUE_ALIAS_CASES)
 async def test_value_aliases_resolve_by_canonical_element(endpoint_capture, canonical, alias, expected):
-    elements, overrides = await blp._aroute_kwargs(
+    elements, overrides = await _request_options._aroute_kwargs(
         Service.REFDATA,
         Operation.HISTORICAL_DATA,
         {canonical: alias},
@@ -261,7 +261,7 @@ async def test_abdtick_include_exchange_codes_alias_routes_as_element(endpoint_c
 )
 async def test_excel_presentation_aliases_are_not_sent_to_bloomberg(endpoint_capture, alias):
     with pytest.warns(UserWarning, match="Presentation alias"):
-        elements, overrides = await blp._aroute_kwargs(
+        elements, overrides = await _request_options._aroute_kwargs(
             Service.REFDATA,
             Operation.HISTORICAL_DATA,
             {alias: "ignored"},
@@ -307,7 +307,7 @@ PRESENTATION_VALUE_CASES = [
 
 @pytest.mark.parametrize(("key", "value", "expected"), PRESENTATION_VALUE_CASES)
 def test_presentation_value_aliases_normalize(key, value, expected):
-    assert blp._normalize_presentation_alias(key, value) == (key, expected)
+    assert _request_options._normalize_presentation_alias(key, value) == (key, expected)
 
 
 @pytest.mark.asyncio

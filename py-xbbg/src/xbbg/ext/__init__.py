@@ -88,27 +88,9 @@ from __future__ import annotations
 # ruff: noqa: E402  # guarded optional native imports require helper definitions first
 import logging
 
+from xbbg._core_guard import is_native_import_error
+
 logger = logging.getLogger(__name__)
-
-
-_NATIVE_IMPORT_ERROR_MARKERS = (
-    "DLL load failed",
-    "cannot open shared object file",
-    "image not found",
-    "Library not loaded",
-)
-
-
-def _is_native_import_error(error: ImportError) -> bool:
-    message = str(error)
-    native_loader_error = any(marker in message for marker in _NATIVE_IMPORT_ERROR_MARKERS) and (
-        "_core" in message or "xbbg" in message
-    )
-    # "cannot import name" also carries name="xbbg._core", but there the extension
-    # loaded and lacks a helper: it is outdated, not missing, so it must not degrade.
-    return not message.startswith("cannot import name") and (
-        error.name == "xbbg._core" or "No module named 'xbbg._core'" in message or native_loader_error
-    )
 
 
 class _UnavailableExtension:
@@ -190,7 +172,7 @@ try:
         subscribe_auction,
     )
 except ImportError as exc:
-    if not _is_native_import_error(exc):
+    if not is_native_import_error(exc):
         raise
     _bind_unavailable(
         (
@@ -221,7 +203,7 @@ try:
         yas,
     )
 except ImportError as exc:
-    if not _is_native_import_error(exc):
+    if not is_native_import_error(exc):
         raise
     _bind_unavailable(
         (
@@ -252,7 +234,7 @@ try:
         futures_curve,
     )
 except ImportError as exc:
-    if not _is_native_import_error(exc):
+    if not is_native_import_error(exc):
         raise
     _bind_unavailable(
         (

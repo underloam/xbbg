@@ -11,7 +11,7 @@ import warnings
 import pytest
 
 import xbbg
-from xbbg import blp
+from xbbg import _engine, _streaming, blp
 from xbbg._core import ArrowTable
 from xbbg.exceptions import BlpDelayedDataWarning, BlpFieldWarning, BlpSubscriptionWarning
 
@@ -104,7 +104,7 @@ def test_sync_stream_warns_on_consumer_thread_even_when_no_batch_arrives(monkeyp
     async def subscribe(*_args, **_kwargs):
         return native
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: SimpleNamespace(subscribe=subscribe))
+    monkeypatch.setattr(_engine, "_get_engine", lambda: SimpleNamespace(subscribe=subscribe))
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
         batches = list(blp.stream(TOPIC, "BID", raw=True))
@@ -133,7 +133,7 @@ def test_sync_stream_delivers_warnings_generated_during_cleanup(monkeypatch, clo
     async def subscribe(*_args, **_kwargs):
         return native
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: SimpleNamespace(subscribe=subscribe))
+    monkeypatch.setattr(_engine, "_get_engine", lambda: SimpleNamespace(subscribe=subscribe))
     source = blp.stream(TOPIC, "BID", raw=True)
     next(source)
     assert waiting.wait(timeout=2)
@@ -155,7 +155,7 @@ def test_sync_stream_delivers_warnings_generated_during_cleanup(monkeypatch, clo
 @pytest.mark.asyncio
 async def test_projection_growth_latest_conversion_and_aliased_remove():
     native = NativeSubscription()
-    sub = blp.Subscription(native, raw=True, backend="pandas", topic_normalizer=blp._normalize_mktbar_topics)
+    sub = blp.Subscription(native, raw=True, backend="pandas", topic_normalizer=_streaming._normalize_mktbar_topics)
     await sub.add("SYNTHETIC2 Equity", aliases={"SYNTHETIC2 Equity": "second source"})
     assert native.added == [
         (["//blp/mktbar/ticker/SYNTHETIC2 Equity"], {"//blp/mktbar/ticker/SYNTHETIC2 Equity": "second source"})
@@ -197,7 +197,7 @@ def test_shared_subscription_options_reach_native(monkeypatch, entrypoint, with_
         return native
 
     engine = SimpleNamespace(subscribe=subscribe, subscribe_with_options=subscribe)
-    monkeypatch.setattr(blp, "_get_engine", lambda: engine)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
     kwargs: dict[str, Any] = {
         "aliases": {TOPIC: LABEL},
         "on_delayed": "ignore",
@@ -248,14 +248,14 @@ def test_feed_diagnostics_keep_nested_python_values_and_engine_scope(monkeypatch
     global_engine = SimpleNamespace(subscription_feeds=list)
     scoped = object.__new__(blp.Engine)
     monkeypatch.setattr(scoped, "_py_engine", SimpleNamespace(subscription_feeds=lambda: [row]), raising=False)
-    monkeypatch.setattr(blp, "_engine", global_engine)
+    monkeypatch.setattr(_engine, "_engine", global_engine)
     assert xbbg.subscription_feeds() == []
-    token = blp._active_engine.set(scoped)
+    token = _engine._active_engine.set(scoped)
     try:
         assert xbbg.subscription_feeds() == [row]
         assert scoped.subscription_feeds() == [row]
     finally:
-        blp._active_engine.reset(token)
+        _engine._active_engine.reset(token)
 
 
 @pytest.mark.asyncio

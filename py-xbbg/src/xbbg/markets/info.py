@@ -1,18 +1,15 @@
-"""Market information utilities for tickers and exchanges."""
+"""Python presentation adapters for native market metadata and timing."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-import importlib
-import logging
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
+
+from xbbg import _core, _engine, _sync
+from xbbg.markets.bloomberg import fetch_exchange_info
 
 if TYPE_CHECKING:
     import pandas as pd
-
-from xbbg.markets.bloomberg import _require_pandas, _to_pandas_wide
-
-logger = logging.getLogger(__name__)
 
 __all__ = [
     "exch_info",
@@ -25,6 +22,12 @@ __all__ = [
 ]
 
 
+def _require_pandas(feature: str) -> Any:
+    from xbbg.backend import Backend, _import_backend_module
+
+    return _import_backend_module(Backend.PANDAS, feature=feature)
+
+
 @dataclass(frozen=True)
 class CurrencyPair:
     """FX conversion metadata."""
@@ -35,151 +38,51 @@ class CurrencyPair:
 
 
 def exch_info_bloomberg(ticker: str, **kwargs) -> pd.Series:
-    """Get exchange info from Bloomberg API."""
+    """Present resolved exchange metadata as a Series of session lists.
+
+    Despite the historical name, resolution includes native overrides and the
+    exchange cache before Bloomberg. ``ref=`` selects another ticker and
+    ``engine=`` selects an explicit engine. Native fallback metadata remains an
+    empty Series; engine startup errors propagate instead of being hidden.
+    """
     pd = _require_pandas("xbbg.markets.exch_info_bloomberg()")
-    from .bloomberg import fetch_exchange_info
-    from .sessions import derive_sessions
-
-    if ref := kwargs.get("ref"):
-        return exch_info_bloomberg(ticker=ref, **{k: v for k, v in kwargs.items() if k != "ref"})
-
-    try:
-        bbg_info = fetch_exchange_info(ticker=ticker)
-        if bbg_info.source == "fallback":
-            return pd.Series(dtype=object)
-
-        sessions = derive_sessions(bbg_info)
-        result: dict[str, object] = {"tz": bbg_info.timezone}
-        if sessions.allday:
-            result["allday"] = list(sessions.allday)
-        if sessions.day:
-            result["day"] = list(sessions.day)
-        if sessions.pre:
-            result["pre"] = list(sessions.pre)
-        if sessions.post:
-            result["post"] = list(sessions.post)
-        if sessions.am:
-            result["am"] = list(sessions.am)
-        if sessions.pm:
-            result["pm"] = list(sessions.pm)
-
-        name = bbg_info.mic or bbg_info.exch_code or "Bloomberg"
-        return pd.Series(result, name=name)
-    except Exception as e:
-        logger.warning("Failed to get Bloomberg exchange info for %s: %s", ticker, e)
+    ticker = kwargs.pop("ref", None) or ticker
+    kwargs.pop("original", None)
+    info = fetch_exchange_info(ticker, **kwargs)
+    if info.source == "fallback":
         return pd.Series(dtype=object)
+
+    values: dict[str, object] = {"tz": info.timezone}
+    values.update({name: list(window) for name, window in info.sessions.items()})
+    return pd.Series(values, name=info.mic or info.exch_code or "Bloomberg")
 
 
 def exch_info(ticker: str, **kwargs) -> pd.Series:
-    """Exchange info for given ticker."""
-    pd = _require_pandas("xbbg.markets.exch_info()")
-    if ref := kwargs.get("ref"):
-        return exch_info(ticker=ref, **{k: v for k, v in kwargs.items() if k != "ref"})
+    """Resolve exchange information; see :func:`exch_info_bloomberg`."""
+    _require_pandas("xbbg.markets.exch_info()")
+    return exch_info_bloomberg(ticker, **kwargs)
 
-    result = exch_info_bloomberg(ticker=ticker, **kwargs)
-    if not result.empty:
-        return result
 
-    original = kwargs.get("original", "")
-    if original:
-        logger.warning("Bloomberg exchange info not found for: %s", original)
-    return pd.Series(dtype=object)
+async def _afetch_market_info(ticker: str) -> dict[str, Any]:
+    return await _engine._get_engine().fetch_market_info(ticker)
 
 
 def market_info(ticker: str) -> pd.Series:
-    """Get market info for a ticker using Bloomberg metadata fields."""
+    """Present native market metadata as a Series, omitting absent fields.
+
+    Rust decides which securities need futures-cycle metadata and can mark
+    ``is_fut`` true even when ``freq`` is unavailable. All tickers, including
+    CDX, use the native query rather than Python asset filters or hard-coded
+    exchange metadata. Query errors propagate instead of returning empty data.
+    """
     pd = _require_pandas("xbbg.markets.market_info()")
-    from xbbg.blp import bdp
-
-    t_info = ticker.split()
-    if len(t_info) < 2:
-        return pd.Series(dtype=object)
-
-    asset = t_info[-1]
-    if asset not in ["Equity", "Comdty", "Curncy", "Index", "Corp"]:
-        return pd.Series(dtype=object)
-
-    if asset == "Corp" and len(t_info) >= 2 and t_info[0] == "CDX":
-        return pd.Series({"exch": "US", "tz": "America/New_York"})
-
-    fields = ["EXCH_CODE", "ID_MIC_PRIM_EXCH", "IANA_TIME_ZONE"]
-    is_generic_future = (
-        asset in ["Index", "Comdty", "Curncy"]
-        and len(t_info[0]) >= 2
-        and t_info[0][-1].isdigit()
-        and t_info[0][-2:-1].isalpha()
-    )
-    if is_generic_future:
-        fields.append("FUT_GEN_MONTH")
-
-    try:
-        raw = bdp(tickers=ticker, flds=fields)
-        result = _to_pandas_wide(raw)
-    except Exception as e:
-        logger.warning("Failed to get market info from Bloomberg for %s: %s", ticker, e)
-        return pd.Series(dtype=object)
-
-    if result.empty:
-        return pd.Series(dtype=object)
-
-    row = result.iloc[0]
-    cols = {c.lower(): c for c in result.columns}
-
-    def _get(name: str):
-        key = cols.get(name.lower())
-        if key is None:
-            return None
-        val = row.get(key)
-        if pd.isna(val):
-            return None
-        return val
-
-    info: dict[str, object] = {}
-    exch_code = _get("EXCH_CODE") or _get("ID_MIC_PRIM_EXCH")
-    if exch_code:
-        info["exch"] = exch_code
-
-    tz = _get("IANA_TIME_ZONE")
-    if tz:
-        info["tz"] = tz
-
-    fut_month = _get("FUT_GEN_MONTH")
-    if fut_month:
-        info["freq"] = fut_month
-        info["is_fut"] = True
-    else:
-        info["is_fut"] = False
-
-    return pd.Series(info)
-
-
-def explode(data: pd.DataFrame, columns: list[str]) -> pd.DataFrame:
-    """Explode helper retained for backward compatibility."""
-    pd = _require_pandas("xbbg.markets.explode()")
-    if data.empty:
-        return pd.DataFrame()
-
-    missing_cols = [col for col in columns if col not in data.columns]
-    if missing_cols:
-        logger.warning(
-            "Missing columns %s in DataFrame for explode. Available columns: %s.",
-            missing_cols,
-            list(data.columns),
-        )
-        return pd.DataFrame()
-
-    if len(columns) == 1:
-        return data.explode(column=columns[0])
-    return explode(data=data.explode(column=columns[-1]), columns=columns[:-1])
+    values = _sync._run_sync("market_info", _afetch_market_info, (ticker,), {})
+    return pd.Series({name: value for name, value in values.items() if value is not None})
 
 
 def ccy_pair(local: str, base: str = "USD") -> CurrencyPair:
     """Currency pair info using Rust FX helpers."""
-    core = importlib.import_module("xbbg._core")
-    ext_same_currency = cast("Any", core.ext_same_currency)
-    ext_build_fx_pair = cast("Any", core.ext_build_fx_pair)
-
-    if ext_same_currency(base, local):
+    if _core.ext_same_currency(base, local):
         factor = 1.0
         if base and base[-1].islower():
             factor /= 100.0
@@ -187,7 +90,7 @@ def ccy_pair(local: str, base: str = "USD") -> CurrencyPair:
             factor *= 100.0
         return CurrencyPair(ticker="", factor=factor, power=1.0)
 
-    fx_pair, factor, _from_ccy, _to_ccy = ext_build_fx_pair(local, base)
+    fx_pair, factor, _from_ccy, _to_ccy = _core.ext_build_fx_pair(local, base)
     return CurrencyPair(ticker=fx_pair, factor=float(factor), power=1.0)
 
 
@@ -197,53 +100,65 @@ def convert_session_times_to_utc(
     exchange_tz: str,
     time_fmt: str = "%Y-%m-%dT%H:%M:%S",
 ) -> tuple[str, str]:
-    """Convert timezone-naive session times from exchange timezone to UTC."""
-    pd = _require_pandas("xbbg.markets.convert_session_times_to_utc()")
+    """Convert dated, timezone-naive session timestamps using native tz rules.
+
+    Each endpoint retains its own input date, including overnight sessions.
+    Pandas parses and formats the public timestamps; Rust performs timezone
+    conversion and raises ``ValueError`` for ambiguous/nonexistent local times.
+    The existing exact ``UTC`` passthrough is retained, including its formatting.
+    """
     if exchange_tz == "UTC":
         return start_time, end_time
 
-    start_ts = pd.Timestamp(start_time).tz_localize(exchange_tz).tz_convert("UTC")
-    end_ts = pd.Timestamp(end_time).tz_localize(exchange_tz).tz_convert("UTC")
-    return start_ts.strftime(time_fmt), end_ts.strftime(time_fmt)
+    pd = _require_pandas("xbbg.markets.convert_session_times_to_utc()")
+    start = pd.Timestamp(start_time)
+    end = pd.Timestamp(end_time)
+    if start.tzinfo is not None or end.tzinfo is not None:
+        raise TypeError("session timestamps must be timezone-naive")
+
+    start_clock = start.strftime("%H:%M:%S")
+    end_clock = end.strftime("%H:%M:%S")
+    if start.date() == end.date():
+        start_utc, end_utc = _core.ext_session_times_to_utc(
+            start_clock, end_clock, exchange_tz, start.date().isoformat()
+        )
+    else:
+        start_utc, _ = _core.ext_session_times_to_utc(start_clock, start_clock, exchange_tz, start.date().isoformat())
+        _, end_utc = _core.ext_session_times_to_utc(end_clock, end_clock, exchange_tz, end.date().isoformat())
+
+    # The native binding has second precision; retain caller-supplied fractions.
+    start_result = pd.Timestamp(start_utc, tz="UTC") + pd.Timedelta(
+        microseconds=start.microsecond, nanoseconds=start.nanosecond
+    )
+    end_result = pd.Timestamp(end_utc, tz="UTC") + pd.Timedelta(
+        microseconds=end.microsecond, nanoseconds=end.nanosecond
+    )
+    return start_result.strftime(time_fmt), end_result.strftime(time_fmt)
 
 
-def _resolve_to_timezone(tz: str, exch_tz: str) -> str:
-    if tz == "local":
-        return exch_tz
-
-    alias = {
-        "NY": "America/New_York",
-        "LN": "Europe/London",
-        "TK": "Asia/Tokyo",
-        "HK": "Asia/Hong_Kong",
-    }
-    if tz.upper() in alias:
-        return alias[tz.upper()]
-
-    if " " in tz:
-        ref = exch_info(ticker=tz)
-        if not ref.empty and "tz" in ref:
-            return str(ref["tz"])
-
-    return tz
+async def _amarket_timing(ticker, date, timing, tz, **kwargs) -> str:
+    ticker = kwargs.pop("ref", None) or ticker
+    kwargs.pop("original", None)
+    engine = _engine._get_engine(**kwargs)
+    if tz is not None:
+        tz = str(tz)
+        country = {"NY": "US", "LN": "GB", "TK": "JP", "HK": "HK"}.get(tz.upper())
+        if country is not None:
+            tz = _core.ext_infer_timezone(country)
+        elif " " in tz:
+            tz = (await engine.resolve_exchange(tz))["timezone"]
+    return await engine.market_timing(ticker, date, timing, tz)
 
 
 def market_timing(ticker, dt, timing="EOD", tz="local", **kwargs) -> str:
-    """Market close/open time for ticker."""
+    """Resolve BOD/EOD/FINISHED through native exchange and timezone rules.
+
+    ``ref=`` and ``engine=`` select the reference ticker and engine. Target
+    timezones accept IANA names, ``local``, NY/LN/TK/HK aliases or another ticker.
+    Native timing names are case-insensitive; invalid names and missing day
+    sessions raise instead of silently using EOD or returning an empty string.
+    FINISHED uses the day close when an override has no ``allday`` window.
+    """
     pd = _require_pandas("xbbg.markets.market_timing()")
-    exch = pd.Series(exch_info(ticker=ticker, **kwargs))
-    required = {"tz", "allday", "day"}
-    if not required.issubset(exch.index):
-        logger.error("Required exchange information %s not found for ticker: %s", required, ticker)
-        return ""
-
-    mkt_time = {"BOD": exch.day[0], "FINISHED": exch.allday[-1]}.get(timing, exch.day[-1])
-    cur_dt = str(pd.Timestamp(str(dt)).date())
-
-    if tz == "local":
-        return f"{cur_dt} {mkt_time}"
-
-    from_tz = str(exch.tz)
-    to_tz = _resolve_to_timezone(str(tz), from_tz)
-    ts = pd.Timestamp(f"{cur_dt} {mkt_time}").tz_localize(from_tz).tz_convert(to_tz)
-    return str(ts)
+    date = pd.Timestamp(str(dt)).date().isoformat()
+    return _sync._run_sync("market_timing", _amarket_timing, (ticker, date, timing, tz), kwargs)

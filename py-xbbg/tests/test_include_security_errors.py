@@ -6,6 +6,7 @@ from collections.abc import Sized
 
 import pytest
 
+from xbbg import _engine, _request_options, backend as backend_module
 from xbbg._core import ArrowRecordBatch, ArrowTable
 from xbbg.exceptions import BlpValidationError
 from xbbg.services import Operation, RequestParams, Service
@@ -136,7 +137,7 @@ async def test_arequest_passes_include_security_errors_to_engine(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -163,7 +164,7 @@ async def test_arequest_omits_include_security_errors_when_false(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -189,7 +190,7 @@ async def test_arequest_passes_return_eids_to_engine(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -216,7 +217,7 @@ async def test_arequest_omits_return_eids_when_false(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -248,10 +249,10 @@ async def test_abdp_forwards_include_security_errors(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abdp("IBM US Equity", "PX_LAST", include_security_errors=True)
 
@@ -278,10 +279,10 @@ async def test_abdp_forwards_return_eids(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abdp("IBM US Equity", "PX_LAST", return_eids=True)
 
@@ -308,10 +309,10 @@ async def test_abdh_forwards_return_eids(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "date": "2024-01-01", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abdh("IBM US Equity", "PX_LAST", start_date="2024-01-01", return_eids=True)
 
@@ -334,9 +335,9 @@ async def test_abds_forwards_return_eids(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "DVD_HIST_ALL"}]
 
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     await blp.abds("IBM US Equity", "DVD_HIST_ALL", return_eids=True)
 
@@ -378,8 +379,8 @@ async def test_eid_capable_async_builders_forward_only_true(monkeypatch, call, e
         captured.update(kwargs)
         return []
 
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
-    monkeypatch.setattr(blp, "_convert_result_backend", lambda frame, _backend: frame)
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(backend_module, "_convert_result_backend", lambda frame, _backend: frame)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
 
     await call(blp, return_eids)
@@ -438,7 +439,7 @@ async def test_generic_intraday_requests_forward_return_eids(monkeypatch, operat
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     await blp.arequest(Service.REFDATA, operation, return_eids=True, **request_kwargs)
 
@@ -458,7 +459,7 @@ async def test_acheck_entitlements_forwards_extracted_eids_and_service(monkeypat
             captured["eids"] = eids
             return object()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     extracted = {"IBM US Equity": [101, 202]}
 
     await blp.acheck_entitlements(extracted["IBM US Equity"], "//blp/mktdata")
@@ -483,10 +484,10 @@ def test_bdp_forwards_include_security_errors(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     assert callable(blp.bdp)
     result = blp.bdp("IBM US Equity", "PX_LAST", include_security_errors=True)

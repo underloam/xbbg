@@ -86,13 +86,6 @@ PACKAGES = {
         "import": "xbbg",
         "version_check": lambda: __import__("xbbg").__version__,
     },
-    "xbbg-legacy": {
-        "name": "xbbg (Python <1.0)",
-        "enabled": True,
-        "import": "xbbg_legacy",  # Install xbbg==0.10.3 as xbbg_legacy
-        "version_check": lambda: __import__("xbbg_legacy").__version__,
-        "install_cmd": "pip install xbbg==0.10.3",
-    },
     "pdblp": {
         "name": "pdblp",
         "enabled": True,
@@ -140,8 +133,6 @@ METRICS = [
 # Acceptable regression from main branch (for CI)
 REGRESSION_THRESHOLD_PERCENT = 10  # Fail if >10% slower
 
-# Expected speedup vs legacy (for reporting)
-EXPECTED_SPEEDUP_VS_LEGACY = 5.0  # Target: 5x faster
 EXPECTED_SPEEDUP_VS_PDBLP = 3.0  # Target: 3x faster
 
 # ============================================================================

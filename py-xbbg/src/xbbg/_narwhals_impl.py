@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 import operator
-import re
 from types import ModuleType
 from typing import Any, Literal, overload
 
 from narwhals._utils import Implementation, Version
 
+from xbbg._arrow import ensure_arrow_table, is_arrow_record_batch, is_arrow_table, native_schema
 from xbbg.backend import Backend, _import_backend_module, _to_polars_frame
 
 
@@ -30,97 +30,10 @@ def _arrow_record_batch_class() -> type[Any]:
     return ArrowRecordBatch
 
 
-def _is_arrow_table(value: Any) -> bool:
-    return value.__class__.__name__ == "ArrowTable" and hasattr(value, "__arrow_c_stream__")
-
-
-def _is_arrow_record_batch(value: Any) -> bool:
-    return value.__class__.__name__ == "ArrowRecordBatch" and hasattr(value, "__arrow_c_array__")
-
-
-def _ensure_table(value: Any) -> Any:
-    if _is_arrow_table(value):
-        return value
-    if _is_arrow_record_batch(value):
-        return value.to_table()
-    raise TypeError(f"Expected xbbg ArrowTable or ArrowRecordBatch, got {type(value).__name__}")
-
-
 def _native_namespace() -> ModuleType:
     import xbbg
 
     return xbbg
-
-
-_SIMPLE_NATIVE_DTYPES = {
-    "Boolean": "Boolean",
-    "Int8": "Int8",
-    "Int16": "Int16",
-    "Int32": "Int32",
-    "Int64": "Int64",
-    "UInt8": "UInt8",
-    "UInt16": "UInt16",
-    "UInt32": "UInt32",
-    "UInt64": "UInt64",
-    "Float16": "Float16",
-    "Float32": "Float32",
-    "Float64": "Float64",
-    "Utf8": "String",
-    "LargeUtf8": "String",
-    "Utf8View": "String",
-    "Binary": "Binary",
-    "LargeBinary": "Binary",
-    "BinaryView": "Binary",
-}
-_TIME_UNITS: dict[str, Literal["s", "ms", "us", "ns"]] = {
-    "s": "s",
-    "ms": "ms",
-    "µs": "us",
-    "ns": "ns",
-}
-
-
-def _native_dtype(data_type: str, version: Version) -> Any:
-    dtypes = version.dtypes
-    dtype_name = _SIMPLE_NATIVE_DTYPES.get(data_type)
-    if dtype_name is not None:
-        return getattr(dtypes, dtype_name)()
-    if data_type in {"Date32", "Date64"}:
-        return dtypes.Date()
-    if data_type.startswith(("Time32(", "Time64(")):
-        return dtypes.Time()
-
-    match = re.fullmatch(
-        r'Timestamp\((s|ms|µs|ns)(?:, "(.*)")?\)',
-        data_type,
-    )
-    if match is not None:
-        return dtypes.Datetime(_TIME_UNITS[match.group(1)], match.group(2))
-
-    match = re.fullmatch(
-        r"Duration\((s|ms|µs|ns)\)",
-        data_type,
-    )
-    if match is not None:
-        return dtypes.Duration(_TIME_UNITS[match.group(1)])
-
-    match = re.fullmatch(r"Decimal128\((\d+), (-?\d+)\)", data_type)
-    if match is not None and int(match.group(2)) >= 0:
-        return dtypes.Decimal(precision=int(match.group(1)), scale=int(match.group(2)))
-
-    raise TypeError(f"unsupported native Arrow dtype {data_type!r}")
-
-
-def _native_schema(table: Any, version: Version = Version.V1) -> dict[str, Any]:
-    schema: dict[str, Any] = {}
-    for field in table.schema.fields:
-        try:
-            schema[field.name] = _native_dtype(field.data_type, version)
-        except TypeError as exc:
-            raise TypeError(
-                f"cannot convert native Arrow column {field.name!r} with dtype {field.data_type!r} without PyArrow"
-            ) from exc
-    return schema
 
 
 def _flatten_columns(columns: Sequence[str] | Sequence[Iterable[str]]) -> list[str]:
@@ -146,10 +59,10 @@ class XbbgNamespace:
         raise NotImplementedError("xbbg Narwhals expression execution is not implemented for this operation")
 
     def from_native(self, data: Any, /) -> XbbgDataFrame:
-        return XbbgDataFrame(_ensure_table(data), version=self._version)
+        return XbbgDataFrame(data, version=self._version)
 
     def is_native(self, obj: Any, /) -> bool:
-        return _is_arrow_table(obj) or _is_arrow_record_batch(obj)
+        return is_arrow_table(obj) or is_arrow_record_batch(obj)
 
     def concat(self, items: Iterable[XbbgDataFrame], *, how: str) -> XbbgDataFrame:
         if how != "vertical":
@@ -164,7 +77,7 @@ class XbbgDataFrame:
     _implementation = Implementation.UNKNOWN
 
     def __init__(self, table: Any, *, version: Version) -> None:
-        self._native_frame = _ensure_table(table)
+        self._native_frame = ensure_arrow_table(table, native_only=True)
         self._version = version
 
     def __narwhals_dataframe__(self) -> XbbgDataFrame:
@@ -178,7 +91,7 @@ class XbbgDataFrame:
 
     @classmethod
     def from_native(cls, data: Any, /, *, context: Any) -> XbbgDataFrame:
-        return cls(_ensure_table(data), version=context._version)
+        return cls(data, version=context._version)
 
     def to_narwhals(self) -> Any:
         return self._version.dataframe(self, level="full")
@@ -203,13 +116,13 @@ class XbbgDataFrame:
         return self.native.num_rows
 
     def _with_native(self, table: Any) -> XbbgDataFrame:
-        return type(self)(_ensure_table(table), version=self._version)
+        return type(self)(table, version=self._version)
 
     def _with_version(self, version: Version) -> XbbgDataFrame:
         return type(self)(self.native, version=version)
 
     def collect_schema(self) -> Mapping[str, Any]:
-        return _native_schema(self.native, self._version)
+        return native_schema(self.native, self._version)
 
     def clone(self) -> XbbgDataFrame:
         return self._with_native(self.native)

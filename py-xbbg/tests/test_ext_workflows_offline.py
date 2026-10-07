@@ -213,3 +213,29 @@ def test_pivot_bdp_to_wide_keeps_foreign_frames_on_pure_narwhals_path(monkeypatc
     row = result.set_index("ticker").loc["IBM US Equity"]
     assert row["PX_LAST"] == 123.45
     assert row["VOLUME"] == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_corporate_bonds_uses_native_query_without_active_only(monkeypatch):
+    import inspect
+
+    import xbbg
+    from xbbg.ext import fixed_income
+
+    calls = []
+
+    def build_query(ticker, ccy, fields):
+        calls.append((ticker, ccy, fields))
+        return "get(id) for(debt('ACME US Equity'))"
+
+    async def query(expression, **kwargs):
+        return expression, kwargs
+
+    monkeypatch.setattr(fixed_income, "ext_build_corporate_bonds_query", build_query)
+    monkeypatch.setattr(xbbg, "abql", query)
+    result = await fixed_income.acorporate_bonds("ACME US Equity", ccy=None, fields=["name"], backend="native")
+
+    assert calls == [("ACME US Equity", None, ["name"])]
+    assert result == ("get(id) for(debt('ACME US Equity'))", {"backend": "native"})
+    assert "active_only" not in inspect.signature(fixed_income.acorporate_bonds).parameters
+    assert "active_only" not in inspect.signature(fixed_income.corporate_bonds).parameters

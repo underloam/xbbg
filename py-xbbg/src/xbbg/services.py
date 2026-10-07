@@ -69,15 +69,11 @@ __all__ = [
     "VALIDATION_MODE_VALUES",
     "ExtractorHint",
     "Format",
-    "LongMode",
     "Operation",
     "OutputMode",
     "RequestParams",
     "Service",
 ]
-
-# Backwards compatibility alias
-LongMode = Format
 
 
 @dataclass

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-import importlib
 from typing import Any
 
 from . import blp
+from .backend import _convert_result_backend
 
 
 def _arrow_table_class():
@@ -20,10 +20,6 @@ def _arrow_record_batch_class():
     from xbbg._core import ArrowRecordBatch
 
     return ArrowRecordBatch
-
-
-def _nw_module():
-    return importlib.import_module("narwhals.stable.v1")
 
 
 def _require_blpapi():
@@ -304,7 +300,7 @@ class mock_engine:
             context.frame = table
             return table
 
-        context.frame = blp._convert_result_backend(table, context.backend)
+        context.frame = _convert_result_backend(table, context.backend)
         return context.frame
 
     def __enter__(self):
@@ -315,7 +311,7 @@ class mock_engine:
         blp.add_middleware(middleware)
         return self
 
-    def __exit__(self, exc_type, exc, tb) -> None:
+    def __exit__(self, _exc_type, _exc, _tb) -> None:
         if self._middleware is not None:
             try:
                 blp.remove_middleware(self._middleware)

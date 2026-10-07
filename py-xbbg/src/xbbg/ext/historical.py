@@ -26,34 +26,17 @@ from typing import TYPE_CHECKING
 
 import narwhals.stable.v1 as nw
 
-from xbbg.ext._utils import DateLike, _call_native_recipe, _fmt_date, _syncify
-
-_NATIVE_IMPORT_ERROR_MARKERS = (
-    "DLL load failed",
-    "cannot open shared object file",
-    "image not found",
-    "Library not loaded",
-)
-
-
-def _is_native_import_error(error: ImportError) -> bool:
-    message = str(error)
-    native_loader_error = any(marker in message for marker in _NATIVE_IMPORT_ERROR_MARKERS) and (
-        "_core" in message or "xbbg" in message
-    )
-    # "cannot import name" also carries name="xbbg._core", but there the extension
-    # loaded and lacks a helper: it is outdated, not missing, so it must not degrade.
-    return not message.startswith("cannot import name") and (
-        error.name == "xbbg._core" or "No module named 'xbbg._core'" in message or native_loader_error
-    )
-
+from xbbg._core_guard import is_native_import_error
+from xbbg._dates import DateLike, _fmt_date
+from xbbg.backend import _convert_result_backend
+from xbbg.ext._utils import _call_native_recipe, _syncify
 
 try:
     # Import Rust helper for turnover defaults. This helper has a faithful
     # Python fallback so offline tests can import and exercise turnover paths.
     from xbbg._core import ext_default_turnover_dates
 except ImportError as exc:
-    if not _is_native_import_error(exc):
+    if not is_native_import_error(exc):
         raise
 
     from datetime import date as _date, timedelta as _timedelta
@@ -93,7 +76,7 @@ try:
         ext_rename_dividend_columns,
     )
 except ImportError as exc:
-    if not _is_native_import_error(exc):
+    if not is_native_import_error(exc):
         raise
 
     ext_filter_equity_tickers = _missing_native_helper("ext_filter_equity_tickers", exc)
@@ -112,10 +95,9 @@ if TYPE_CHECKING:
 
 def _get_empty_dataframe() -> IntoDataFrame:
     """Return empty DataFrame using configured backend."""
-    from xbbg import blp
     from xbbg._core import ArrowTable
 
-    return blp._convert_result_backend(ArrowTable.empty(["ticker", "field", "value"]), None)
+    return _convert_result_backend(ArrowTable.empty(["ticker", "field", "value"]), None)
 
 
 # =============================================================================

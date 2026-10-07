@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xbbg import blp
+from xbbg import _endpoints, _engine, backend as backend_module, blp
 from xbbg._core import ArrowTable
 from xbbg.services import ExtractorHint, Operation, Service
 
@@ -19,7 +19,7 @@ async def test_absrch_generated_endpoint_preserves_excel_grid_overrides(monkeypa
         return []
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda frame, _backend: frame)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda frame, _backend: frame)
 
     result = await blp.absrch("COMDTY:WEATHER", provider="wsi", location_time=True)
 
@@ -45,7 +45,7 @@ async def test_arequest_preserves_exrsvc_overrides_as_overrides(monkeypatch):
             captured.update(params_dict)
             return raw
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.EXRSVC,
@@ -63,7 +63,7 @@ async def test_arequest_preserves_exrsvc_overrides_as_overrides(monkeypatch):
 
 
 def test_absrch_plan_routes_search_kwargs_to_excel_grid_overrides():
-    plan = blp._build_absrch_plan(
+    plan = _endpoints._build_absrch_plan(
         {
             "domain": "COMDTY:WEATHER",
             "backend": None,
@@ -87,7 +87,7 @@ def test_absrch_plan_routes_search_kwargs_to_excel_grid_overrides():
 
 
 def test_absrch_plan_accepts_explicit_override_pairs():
-    plan = blp._build_absrch_plan(
+    plan = _endpoints._build_absrch_plan(
         {
             "domain": "COMDTY:WEATHER",
             "backend": "native",
@@ -104,7 +104,9 @@ def test_absrch_plan_accepts_explicit_override_pairs():
 
 def test_absrch_plan_rejects_scalar_overrides():
     with pytest.raises(TypeError, match="bsrch overrides"):
-        blp._build_absrch_plan({"domain": "COMDTY:WEATHER", "backend": None, "kwargs": {"overrides": "provider=wsi"}})
+        _endpoints._build_absrch_plan(
+            {"domain": "COMDTY:WEATHER", "backend": None, "kwargs": {"overrides": "provider=wsi"}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -117,4 +119,4 @@ def test_absrch_plan_rejects_scalar_overrides():
 )
 def test_absrch_plan_rejects_malformed_override_pairs(overrides):
     with pytest.raises(TypeError, match="bsrch overrides"):
-        blp._build_absrch_plan({"domain": "COMDTY:WEATHER", "backend": None, "kwargs": {"overrides": overrides}})
+        _endpoints._build_absrch_plan({"domain": "COMDTY:WEATHER", "backend": None, "kwargs": {"overrides": overrides}})

@@ -1,4 +1,4 @@
-"""Unit tests for the override-path date normalizer in ``blp.py`` (#317).
+"""Unit tests for the shared override-path date normalizer (#317).
 
 The override path receives ``**kwargs`` from BDP / BDH / BDS calls without
 per-field type metadata, so it relies on value-based duck typing to convert
@@ -11,13 +11,11 @@ from datetime import date, datetime, timezone
 
 import pytest
 
-# These tests import the normalizer directly so they don't drag in the full
-# request stack or the Rust binary. The module's only "side effect" at import
-# time is the lazy ``_fmt_date`` import already covered by other tests.
+# Exercise the shared request normalizer without dispatching Bloomberg requests.
 pytest.importorskip("xbbg")
 
-from xbbg import blp
-from xbbg.blp import _normalize_override_value
+from xbbg import _request_options, blp
+from xbbg._request_options import _normalize_override_value
 
 
 class _DuckTimestamp:
@@ -105,7 +103,7 @@ def test_ovr_normalizes_per_security_specs() -> None:
 
 
 def test_request_overrides_split_global_and_security_pairs() -> None:
-    assert blp._normalize_request_overrides(
+    assert _request_options._normalize_request_overrides(
         blp.ovr({"EQY_FUND_CRNCY": "USD", "IBM US Equity": {"EQY_FUND_CRNCY": "EUR"}})
     ) == (
         [("EQY_FUND_CRNCY", "USD")],

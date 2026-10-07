@@ -29,6 +29,8 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from xbbg import _sync
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -505,7 +507,7 @@ class TestNotebookSyncBridge:
     async def test_bdp_bdh_sync_wrappers_work_in_ipykernel_loop(self):
         """bdp/bdh should work from a running IPykernel event loop."""
         IPython = pytest.importorskip("IPython")
-        from xbbg import bdh, bdp, blp
+        from xbbg import bdh, bdp
 
         original_get_ipython = self._enable_fake_ipykernel(IPython)
         try:
@@ -514,7 +516,7 @@ class TestNotebookSyncBridge:
             bdh_df = bdh(CONFIG.equity_single, CONFIG.price_field, start_date=start, end_date=end)
         finally:
             IPython.get_ipython = original_get_ipython
-            blp._stop_notebook_sync_loop()
+            _sync._stop_notebook_sync_loop()
 
         assert len(bdp_df) == 1
         assert len(bdh_df) >= 1
@@ -524,7 +526,7 @@ class TestNotebookSyncBridge:
     async def test_subscribe_sync_wrapper_works_in_ipykernel_loop(self):
         """A bridged subscribe() handle is consumed and closed on the notebook loop."""
         IPython = pytest.importorskip("IPython")
-        from xbbg import blp, subscribe
+        from xbbg import subscribe
 
         original_get_ipython = self._enable_fake_ipykernel(IPython)
         try:
@@ -535,7 +537,7 @@ class TestNotebookSyncBridge:
                 await sub.unsubscribe()
         finally:
             IPython.get_ipython = original_get_ipython
-            blp._stop_notebook_sync_loop()
+            _sync._stop_notebook_sync_loop()
 
         assert len(batch) >= 1
 
@@ -2477,16 +2479,6 @@ class TestFieldCacheAsync:
 
 # Test registry for CLI
 TESTS: dict[str, Callable] = {}
-
-
-def register_test(name: str):
-    """Decorator to register a test function."""
-
-    def decorator(func):
-        TESTS[name] = func
-        return func
-
-    return decorator
 
 
 # Register all test classes

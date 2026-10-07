@@ -29,12 +29,10 @@ import narwhals.stable.v1 as nw
 
 # Import Rust date parser (shared with other ext modules)
 from xbbg._core import ext_get_futures_months, ext_parse_date
+from xbbg._dates import DateLike, _fmt_date, _normalize_to_datetime
 from xbbg.ext._utils import (
-    DateLike,
     _call_native_recipe,
     _canonical_column_name,
-    _fmt_date,
-    _normalize_to_datetime,
     _syncify,
 )
 

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from xbbg import _core, blp
+from xbbg import _core, _engine, blp
 from xbbg._core import ArrowTable
 from xbbg.exceptions import BlpValidationError
 from xbbg.ext import AUCTION, auction, imbalance_side
@@ -32,7 +32,7 @@ def _patch_recipe(monkeypatch, rows):
         return ArrowTable.from_pylist(rows).to_record_batch()
 
     monkeypatch.setattr(_core, "recipe_resolve_venues", recipe)
-    monkeypatch.setattr(blp, "_get_engine", lambda: engine)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
     return calls
 
 
@@ -254,7 +254,7 @@ def test_auction_stream_early_close_unsubscribes_after_atomic_routing(monkeypatc
         return native
 
     engine = SimpleNamespace(subscribe=subscribe)
-    monkeypatch.setattr(blp, "_get_engine", lambda: engine)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
 
     async def resolve(_engine, securities, pcs_overrides):
         return ArrowTable.from_pylist([_row(0, FIRST, FIRST_VENUE)]).to_record_batch()

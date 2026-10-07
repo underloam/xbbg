@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from xbbg import _core, blp
+from xbbg import _core, _engine, blp
 
 FIRST = "SYNTHETIC1 Equity"
 SECOND = "SYNTHETIC2 Equity"
@@ -88,11 +88,11 @@ class _Scope:
 
 
 def _start(source, scope):
-    token = blp._active_engine.set(scope)
+    token = _engine._active_engine.set(scope)
     try:
         return next(source)
     finally:
-        blp._active_engine.reset(token)
+        _engine._active_engine.reset(token)
 
 
 def test_shared_consumers_are_admitted_when_new_and_isolated_feeds_hit_capacity():
@@ -189,7 +189,7 @@ def test_only_dedicated_native_claim_timeouts_get_the_producer_limit_message(err
 @pytest.mark.asyncio
 async def test_direct_async_subscription_keeps_native_unbounded_claim_default(monkeypatch):
     engine = _Engine()
-    monkeypatch.setattr(blp, "_get_engine", lambda: engine)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
     sub = await blp.asubscribe(FIRST, "BID", raw=True)
     try:
         assert engine.attempts == [((FIRST,), None)]
@@ -200,8 +200,8 @@ async def test_direct_async_subscription_keeps_native_unbounded_claim_default(mo
 
 def test_claim_timeout_message_uses_global_configuration(monkeypatch):
     engine = _Engine(limit=3)
-    monkeypatch.setattr(blp, "_get_engine", lambda: engine)
-    monkeypatch.setattr(blp, "_config", SimpleNamespace(max_subscription_sessions=3))
+    monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
+    monkeypatch.setattr(_engine, "_config", SimpleNamespace(max_subscription_sessions=3))
     sources = [blp.stream(topic, "BID", raw=True) for topic in (FIRST, SECOND, THIRD, "SYNTHETIC4 Equity")]
     try:
         for source in sources[:3]:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from xbbg import _engine, _request_options, backend as backend_module
 from xbbg._core import ArrowTable
 from xbbg.services import Operation, RequestParams, Service
 
@@ -53,7 +54,7 @@ async def test_arequest_passes_validate_fields_to_engine(monkeypatch):
                 ]
             ).to_batches()[0]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -77,7 +78,7 @@ async def test_arequest_maps_native_validation_error_to_public_exception(monkeyp
         async def request(self, _params_dict):
             raise _core.BlpValidationError("Configuration error: Unknown Bloomberg field(s): BAD_FIELD")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     with pytest.raises(BlpValidationError, match="Unknown Bloomberg field"):
         await blp.arequest(
@@ -98,7 +99,7 @@ async def test_arequest_maps_native_request_error_to_public_exception(monkeypatc
         async def request(self, _params_dict):
             raise _core.BlpRequestError("Request failed: All securities failed")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     with pytest.raises(BlpRequestError, match="All securities failed") as exc_info:
         await blp.arequest(
@@ -132,7 +133,7 @@ async def test_arequest_preserves_native_request_subclasses(monkeypatch, native_
         async def request(self, _params_dict):
             raise native_cls(f"{native_name}: specific request failure")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     with pytest.raises(public_cls, match="specific request failure") as exc_info:
         await blp.arequest(
@@ -164,10 +165,10 @@ async def test_abdp_forwards_validate_fields(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abdp("IBM US Equity", "PX_LAST", validate_fields=True)
 
@@ -192,10 +193,10 @@ def test_bdp_forwards_validate_fields(monkeypatch):
         captured.update(kwargs)
         return [{"ticker": "IBM US Equity", "field": "PX_LAST", "value": "123.45"}]
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-    monkeypatch.setattr(blp, "_aroute_kwargs", fake_route_kwargs)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_request_options, "_aroute_kwargs", fake_route_kwargs)
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = blp.bdp("IBM US Equity", "PX_LAST", validate_fields=True)
 

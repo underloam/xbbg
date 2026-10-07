@@ -26,8 +26,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from xbbg._dates import DateLike
 from xbbg.ext._utils import (
-    DateLike,
     _abdp_fields,
     _abds_field,
     _apply_settle_override,

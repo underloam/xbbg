@@ -1,156 +1,72 @@
 # Benchmark Results
 
-This directory contains historical benchmark results for xbbg performance tracking.
+This directory stores reports produced by the benchmark entry points. See
+[../README.md](../README.md) for installed-package comparisons, dependencies, and
+measurement boundaries.
 
-## File Naming Convention
+## File Naming
 
-### Version-Specific Files (Overwrites)
-```
-benchmark_v{version}.json
-benchmark_v{version}.md
-```
+| Files | Purpose |
+|-------|---------|
+| `benchmark_v{version}.json` / `.md` | Most recent standard-suite run for that installed xbbg version; overwritten on a new run of the same version. |
+| `benchmark_v{version}_{YYYYMMDD_HHMMSS}.json` / `.md` | Timestamped standard-suite snapshot. |
+| `latest.json` / `latest.md` | Local symlink or copy of the latest standard-suite report; not committed. |
+| `handoff_offline_{YYYYMMDD_HHMMSS}.json` | Offline native Arrow handoff observations. |
+| `handoff_offline_latest.json` | Most recent local offline handoff report. |
+| `latest_competitor_equivalence_{YYYYMMDD_HHMMSS}.json` / `.md` | Separate installed-competitor comparison, with normalized result-equivalence checks. |
 
-**Example:** `benchmark_v1.0.0.json`, `benchmark_v1.0.1.md`
+The current installation is the only xbbg lane. Compare different xbbg versions
+by running the same benchmark inputs separately with each actual installed build,
+not by importing a renamed package from the current environment.
 
-- **Purpose:** Current benchmark for each version
-- **Behavior:** OVERWRITES when you re-run benchmarks for the same version
-- **Commit:** YES - These are the canonical benchmark results per xbbg version
+## Running and Saving Reports
 
-### Timestamped Archives (Never Overwrites)
-```
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.json
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.md
-```
-
-**Example:** `benchmark_v1.0.0_20260108_153045.json`
-
-- **Purpose:** Historical snapshots of benchmark runs
-- **Behavior:** NEVER overwrites - each run creates a new file
-- **Commit:** YES - Keeps full history of all benchmark runs
-- **Use case:** Track performance changes across different machines, Bloomberg connections, etc.
-
-### Latest Files (Symlinks/Copies)
-```
-latest.json
-latest.md
-```
-
-- **Purpose:** Quick access to most recent benchmark
-- **Behavior:** Always points to/copies the latest version
-- **Commit:** NO - These are generated, ignore in git
-
-## Workflow
-
-### Running Benchmarks Locally
+From the repository root, in the environment containing the xbbg build under
+measurement:
 
 ```bash
-# Install dependencies (from project root)
-uv sync --group benchmark
+# Requires authorized Bloomberg access
+python py-xbbg/benchmarks/run_all.py
 
-# Run benchmarks (requires Bloomberg terminal/BPIPE access)
-cd benchmarks
-python run_all.py
+# No live requests
+python py-xbbg/benchmarks/bench_handoff_offline.py --quick
 ```
 
-**Output:**
-```
-results/
-├── benchmark_v1.0.0.json           # Version file (overwrites)
-├── benchmark_v1.0.0.md
-├── benchmark_v1.0.0_20260108_153045.json  # Timestamped archive (keeps)
-├── benchmark_v1.0.0_20260108_153045.md
-├── latest.json                     # Symlink/copy (ignored)
-└── latest.md
-```
+Before retaining or sharing a generated report:
 
-### After Running Benchmarks
+1. Check that the requested operations returned usable data, and inspect
+   equivalence results when comparing packages.
+2. Record the actual package versions and request inputs.
+3. Remove local absolute paths and identifying environment details from provenance.
+4. Keep the JSON and Markdown report together. Do not replace missing
+   measurements with example timings.
 
-1. **Review results:**
-   ```bash
-   cat results/benchmark_v1.0.0.md
-   ```
+Live request benchmarks run locally, not in offline CI.
 
-2. **Commit to git:**
-   ```bash
-   git add results/benchmark_v*.json
-   git add results/benchmark_v*.md
-   git commit -m "chore: add benchmark results for v1.0.0"
-   ```
+## Historical Reports
 
-3. **Compare versions:**
-   ```bash
-   # Compare current vs previous version
-   diff results/benchmark_v0.10.3.md results/benchmark_v1.0.0.md
-   ```
+The checked-in June 2026 reports predate the current measurement contract.
+Unsupported renamed-package rows and their derived comparisons have been removed;
+the other recorded observations are preserved, not remeasured.
 
-## Version History
+These reports do not establish comparable work between packages: some result
+shapes differ, result equivalence was not recorded, and their older timing and
+memory labels do not describe the current measurement boundaries. They are
+historical records, not evidence for current speedup or memory-reduction claims.
 
-| Version | Date | Key Results | Notes |
-|---------|------|-------------|-------|
-| 1.0.0 | TBD | TBD | First Rust release |
-| 0.10.3 | TBD | TBD | Legacy Python (baseline) |
+## Interpreting Current Reports
 
-## Why This Structure?
+- **Fresh-process first result** includes process spawn, imports, session setup,
+  request, result construction, and the flushed result marker. One sample is
+  reported; teardown and child exit are excluded.
+- **Warm-session timing** measures uninstrumented calls after discarded warmup.
+  Compare matching operations, inputs, lifecycle scopes, and sample counts.
+- **p95 / p99** are `null` below 20 / 100 warm observations respectively.
+- **CPython tracemalloc peak** is measured in a separate untimed call and excludes
+  native allocations and process RSS. It is not total memory consumption.
+- **Shape** describes dimensions only. A fast result with different values or
+  missing rows is not a performance win.
 
-### ✅ Version-Specific Files
-- **Marketing/docs:** "v1.0.0 is 10x faster than v0.10.3" (canonical xbbg comparison)
-- **Documentation**: Include in release notes
-- **Reproducibility**: Re-run benchmarks, overwrite if needed
-
-### ✅ Timestamped Archives
-- **Historical tracking**: See how performance evolved
-- **Environment differences**: Compare results across different machines/connections
-- **Debugging**: "Why was v1.0.0 faster on Jan 8 than Jan 5?"
-
-### ❌ Latest Files (Not Committed)
-- **Convenience**: Quick access for local dev
-- **Generated**: Can always be recreated
-- **No history value**: Already captured in version/timestamped files
-
-## Data Integrity
-
-**All benchmark files are committed to git** (except `latest.*`) because:
-- ✅ Small file sizes (JSON/MD are text, compress well)
-- ✅ Performance claims need evidence
-- ✅ Historical tracking is valuable
-- ✅ Results are expensive to generate (require Bloomberg access)
-
-## CI/CD Note
-
-**Benchmarks do NOT run in CI** because they require:
-- ❌ Bloomberg Terminal or B-PIPE access
-- ❌ Live market data connection
-- ❌ Data usage limits management
-
-**Benchmarks run LOCALLY only**, then results are committed.
-
-## Interpreting Results
-
-### Key Metrics
-
-| Metric | Description | Good Value |
-|--------|-------------|------------|
-| **Cold Start** | First request (includes setup) | Baseline |
-| **Warm Mean** | Average of subsequent requests | Primary comparison |
-| **Warm P95** | 95th percentile latency | Consistency indicator |
-| **Memory Peak** | Peak memory usage | Lower is better |
-| **Speedup** | Ratio vs baseline | Higher is better |
-
-### Example Comparison
-
-```markdown
-## BDP - Reference Data
-
-| Package         | Warm Mean (ms) | Memory (MB) |
-|-----------------|----------------|-------------|
-| xbbg v1.0.0 ✅  |  12.3          |  8.2        |
-| xbbg v0.10.3    | 120.7          | 45.1        |
-
-**Speedup:** 9.8x faster, 5.5x less memory
-```
-
-**This means:** Rust version completes BDP requests in 1/10th the time using 1/5th the memory.
-
-## Questions?
-
-See [../README.md](../README.md) for full benchmark suite documentation.
+The standalone equivalence and offline handoff reports label their own consumer
+and lifecycle scopes. Do not compare unlike measurement scopes or sum different
+sets of operations into an overall speedup.

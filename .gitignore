@@ -128,6 +128,9 @@ venv.bak/
 #Ruff
 .ruff_cache/
 
+# import-linter
+.import_linter_cache/
+
 # Bloomberg BLPAPI SDK (local development only; do not commit)
 # README.md under vendor/blpapi-sdk is tracked for setup instructions; everything else is ignored.
 crates/blpapi-sys/vendor/blpapi-sdk/*

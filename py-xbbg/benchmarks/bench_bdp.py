@@ -8,8 +8,6 @@ from __future__ import annotations
 import logging
 import sys
 
-sys.stdout.reconfigure(encoding="utf-8")
-
 from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
@@ -58,19 +56,6 @@ def run_xbbg_rust(tickers, fields):
     return xbbg.bdp(tickers, fields)
 
 
-def run_xbbg_legacy(tickers, fields):
-    """Benchmark legacy xbbg Python version."""
-    # Assume xbbg 0.10.3 is installed separately
-    # (Could use virtual env or rename import)
-    try:
-        import xbbg_legacy
-
-        return xbbg_legacy.bdp(tickers, fields)
-    except ImportError:
-        logger.warning("xbbg legacy not installed (pip install xbbg==0.10.3)")
-        return None
-
-
 def run_pdblp(tickers, fields):
     try:
         con = reused_pdblp_connection()
@@ -106,16 +91,6 @@ def main():
         except Exception as e:
             logger.error(f"  ✗ Error: {e}")
 
-    if True:  # xbbg Legacy
-        logger.info("Running xbbg (legacy)...")
-        try:
-            result = benchmark_bdp("xbbg-legacy", run_xbbg_legacy, TICKERS_SINGLE[0], FIELDS_SINGLE[0])
-            if result:
-                results.append(result)
-                logger.info(f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB")
-        except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
-
     if True:  # pdblp
         logger.info("Running pdblp...")
         try:
@@ -134,16 +109,6 @@ def main():
         logger.info("Running xbbg (Rust)...")
         try:
             result = benchmark_bdp("xbbg-rust", run_xbbg_rust, TICKERS_MULTI, FIELDS_MULTI)
-            if result:
-                results.append(result)
-                logger.info(f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB")
-        except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
-
-    if True:  # xbbg Legacy
-        logger.info("Running xbbg (legacy)...")
-        try:
-            result = benchmark_bdp("xbbg-legacy", run_xbbg_legacy, TICKERS_MULTI, FIELDS_MULTI)
             if result:
                 results.append(result)
                 logger.info(f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB")
@@ -176,22 +141,10 @@ def main():
         logger.info(f"  CPython tracemalloc peak (untimed call): {result.python_tracemalloc_peak_mb:.2f}MB")
         logger.info(f"  Shape:      {result.data_shape}")
 
-    # Calculate speedups
-    xbbg_rust_results = [r for r in results if r.package == "xbbg-rust"]
-    legacy_results = [r for r in results if r.package == "xbbg-legacy"]
-
-    if xbbg_rust_results and legacy_results:
-        rust_time = sum(r.warm_mean_ms for r in xbbg_rust_results)
-        legacy_time = sum(r.warm_mean_ms for r in legacy_results)
-        speedup = legacy_time / rust_time if rust_time > 0 else 0
-
-        logger.info(f"\n\n{'=' * 70}")
-        logger.info(f"xbbg Rust vs Legacy Speedup: {speedup:.2f}x faster")
-        logger.info(f"{'=' * 70}")
-
     return results
 
 
 if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     main()
