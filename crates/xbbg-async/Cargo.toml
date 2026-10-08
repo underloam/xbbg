@@ -57,3 +57,6 @@ tracing-subscriber = { workspace = true, features = [
   "std",
   "env-filter",
 ] }
+
+[lints]
+workspace = true

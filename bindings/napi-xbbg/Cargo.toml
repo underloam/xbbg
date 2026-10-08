@@ -29,3 +29,6 @@ live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
 
 [build-dependencies]
 napi-build = { workspace = true }
+
+[lints]
+workspace = true

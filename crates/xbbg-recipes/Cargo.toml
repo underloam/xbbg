@@ -34,3 +34,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [features]
 default = ["live"]
 live = ["xbbg-async/live"]
+
+[lints]
+workspace = true

@@ -40,3 +40,6 @@ default = ["live"]
 mimalloc = ["dep:mimalloc"]
 stub-gen = ["dep:pyo3-stub-gen"]
 live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
+
+[lints]
+workspace = true

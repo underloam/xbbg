@@ -48,3 +48,6 @@ features = ["dynamic"]
 [package.metadata.cargo-shear]
 # bindgen emits cty references into OUT_DIR/bindings.rs, outside the source tree.
 ignored = ["cty"]
+
+[lints]
+workspace = true

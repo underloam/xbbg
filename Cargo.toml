@@ -36,6 +36,9 @@ homepage = "https://xbbg.org/"
 edition = "2021"
 rust-version = "1.88"
 
+[workspace.lints.rust]
+unreachable_pub = "warn"
+
 # =============================================================================
 # Workspace Dependencies
 # =============================================================================

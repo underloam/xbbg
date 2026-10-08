@@ -17,3 +17,6 @@ include = ["src/**/*.rs", "Cargo.toml", "README.md"]
 tracing = { workspace = true }
 tracing-core = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["fmt", "std", "registry"] }
+
+[lints]
+workspace = true

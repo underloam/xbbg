@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 /// `%CONDA_PREFIX%\\Library\\bin`. Copying that DLL to an OUT_DIR-local
 /// `libclang.dll` alias keeps the repository self-contained and avoids mutating
 /// the pixi environment.
-pub fn prepare_windows_libclang_alias(out_dir: &Path) -> Result<(), String> {
+pub(crate) fn prepare_windows_libclang_alias(out_dir: &Path) -> Result<(), String> {
     println!("cargo:rerun-if-env-changed=LIBCLANG_PATH");
     println!("cargo:rerun-if-env-changed=CONDA_PREFIX");
 

@@ -37,3 +37,6 @@ rustc-hash = { workspace = true }  # Fast non-cryptographic hashing for Name cac
 
 # Benchmarks have been consolidated into crates/xbbg-bench.
 # Run with: cargo bench --package xbbg-bench
+
+[lints]
+workspace = true
