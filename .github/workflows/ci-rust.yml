@@ -968,8 +968,13 @@ jobs:
       - name: Build stub generator
         run: cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
 
+      - name: Test stub postprocessor
+        run: cargo test -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
+
       - name: Regenerate stubs
-        run: CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/bindings/pyo3-xbbg" ./target/debug/stub_gen
+        run: |
+          CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/bindings/pyo3-xbbg" ./target/debug/stub_gen
+          python3 scripts/generate_package_stub.py
 
       - name: Commit stubs if changed
         run: |

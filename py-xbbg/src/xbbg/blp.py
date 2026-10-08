@@ -307,6 +307,147 @@ if TYPE_CHECKING:
         """Sync Bloomberg government securities list (BGOVTS) request. See ``abgovts`` for details."""
         ...
 
+    def request(
+        service: str | Service,
+        operation: str | Operation,
+        *,
+        request_operation: str | Operation | None = None,
+        securities: str | Sequence[str] | None = None,
+        security: str | None = None,
+        fields: str | Sequence[str] | None = None,
+        overrides: Mapping[str, Any] | Sequence[tuple[str, Any]] | OverrideSpec | None = None,
+        security_overrides: Sequence[tuple[str, Sequence[tuple[str, Any]]]] | None = None,
+        elements: Sequence[tuple[str, Any]] | None = None,
+        start_date: DateLike = None,
+        end_date: DateLike = None,
+        start_datetime: DateLike = None,
+        end_datetime: DateLike = None,
+        event_type: str | None = None,
+        event_types: Sequence[str] | None = None,
+        interval: int | None = None,
+        options: dict[str, Any] | Sequence[tuple[str, str]] | None = None,
+        field_types: dict[str, str] | None = None,
+        output: OutputMode | str = OutputMode.ARROW,
+        extractor: ExtractorHint | str | None = None,
+        format: Format | str | None = None,
+        include_security_errors: bool = False,
+        return_eids: bool = False,
+        validate_fields: bool | None = None,
+        backend: Backend | str | None = None,
+        request_tz: str | None = None,
+        output_tz: str | None = None,
+        _raw: bool = False,
+    ) -> DataFrameResult:
+        """Sync generic Bloomberg request. See ``arequest`` for details."""
+        ...
+
+    def seat_type() -> str:
+        """Sync identity seat type. See ``aseat_type`` for details."""
+        ...
+
+    def check_entitlements(eids: Sequence[int], service: str = Service.REFDATA.value) -> EntitlementReport:
+        """Sync EID entitlement check. See ``acheck_entitlements`` for details."""
+        ...
+
+    def identity_is_authorized(service: str = Service.REFDATA.value) -> bool:
+        """Sync identity authorization check. See ``aidentity_is_authorized`` for details."""
+        ...
+
+    def subscribe(
+        tickers: str | list[str],
+        fields: str | list[str],
+        *,
+        raw: bool = False,
+        all_fields: bool = False,
+        backend: Backend | str | None = None,
+        service: str | Service | None = None,
+        options: list[str] | None = None,
+        conflate: bool = False,
+        tick_mode: bool = False,
+        flush_threshold: int | None = None,
+        stream_capacity: int | None = None,
+        overflow_policy: str | None = None,
+        output: str | None = None,
+        aliases: Mapping[str, str] | None = None,
+        on_delayed: str = "warn",
+        isolated: bool = False,
+        rows: bool = True,
+        on_field_error: str = "warn",
+        zero_as_null: Sequence[str] | None = None,
+    ) -> Subscription:
+        """Sync subscription creation. See ``asubscribe`` for details."""
+        ...
+
+    def vwap(
+        tickers: str | list[str],
+        *,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        raw: bool = False,
+        all_fields: bool = True,
+        backend: Backend | str | None = None,
+    ) -> Subscription:
+        """Sync VWAP subscription creation. See ``avwap`` for details."""
+        ...
+
+    def mktbar(
+        tickers: str | list[str],
+        *,
+        bar_size: int = 1,
+        start_time: str | None = None,
+        end_time: str | None = None,
+        raw: bool = False,
+        all_fields: bool = True,
+        backend: Backend | str | None = None,
+    ) -> Subscription:
+        """Sync market-bar subscription creation. See ``amktbar`` for details."""
+        ...
+
+    def depth(
+        tickers: str | list[str],
+        *,
+        raw: bool = False,
+        all_fields: bool = False,
+        backend: Backend | str | None = None,
+    ) -> Subscription:
+        """Sync market-depth subscription creation. See ``adepth`` for details."""
+        ...
+
+    def chains(
+        underlying: str,
+        *,
+        chain_type: str = "OPTIONS",
+        raw: bool = False,
+        all_fields: bool = False,
+        backend: Backend | str | None = None,
+    ) -> Subscription:
+        """Sync chain subscription creation. See ``achains`` for details."""
+        ...
+
+    def bta(
+        tickers: str | list[str],
+        study: str,
+        *,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        periodicity: str = "DAILY",
+        interval: int | None = None,
+        **study_params,
+    ) -> DataFrameResult:
+        """Sync technical analysis request. See ``abta`` for details."""
+        ...
+
+    def bops(service: str | Service = Service.REFDATA) -> list[str]:
+        """Sync service operation listing. See ``abops`` for details."""
+        ...
+
+    def bschema(
+        service: str | Service = Service.REFDATA,
+        operation: str | Operation | None = None,
+    ) -> dict:
+        """Sync service schema lookup. See ``abschema`` for details."""
+        ...
+
 else:
     (bdp, bdh, bds, bdib, bdtick, bql, bsrch, bqr, bflds, beqs, blkp, bport, bcurves, bgovts) = (None,) * 14
 
