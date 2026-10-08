@@ -156,86 +156,31 @@ def test_ext_exports_new_workflows():
         assert name in ext.__all__
 
 
-def test_pivot_bdp_to_wide_uses_native_pyo3_pivot_for_xbbg_narwhals(monkeypatch):
-    import narwhals.stable.v1 as nw
-
-    import xbbg._core as core_module
-    from xbbg._core import ArrowTable
-    from xbbg.ext._utils import _pivot_bdp_to_wide
-
-    long_table = ArrowTable.from_pylist(
-        [
-            {"ticker": "IBM US Equity", "field": "PX_LAST", "value": 123.45},
-            {"ticker": "IBM US Equity", "field": "VOLUME", "value": 1000.0},
-        ]
-    )
-    wide_batch = ArrowTable.from_pylist(
-        [{"ticker": "IBM US Equity", "PX_LAST": 123.45, "VOLUME": 1000.0}]
-    ).to_batches()[0]
-    calls = []
-
-    def fake_ext_pivot_to_wide(batch):
-        calls.append(batch.to_pylist())
-        return wide_batch
-
-    monkeypatch.setattr(core_module, "ext_pivot_to_wide", fake_ext_pivot_to_wide)
-
-    result = _pivot_bdp_to_wide(nw.from_native(long_table))
-
-    assert calls == [long_table.to_pylist()]
-    native = result.to_native()
-    assert native.column_names == ["ticker", "PX_LAST", "VOLUME"]
-    assert native.to_pylist() == [{"ticker": "IBM US Equity", "PX_LAST": 123.45, "VOLUME": 1000.0}]
-
-
-def test_pivot_bdp_to_wide_keeps_foreign_frames_on_pure_narwhals_path(monkeypatch):
-    import narwhals.stable.v1 as nw
-
-    import xbbg._core as core_module
-    from xbbg.ext._utils import _pivot_bdp_to_wide
-
-    pd = pytest.importorskip("pandas")
-    frame = pd.DataFrame(
-        [
-            {"ticker": "IBM US Equity", "field": "PX_LAST", "value": 123.45},
-            {"ticker": "IBM US Equity", "field": "VOLUME", "value": 1000.0},
-        ]
-    )
-
-    def fail_native_pivot(_batch):
-        raise AssertionError("foreign Narwhals frames must not call the native xbbg pivot")
-
-    monkeypatch.setattr(core_module, "ext_pivot_to_wide", fail_native_pivot)
-
-    result = _pivot_bdp_to_wide(nw.from_native(frame)).to_native()
-
-    assert set(result.columns) == {"ticker", "PX_LAST", "VOLUME"}
-    row = result.set_index("ticker").loc["IBM US Equity"]
-    assert row["PX_LAST"] == 123.45
-    assert row["VOLUME"] == 1000.0
-
-
 @pytest.mark.asyncio
-async def test_corporate_bonds_uses_native_query_without_active_only(monkeypatch):
+async def test_corporate_bonds_uses_native_recipe_without_active_only(monkeypatch):
     import inspect
 
-    import xbbg
     from xbbg.ext import fixed_income
 
     calls = []
+    native_result = object()
 
-    def build_query(ticker, ccy, fields):
-        calls.append((ticker, ccy, fields))
-        return "get(id) for(debt('ACME US Equity'))"
+    async def call_recipe(name, ticker, **kwargs):
+        calls.append((name, ticker, kwargs))
+        return native_result
 
-    async def query(expression, **kwargs):
-        return expression, kwargs
+    monkeypatch.setattr(fixed_income, "_call_native_recipe", call_recipe)
+    result = await fixed_income.acorporate_bonds(
+        "ACME US Equity", ccy=None, fields=["name"], backend="native", mode="cached"
+    )
 
-    monkeypatch.setattr(fixed_income, "ext_build_corporate_bonds_query", build_query)
-    monkeypatch.setattr(xbbg, "abql", query)
-    result = await fixed_income.acorporate_bonds("ACME US Equity", ccy=None, fields=["name"], backend="native")
-
-    assert calls == [("ACME US Equity", None, ["name"])]
-    assert result == ("get(id) for(debt('ACME US Equity'))", {"backend": "native"})
+    assert calls == [
+        (
+            "recipe_corporate_bonds",
+            "ACME US Equity",
+            {"ccy": None, "fields": ["name"], "backend": "native", "request_options": {"mode": "cached"}},
+        )
+    ]
+    assert result is native_result
     assert "active_only" not in inspect.signature(fixed_income.acorporate_bonds).parameters
     assert "active_only" not in inspect.signature(fixed_income.corporate_bonds).parameters

@@ -1938,10 +1938,11 @@ impl JsEngine {
         let batch = xbbg_recipes::fixed_income::recipe_bqr(
             &engine,
             ticker,
-            start_datetime,
-            end_datetime,
+            Some(start_datetime),
+            Some(end_datetime),
             event_types,
             include_broker_codes.unwrap_or(true),
+            Default::default(),
         )
         .await
         .map_err(recipe_error_to_napi)?;
@@ -1963,9 +1964,20 @@ impl JsEngine {
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
         let yt = yield_type
-            .and_then(|v| xbbg_ext::transforms::fixed_income::YieldType::try_from(v).ok());
+            .map(xbbg_ext::transforms::fixed_income::YieldType::try_from)
+            .transpose()
+            .map_err(|error| napi::Error::new(napi::Status::InvalidArg, error.to_string()))?;
         let batch = xbbg_recipes::fixed_income::recipe_yas(
-            &engine, tickers, fields, settle_dt, yt, spread, yield_val, price, benchmark,
+            &engine,
+            tickers,
+            fields,
+            settle_dt,
+            yt,
+            spread,
+            yield_val,
+            price,
+            benchmark,
+            Default::default(),
         )
         .await
         .map_err(recipe_error_to_napi)?;
@@ -1979,9 +1991,14 @@ impl JsEngine {
         fields: Option<Vec<String>>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch = xbbg_recipes::fixed_income::recipe_preferreds(&engine, equity_ticker, fields)
-            .await
-            .map_err(recipe_error_to_napi)?;
+        let batch = xbbg_recipes::fixed_income::recipe_preferreds(
+            &engine,
+            equity_ticker,
+            fields,
+            Default::default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 
@@ -1993,10 +2010,15 @@ impl JsEngine {
         fields: Option<Vec<String>>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch =
-            xbbg_recipes::fixed_income::recipe_corporate_bonds(&engine, ticker, ccy, fields)
-                .await
-                .map_err(recipe_error_to_napi)?;
+        let batch = xbbg_recipes::fixed_income::recipe_corporate_bonds(
+            &engine,
+            ticker,
+            ccy,
+            fields,
+            Default::default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 
@@ -2008,9 +2030,15 @@ impl JsEngine {
         freq: Option<String>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch = xbbg_recipes::futures::recipe_fut_ticker(&engine, gen_ticker, dt, freq)
-            .await
-            .map_err(recipe_error_to_napi)?;
+        let batch = xbbg_recipes::futures::recipe_fut_ticker(
+            &engine,
+            gen_ticker,
+            dt,
+            freq,
+            Default::default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 
@@ -2022,9 +2050,15 @@ impl JsEngine {
         freq: Option<String>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch = xbbg_recipes::futures::recipe_active_futures(&engine, gen_ticker, dt, freq)
-            .await
-            .map_err(recipe_error_to_napi)?;
+        let batch = xbbg_recipes::futures::recipe_active_futures(
+            &engine,
+            gen_ticker,
+            dt,
+            freq,
+            Default::default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 
@@ -2101,7 +2135,12 @@ impl JsEngine {
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
         let batch = xbbg_recipes::historical::recipe_dividend(
-            &engine, tickers, dvd_type, start_date, end_date,
+            &engine,
+            tickers,
+            dvd_type,
+            start_date,
+            end_date,
+            Default::default(),
         )
         .await
         .map_err(recipe_error_to_napi)?;
@@ -2142,7 +2181,13 @@ impl JsEngine {
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
         let batch = xbbg_recipes::historical::recipe_turnover(
-            &engine, tickers, start_date, end_date, ccy, factor,
+            &engine,
+            tickers,
+            start_date,
+            end_date,
+            ccy,
+            factor,
+            Default::default(),
         )
         .await
         .map_err(recipe_error_to_napi)?;
@@ -2156,9 +2201,14 @@ impl JsEngine {
         fields: Option<Vec<String>>,
     ) -> napi::Result<NativeArrowBatch> {
         let engine = self.engine.clone();
-        let batch = xbbg_recipes::historical::recipe_etf_holdings(&engine, etf_ticker, fields)
-            .await
-            .map_err(recipe_error_to_napi)?;
+        let batch = xbbg_recipes::historical::recipe_etf_holdings(
+            &engine,
+            etf_ticker,
+            fields,
+            Default::default(),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
     }
 

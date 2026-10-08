@@ -2840,7 +2840,10 @@ version = "1.5.1"
 dependencies = [
  "arrow-arith",
  "arrow-array",
+ "arrow-cast",
+ "arrow-ord",
  "arrow-schema",
+ "arrow-select",
  "chrono",
  "serde_json",
  "thiserror 2.0.20",

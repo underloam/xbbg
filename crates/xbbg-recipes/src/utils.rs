@@ -5,8 +5,119 @@ use arrow_array::{
     Array, ArrayRef, Date32Array, Float64Array, Int32Array, Int64Array, LargeStringArray,
     RecordBatch, StringArray,
 };
+use xbbg_async::engine::{ExtractorType, RequestParams};
+use xbbg_async::services::{Operation, Service};
 
 use crate::error::{RecipeError, Result};
+
+/// Merge caller request controls without changing the recipe's request identity.
+///
+/// Explicit pairs replace recipe defaults by name. BQL uses elements rather
+/// than field overrides; raw kwargs remain available to the engine's router.
+pub(crate) fn apply_request_options(params: &mut RequestParams, options: &RequestParams) {
+    if params.service == Service::BqlSvc.as_str() {
+        merge_pairs(&mut params.elements, options.overrides.as_deref());
+    } else {
+        merge_pairs(&mut params.overrides, options.overrides.as_deref());
+    }
+    merge_pairs(&mut params.elements, options.elements.as_deref());
+    if params.operation == Operation::HistoricalData.as_str() {
+        let adjustment = options
+            .kwargs
+            .as_ref()
+            .and_then(|values| values.get("adjust"));
+        let fields: &[&str] = match adjustment.map(String::as_str) {
+            Some("all") => &["adjustmentSplit", "adjustmentNormal", "adjustmentAbnormal"],
+            Some("dvd") => &["adjustmentNormal", "adjustmentAbnormal"],
+            Some("split") => &["adjustmentSplit"],
+            _ => &[],
+        };
+        for field in fields {
+            let values = params.options.get_or_insert_with(Vec::new);
+            if let Some((_, value)) = values
+                .iter_mut()
+                .find(|(key, _)| key.eq_ignore_ascii_case(field))
+            {
+                value.clear();
+                value.push_str("true");
+            } else {
+                values.push(((*field).to_string(), "true".to_string()));
+            }
+        }
+    }
+    merge_pairs(&mut params.options, options.options.as_deref());
+    if let Some(values) = &options.kwargs {
+        params
+            .kwargs
+            .get_or_insert_with(Default::default)
+            .extend(values.clone());
+    }
+    if let Some(kwargs) = &mut params.kwargs {
+        // Historical display/adjustment controls do not belong in metadata lookups.
+        kwargs.remove("adjust");
+        if params.extractor == ExtractorType::BulkData {
+            kwargs.remove("raw");
+        }
+    }
+    if let Some(values) = &options.security_overrides {
+        for (security, overrides) in values {
+            if params
+                .securities
+                .as_ref()
+                .is_some_and(|values| values.contains(security))
+                || params.security.as_ref() == Some(security)
+            {
+                params
+                    .security_overrides
+                    .get_or_insert_with(Vec::new)
+                    .push((security.clone(), overrides.clone()));
+            }
+        }
+    }
+    if let Some(values) = &options.field_types {
+        params
+            .field_types
+            .get_or_insert_with(Default::default)
+            .extend(values.clone());
+    }
+    if options.format.is_some() {
+        params.format.clone_from(&options.format);
+    }
+    if params.extractor == ExtractorType::BulkData {
+        params.format = None;
+    }
+    if options.request_tz.is_some() {
+        params.request_tz.clone_from(&options.request_tz);
+    }
+    if options.output_tz.is_some() {
+        params.output_tz.clone_from(&options.output_tz);
+    }
+    if options.request_id.is_some() {
+        params.request_id.clone_from(&options.request_id);
+    }
+    if options.validate_fields.is_some() {
+        params.validate_fields = options.validate_fields;
+    }
+    params.include_security_errors |= options.include_security_errors;
+    params.return_eids |= options.return_eids;
+}
+
+fn merge_pairs(target: &mut Option<Vec<(String, String)>>, source: Option<&[(String, String)]>) {
+    let Some(source) = source.filter(|values| !values.is_empty()) else {
+        return;
+    };
+    let target = target.get_or_insert_with(Vec::new);
+    for (key, value) in source {
+        if let Some((_, current)) = target
+            .iter_mut()
+            .find(|(name, _)| name.eq_ignore_ascii_case(key))
+        {
+            current.clone_from(value);
+        } else {
+            target.push((key.clone(), value.clone()));
+        }
+    }
+}
 
 /// Extract a value from an Arrow array at `idx` as a `String`.
 ///
@@ -215,5 +326,175 @@ mod tests {
         assert_eq!(parse_f64_like("123.45"), Some(123.45));
         assert_eq!(parse_f64_like("1,234.5"), Some(1234.5));
         assert_eq!(parse_f64_like("nan"), None);
+    }
+
+    #[test]
+    fn recipe_options_merge_without_replacing_request_identity() {
+        let mut params = RequestParams {
+            service: Service::RefData.to_string(),
+            operation: "ReferenceDataRequest".into(),
+            securities: Some(vec!["ABC US Equity".into()]),
+            fields: Some(vec!["PX_LAST".into()]),
+            overrides: Some(vec![("SETTLE_DT".into(), "20240101".into())]),
+            ..Default::default()
+        };
+        let options = RequestParams {
+            service: "//ignored".into(),
+            fields: Some(vec!["IGNORED".into()]),
+            overrides: Some(vec![
+                ("settle_dt".into(), "20240102".into()),
+                ("CUSTOM".into(), "1".into()),
+            ]),
+            format: Some("wide".into()),
+            validate_fields: Some(false),
+            ..Default::default()
+        };
+        apply_request_options(&mut params, &options);
+        assert_eq!(params.service, Service::RefData.to_string());
+        assert_eq!(params.fields.unwrap(), vec!["PX_LAST"]);
+        assert_eq!(params.securities.unwrap(), vec!["ABC US Equity"]);
+        assert_eq!(
+            params.overrides.unwrap(),
+            vec![
+                ("SETTLE_DT".into(), "20240102".into()),
+                ("CUSTOM".into(), "1".into())
+            ]
+        );
+        assert_eq!(params.format.as_deref(), Some("wide"));
+        assert_eq!(params.validate_fields, Some(false));
+    }
+
+    #[test]
+    fn bql_recipe_options_route_overrides_to_elements() {
+        let mut params = RequestParams {
+            service: Service::BqlSvc.to_string(),
+            elements: Some(vec![(
+                "expression".into(),
+                "get(id) for('ABC US Equity')".into(),
+            )]),
+            ..Default::default()
+        };
+        apply_request_options(
+            &mut params,
+            &RequestParams {
+                overrides: Some(vec![("currency".into(), "USD".into())]),
+                ..Default::default()
+            },
+        );
+        assert!(params.overrides.is_none());
+        assert_eq!(
+            params.elements.unwrap()[1],
+            ("currency".into(), "USD".into())
+        );
+    }
+
+    #[test]
+    fn adjustment_controls_only_reach_historical_requests() {
+        for (adjust, expected) in [
+            (
+                "all",
+                vec!["adjustmentSplit", "adjustmentNormal", "adjustmentAbnormal"],
+            ),
+            ("dvd", vec!["adjustmentNormal", "adjustmentAbnormal"]),
+            ("split", vec!["adjustmentSplit"]),
+        ] {
+            let options = RequestParams {
+                kwargs: Some(std::collections::HashMap::from([(
+                    "adjust".into(),
+                    adjust.into(),
+                )])),
+                ..Default::default()
+            };
+            let mut history = RequestParams {
+                operation: Operation::HistoricalData.to_string(),
+                ..Default::default()
+            };
+            apply_request_options(&mut history, &options);
+            assert_eq!(
+                history.options.unwrap(),
+                expected
+                    .into_iter()
+                    .map(|name| (name.to_string(), "true".into()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(!history.kwargs.unwrap().contains_key("adjust"));
+            let mut reference = RequestParams::default();
+            apply_request_options(&mut reference, &options);
+            assert!(reference.options.is_none());
+            assert!(!reference.kwargs.unwrap().contains_key("adjust"));
+        }
+    }
+
+    #[test]
+    fn explicit_adjustment_options_win_over_legacy_shorthand() {
+        let mut history = RequestParams {
+            operation: Operation::HistoricalData.to_string(),
+            ..Default::default()
+        };
+        apply_request_options(
+            &mut history,
+            &RequestParams {
+                kwargs: Some(std::collections::HashMap::from([(
+                    "adjust".into(),
+                    "all".into(),
+                )])),
+                options: Some(vec![("adjustmentSplit".into(), "false".into())]),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            history.options.unwrap()[0],
+            ("adjustmentSplit".into(), "false".into())
+        );
+    }
+
+    #[test]
+    fn bulk_requests_consume_raw_and_cannot_select_output_format() {
+        let mut bulk = RequestParams {
+            extractor: ExtractorType::BulkData,
+            extractor_set: true,
+            ..Default::default()
+        };
+        apply_request_options(
+            &mut bulk,
+            &RequestParams {
+                kwargs: Some(std::collections::HashMap::from([(
+                    "raw".into(),
+                    "True".into(),
+                )])),
+                format: Some("wide".into()),
+                ..Default::default()
+            },
+        );
+        assert!(!bulk.kwargs.unwrap().contains_key("raw"));
+        assert!(bulk.format.is_none());
+    }
+
+    #[test]
+    fn per_security_overrides_follow_each_internal_request_security_set() {
+        let options = RequestParams {
+            security_overrides: Some(vec![
+                ("ABC LN Equity".into(), vec![("CUSTOM".into(), "1".into())]),
+                ("USDGBP Curncy".into(), vec![("CUSTOM".into(), "2".into())]),
+            ]),
+            ..Default::default()
+        };
+        for (security, expected) in [("ABC LN Equity", "1"), ("USDGBP Curncy", "2")] {
+            let mut params = RequestParams {
+                securities: Some(vec![security.into()]),
+                ..Default::default()
+            };
+            apply_request_options(&mut params, &options);
+            assert_eq!(
+                params.security_overrides.unwrap(),
+                vec![(security.into(), vec![("CUSTOM".into(), expected.into())])]
+            );
+        }
+        let mut params = RequestParams {
+            securities: Some(vec!["OTHER US Equity".into()]),
+            ..Default::default()
+        };
+        apply_request_options(&mut params, &options);
+        assert!(params.security_overrides.is_none());
     }
 }
