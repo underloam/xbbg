@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::errors::BlpAsyncError;
 use crate::request_builder::RequestBuilder;
 use crate::schema::SchemaCache;
-use crate::services::{ExtractorType, Operation};
+use crate::services::{ExtractorType, Format, Operation};
 
 use super::state::{LongMode, OutputFormat};
 use super::{OverridePairs, RequestParams, SecurityOverridePairs};
@@ -50,29 +50,29 @@ pub(crate) struct PlannedOutput {
 
 impl PlannedOutput {
     fn parse(format: Option<&str>) -> Result<Self, BlpAsyncError> {
-        match format {
-            None | Some("long") => Ok(Self {
+        let format = format
+            .map(Format::from_str)
+            .transpose()
+            .map_err(|detail| BlpAsyncError::ConfigError { detail })?
+            .unwrap_or_default();
+        Ok(match format {
+            Format::Long => Self {
                 format: OutputFormat::Long,
                 long_mode: LongMode::String,
-            }),
-            Some("semi_long" | "wide") => Ok(Self {
+            },
+            Format::SemiLong => Self {
                 format: OutputFormat::Wide,
                 long_mode: LongMode::String,
-            }),
-            Some("long_typed" | "typed") => Ok(Self {
+            },
+            Format::LongTyped => Self {
                 format: OutputFormat::Long,
                 long_mode: LongMode::Typed,
-            }),
-            Some("long_metadata" | "metadata" | "with_metadata") => Ok(Self {
+            },
+            Format::LongWithMetadata => Self {
                 format: OutputFormat::Long,
                 long_mode: LongMode::WithMetadata,
-            }),
-            Some(other) => Err(BlpAsyncError::ConfigError {
-                detail: format!(
-                    "unknown output format '{other}' (expected long, long_typed, long_metadata, or semi_long; aliases: typed, metadata, with_metadata, or wide)"
-                ),
-            }),
-        }
+            },
+        })
     }
 }
 
@@ -971,35 +971,76 @@ mod tests {
     }
 
     #[test]
-    fn prepares_historical_formats_with_current_output_semantics() {
+    fn prepares_reference_and_historical_formats_with_current_output_semantics() {
         for (format, expected) in [
-            ("long", (OutputFormat::Long, LongMode::String)),
-            ("long_typed", (OutputFormat::Long, LongMode::Typed)),
+            (None, (OutputFormat::Long, LongMode::String)),
+            (Some(""), (OutputFormat::Long, LongMode::String)),
+            (Some("long"), (OutputFormat::Long, LongMode::String)),
+            (Some("long_typed"), (OutputFormat::Long, LongMode::Typed)),
+            (Some("typed"), (OutputFormat::Long, LongMode::Typed)),
             (
-                "long_metadata",
+                Some("long_metadata"),
                 (OutputFormat::Long, LongMode::WithMetadata),
             ),
-            ("wide", (OutputFormat::Wide, LongMode::String)),
-            ("semi_long", (OutputFormat::Wide, LongMode::String)),
+            (
+                Some("metadata"),
+                (OutputFormat::Long, LongMode::WithMetadata),
+            ),
+            (
+                Some("with_metadata"),
+                (OutputFormat::Long, LongMode::WithMetadata),
+            ),
+            (Some("wide"), (OutputFormat::Wide, LongMode::String)),
+            (Some("semi_long"), (OutputFormat::Wide, LongMode::String)),
         ] {
-            let params = RequestParams {
-                service: Service::RefData.to_string(),
+            let reference = RequestParams {
+                format: format.map(str::to_string),
+                ..refdata_params()
+            };
+            let historical = RequestParams {
                 operation: Operation::HistoricalData.to_string(),
-                securities: Some(vec!["AAPL US Equity".to_string()]),
-                fields: Some(vec!["PX_LAST".to_string()]),
                 start_date: Some("20240101".to_string()),
                 end_date: Some("20240131".to_string()),
-                format: Some(format.to_string()),
-                ..Default::default()
+                ..reference.clone()
+            };
+            let expected = PlannedOutput {
+                format: expected.0,
+                long_mode: expected.1,
             };
 
-            let prepared = PreparedRequest::prepare(params, &empty_schema()).unwrap();
-            assert_eq!(
-                prepared.shape(),
-                PlannedRequestShape::HistData(PlannedOutput {
-                    format: expected.0,
-                    long_mode: expected.1,
-                })
+            for (params, expected_shape) in [
+                (reference, PlannedRequestShape::RefData(expected)),
+                (historical, PlannedRequestShape::HistData(expected)),
+            ] {
+                let prepared = PreparedRequest::prepare(params, &empty_schema()).unwrap();
+                assert_eq!(prepared.shape(), expected_shape, "format: {format:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn output_format_errors_come_from_generated_parser() {
+        for format in [
+            "sideways",
+            "LONG",
+            " long",
+            "long ",
+            "long_with_metadata",
+            "arrow",
+            "json",
+        ] {
+            let params = RequestParams {
+                format: Some(format.to_string()),
+                ..refdata_params()
+            };
+            let error = PreparedRequest::prepare(params, &empty_schema()).unwrap_err();
+            assert!(
+                matches!(
+                    error,
+                    BlpAsyncError::ConfigError { detail }
+                        if detail == Format::from_str(format).unwrap_err()
+                ),
+                "format: {format}"
             );
         }
     }

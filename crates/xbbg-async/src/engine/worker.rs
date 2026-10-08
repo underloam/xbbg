@@ -24,9 +24,8 @@
 //! - Intraday ticks (bdtick)
 //! - Field info queries
 
-use std::collections::hash_map::Entry;
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU8, Ordering};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -39,9 +38,6 @@ use xbbg_core::{
     AsyncSession, AuthConfig, BlpError, CorrelationId, EntitlementCheck, EventType, SeatType,
 };
 
-/// Max wall time we'll wait for an async open_service reply.
-const SERVICE_OPEN_TIMEOUT_MS: u64 = 10_000;
-
 /// Max wall time we'll wait for identity authorization to complete.
 const IDENTITY_AUTH_TIMEOUT_MS: u64 = 10_000;
 
@@ -51,7 +47,10 @@ const APIAUTH_SERVICE: &str = "//blp/apiauth";
 /// Threshold for warning about slow Bloomberg responses (30 seconds).
 const SLOW_REQUEST_WARN_THRESHOLD: Duration = Duration::from_secs(30);
 
-use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID, SERVICE_OPEN_CID_TAG};
+use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID};
+use super::session_lifecycle::{
+    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
+};
 use super::state::{
     BqlState, BsrchState, BulkDataState, FieldInfoState, GenericState, HistDataState,
     HistDataStreamState, IntradayBarState, IntradayBarStreamState, IntradayTickState,
@@ -358,12 +357,6 @@ struct RequestSlot {
     cell: Arc<RequestStateCell>,
 }
 
-/// A pending async `open_service` call plus everyone awaiting its outcome.
-struct PendingServiceOpen {
-    cid: i64,
-    waiters: Vec<oneshot::Sender<Result<(), BlpError>>>,
-}
-
 /// Authorization state of this worker's on-demand session identity
 /// (`generateAuthorizedIdentityAsync` tagged with [`IDENTITY_CID`]; used
 /// when the engine has an [`AuthConfig`] — the SDK then owns the authorized
@@ -390,14 +383,6 @@ enum IdentityAuthState {
     Failed(String),
 }
 
-/// Session startup outcome latch, resolved exactly once by the first
-/// startup-relevant SESSION_STATUS message.
-#[derive(Default)]
-struct StartupLatch {
-    resolved: bool,
-    result: Option<Result<(), BlpError>>,
-}
-
 /// State shared between submitter threads and the SDK dispatcher callback.
 pub(super) struct WorkerShared {
     id: usize,
@@ -411,11 +396,8 @@ pub(super) struct WorkerShared {
     open_services: RwLock<HashSet<String>>,
     /// Pending async `open_service` calls keyed by service name; resolved by
     /// `handle_service_status` matching on the open's correlation ID.
-    pending_service_opens: Mutex<HashMap<String, PendingServiceOpen>>,
-    /// Counter for generating unique service-open CIDs.
-    next_service_open_id: AtomicI64,
-    startup: Mutex<StartupLatch>,
-    startup_cv: Condvar,
+    pending_service_opens: Mutex<PendingServiceOpens>,
+    startup: StartupLatch,
     /// On-demand session-identity latch (auth-configured engines); see
     /// [`IdentityAuthState`].
     identity: Mutex<IdentityAuthState>,
@@ -434,66 +416,6 @@ pub(super) struct WorkerShared {
     lifecycle: RwLock<()>,
 }
 
-struct PendingServiceWaiter<'a> {
-    shared: &'a WorkerShared,
-    service: &'a str,
-    attempt_cid: i64,
-    receiver: Option<oneshot::Receiver<Result<(), BlpError>>>,
-}
-
-impl<'a> PendingServiceWaiter<'a> {
-    fn new(
-        shared: &'a WorkerShared,
-        service: &'a str,
-        attempt_cid: i64,
-        receiver: oneshot::Receiver<Result<(), BlpError>>,
-    ) -> Self {
-        Self {
-            shared,
-            service,
-            attempt_cid,
-            receiver: Some(receiver),
-        }
-    }
-
-    fn receiver(&mut self) -> &mut oneshot::Receiver<Result<(), BlpError>> {
-        self.receiver.as_mut().expect("receiver is present")
-    }
-}
-
-impl Drop for PendingServiceWaiter<'_> {
-    fn drop(&mut self) {
-        self.receiver.take();
-        self.shared
-            .prune_pending_service_waiters(self.service, self.attempt_cid);
-    }
-}
-
-struct PendingIdentityWaiter<'a> {
-    shared: &'a WorkerShared,
-    receiver: Option<oneshot::Receiver<Result<(), BlpError>>>,
-}
-
-impl<'a> PendingIdentityWaiter<'a> {
-    fn new(shared: &'a WorkerShared, receiver: oneshot::Receiver<Result<(), BlpError>>) -> Self {
-        Self {
-            shared,
-            receiver: Some(receiver),
-        }
-    }
-
-    fn receiver(&mut self) -> &mut oneshot::Receiver<Result<(), BlpError>> {
-        self.receiver.as_mut().expect("receiver is present")
-    }
-}
-
-impl Drop for PendingIdentityWaiter<'_> {
-    fn drop(&mut self) {
-        self.receiver.take();
-        self.shared.prune_pending_identity_waiters();
-    }
-}
-
 impl WorkerShared {
     fn new(id: usize, health: Arc<AtomicU8>) -> Self {
         Self {
@@ -501,10 +423,8 @@ impl WorkerShared {
             requests: Mutex::new(Slab::new()),
             next_generation: AtomicU32::new(0),
             open_services: RwLock::new(HashSet::new()),
-            pending_service_opens: Mutex::new(HashMap::new()),
-            next_service_open_id: AtomicI64::new(0),
-            startup: Mutex::new(StartupLatch::default()),
-            startup_cv: Condvar::new(),
+            pending_service_opens: Mutex::new(PendingServiceOpens::default()),
+            startup: StartupLatch::default(),
             identity: Mutex::new(IdentityAuthState::default()),
             pending_token: Mutex::new(None),
             pending_identity_auth: Mutex::new(None),
@@ -548,27 +468,6 @@ impl WorkerShared {
             }
             None => None,
         }
-    }
-
-    fn resolve_startup(&self, result: Result<(), BlpError>) {
-        let mut latch = self.startup.lock();
-        if !latch.resolved {
-            latch.resolved = true;
-            latch.result = Some(result);
-            self.startup_cv.notify_all();
-        }
-    }
-
-    /// Block until the first startup-relevant status arrives (or `timeout`).
-    fn wait_startup(&self, timeout: Duration) -> Result<(), BlpError> {
-        let deadline = Instant::now() + timeout;
-        let mut latch = self.startup.lock();
-        while latch.result.is_none() {
-            if self.startup_cv.wait_until(&mut latch, deadline).timed_out() {
-                return Err(BlpError::Timeout);
-            }
-        }
-        latch.result.take().expect("checked above")
     }
 
     /// Mark expired slow requests and return hard-timeout candidates.
@@ -621,22 +520,6 @@ impl WorkerShared {
         );
     }
 
-    fn prune_pending_service_waiters(&self, service: &str, attempt_cid: i64) {
-        let mut pending = self.pending_service_opens.lock();
-        let remove_attempt = if let Some(open) = pending.get_mut(service) {
-            if open.cid != attempt_cid {
-                return;
-            }
-            open.waiters.retain(|waiter| !waiter.is_closed());
-            open.waiters.is_empty()
-        } else {
-            false
-        };
-        if remove_attempt {
-            pending.remove(service);
-        }
-    }
-
     fn prune_pending_identity_waiters(&self) {
         if let IdentityAuthState::Pending(waiters) = &mut *self.identity.lock() {
             waiters.retain(|waiter| !waiter.is_closed());
@@ -649,13 +532,13 @@ impl WorkerShared {
             pending.drain().collect()
         };
         for (service, open) in drained {
-            for waiter in open.waiters {
-                let _ = waiter.send(Err(BlpError::OpenService {
+            open.complete(|| {
+                Err(BlpError::OpenService {
                     service: service.clone(),
                     source: None,
                     label: Some(reason.to_string()),
-                }));
-            }
+                })
+            });
         }
     }
 
@@ -975,7 +858,7 @@ impl WorkerShared {
                 if !self.shutting_down.load(Ordering::Acquire) {
                     self.health.store(0, Ordering::Release);
                 }
-                self.resolve_startup(Ok(()));
+                self.startup.resolve(Ok(()));
                 xbbg_log::info!(worker_id = self.id, "session started");
             }
             "SessionStartupFailure" => {
@@ -986,14 +869,15 @@ impl WorkerShared {
                     "session startup failure"
                 );
                 self.health.store(2, Ordering::Release);
-                self.resolve_startup(Err(session_start_error("session startup failure", reason)));
+                self.startup
+                    .resolve(Err(session_start_error("session startup failure", reason)));
             }
             "SessionTerminated" => {
                 // SDK has given up reconnecting. The session is dead. Drain
                 // everything and mark the worker so the pool evicts it.
                 let reason = extract_reason_description(msg);
                 let shutdown_requested = self.shutting_down.swap(true, Ordering::AcqRel);
-                self.resolve_startup(Err(session_start_error(
+                self.startup.resolve(Err(session_start_error(
                     "session terminated during startup",
                     reason.clone(),
                 )));
@@ -1017,7 +901,7 @@ impl WorkerShared {
             }
             "AuthorizationFailure" => {
                 let reason = extract_reason_description(msg);
-                self.resolve_startup(Err(session_start_error(
+                self.startup.resolve(Err(session_start_error(
                     "session identity authorization failed",
                     reason,
                 )));
@@ -1028,7 +912,7 @@ impl WorkerShared {
                 // worker.
                 let reason = extract_reason_description(msg);
                 self.shutting_down.store(true, Ordering::Release);
-                self.resolve_startup(Err(session_start_error(
+                self.startup.resolve(Err(session_start_error(
                     "session identity authorization revoked",
                     reason.clone(),
                 )));
@@ -1110,20 +994,12 @@ impl WorkerShared {
         // so every waiting `ensure_service` unblocks.
         if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure") {
             if let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0) {
-                let entry = {
-                    let mut pending = self.pending_service_opens.lock();
-                    let service = pending
-                        .iter()
-                        .find_map(|(name, open)| (open.cid == cid_int).then(|| name.clone()));
-                    service.and_then(|name| pending.remove(&name).map(|open| (name, open)))
-                };
+                let entry = self.pending_service_opens.lock().remove_by_cid(cid_int);
                 if let Some((service, open)) = entry {
                     if msg_type == "ServiceOpened" {
                         self.open_services.write().insert(service.clone());
                         xbbg_log::debug!(worker_id = self.id, service = %service, "service opened");
-                        for waiter in open.waiters {
-                            let _ = waiter.send(Ok(()));
-                        }
+                        open.complete(|| Ok(()));
                     } else {
                         let reason = extract_reason_description(msg);
                         xbbg_log::warn!(
@@ -1132,13 +1008,13 @@ impl WorkerShared {
                             reason = %reason.as_deref().unwrap_or(""),
                             "service open failed"
                         );
-                        for waiter in open.waiters {
-                            let _ = waiter.send(Err(BlpError::OpenService {
+                        open.complete(|| {
+                            Err(BlpError::OpenService {
                                 service: service.clone(),
                                 source: None,
                                 label: reason.clone(),
-                            }));
-                        }
+                            })
+                        });
                     }
                     return;
                 }
@@ -1208,7 +1084,8 @@ impl AsyncRequestWorker {
             .start()
             .map_err(|err| attach_auth_context(err, config.auth.as_ref()))?;
         shared
-            .wait_startup(Duration::from_millis(u64::from(SESSION_STARTUP_TIMEOUT_MS)))
+            .startup
+            .wait(Duration::from_millis(u64::from(SESSION_STARTUP_TIMEOUT_MS)))
             .map_err(|err| attach_auth_context(err, config.auth.as_ref()))?;
 
         let worker = Self {
@@ -1279,66 +1156,36 @@ impl AsyncRequestWorker {
             if self.shared.open_services.read().contains(name) {
                 return Ok(());
             }
-            let (tx, rx) = oneshot::channel();
-            let attempt_cid = match pending.entry(name.to_string()) {
-                Entry::Occupied(mut entry) => {
-                    let open = entry.get_mut();
-                    open.waiters.retain(|waiter| !waiter.is_closed());
-                    open.waiters.push(tx);
-                    open.cid
+            let (should_open, attempt_cid, rx) = pending.register(name);
+            if should_open {
+                let cid = CorrelationId::Int(attempt_cid);
+                // Keep the enqueue-only FFI call under this lock so dispatch
+                // cannot resolve an attempt before registration is complete.
+                if let Err(error) = self.session.open_service_async(name, &cid) {
+                    pending.remove(name, attempt_cid);
+                    return Err(error);
                 }
-                Entry::Vacant(entry) => {
-                    let id = self
-                        .shared
-                        .next_service_open_id
-                        .fetch_add(1, Ordering::Relaxed)
-                        .wrapping_add(1);
-                    let cid_int = SERVICE_OPEN_CID_TAG | (id & (SERVICE_OPEN_CID_TAG - 1));
-                    let cid = CorrelationId::Int(cid_int);
-                    // The enqueue-only FFI call is cheap; holding the lock
-                    // across it closes the insert/resolve race.
-                    self.session.open_service_async(name, &cid)?;
-                    entry.insert(PendingServiceOpen {
-                        cid: cid_int,
-                        waiters: vec![tx],
-                    });
-                    cid_int
-                }
-            };
+            }
             (attempt_cid, rx)
         };
-        let mut waiter = PendingServiceWaiter::new(&self.shared, name, attempt_cid, rx);
-
-        match tokio::time::timeout(
-            Duration::from_millis(SERVICE_OPEN_TIMEOUT_MS),
-            waiter.receiver(),
+        PendingWaiter::new(rx, || {
+            self.shared
+                .pending_service_opens
+                .lock()
+                .prune(name, attempt_cid);
+        })
+        .wait_service_open(
+            || {
+                self.shared
+                    .pending_service_opens
+                    .lock()
+                    .remove(name, attempt_cid)
+            },
+            || BlpError::Internal {
+                detail: format!("service open for {name} dropped without resolution"),
+            },
         )
         .await
-        {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(BlpError::Internal {
-                detail: format!("service open for {name} dropped without resolution"),
-            }),
-            Err(_) => {
-                let timed_out = {
-                    let mut pending = self.shared.pending_service_opens.lock();
-                    if pending
-                        .get(name)
-                        .is_some_and(|open| open.cid == attempt_cid)
-                    {
-                        pending.remove(name)
-                    } else {
-                        None
-                    }
-                };
-                if let Some(open) = timed_out {
-                    for waiter in open.waiters {
-                        let _ = waiter.send(Err(BlpError::Timeout));
-                    }
-                }
-                Err(BlpError::Timeout)
-            }
-        }
     }
 
     /// Ensure the SDK-owned session identity is authorized, lazily issuing
@@ -1389,7 +1236,7 @@ impl AsyncRequestWorker {
                 }
             }
         };
-        let mut waiter = PendingIdentityWaiter::new(&self.shared, rx);
+        let mut waiter = PendingWaiter::new(rx, || self.shared.prune_pending_identity_waiters());
 
         match tokio::time::timeout(
             Duration::from_millis(IDENTITY_AUTH_TIMEOUT_MS),
@@ -1641,32 +1488,7 @@ impl AsyncRequestWorker {
             return None;
         }
         let params = request.params();
-        let fields = params.fields.clone().unwrap_or_default();
-        let ticker = params.security.clone().unwrap_or_default();
-
-        let state = match request.shape() {
-            PlannedRequestShape::HistData(_) => {
-                UnifiedRequestState::HistDataStream(HistDataStreamState::new(fields, stream))
-            }
-            PlannedRequestShape::IntradayBar => {
-                UnifiedRequestState::IntradayBarStream(IntradayBarStreamState::new(ticker, stream))
-            }
-            PlannedRequestShape::IntradayTick => UnifiedRequestState::IntradayTickStream(
-                IntradayTickStreamState::new(ticker, stream),
-            ),
-            _ => {
-                send_stream_error(
-                    stream,
-                    BlpError::InvalidArgument {
-                        detail: format!(
-                            "Streaming not supported for extractor: {:?}",
-                            params.extractor
-                        ),
-                    },
-                );
-                return None;
-            }
-        };
+        let state = create_stream_request_state(&request, stream)?;
 
         if let Err(error) = self.ensure_service(&params.service).await {
             state.fail(error);
@@ -1884,6 +1706,41 @@ impl AsyncRequestWorker {
     }
 }
 
+/// Create streaming state from the same prepared parameters used for accumulated responses.
+fn create_stream_request_state(
+    request: &PreparedRequest,
+    stream: mpsc::Sender<Result<RecordBatch, BlpError>>,
+) -> Option<UnifiedRequestState> {
+    let params = request.params();
+    Some(match request.shape() {
+        PlannedRequestShape::HistData(_) => {
+            UnifiedRequestState::HistDataStream(HistDataStreamState::with_types(
+                params.fields.clone().unwrap_or_default(),
+                params.field_types.clone(),
+                stream,
+            ))
+        }
+        PlannedRequestShape::IntradayBar => UnifiedRequestState::IntradayBarStream(
+            IntradayBarStreamState::new(params.security.clone().unwrap_or_default(), stream),
+        ),
+        PlannedRequestShape::IntradayTick => UnifiedRequestState::IntradayTickStream(
+            IntradayTickStreamState::new(params.security.clone().unwrap_or_default(), stream),
+        ),
+        _ => {
+            send_stream_error(
+                stream,
+                BlpError::InvalidArgument {
+                    detail: format!(
+                        "Streaming not supported for extractor: {:?}",
+                        params.extractor
+                    ),
+                },
+            );
+            return None;
+        }
+    })
+}
+
 /// Create the appropriate request state based on the prepared request kind.
 fn create_request_state(
     request: &PreparedRequest,
@@ -2082,6 +1939,108 @@ mod tests {
     use super::*;
     use crate::engine::RequestParams;
 
+    #[test]
+    fn prepared_history_stream_preserves_field_types_across_chunks() {
+        use arrow_array::StringArray;
+        use arrow_schema::DataType;
+        use std::collections::HashMap;
+        use xbbg_core::test_support::TestEvent;
+
+        let request = PreparedRequest::prepare(
+            RequestParams {
+                service: "//blp/refdata".into(),
+                operation: "HistoricalDataRequest".into(),
+                securities: Some(vec!["TEST Equity".into()]),
+                fields: Some(vec!["COUNT".into(), "MISSING".into()]),
+                field_types: Some(HashMap::from([
+                    ("COUNT".into(), "string".into()),
+                    ("MISSING".into(), "bool".into()),
+                ])),
+                format: Some("wide".into()),
+                start_date: Some("19700102".into()),
+                end_date: Some("19700103".into()),
+                ..Default::default()
+            },
+            &crate::schema::SchemaCache::new(),
+        )
+        .unwrap();
+        let (sender, mut chunks) = mpsc::channel(2);
+        let mut stream = create_stream_request_state(&request, sender).unwrap();
+        let (reply, mut result) = oneshot::channel();
+        let mut accumulated = create_request_state(&request, reply);
+        let event = |kind, date, count| {
+            TestEvent::with_schema(
+                r#"<ServiceDefinition name="xbbg.test.history" version="1.0.0.0">
+                    <service name="//xbbg/test/history" version="1.0.0.0">
+                        <event name="HistoricalDataResponse" eventType="HistoryResponse"/>
+                    </service>
+                    <schema>
+                        <sequenceType name="HistoryResponse">
+                            <element name="securityData" type="SecurityData"/>
+                        </sequenceType>
+                        <sequenceType name="SecurityData">
+                            <element name="security" type="String"/>
+                            <element name="fieldData" type="HistoryRow" maxOccurs="unbounded"/>
+                        </sequenceType>
+                        <sequenceType name="HistoryRow">
+                            <element name="date" type="Date"/>
+                            <element name="COUNT" type="Int64" minOccurs="0"/>
+                        </sequenceType>
+                    </schema>
+                </ServiceDefinition>"#,
+                kind,
+                "HistoricalDataResponse",
+                &[],
+                |formatter| {
+                    formatter.json(
+                        &serde_json::json!({
+                            "securityData": {
+                                "security": "TEST Equity",
+                                "fieldData": [{"date": date, "COUNT": count}]
+                            }
+                        })
+                        .to_string(),
+                    )
+                },
+            )
+        };
+        let partial = event(EventType::PartialResponse, "1970-01-02", Some(42_i64));
+        let mut messages = partial.event().messages();
+        let message = messages.next().unwrap();
+        stream.on_partial(&message);
+        accumulated.on_partial(&message);
+
+        let final_response = event(EventType::Response, "1970-01-03", None);
+        let mut messages = final_response.event().messages();
+        let message = messages.next().unwrap();
+        stream.finish_and_reply(&message);
+        accumulated.finish_and_reply(&message);
+
+        let expected = result.try_recv().unwrap().unwrap();
+        let chunks = [
+            chunks.try_recv().unwrap().unwrap(),
+            chunks.try_recv().unwrap().unwrap(),
+        ];
+        for chunk in &chunks {
+            assert_eq!(chunk.schema(), expected.schema());
+            let count = chunk.column_by_name("COUNT").unwrap();
+            assert_eq!(count.data_type(), &DataType::Utf8);
+            let missing = chunk.column_by_name("MISSING").unwrap();
+            assert_eq!(missing.data_type(), &DataType::Boolean);
+            assert_eq!(missing.null_count(), chunk.num_rows());
+        }
+        let count = chunks[0]
+            .column_by_name("COUNT")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(count.value(0), "42");
+        assert!(chunks[1].column_by_name("COUNT").unwrap().is_null(0));
+        let combined = arrow_select::concat::concat_batches(&expected.schema(), &chunks).unwrap();
+        assert_eq!(combined, expected);
+    }
+
     fn shared() -> WorkerShared {
         WorkerShared::new(0, Arc::new(AtomicU8::new(0)))
     }
@@ -2178,16 +2137,16 @@ mod tests {
     #[test]
     fn startup_latch_resolves_once() {
         let shared = shared();
-        shared.resolve_startup(Ok(()));
-        shared.resolve_startup(Err(BlpError::Timeout)); // ignored: already resolved
-        assert!(shared.wait_startup(Duration::from_millis(10)).is_ok());
+        shared.startup.resolve(Ok(()));
+        shared.startup.resolve(Err(BlpError::Timeout)); // ignored: already resolved
+        assert!(shared.startup.wait(Duration::from_millis(10)).is_ok());
     }
 
     #[test]
     fn startup_latch_times_out_when_unresolved() {
         let shared = shared();
         assert!(matches!(
-            shared.wait_startup(Duration::from_millis(10)),
+            shared.startup.wait(Duration::from_millis(10)),
             Err(BlpError::Timeout)
         ));
     }
@@ -2232,19 +2191,16 @@ mod tests {
     fn cancelled_service_waiter_removes_its_empty_generation() {
         let shared = shared();
         let service = "//blp/refdata";
-        let attempt_cid = SERVICE_OPEN_CID_TAG | 1;
-        let (tx, rx) = oneshot::channel();
-        shared.pending_service_opens.lock().insert(
-            service.to_string(),
-            PendingServiceOpen {
-                cid: attempt_cid,
-                waiters: vec![tx],
-            },
-        );
+        let (_, attempt_cid, rx) = shared.pending_service_opens.lock().register(service);
 
-        drop(PendingServiceWaiter::new(&shared, service, attempt_cid, rx));
+        drop(PendingWaiter::new(rx, || {
+            shared
+                .pending_service_opens
+                .lock()
+                .prune(service, attempt_cid);
+        }));
 
-        assert!(!shared.pending_service_opens.lock().contains_key(service));
+        assert!(shared.pending_service_opens.lock().is_empty());
     }
 
     #[test]
@@ -2253,7 +2209,9 @@ mod tests {
         let (tx, rx) = oneshot::channel();
         *shared.identity.lock() = IdentityAuthState::Pending(vec![tx]);
 
-        drop(PendingIdentityWaiter::new(&shared, rx));
+        drop(PendingWaiter::new(rx, || {
+            shared.prune_pending_identity_waiters()
+        }));
 
         match &*shared.identity.lock() {
             IdentityAuthState::Pending(waiters) => assert!(waiters.is_empty()),

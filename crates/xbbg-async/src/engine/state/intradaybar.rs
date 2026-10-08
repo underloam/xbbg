@@ -1,9 +1,9 @@
 //! Intraday bar (bdib) state with Arrow builders.
 //!
-//! Extracts IntradayBarResponse messages directly from Bloomberg Elements
-//! without JSON intermediate serialization.
+//! Accumulation and streaming share the Element decoder, Arrow builders and schema.
+//! Ticker is non-nullable: every row uses the request's supplied ticker string.
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::builder::{
     Float64Builder, Int32Builder, StringBuilder, TimestampMicrosecondBuilder,
@@ -61,17 +61,17 @@ struct IntradayBarBuilders {
 }
 
 impl IntradayBarBuilders {
-    fn new() -> Self {
+    fn new(rows: usize, ticker_len: usize) -> Self {
         Self {
-            ticker: StringBuilder::new(),
-            time: TimestampMicrosecondBuilder::new(),
-            open: Float64Builder::new(),
-            high: Float64Builder::new(),
-            low: Float64Builder::new(),
-            close: Float64Builder::new(),
-            volume: Float64Builder::new(),
-            num_events: Int32Builder::new(),
-            value: Float64Builder::new(),
+            ticker: StringBuilder::with_capacity(rows, ticker_len.saturating_mul(rows)),
+            time: TimestampMicrosecondBuilder::with_capacity(rows),
+            open: Float64Builder::with_capacity(rows),
+            high: Float64Builder::with_capacity(rows),
+            low: Float64Builder::with_capacity(rows),
+            close: Float64Builder::with_capacity(rows),
+            volume: Float64Builder::with_capacity(rows),
+            num_events: Int32Builder::with_capacity(rows),
+            value: Float64Builder::with_capacity(rows),
         }
     }
 
@@ -90,20 +90,23 @@ impl IntradayBarBuilders {
     }
 }
 
-/// State for an intraday bar request (bdib).
-pub struct IntradayBarState {
-    /// Event type (TRADE, BID, ASK, etc.)
-    event_type: String,
-    /// Interval in minutes
-    interval: u32,
+/// Shared bar decoding and Arrow materialization for both delivery modes.
+pub(super) struct IntradayBarResponse {
     /// Ticker for this request
     ticker: String,
     /// Pre-interned Bloomberg field names used in hot-path lookups.
     names: IntradayBarNames,
     /// Fixed Arrow builders for the output schema.
-    builders: IntradayBarBuilders,
+    builders: Option<IntradayBarBuilders>,
     /// Response-level entitlement IDs attached as schema metadata.
     response_meta: ResponseMetadata,
+}
+
+/// State for an intraday bar request (bdib).
+pub struct IntradayBarState {
+    event_type: String,
+    interval: u32,
+    response: IntradayBarResponse,
     /// Reply channel
     pub reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
 }
@@ -119,10 +122,7 @@ impl IntradayBarState {
         Self {
             event_type,
             interval,
-            ticker,
-            names: IntradayBarNames::new(),
-            builders: IntradayBarBuilders::new(),
-            response_meta: ResponseMetadata::default(),
+            response: IntradayBarResponse::new(ticker),
             reply,
         }
     }
@@ -139,7 +139,7 @@ impl IntradayBarState {
 
     /// Process a PARTIAL_RESPONSE message.
     pub fn on_partial(&mut self, msg: &Message) {
-        self.process_message(msg);
+        self.response.process_message(msg);
     }
 
     /// Process the final RESPONSE message and send the result via reply channel.
@@ -148,13 +148,23 @@ impl IntradayBarState {
             let _ = self.reply.send(Err(error));
             return;
         }
-
-        self.process_message(msg);
-        let result = self.finish_batch();
+        self.response.process_message(msg);
+        let result = self.response.finish_batch();
         if let Ok(ref batch) = result {
             xbbg_log::debug!(rows = batch.num_rows(), "intradaybar finish");
         }
         let _ = self.reply.send(result);
+    }
+}
+
+impl IntradayBarResponse {
+    pub(super) fn new(ticker: String) -> Self {
+        Self {
+            ticker,
+            names: IntradayBarNames::new(),
+            builders: None,
+            response_meta: ResponseMetadata::default(),
+        }
     }
 
     /// Process an IntradayBarResponse message using Element API.
@@ -176,13 +186,13 @@ impl IntradayBarState {
     ///   }
     /// }
     /// ```
-    fn process_message(&mut self, msg: &Message) {
+    pub(super) fn process_message(&mut self, msg: &Message) -> bool {
         let root = msg.elements();
 
         // Get barData
         let Some(bar_data) = root.get(&self.names.bar_data) else {
             trace!("No barData in message");
-            return;
+            return false;
         };
 
         if let Some(eids) = bar_data.get(&self.names.eid_data) {
@@ -192,45 +202,58 @@ impl IntradayBarState {
         // Get barTickData array
         let Some(bar_tick_data) = bar_data.get(&self.names.bar_tick_data) else {
             trace!("No barTickData in message");
-            return;
+            return !self.response_meta.is_empty();
         };
 
         // Iterate through each bar
         let n = bar_tick_data.len();
+        if n == 0 {
+            return !self.response_meta.is_empty();
+        }
+        let builders = self
+            .builders
+            .get_or_insert_with(|| IntradayBarBuilders::new(n, self.ticker.len()));
         for i in 0..n {
             let Some(bar) = bar_tick_data.get_element(i) else {
                 continue;
             };
 
-            self.builders.ticker.append_value(&self.ticker);
-            Self::append_time_field(&bar, &self.names.time, &mut self.builders.time);
-            Self::append_f64_field(&bar, &self.names.open, &mut self.builders.open);
-            Self::append_f64_field(&bar, &self.names.high, &mut self.builders.high);
-            Self::append_f64_field(&bar, &self.names.low, &mut self.builders.low);
-            Self::append_f64_field(&bar, &self.names.close, &mut self.builders.close);
-            Self::append_f64_field(&bar, &self.names.volume, &mut self.builders.volume);
-            Self::append_i32_field(&bar, &self.names.num_events, &mut self.builders.num_events);
-            Self::append_f64_field(&bar, &self.names.value, &mut self.builders.value);
+            builders.ticker.append_value(&self.ticker);
+            Self::append_time_field(&bar, &self.names.time, &mut builders.time);
+            Self::append_f64_field(&bar, &self.names.open, &mut builders.open);
+            Self::append_f64_field(&bar, &self.names.high, &mut builders.high);
+            Self::append_f64_field(&bar, &self.names.low, &mut builders.low);
+            Self::append_f64_field(&bar, &self.names.close, &mut builders.close);
+            Self::append_f64_field(&bar, &self.names.volume, &mut builders.volume);
+            Self::append_i32_field(&bar, &self.names.num_events, &mut builders.num_events);
+            Self::append_f64_field(&bar, &self.names.value, &mut builders.value);
         }
+        true
     }
 
-    fn finish_batch(&mut self) -> Result<RecordBatch, BlpError> {
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("ticker", DataType::Utf8, true),
-            Field::new(
-                "time",
-                DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                true,
-            ),
-            Field::new("open", DataType::Float64, true),
-            Field::new("high", DataType::Float64, true),
-            Field::new("low", DataType::Float64, true),
-            Field::new("close", DataType::Float64, true),
-            Field::new("volume", DataType::Float64, true),
-            Field::new("numEvents", DataType::Int32, true),
-            Field::new("value", DataType::Float64, true),
-        ]));
-        let batch = RecordBatch::try_new(schema, self.builders.finish()).map_err(|e| {
+    pub(super) fn finish_batch(&mut self) -> Result<RecordBatch, BlpError> {
+        static SCHEMA: LazyLock<Arc<Schema>> = LazyLock::new(|| {
+            Arc::new(Schema::new(vec![
+                Field::new("ticker", DataType::Utf8, false),
+                Field::new(
+                    "time",
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                    true,
+                ),
+                Field::new("open", DataType::Float64, true),
+                Field::new("high", DataType::Float64, true),
+                Field::new("low", DataType::Float64, true),
+                Field::new("close", DataType::Float64, true),
+                Field::new("volume", DataType::Float64, true),
+                Field::new("numEvents", DataType::Int32, true),
+                Field::new("value", DataType::Float64, true),
+            ]))
+        });
+        let mut builders = self
+            .builders
+            .take()
+            .unwrap_or_else(|| IntradayBarBuilders::new(0, self.ticker.len()));
+        let batch = RecordBatch::try_new(Arc::clone(&SCHEMA), builders.finish()).map_err(|e| {
             BlpError::Internal {
                 detail: format!("build IntradayBar RecordBatch: {e}"),
             }

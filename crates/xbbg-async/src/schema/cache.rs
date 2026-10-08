@@ -166,12 +166,6 @@ impl SchemaCache {
         }
     }
 
-    /// Save a schema to disk cache.
-    fn save_to_disk(&self, service: &str, schema: &ServiceSchema) -> Result<(), String> {
-        let _order = self.order_lock.lock();
-        self.write_schema(service, schema)
-    }
-
     fn write_schema(&self, service: &str, schema: &ServiceSchema) -> Result<(), String> {
         let path = self.cache_path(service);
         write_json_atomic(&path, schema)?;
@@ -238,11 +232,6 @@ impl SchemaCache {
         };
         drop(previous_snapshot);
         schema
-    }
-
-    /// Persist a schema to the disk cache without updating memory.
-    pub fn persist(&self, service: &str, schema: &ServiceSchema) -> Result<(), String> {
-        self.save_to_disk(service, schema)
     }
 
     /// Return the cache directory used for disk-backed operations.

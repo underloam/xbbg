@@ -108,6 +108,8 @@ pub struct SubscribeRequest {
     pub session_wait: Option<Duration>,
     pub isolated: bool,
     pub stream_capacity: Option<usize>,
+    /// Consumer-side Arrow batch size hint. Bindings apply this when collecting
+    /// native updates; engine subscription delivery is always immediate.
     pub flush_threshold: Option<usize>,
     pub overflow_policy: Option<OverflowPolicy>,
 }
@@ -1541,7 +1543,6 @@ impl FeedSession {
                 kinds,
                 all_fields,
                 first.identity.options.clone(),
-                Some(1),
                 Some(OverflowPolicy::DropNewest),
                 self.status.clone(),
             )
@@ -2298,10 +2299,6 @@ impl SharedSubscriptions {
                         identity.topic.clone(),
                         fields.clone(),
                         consumer.stream.clone(),
-                        consumer
-                            .request
-                            .flush_threshold
-                            .unwrap_or(self.config.subscription_flush_threshold),
                         consumer
                             .request
                             .overflow_policy

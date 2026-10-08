@@ -132,7 +132,7 @@ fn convert_element_def_inner(
     }
 }
 /// Convert a Bloomberg Operation to OperationSchema.
-pub fn convert_operation(op: &Operation<'_>) -> OperationSchema {
+pub(crate) fn convert_operation(op: &Operation<'_>) -> OperationSchema {
     // Convert request definition
     let request = match op.request_definition() {
         Ok(req_def) => convert_element_def(&req_def),

@@ -282,17 +282,15 @@ def render_rust(defs: dict[str, Any]) -> str:
     operations: dict[str, dict[str, Any]] = defs["operations"]
     extractors: dict[str, dict[str, Any]] = defs["extractors"]
     formats: dict[str, dict[str, Any]] = defs["formats"]
-    output_modes: dict[str, dict[str, Any]] = defs["output_modes"]
+    format_members = closed_set_members(formats)
 
     service_names = {key: rust_name(key, data) for key, data in services.items()}
     operation_names = {key: rust_name(key, data) for key, data in operations.items()}
     extractor_names = {key: rust_name(key, data) for key, data in extractors.items()}
     format_names = {key: rust_name(key, data) for key, data in formats.items()}
-    output_mode_names = {key: rust_name(key, data) for key, data in output_modes.items()}
 
     default_extractor_name = find_default_name("extractors", extractors, extractor_names)
     default_format_name = find_default_name("formats", formats, format_names)
-    default_output_mode_name = find_default_name("output_modes", output_modes, output_mode_names)
 
     lines: list[str] = []
     lines.append(RUST_HEADER)
@@ -515,9 +513,10 @@ def render_rust(defs: dict[str, Any]) -> str:
     lines.append("    }")
     lines.append("}")
     lines.append("")
-    lines.append("/// Output format for reference data (bdp/bdh).")
+    lines.append("/// Output format for reference and historical data (bdp/bdh).")
     lines.append("///")
     lines.append("/// Controls the shape and typing of the output Arrow table.")
+    lines.append("/// Parsing accepts the canonical strings and aliases declared in defs/bloomberg.toml.")
     lines.append("#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]")
     lines.append('#[serde(rename_all = "snake_case")]')
     lines.append("pub enum Format {")
@@ -552,67 +551,13 @@ def render_rust(defs: dict[str, Any]) -> str:
     lines.append("impl FromStr for Format {")
     lines.append("    type Err = String;")
     lines.append("")
+    lines.append("    /// Parse a canonical format or alias without case or whitespace normalization.")
     lines.append("    fn from_str(s: &str) -> Result<Self, Self::Err> {")
     lines.append("        match s {")
-    for key, data in sorted_items(formats):
-        lines.append(
-            '            "{}" => Ok(Self::{}),'.format(
-                escape_rust_string(data["value"]),
-                format_names[key],
-            )
-        )
+    for key, value, aliases, _doc, _is_default in format_members:
+        pattern = " | ".join(f'"{escape_rust_string(spelling)}"' for spelling in [value, *aliases])
+        lines.append(f"            {pattern} => Ok(Self::{format_names[key]}),")
     lines.append('            other => Err(format!("Unknown format: {}", other)),')
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("}")
-    lines.append("")
-    lines.append("/// Output mode for generic requests.")
-    lines.append("///")
-    lines.append("/// Controls how Bloomberg responses are converted before returning.")
-    lines.append("#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]")
-    lines.append('#[serde(rename_all = "snake_case")]')
-    lines.append("pub enum OutputMode {")
-    for key, data in sorted_items(output_modes):
-        lines.append("    /// {}".format(data["doc"]))
-        if output_mode_names[key] == default_output_mode_name:
-            lines.append("    #[default]")
-        lines.append(f"    {output_mode_names[key]},")
-    lines.append("}")
-    lines.append("")
-    lines.append("impl OutputMode {")
-    lines.append("    /// Returns the output mode identifier string.")
-    lines.append("    pub fn as_str(&self) -> &str {")
-    lines.append("        match self {")
-    for key, data in sorted_items(output_modes):
-        lines.append(
-            '            Self::{} => "{}",'.format(
-                output_mode_names[key],
-                escape_rust_string(data["value"]),
-            )
-        )
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("}")
-    lines.append("")
-    lines.append("impl fmt::Display for OutputMode {")
-    lines.append("    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {")
-    lines.append('        write!(f, "{}", self.as_str())')
-    lines.append("    }")
-    lines.append("}")
-    lines.append("")
-    lines.append("impl FromStr for OutputMode {")
-    lines.append("    type Err = String;")
-    lines.append("")
-    lines.append("    fn from_str(s: &str) -> Result<Self, Self::Err> {")
-    lines.append("        match s {")
-    for key, data in sorted_items(output_modes):
-        lines.append(
-            '            "{}" => Ok(Self::{}),'.format(
-                escape_rust_string(data["value"]),
-                output_mode_names[key],
-            )
-        )
-    lines.append('            other => Err(format!("Unknown output mode: {}", other)),')
     lines.append("        }")
     lines.append("    }")
     lines.append("}")
@@ -808,6 +753,20 @@ def render_rust(defs: dict[str, Any]) -> str:
     lines.append("        }")
     lines.append("    }")
     lines.append("")
+    if any(aliases for _key, _value, aliases, _doc, _is_default in format_members):
+        lines.append("    #[test]")
+        lines.append("    fn format_aliases_use_canonical_variants() {")
+        lines.append("        for (alias, expected) in [")
+        for key, _value, aliases, _doc, _is_default in format_members:
+            for alias in aliases:
+                lines.append(f'            ("{escape_rust_string(alias)}", Format::{format_names[key]}),')
+        lines.append("        ] {")
+        lines.append("            assert_eq!(Format::from_str(alias).unwrap(), expected);")
+        lines.append("            assert_ne!(expected.as_str(), alias);")
+        lines.append("            assert_eq!(expected.to_string(), expected.as_str());")
+        lines.append("        }")
+        lines.append("    }")
+        lines.append("")
     lines.append("    #[test]")
     lines.append("    fn format_invalid() {")
     lines.append('        assert!(Format::from_str("invalid").is_err());')
@@ -822,56 +781,6 @@ def render_rust(defs: dict[str, Any]) -> str:
     lines.append(f"        assert_eq!(back, Format::{serde_format_variant});")
     lines.append("    }")
     lines.append("")
-
-    roundtrip_mode_key = "ARROW" if "ARROW" in output_modes else sorted(output_modes.keys())[0]
-    roundtrip_mode_variant = output_mode_names[roundtrip_mode_key]
-    roundtrip_mode_value = output_modes[roundtrip_mode_key]["value"]
-    serde_mode_key = "JSON" if "JSON" in output_modes else roundtrip_mode_key
-    serde_mode_variant = output_mode_names[serde_mode_key]
-    serde_mode_value = output_modes[serde_mode_key]["value"]
-
-    lines.append("    #[test]")
-    lines.append("    fn output_mode_roundtrip() {")
-    lines.append(
-        f'        assert_eq!(OutputMode::from_str("{escape_rust_string(roundtrip_mode_value)}").unwrap(), OutputMode::{roundtrip_mode_variant});'
-    )
-    lines.append(
-        f'        assert_eq!(OutputMode::{roundtrip_mode_variant}.as_str(), "{escape_rust_string(roundtrip_mode_value)}");'
-    )
-    lines.append(
-        f'        assert_eq!(OutputMode::{roundtrip_mode_variant}.to_string(), "{escape_rust_string(roundtrip_mode_value)}");'
-    )
-    lines.append("    }")
-    lines.append("")
-    lines.append("    #[test]")
-    lines.append("    fn output_mode_all_variants() {")
-    lines.append("        for (s, expected) in [")
-    for key, data in sorted_items(output_modes):
-        lines.append(
-            '            ("{}", OutputMode::{}),'.format(
-                escape_rust_string(data["value"]),
-                output_mode_names[key],
-            )
-        )
-    lines.append("        ] {")
-    lines.append("            assert_eq!(OutputMode::from_str(s).unwrap(), expected);")
-    lines.append("            assert_eq!(expected.as_str(), s);")
-    lines.append("        }")
-    lines.append("    }")
-    lines.append("")
-    lines.append("    #[test]")
-    lines.append("    fn output_mode_invalid() {")
-    lines.append('        assert!(OutputMode::from_str("invalid").is_err());')
-    lines.append("    }")
-    lines.append("")
-    lines.append("    #[test]")
-    lines.append("    fn output_mode_serde() {")
-    lines.append(f"        let mode = OutputMode::{serde_mode_variant};")
-    lines.append("        let json = serde_json::to_string(&mode).unwrap();")
-    lines.append(f'        assert_eq!(json, r#""{escape_rust_string(serde_mode_value)}""#);')
-    lines.append("        let back: OutputMode = serde_json::from_str(&json).unwrap();")
-    lines.append(f"        assert_eq!(back, OutputMode::{serde_mode_variant});")
-    lines.append("    }")
     lines.append("}")
 
     return "\n".join(lines) + "\n"

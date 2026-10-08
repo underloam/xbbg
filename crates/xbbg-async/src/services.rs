@@ -350,9 +350,10 @@ impl ExtractorType {
     }
 }
 
-/// Output format for reference data (bdp/bdh).
+/// Output format for reference and historical data (bdp/bdh).
 ///
 /// Controls the shape and typing of the output Arrow table.
+/// Parsing accepts the canonical strings and aliases declared in defs/bloomberg.toml.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Format {
@@ -388,54 +389,14 @@ impl fmt::Display for Format {
 impl FromStr for Format {
     type Err = String;
 
+    /// Parse a canonical format or alias without case or whitespace normalization.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "long" => Ok(Self::Long),
-            "long_typed" => Ok(Self::LongTyped),
-            "long_metadata" => Ok(Self::LongWithMetadata),
-            "semi_long" => Ok(Self::SemiLong),
+            "long_typed" | "typed" => Ok(Self::LongTyped),
+            "long_metadata" | "metadata" | "with_metadata" => Ok(Self::LongWithMetadata),
+            "semi_long" | "wide" => Ok(Self::SemiLong),
             other => Err(format!("Unknown format: {}", other)),
-        }
-    }
-}
-
-/// Output mode for generic requests.
-///
-/// Controls how Bloomberg responses are converted before returning.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum OutputMode {
-    /// Convert to Arrow RecordBatch using appropriate extractor.
-    #[default]
-    Arrow,
-    /// Return raw JSON as a single-column Arrow table.
-    Json,
-}
-
-impl OutputMode {
-    /// Returns the output mode identifier string.
-    pub fn as_str(&self) -> &str {
-        match self {
-            Self::Arrow => "arrow",
-            Self::Json => "json",
-        }
-    }
-}
-
-impl fmt::Display for OutputMode {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.as_str())
-    }
-}
-
-impl FromStr for OutputMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "arrow" => Ok(Self::Arrow),
-            "json" => Ok(Self::Json),
-            other => Err(format!("Unknown output mode: {}", other)),
         }
     }
 }
@@ -718,6 +679,20 @@ mod tests {
     }
 
     #[test]
+    fn format_aliases_use_canonical_variants() {
+        for (alias, expected) in [
+            ("typed", Format::LongTyped),
+            ("metadata", Format::LongWithMetadata),
+            ("with_metadata", Format::LongWithMetadata),
+            ("wide", Format::SemiLong),
+        ] {
+            assert_eq!(Format::from_str(alias).unwrap(), expected);
+            assert_ne!(expected.as_str(), alias);
+            assert_eq!(expected.to_string(), expected.as_str());
+        }
+    }
+
+    #[test]
     fn format_invalid() {
         assert!(Format::from_str("invalid").is_err());
     }
@@ -729,35 +704,6 @@ mod tests {
         assert_eq!(json, r#""long_typed""#);
         let back: Format = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Format::LongTyped);
-    }
-
-    #[test]
-    fn output_mode_roundtrip() {
-        assert_eq!(OutputMode::from_str("arrow").unwrap(), OutputMode::Arrow);
-        assert_eq!(OutputMode::Arrow.as_str(), "arrow");
-        assert_eq!(OutputMode::Arrow.to_string(), "arrow");
-    }
-
-    #[test]
-    fn output_mode_all_variants() {
-        for (s, expected) in [("arrow", OutputMode::Arrow), ("json", OutputMode::Json)] {
-            assert_eq!(OutputMode::from_str(s).unwrap(), expected);
-            assert_eq!(expected.as_str(), s);
-        }
-    }
-
-    #[test]
-    fn output_mode_invalid() {
-        assert!(OutputMode::from_str("invalid").is_err());
-    }
-
-    #[test]
-    fn output_mode_serde() {
-        let mode = OutputMode::Json;
-        let json = serde_json::to_string(&mode).unwrap();
-        assert_eq!(json, r#""json""#);
-        let back: OutputMode = serde_json::from_str(&json).unwrap();
-        assert_eq!(back, OutputMode::Json);
     }
 }
 
