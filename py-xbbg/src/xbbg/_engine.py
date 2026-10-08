@@ -97,6 +97,10 @@ class Engine:
         """Return shared-feed diagnostics for this engine, without identity data."""
         return self._py_engine.subscription_feeds()
 
+    def worker_health(self) -> list[tuple[int, str]]:
+        """Return request-worker IDs and their current native health status."""
+        return self._py_engine.worker_health()
+
 
 # =============================================================================
 # Engine Lifecycle Management

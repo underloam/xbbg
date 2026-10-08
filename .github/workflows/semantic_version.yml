@@ -297,6 +297,7 @@ jobs:
       run: |
         cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
         CARGO_MANIFEST_DIR=${{ github.workspace }}/bindings/pyo3-xbbg ./target/debug/stub_gen
+        python3 scripts/generate_package_stub.py
 
     - name: Commit release sources
       run: |
