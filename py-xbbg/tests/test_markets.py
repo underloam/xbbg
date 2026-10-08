@@ -232,6 +232,7 @@ class TestExchangeAdapters:
         timestamp = datetime(2024, 1, 15)
         assert ExchangeInfo(TICKER, cached_at=timestamp).cached_at == timestamp
 
+    @pytest.mark.asyncio
     async def test_async_fetch_uses_native_resolver(self, engine_seam):
         engine, get_engine = engine_seam
         explicit_engine = object()
