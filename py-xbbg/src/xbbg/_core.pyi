@@ -4,6 +4,8 @@
 import builtins
 import typing
 __all__ = [
+    "__version__",
+    "__build_info__",
     "BlpError",
     "BlpSessionError",
     "BlpRequestError",
@@ -55,7 +57,6 @@ __all__ = [
     "ext_get_month_name",
     "ext_imbalance_side",
     "ext_infer_timezone",
-    "ext_is_long_format",
     "ext_is_specific_contract",
     "ext_list_exchange_overrides",
     "ext_normalize_tickers",
@@ -74,6 +75,7 @@ __all__ = [
     "get_log_level",
     "recipe_active_cdx",
     "recipe_active_futures",
+    "recipe_adjust_ccy",
     "recipe_auction_snapshot",
     "recipe_bqr",
     "recipe_cdx_ticker",
@@ -81,6 +83,7 @@ __all__ = [
     "recipe_currency_conversion",
     "recipe_dividend",
     "recipe_dividend_yield",
+    "recipe_earning",
     "recipe_etf_holdings",
     "recipe_etf_nav_history",
     "recipe_etf_nav_relationships",
@@ -121,6 +124,20 @@ class BlpValidationError(BlpError): ...
 class BlpTimeoutError(BlpError): ...
 
 class BlpInternalError(BlpError): ...
+
+class _BuildInfo(typing.TypedDict):
+    profile: builtins.str
+    target: builtins.str
+    rustFlags: builtins.list[builtins.str]
+    rustcVersion: builtins.str
+    gitCommit: builtins.str
+    gitDescribe: builtins.str
+    allocator: builtins.str
+    optLevel: builtins.str
+    targetFeatures: builtins.list[builtins.str]
+
+__version__: builtins.str
+__build_info__: _BuildInfo
 
 @typing.final
 class ArrowColumn:
@@ -372,14 +389,6 @@ class PyEngine:
         r"""
         Resolve market timing (BOD/EOD/FINISHED) for a ticker/date.
         """
-    def invalidate_exchange_cache(self, ticker: typing.Optional[builtins.str] = None) -> None:
-        r"""
-        Invalidate exchange cache (one ticker or all entries).
-        """
-    def save_exchange_cache(self) -> None:
-        r"""
-        Persist exchange cache to disk.
-        """
     def resolve_field_types(self, fields: typing.Sequence[builtins.str], overrides: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, default_type: builtins.str = 'string') -> typing.Any:
         r"""
         Resolve field types for a list of fields.
@@ -392,24 +401,9 @@ class PyEngine:
         r"""
         Clear the field type cache.
         """
-    def save_field_cache(self) -> None:
-        r"""
-        Save the field type cache to disk.
-        """
     def field_cache_stats(self) -> typing.Any:
         r"""
         Get field cache statistics including the active cache path.
-        """
-    def validate_fields(self, fields: typing.Sequence[builtins.str]) -> typing.Any:
-        r"""
-        Validate Bloomberg field names.
-        
-        Queries Bloomberg's field info service to check if the given fields exist.
-        Returns a list of invalid field names (fields that Bloomberg doesn't recognize).
-        
-        Example:
-            invalid = await engine.validate_fields(["PX_LAST", "INVALID_FIELD"])
-            # invalid = ["INVALID_FIELD"]
         """
     def get_schema(self, service: builtins.str) -> typing.Any:
         r"""
@@ -427,12 +421,6 @@ class PyEngine:
     def list_operations(self, service: builtins.str) -> typing.Any:
         r"""
         List all operations for a service.
-        """
-    def get_cached_schema(self, service: builtins.str) -> typing.Optional[builtins.str]:
-        r"""
-        Get cached schema without introspection.
-        
-        Returns None if the schema is not cached.
         """
     def invalidate_schema(self, service: builtins.str) -> None:
         r"""
@@ -1116,7 +1104,7 @@ def ext_auction_field_groups() -> dict:
 
 def ext_auction_zero_price_fields() -> list[str]: ...
 
-def ext_build_corporate_bonds_query(ticker: builtins.str, ccy: typing.Optional[builtins.str] = None, extra_fields: typing.Sequence[builtins.str] = [], active_only: builtins.bool = True) -> builtins.str:
+def ext_build_corporate_bonds_query(ticker: builtins.str, ccy: typing.Optional[builtins.str] = None, extra_fields: typing.Sequence[builtins.str] = []) -> builtins.str:
     r"""
     Build a BQL query for corporate bonds.
     
@@ -1124,7 +1112,6 @@ def ext_build_corporate_bonds_query(ticker: builtins.str, ccy: typing.Optional[b
         ticker: Company ticker without suffix (e.g., "AAPL").
         ccy: Currency filter (None for all currencies).
         extra_fields: Additional fields beyond default (id).
-        active_only: If true, only return active bonds.
     
     Returns: Complete BQL query string.
     """
@@ -1338,11 +1325,6 @@ def ext_infer_timezone(country_iso: builtins.str) -> typing.Optional[builtins.st
     Infer timezone from country ISO code.
     """
 
-def ext_is_long_format(batch: ArrowRecordBatch) -> builtins.bool:
-    r"""
-    Check if a RecordBatch is in long format (ticker, field, value).
-    """
-
 def ext_is_specific_contract(ticker: builtins.str) -> builtins.bool:
     r"""
     Check if a ticker is a specific contract (not generic).
@@ -1448,7 +1430,7 @@ def recipe_active_cdx(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.s
         versionless: Return the versionless ticker form (default: false)
     """
 
-def recipe_active_futures(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, freq: typing.Optional[builtins.str] = None) -> typing.Any:
+def recipe_active_futures(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, freq: typing.Optional[builtins.str] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Resolve the most active futures contract around a reference date.
     
@@ -1457,6 +1439,20 @@ def recipe_active_futures(engine: PyEngine, gen_ticker: builtins.str, dt: builti
         gen_ticker: Generic futures ticker (e.g., "ES1 Index")
         dt: Reference date (YYYYMMDD format)
         freq: Roll frequency ("M" monthly, "Q"/"QE" quarterly)
+        request_options: Normalized request controls; internal data retains the recipe's required shape
+    """
+
+def recipe_adjust_ccy(engine: PyEngine, data: typing.Any, target_ccy: builtins.str = 'USD', start_date: builtins.str = '', end_date: builtins.str = '', request_options: typing.Optional[dict] = None) -> typing.Any:
+    r"""
+    Convert long or wide Arrow historical values into a target currency.
+    
+    Args:
+        engine: Bloomberg engine instance
+        data: Arrow array/stream-compatible historical data
+        target_ccy: Target currency; local preserves the input
+        start_date: Fallback query start date
+        end_date: Fallback query end date
+        request_options: Normalized request controls, scoped to each internal request's securities
     """
 
 def recipe_auction_snapshot(engine: PyEngine, securities: typing.Sequence[builtins.str], fields: typing.Optional[typing.Sequence[builtins.str]] = None, pcs_overrides: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> typing.Any:
@@ -1466,7 +1462,7 @@ def recipe_auction_snapshot(engine: PyEngine, securities: typing.Sequence[builti
     None or an empty field list selects the default auction field groups.
     """
 
-def recipe_bqr(engine: PyEngine, ticker: builtins.str, start_datetime: builtins.str, end_datetime: builtins.str, event_types: typing.Optional[typing.Sequence[builtins.str]] = None, include_broker_codes: builtins.bool = True) -> typing.Any:
+def recipe_bqr(engine: PyEngine, ticker: builtins.str, start_datetime: typing.Optional[builtins.str] = None, end_datetime: typing.Optional[builtins.str] = None, event_types: typing.Optional[typing.Sequence[builtins.str]] = None, include_broker_codes: builtins.bool = True, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Bloomberg Quote Request - dealer quotes via IntradayTick.
     
@@ -1477,6 +1473,7 @@ def recipe_bqr(engine: PyEngine, ticker: builtins.str, start_datetime: builtins.
         end_datetime: End datetime (ISO format)
         event_types: Event types to retrieve (default: ["BID", "ASK"])
         include_broker_codes: Include broker/dealer codes (default: true)
+        request_options: Normalized include flags, request controls, and input/output timezones
     """
 
 def recipe_cdx_ticker(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, versionless: builtins.bool = False) -> typing.Any:
@@ -1495,7 +1492,7 @@ def recipe_cdx_ticker(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.s
         versionless: Return the versionless ticker form (default: false)
     """
 
-def recipe_corporate_bonds(engine: PyEngine, ticker: builtins.str, ccy: typing.Optional[builtins.str] = None, fields: typing.Optional[typing.Sequence[builtins.str]] = None, active_only: builtins.bool = True) -> typing.Any:
+def recipe_corporate_bonds(engine: PyEngine, ticker: builtins.str, ccy: typing.Optional[builtins.str] = None, fields: typing.Optional[typing.Sequence[builtins.str]] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Find corporate bonds for a company via BQL.
     
@@ -1504,7 +1501,7 @@ def recipe_corporate_bonds(engine: PyEngine, ticker: builtins.str, ccy: typing.O
         ticker: Company ticker prefix (e.g., "AAPL")
         ccy: Currency filter (e.g., "USD"). None for all currencies.
         fields: Additional fields to retrieve (default: id)
-        active_only: If true, only return active bonds (default: true)
+        request_options: Normalized request controls merged into the BQL request
     """
 
 def recipe_currency_conversion(engine: PyEngine, ticker: builtins.str, target_ccy: builtins.str, start_date: builtins.str, end_date: builtins.str) -> typing.Any:
@@ -1519,7 +1516,7 @@ def recipe_currency_conversion(engine: PyEngine, ticker: builtins.str, target_cc
         end_date: End date (YYYYMMDD format)
     """
 
-def recipe_dividend(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, dvd_type: typing.Optional[builtins.str] = None) -> typing.Any:
+def recipe_dividend(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, dvd_type: typing.Optional[builtins.str] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Fetch dividend history for securities.
     
@@ -1528,7 +1525,8 @@ def recipe_dividend(engine: PyEngine, tickers: typing.Sequence[builtins.str], st
         tickers: Securities to query
         start_date: Start date (YYYYMMDD format)
         end_date: End date (YYYYMMDD format)
-        dvd_type: Dividend type filter (e.g., "all", "regular")
+        dvd_type: Dividend alias or raw Bloomberg bulk field
+        request_options: Normalized request controls; raw is ignored and bulk format is fixed
     """
 
 def recipe_dividend_yield(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, dividend_types: typing.Optional[typing.Sequence[builtins.str]] = None, window_days: typing.Optional[builtins.int] = None) -> typing.Any:
@@ -1544,7 +1542,23 @@ def recipe_dividend_yield(engine: PyEngine, tickers: typing.Sequence[builtins.st
         window_days: Rolling trailing window in calendar days
     """
 
-def recipe_etf_holdings(engine: PyEngine, etf_ticker: builtins.str, fields: typing.Optional[typing.Sequence[builtins.str]] = None) -> typing.Any:
+def recipe_earning(engine: PyEngine, tickers: typing.Sequence[builtins.str], by: typing.Optional[builtins.str] = None, typ: builtins.str = 'Revenue', ccy: typing.Optional[builtins.str] = None, level: typing.Optional[builtins.int] = None, year: typing.Optional[builtins.int] = None, periods: typing.Optional[builtins.int] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
+    r"""
+    Fetch statement or geography/product earnings and hierarchical percentages.
+    
+    Args:
+        engine: Bloomberg engine instance
+        tickers: Securities to query
+        by: Geo/Product breakdown or Q/A period granularity
+        typ: Statement type IS/BS/CF or a geography/product metric
+        ccy: Currency override
+        level: Optional hierarchy filter (1 or 2)
+        year: Fiscal year override
+        periods: Number of periods
+        request_options: Normalized request controls; raw is ignored and bulk format is fixed
+    """
+
+def recipe_etf_holdings(engine: PyEngine, etf_ticker: builtins.str, fields: typing.Optional[typing.Sequence[builtins.str]] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Fetch ETF constituent holdings via BQL.
     
@@ -1552,6 +1566,7 @@ def recipe_etf_holdings(engine: PyEngine, etf_ticker: builtins.str, fields: typi
         engine: Bloomberg engine instance
         etf_ticker: ETF ticker (e.g., "SPY US Equity")
         fields: Additional fields beyond defaults (id_isin, weights, id().position)
+        request_options: Normalized request controls merged into the BQL request
     """
 
 def recipe_etf_nav_history(engine: PyEngine, etfs: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str) -> typing.Any:
@@ -1577,7 +1592,7 @@ def recipe_etf_nav_snapshot(engine: PyEngine, etfs: typing.Sequence[builtins.str
     fallback for missing daily NAV relationships.
     """
 
-def recipe_fut_ticker(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, freq: typing.Optional[builtins.str] = None) -> typing.Any:
+def recipe_fut_ticker(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, freq: typing.Optional[builtins.str] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Resolve a generic futures ticker to a specific contract ticker.
     
@@ -1586,6 +1601,7 @@ def recipe_fut_ticker(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.s
         gen_ticker: Generic futures ticker (e.g., "ES1 Index", "CL2 Comdty")
         dt: Reference date (YYYYMMDD format)
         freq: Roll frequency ("M" monthly, "Q"/"QE" quarterly)
+        request_options: Normalized request controls; internal data retains the recipe's required shape
     """
 
 def recipe_futures_curve(engine: PyEngine, gen_ticker: builtins.str, asof: typing.Optional[builtins.str] = None, chain_field: typing.Optional[builtins.str] = None, fields: typing.Optional[typing.Sequence[builtins.str]] = None, max_contracts: typing.Optional[builtins.int] = None) -> typing.Any:
@@ -1611,7 +1627,7 @@ def recipe_issuer_isins(engine: PyEngine, bond_isins: typing.Sequence[builtins.s
     Resolve bond ISINs to issuer equity ISINs.
     """
 
-def recipe_preferreds(engine: PyEngine, ticker: builtins.str, fields: typing.Optional[typing.Sequence[builtins.str]] = None) -> typing.Any:
+def recipe_preferreds(engine: PyEngine, ticker: builtins.str, fields: typing.Optional[typing.Sequence[builtins.str]] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Find preferred stocks for a company via BQL.
     
@@ -1619,6 +1635,7 @@ def recipe_preferreds(engine: PyEngine, ticker: builtins.str, fields: typing.Opt
         engine: Bloomberg engine instance
         ticker: Company equity ticker (e.g., "BAC US Equity")
         fields: Additional fields to retrieve (default: id, name)
+        request_options: Normalized request controls merged into the BQL request
     """
 
 def recipe_resolve_isins(engine: PyEngine, isins: typing.Sequence[builtins.str]) -> typing.Any:
@@ -1631,7 +1648,7 @@ def recipe_resolve_venues(engine: PyEngine, securities: typing.Sequence[builtins
     Resolve and validate primary exchange-auction venues in input order.
     """
 
-def recipe_turnover(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, ccy: typing.Optional[builtins.str] = None, factor: typing.Optional[builtins.float] = None) -> typing.Any:
+def recipe_turnover(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, ccy: typing.Optional[builtins.str] = None, factor: typing.Optional[builtins.float] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     Fetch trading volume and turnover for securities.
     
@@ -1642,6 +1659,7 @@ def recipe_turnover(engine: PyEngine, tickers: typing.Sequence[builtins.str], st
         end_date: End date (YYYYMMDD format)
         ccy: Currency for conversion. None for local currency.
         factor: Division factor (e.g., 1_000_000.0 for millions)
+        request_options: Normalized request controls, adjustment shorthand, and supported output format
     """
 
 def recipe_vol_surface(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, presets: typing.Optional[typing.Sequence[builtins.str]] = None, field_specs: typing.Optional[typing.Sequence[builtins.str]] = None, as_decimal: typing.Optional[builtins.bool] = True, include_derived: typing.Optional[builtins.bool] = False, risk_free_rate: typing.Optional[builtins.float] = None, dividend_yield_field: typing.Optional[builtins.str] = None) -> typing.Any:
@@ -1649,7 +1667,7 @@ def recipe_vol_surface(engine: PyEngine, tickers: typing.Sequence[builtins.str],
     Build a tidy historical implied volatility surface.
     """
 
-def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], settle_dt: typing.Optional[builtins.str] = None, yield_type: typing.Optional[builtins.int] = None, spread: typing.Optional[builtins.float] = None, yield_val: typing.Optional[builtins.float] = None, price: typing.Optional[builtins.float] = None, benchmark: typing.Optional[builtins.str] = None) -> typing.Any:
+def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], settle_dt: typing.Optional[builtins.str] = None, yield_type: typing.Optional[builtins.int] = None, spread: typing.Optional[builtins.float] = None, yield_val: typing.Optional[builtins.float] = None, price: typing.Optional[builtins.float] = None, benchmark: typing.Optional[builtins.str] = None, request_options: typing.Optional[dict] = None) -> typing.Any:
     r"""
     YAS (Yield & Spread Analysis) recipe.
     
@@ -1666,6 +1684,7 @@ def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields:
         yield_val: Yield value override
         price: Price override
         benchmark: Benchmark security for spread calculation
+        request_options: Normalized overrides, elements, options, types, format, timezones, EIDs, and validation controls
     """
 
 def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]: ...
