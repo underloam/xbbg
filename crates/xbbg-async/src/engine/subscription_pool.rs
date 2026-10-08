@@ -506,7 +506,7 @@ impl SubscriptionWorkerShared {
         };
         tokio::time::timeout(Duration::from_secs(10), wait)
             .await
-            .map_err(|_| BlpAsyncError::BlpError(BlpError::Timeout))?
+            .map_err(|_| BlpAsyncError::Blp(BlpError::Timeout))?
     }
 }
 
@@ -1826,7 +1826,7 @@ impl SubscriptionCommandHandle {
                 error = %error,
                 "failed to open service"
             );
-            return Err(BlpAsyncError::BlpError(error));
+            return Err(BlpAsyncError::Blp(error));
         }
         self.inner
             .shared
@@ -1867,7 +1867,7 @@ impl SubscriptionCommandHandle {
                 .inner
                 .shared
                 .register_subscriptions(request)
-                .map_err(BlpAsyncError::BlpError)?;
+                .map_err(BlpAsyncError::Blp)?;
             status.update_topics(&keys, |next| {
                 next.add_active(&registered_topics, &keys, metrics.clone());
             });
@@ -1888,7 +1888,7 @@ impl SubscriptionCommandHandle {
                 "subscribe failed; quarantining subscription worker"
             );
             self.inner.signal_shutdown();
-            return Err(BlpAsyncError::BlpError(error));
+            return Err(BlpAsyncError::Blp(error));
         }
         if stream_status.iter().any(SubscriptionSender::is_closed) {
             xbbg_log::warn!(
@@ -2062,7 +2062,7 @@ impl SubscriptionCommandHandle {
                 "session.unsubscribe failed; quarantining subscription worker"
             );
             self.inner.signal_shutdown();
-            return Err(BlpAsyncError::BlpError(error));
+            return Err(BlpAsyncError::Blp(error));
         }
         Ok(())
     }
@@ -2146,7 +2146,7 @@ impl SubscriptionWorkerHandle {
         };
         if let Err(error) = unsubscribe_result {
             self.signal_shutdown();
-            return Err(BlpAsyncError::BlpError(error));
+            return Err(BlpAsyncError::Blp(error));
         }
         Ok(())
     }
@@ -2214,7 +2214,7 @@ impl SubscriptionSessionPool {
         for id in 0..size {
             let handle = SubscriptionWorkerHandle::spawn(id, Arc::clone(&config), None).map_err(
                 |error| {
-                    BlpAsyncError::BlpError(BlpError::Internal {
+                    BlpAsyncError::Blp(BlpError::Internal {
                         detail: format!("failed to spawn subscription worker {id}: {error}"),
                     })
                 },
@@ -2267,7 +2267,7 @@ impl SubscriptionSessionPool {
         let handle =
             SubscriptionWorkerHandle::spawn(id, Arc::clone(&self.config), Some(runtime_handle))
                 .map_err(|error| {
-                    BlpAsyncError::BlpError(BlpError::Internal {
+                    BlpAsyncError::Blp(BlpError::Internal {
                         detail: format!("failed to create dynamic subscription worker: {error}"),
                     })
                 })?;
@@ -2373,7 +2373,7 @@ impl SubscriptionSessionPool {
         })
         .await
         .map_err(|join_error| {
-            BlpAsyncError::BlpError(BlpError::Internal {
+            BlpAsyncError::Blp(BlpError::Internal {
                 detail: format!("subscription pool claim task failed: {join_error}"),
             })
         })?

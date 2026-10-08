@@ -230,47 +230,94 @@ fn test_blp_async_error_from_blp_error_internal() {
 }
 
 #[test]
-fn test_blp_async_error_internal_variant() {
-    let async_err = BlpAsyncError::Internal("engine shutdown".to_string());
+fn test_blp_async_error_surviving_display_contract() {
+    use std::error::Error;
 
-    let msg = async_err.to_string();
-    assert!(
-        msg.contains("engine shutdown"),
-        "Expected 'engine shutdown' in: {}",
-        msg
-    );
+    for (error, expected) in [
+        (
+            BlpAsyncError::Internal("engine shutdown".into()),
+            "internal error: engine shutdown",
+        ),
+        (
+            BlpAsyncError::ConfigError {
+                detail: "synthetic config failure".into(),
+            },
+            "configuration error: synthetic config failure",
+        ),
+        (BlpAsyncError::ChannelClosed, "channel closed"),
+        (
+            BlpAsyncError::AllWorkersDown { pool_size: 2 },
+            "all 2 request workers are dead — no healthy worker available",
+        ),
+        (BlpError::Timeout.into(), "operation timed out"),
+        (
+            BlpError::Internal {
+                detail: "session connection dropped (worker=2)".into(),
+            }
+            .into(),
+            "internal error: session connection dropped (worker=2)",
+        ),
+        (
+            BlpError::SubscriptionDataLoss {
+                topic: "SYNTHETIC Equity".into(),
+                detail: "synthetic overflow".into(),
+            }
+            .into(),
+            "subscription data loss for SYNTHETIC Equity: synthetic overflow",
+        ),
+    ] {
+        assert_eq!(error.to_string(), expected);
+        assert!(error.source().is_none());
+    }
 }
 
 #[test]
-fn test_blp_async_error_stream_full() {
-    let async_err = BlpAsyncError::StreamFull;
+fn test_blp_async_error_transparently_preserves_display_and_source_chain() {
+    use std::error::Error;
 
-    let msg = async_err.to_string();
-    assert!(
-        msg.contains("stream full"),
-        "Expected 'stream full' in: {}",
-        msg
-    );
-}
+    #[derive(Debug, thiserror::Error)]
+    #[error("synthetic transport failure")]
+    struct TransportFailure {
+        #[source]
+        source: std::io::Error,
+    }
 
-#[test]
-fn test_blp_async_error_cancelled() {
-    let async_err = BlpAsyncError::Cancelled;
+    fn source() -> Option<Box<dyn Error + Send + Sync>> {
+        Some(Box::new(TransportFailure {
+            source: std::io::Error::other("synthetic root cause"),
+        }))
+    }
 
-    let msg = async_err.to_string();
-    assert!(
-        msg.contains("cancelled"),
-        "Expected 'cancelled' in: {}",
-        msg
-    );
-}
-
-#[test]
-fn test_blp_async_error_timeout_variant() {
-    let async_err = BlpAsyncError::Timeout;
-
-    let msg = async_err.to_string();
-    assert!(msg.contains("timeout"), "Expected 'timeout' in: {}", msg);
+    for error in [
+        BlpError::SessionStart {
+            source: source(),
+            label: Some("synthetic session failure".into()),
+        },
+        BlpError::OpenService {
+            service: "//blp/refdata".into(),
+            source: source(),
+            label: Some("synthetic service failure".into()),
+        },
+        BlpError::RequestFailure {
+            service: "//blp/refdata".into(),
+            operation: Some("ReferenceDataRequest".into()),
+            cid: None,
+            label: Some("synthetic request failure".into()),
+            request_id: None,
+            source: source(),
+        },
+    ] {
+        let expected_display = error.to_string();
+        let async_error = BlpAsyncError::from(error);
+        assert_eq!(async_error.to_string(), expected_display);
+        let source = async_error.source().expect("core error source");
+        assert!(source.is::<TransportFailure>());
+        assert_eq!(source.to_string(), "synthetic transport failure");
+        let root = source.source().expect("nested source");
+        assert!(root.is::<std::io::Error>());
+        assert_eq!(root.to_string(), "synthetic root cause");
+        assert!(root.source().is_none());
+    }
 }
 
 #[test]

@@ -2,13 +2,16 @@
 #![allow(clippy::result_large_err)]
 
 mod cache_io;
+pub mod config;
 pub mod engine;
+pub mod error_presentation;
 mod errors;
 pub mod field_cache;
 pub mod request_builder;
 pub mod schema;
 pub mod sdk_logging;
 pub mod services;
+pub mod subscription_consumer;
 
 pub use errors::BlpAsyncError;
 

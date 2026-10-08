@@ -2382,7 +2382,7 @@ impl SharedSubscriptions {
                 let growth = {
                     let mut state = feed.state.lock();
                     if matches!(state.lifecycle, "failed" | "closed") {
-                        return Err(BlpAsyncError::BlpError(BlpError::SubscriptionFailure {
+                        return Err(BlpAsyncError::Blp(BlpError::SubscriptionFailure {
                             cid: None,
                             label: Some("upstream feed ended while attaching".into()),
                         }));

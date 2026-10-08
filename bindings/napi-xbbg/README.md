@@ -62,8 +62,8 @@ request and wait for subscription-session capacity like any other subscription.
 
 ### Auction utilities and recipes
 
-`extAuctionFieldGroup(name)`, `extAuctionFieldGroupNames()`,
-`extAuctionZeroPriceFields()`, and `extImbalanceSide(code)` are pure utilities
+`extAuctionFieldGroup(name)`, `extAuctionZeroPriceFields()`, and
+`extImbalanceSide(code)` are pure utilities
 backed by `xbbg-ext` and require no engine. Unknown field groups or imbalance sides
 return `null`. `extAuctionZeroPriceFields()` returns the native `ZERO_PRICE_FIELDS`
 price-sentinel list (not a field group); callers can intersect it with their
@@ -86,3 +86,10 @@ xbbg-core + xbbg-async  (pure Rust engine)
          ↓
      js-xbbg             (npm package + TS types)
 ```
+
+Both language bindings use `xbbg-async` for subscription ordering and close
+barriers, engine configuration validation, and domain error presentation. Node
+retains deadline-aware reads, cancelled-read rollback, and typed error encoding.
+TLS timeouts must be non-negative even without credentials. The raw addon's unused
+`version()` and `extAuctionFieldGroupNames()` exports are removed; the package-level
+`version()` and `AuctionFields` remain available.

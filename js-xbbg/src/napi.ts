@@ -333,7 +333,6 @@ export interface NativeAddon {
 
   // Auction utilities
   extAuctionFieldGroup: (name: string) => string[] | null;
-  extAuctionFieldGroupNames: () => string[];
   extAuctionZeroPriceFields: () => string[];
   extImbalanceSide: (code: string) => 'buy' | 'sell' | 'none' | null;
 

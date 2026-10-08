@@ -720,7 +720,7 @@ recipe_wrapper!(
 );
 
 /// Register all recipe functions with the Python module.
-pub fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pyfunctions!(
         m;
         recipe_yas,
@@ -784,17 +784,12 @@ mod tests {
     }
 
     #[test]
-    fn recipe_timeouts_preserve_the_typed_exception_for_each_engine_wrapper() {
+    fn recipe_core_timeout_preserves_the_typed_exception() {
         Python::initialize();
         Python::attach(|py| {
-            for timeout in [
-                BlpAsyncError::Timeout,
-                BlpAsyncError::Blp(BlpError::Timeout),
-                BlpAsyncError::BlpError(BlpError::Timeout),
-            ] {
-                let error = recipe_err(RecipeError::Engine(Box::new(timeout)));
-                assert!(error.is_instance_of::<BlpTimeoutError>(py));
-            }
+            let error = recipe_err(RecipeError::Engine(Box::new(BlpError::Timeout.into())));
+            assert!(error.is_instance_of::<BlpTimeoutError>(py));
+            assert_eq!(error.value(py).to_string(), "Request timed out");
         });
     }
 
@@ -833,29 +828,29 @@ mod tests {
     }
 
     #[test]
-    fn recipe_engine_failures_preserve_session_request_and_internal_types() {
+    fn recipe_engine_failures_preserve_session_and_internal_types() {
         Python::initialize();
         Python::attach(|py| {
-            for session in [
-                BlpAsyncError::SessionLost {
-                    worker_id: 2,
-                    in_flight_count: 1,
-                },
+            let session = recipe_err(RecipeError::Engine(Box::new(
                 BlpAsyncError::AllWorkersDown { pool_size: 2 },
-            ] {
-                let error = recipe_err(RecipeError::Engine(Box::new(session)));
-                assert!(error.is_instance_of::<BlpSessionError>(py));
-            }
-
-            let cancelled = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::Cancelled)));
-            assert!(cancelled.is_instance_of::<BlpRequestError>(py));
+            )));
+            assert!(session.is_instance_of::<BlpSessionError>(py));
+            assert_eq!(
+                session.value(py).to_string(),
+                "all 2 request workers are dead — no healthy worker available",
+            );
 
             for internal in [
                 BlpAsyncError::ChannelClosed,
                 BlpAsyncError::Internal("synthetic failure".into()),
+                BlpError::Internal {
+                    detail: "session connection dropped (worker=2)".into(),
+                }
+                .into(),
             ] {
                 let error = recipe_err(RecipeError::Engine(Box::new(internal)));
                 assert!(error.is_instance_of::<BlpInternalError>(py));
+                assert!(!error.is_instance_of::<BlpSessionError>(py));
             }
         });
     }

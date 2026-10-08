@@ -98,7 +98,6 @@ function fromCode(code: string, msg: string): BlpError {
       return new BlpValidationError(msg, parseValidationOptions(msg));
     case 'TIMEOUT':
       return new BlpTimeoutError(msg);
-    case 'CANCELLED':
     case 'INTERNAL':
       return new BlpInternalError(msg);
     default:
@@ -172,12 +171,7 @@ export function wrapError(napiError: unknown): BlpError {
   }
 
   // Internal errors
-  if (
-    msg.includes('Internal error') ||
-    msg.includes('Channel closed') ||
-    msg.includes('Stream buffer full') ||
-    msg.includes('Request was cancelled')
-  ) {
+  if (msg.includes('Internal error') || msg.includes('Channel closed')) {
     return cacheWrappedError(napiError, new BlpInternalError(msg));
   }
 

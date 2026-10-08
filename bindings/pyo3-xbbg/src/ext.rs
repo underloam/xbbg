@@ -29,7 +29,7 @@ use xbbg_ext::transforms::historical::{
     rename_etf_columns,
 };
 use xbbg_ext::utils::date::{default_bqr_datetimes, default_turnover_dates, fmt_date, parse_date};
-use xbbg_ext::utils::pivot::{is_long_format, pivot_to_wide};
+use xbbg_ext::utils::pivot::pivot_to_wide;
 use xbbg_ext::utils::ticker::{
     build_futures_ticker, filter_equity_tickers, is_specific_contract, normalize_tickers,
     parse_ticker_parts,
@@ -94,14 +94,6 @@ fn ext_pivot_to_wide(py: Python<'_>, batch: PyRef<'_, ArrowRecordBatch>) -> PyRe
         .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
     record_batch_to_arrow_record_batch(py, result)
-}
-
-/// Check if a RecordBatch is in long format (ticker, field, value).
-#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
-#[pyfunction]
-fn ext_is_long_format(py: Python<'_>, batch: PyRef<'_, ArrowRecordBatch>) -> PyResult<bool> {
-    let rust_batch = batch.batch().clone();
-    Ok(py.detach(move || is_long_format(&rust_batch)))
 }
 
 // =============================================================================
@@ -579,13 +571,12 @@ fn ext_default_bqr_datetimes(
 // =============================================================================
 
 /// Register ext functions with the module.
-pub fn register_ext_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register_ext_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pyfunctions!(
         m;
         ext_parse_date,
         ext_fmt_date,
         ext_pivot_to_wide,
-        ext_is_long_format,
         ext_parse_ticker,
         ext_is_specific_contract,
         ext_build_futures_ticker,

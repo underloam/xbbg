@@ -7,7 +7,7 @@ use request::pairs_to_map;
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::str::FromStr;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -16,7 +16,7 @@ use arrow::record_batch::RecordBatch;
 use arrow_zero_copy::NativeArrowBatch;
 use napi::bindgen_prelude::{create_custom_tokio_runtime, Buffer, Error, Status};
 use napi_derive::napi;
-use tokio::sync::{watch, Mutex};
+use tokio::sync::watch;
 use tokio::time::Instant;
 use xbbg_async::engine::state::{
     FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionReceiver, SubscriptionUpdate,
@@ -24,39 +24,20 @@ use xbbg_async::engine::state::{
 };
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr,
-    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, Socks5Proxy,
-    SubscriptionEventInfo, SubscriptionFailureInfo, SubscriptionStatusState, TlsConfig,
-    TopicStatusInfo, Transport,
+    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, SubscriptionEventInfo,
+    SubscriptionFailureInfo, SubscriptionStatusState, TopicStatusInfo, Transport,
 };
+use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
     BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle,
     ValidationMode,
 };
-use xbbg_core::{AuthConfig, BlpError};
+use xbbg_core::BlpError;
 
-type StreamBatchResult = std::result::Result<SubscriptionUpdate, BlpError>;
-type SharedStreamReceiver = Arc<Mutex<Option<SubscriptionReceiver>>>;
-type SharedPendingStreamItems = Arc<StdMutex<VecDeque<StreamBatchResult>>>;
-const MAX_SUBSCRIPTION_BATCH_CAPACITY_HINT: usize = 4096;
-
-fn subscription_batch_capacity_hint(limit: usize) -> usize {
-    limit.clamp(1, MAX_SUBSCRIPTION_BATCH_CAPACITY_HINT)
-}
-
-fn subscription_layouts_match(current: &Arc<FieldLayout>, next: &Arc<FieldLayout>) -> bool {
-    Arc::ptr_eq(current, next)
-        || (current.version == next.version
-            && current.fields.len() == next.fields.len()
-            && current
-                .fields
-                .iter()
-                .zip(next.fields.iter())
-                .all(|(current_field, next_field)| {
-                    current_field.index == next_field.index
-                        && current_field.kind == next_field.kind
-                        && current_field.name == next_field.name
-                }))
-}
+use xbbg_async::subscription_consumer::{
+    subscription_batch_capacity_hint, subscription_layouts_match, wait_for_subscription_close,
+    PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer,
+};
 
 #[napi_derive::module_init]
 fn init_async_runtime() {
@@ -455,16 +436,38 @@ impl From<FeedInfo> for FeedInfoOutput {
     }
 }
 
-fn require_auth_value(value: Option<&String>, field: &str, method: &str) -> Result<String, Error> {
-    value
-        .cloned()
-        .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            Error::new(
-                Status::InvalidArg,
-                format!("auth.{field} is required for auth.method='{method}'"),
-            )
-        })
+fn config_field_name(field: &str) -> &str {
+    match field {
+        "auth_method" => "auth.method",
+        "app_name" => "auth.appName",
+        "dir_property" => "auth.dirProperty",
+        "user_id" => "auth.userId",
+        "ip_address" => "auth.ipAddress",
+        "token" => "auth.token",
+        "tls_client_credentials" => "tls.clientCredentials",
+        "tls_trust_material" => "tls.trustMaterial",
+        "tls_handshake_timeout_ms" => "tls.handshakeTimeoutMs",
+        "tls_crl_fetch_timeout_ms" => "tls.crlFetchTimeoutMs",
+        "zfp_remote" => "zfpRemote",
+        "socks5_host" => "socks5.host",
+        "socks5_port" => "socks5.port",
+        "socks5_host/socks5_port" => "socks5",
+        "request_pool_size" => "requestPoolSize",
+        "runtime_worker_threads" => "runtimeWorkerThreads",
+        "max_subscription_sessions" => "maxSubscriptionSessions",
+        "subscription_pool_size" => "subscriptionPoolSize",
+        "command_queue_size" => "commandQueueSize",
+        "subscription_stream_capacity" => "subscriptionStreamCapacity",
+        "subscription_flush_threshold" => "subscriptionFlushThreshold",
+        "shard_threshold" => "shardThreshold",
+        "shard_chunk_size" => "shardChunkSize",
+        "shard_max_concurrent" => "shardMaxConcurrent",
+        "keep_alive_inactivity_ms" => "keepAliveInactivityMs",
+        "keep_alive_response_timeout_ms" => "keepAliveResponseTimeoutMs",
+        "slow_consumer_hi_water_mark" => "slowConsumerHiWaterMark",
+        "slow_consumer_lo_water_mark" => "slowConsumerLoWaterMark",
+        other => other,
+    }
 }
 
 fn require_non_negative_duration(value: i64, field: &str) -> Result<u64, Error> {
@@ -476,157 +479,11 @@ fn require_non_negative_duration(value: i64, field: &str) -> Result<u64, Error> 
     })
 }
 
-fn require_non_negative_timeout(value: i32, field: &str) -> Result<i32, Error> {
-    if value < 0 {
-        return Err(Error::new(
-            Status::InvalidArg,
-            format!("{field} must be a non-negative integer number of milliseconds"),
-        ));
-    }
-    Ok(value)
-}
-
-fn build_auth_config(input: Option<&AuthConfigInput>) -> Result<Option<AuthConfig>, Error> {
-    let Some(input) = input else {
-        return Ok(None);
-    };
-
-    let method = input.method.trim().to_ascii_lowercase();
-    let auth = match method.as_str() {
-        "" | "none" => None,
-        "user" => Some(AuthConfig::User),
-        "app" => Some(AuthConfig::App {
-            app_name: require_auth_value(input.app_name.as_ref(), "appName", &method)?,
-        }),
-        "userapp" => Some(AuthConfig::UserApp {
-            app_name: require_auth_value(input.app_name.as_ref(), "appName", &method)?,
-        }),
-        "dir" | "directory" => Some(AuthConfig::Directory {
-            property_name: require_auth_value(input.dir_property.as_ref(), "dirProperty", &method)?,
-        }),
-        "manual" => Some(AuthConfig::Manual {
-            app_name: require_auth_value(input.app_name.as_ref(), "appName", &method)?,
-            user_id: require_auth_value(input.user_id.as_ref(), "userId", &method)?,
-            ip_address: require_auth_value(input.ip_address.as_ref(), "ipAddress", &method)?,
-        }),
-        "token" => Some(AuthConfig::Token {
-            token: require_auth_value(input.token.as_ref(), "token", &method)?,
-        }),
-        other => {
-            return Err(Error::new(
-                Status::InvalidArg,
-                format!(
-                    "invalid auth.method: {other}. Must be one of ['none', 'user', 'app', 'userapp', 'dir', 'directory', 'manual', 'token']",
-                ),
-            ));
-        }
-    };
-
-    Ok(auth)
-}
-
-fn resolve_transport_input(
-    host: Option<&str>,
-    port: Option<u16>,
-    servers: Option<&Vec<ServerAddressInput>>,
-    zfp_remote: Option<&str>,
-    socks5: Option<&Socks5ConfigInput>,
-) -> Result<Transport, Error> {
-    let zfp = zfp_remote
-        .map(|s| s.parse::<xbbg_core::zfp::ZfpRemote>())
-        .transpose()
-        .map_err(|e: String| Error::new(Status::InvalidArg, e))?;
-
-    let proxy = socks5.map(|s| Socks5Proxy {
-        host: s.host.clone(),
-        port: s.port,
-    });
-
-    let explicit_servers = servers.map(|s| !s.is_empty()).unwrap_or(false);
-    let explicit_hostport = host.is_some() || port.is_some();
-
-    if let Some(remote) = zfp {
-        if explicit_servers || explicit_hostport {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "zfpRemote cannot be combined with host/port/servers — \
-                 ZFP supplies Bloomberg endpoints via the leased-line path",
-            ));
-        }
-        if proxy.is_some() {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "zfpRemote cannot be combined with socks5",
-            ));
-        }
-        return Ok(Transport::Zfp(remote));
-    }
-
-    let raw: Vec<(String, u16)> = if explicit_servers {
-        servers
-            .unwrap()
-            .iter()
-            .map(|s| (s.host.clone(), s.port))
-            .collect()
-    } else {
-        vec![(
-            host.unwrap_or("localhost").to_string(),
-            port.unwrap_or(8194),
-        )]
-    };
-    let addrs = raw
-        .into_iter()
-        .map(|(h, p)| ServerAddr {
-            host: h,
-            port: p,
-            proxy: proxy.clone(),
-        })
-        .collect();
-    Ok(Transport::Direct(addrs))
-}
-
-fn resolve_tls_input(input: Option<&TlsConfigInput>) -> Result<Option<TlsConfig>, Error> {
-    let Some(input) = input else {
-        return Ok(None);
-    };
-    match (
-        input.client_credentials.as_deref(),
-        input.trust_material.as_deref(),
-    ) {
-        (None, None) => Ok(None),
-        (Some(creds), Some(trust)) => Ok(Some(TlsConfig {
-            client_credentials: creds.to_string(),
-            client_credentials_password: input
-                .client_credentials_password
-                .clone()
-                .unwrap_or_default(),
-            trust_material: trust.to_string(),
-            handshake_timeout_ms: input
-                .handshake_timeout_ms
-                .map(|v| require_non_negative_timeout(v, "tls.handshakeTimeoutMs"))
-                .transpose()?,
-            crl_fetch_timeout_ms: input
-                .crl_fetch_timeout_ms
-                .map(|v| require_non_negative_timeout(v, "tls.crlFetchTimeoutMs"))
-                .transpose()?,
-        })),
-        (Some(_), None) => Err(Error::new(
-            Status::InvalidArg,
-            "tls.clientCredentials set without tls.trustMaterial",
-        )),
-        (None, Some(_)) => Err(Error::new(
-            Status::InvalidArg,
-            "tls.trustMaterial set without tls.clientCredentials",
-        )),
-    }
-}
-
 impl TryFrom<EngineConfigInput> for EngineConfig {
     type Error = Error;
 
     fn try_from(input: EngineConfigInput) -> Result<Self, Self::Error> {
         let mut config = EngineConfig::default();
-        let auth = build_auth_config(input.auth.as_ref())?;
 
         let validation_mode = match input.validation_mode {
             Some(mode) => ValidationMode::from_str(&mode)
@@ -640,14 +497,6 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             None => config.overflow_policy,
         };
 
-        let transport = resolve_transport_input(
-            input.host.as_deref(),
-            input.port,
-            input.servers.as_ref(),
-            input.zfp_remote.as_deref(),
-            input.socks5.as_ref(),
-        )?;
-        config.transport = transport;
         if let Some(size) = input.request_pool_size {
             config.request_pool_size = size as usize;
         }
@@ -655,28 +504,10 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             config.subscription_pool_size = size as usize;
         }
         if let Some(size) = input.runtime_worker_threads {
-            if size == 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "runtimeWorkerThreads must be greater than zero",
-                ));
-            }
             config.runtime_worker_threads = size as usize;
         }
         if let Some(size) = input.max_subscription_sessions {
-            if size == 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "maxSubscriptionSessions must be greater than zero",
-                ));
-            }
             config.max_subscription_sessions = size as usize;
-        }
-        if config.max_subscription_sessions < config.subscription_pool_size {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "maxSubscriptionSessions must be greater than or equal to subscriptionPoolSize",
-            ));
         }
         if let Some(enabled) = input.shard_requests {
             config.shard_requests = enabled;
@@ -691,12 +522,6 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             config.shard_max_concurrent = size as usize;
         }
         if let Some(size) = input.subscription_flush_threshold {
-            if size == 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "subscriptionFlushThreshold must be greater than zero",
-                ));
-            }
             config.subscription_flush_threshold = size as usize;
         }
         if let Some(size) = input.max_event_queue_size {
@@ -706,12 +531,6 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             config.command_queue_size = size as usize;
         }
         if let Some(size) = input.subscription_stream_capacity {
-            if size == 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "subscriptionStreamCapacity must be greater than zero",
-                ));
-            }
             config.subscription_stream_capacity = size as usize;
         }
         if let Some(services) = input.warmup_services {
@@ -720,7 +539,6 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
         if let Some(field_cache_path) = input.field_cache_path {
             config.field_cache_path = Some(field_cache_path.into());
         }
-        config.tls = resolve_tls_input(input.tls.as_ref())?;
         if let Some(num_start_attempts) = input.num_start_attempts {
             config.num_start_attempts = num_start_attempts as usize;
         }
@@ -757,40 +575,10 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             config.keep_alive_enabled = keep_alive_enabled;
         }
         if let Some(v) = input.keep_alive_inactivity_ms {
-            if v < 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "keepAliveInactivityMs must be non-negative".to_string(),
-                ));
-            }
             config.keep_alive_inactivity_ms = Some(v);
         }
         if let Some(v) = input.keep_alive_response_timeout_ms {
-            if v < 0 {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "keepAliveResponseTimeoutMs must be non-negative".to_string(),
-                ));
-            }
             config.keep_alive_response_timeout_ms = Some(v);
-        }
-        if let Some(v) = input.slow_consumer_hi_water_mark {
-            if !(0.0..=1.0).contains(&v) {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "slowConsumerHiWaterMark must be in 0.0..=1.0".to_string(),
-                ));
-            }
-            config.slow_consumer_hi_water_mark = Some(v as f32);
-        }
-        if let Some(v) = input.slow_consumer_lo_water_mark {
-            if !(0.0..1.0).contains(&v) {
-                return Err(Error::new(
-                    Status::InvalidArg,
-                    "slowConsumerLoWaterMark must be in 0.0..1.0".to_string(),
-                ));
-            }
-            config.slow_consumer_lo_water_mark = Some(v as f32);
         }
         if let Some(sdk_log_level) = input.sdk_log_level {
             config.sdk_log_level = sdk_log_level
@@ -799,9 +587,54 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
         }
         config.validation_mode = validation_mode;
         config.overflow_policy = overflow_policy;
-        config.auth = auth;
 
-        Ok(config)
+        let auth = input.auth.as_ref();
+        let tls = input.tls.as_ref();
+        xbbg_async::config::normalize(
+            config,
+            xbbg_async::config::ConfigInput {
+                auth: xbbg_async::config::AuthInput {
+                    method: auth.map(|auth| auth.method.as_str()),
+                    app_name: auth.and_then(|auth| auth.app_name.as_deref()),
+                    dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
+                    user_id: auth.and_then(|auth| auth.user_id.as_deref()),
+                    ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
+                    token: auth.and_then(|auth| auth.token.as_deref()),
+                },
+                tls: xbbg_async::config::TlsInput {
+                    client_credentials: tls.and_then(|tls| tls.client_credentials.as_deref()),
+                    client_credentials_password: tls
+                        .and_then(|tls| tls.client_credentials_password.as_deref()),
+                    trust_material: tls.and_then(|tls| tls.trust_material.as_deref()),
+                    handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
+                    crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
+                },
+                transport: xbbg_async::config::TransportInput {
+                    host: input.host.as_deref().unwrap_or("localhost"),
+                    port: input.port.unwrap_or(8194),
+                    explicit_host_port: input.host.is_some() || input.port.is_some(),
+                    zfp_remote: input.zfp_remote.as_deref(),
+                    socks5_host: input.socks5.as_ref().map(|proxy| proxy.host.as_str()),
+                    socks5_port: input.socks5.as_ref().map(|proxy| proxy.port),
+                },
+                slow_consumer_hi_water_mark: input.slow_consumer_hi_water_mark,
+                slow_consumer_lo_water_mark: input.slow_consumer_lo_water_mark,
+            },
+            input
+                .servers
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(|server| (server.host.as_str(), server.port)),
+            config_field_name,
+        )
+        .map_err(|error| {
+            let detail = match error {
+                BlpAsyncError::ConfigError { detail } => detail,
+                other => other.to_string(),
+            };
+            Error::new(Status::InvalidArg, detail)
+        })
     }
 }
 
@@ -1001,17 +834,6 @@ fn subscription_limit(
     }
 }
 
-async fn wait_for_subscription_close(close_rx: &mut watch::Receiver<bool>) {
-    if *close_rx.borrow() {
-        return;
-    }
-    while close_rx.changed().await.is_ok() {
-        if *close_rx.borrow() {
-            return;
-        }
-    }
-}
-
 async fn receive_stream_item(
     rx: &mut SubscriptionReceiver,
     close_rx: &mut watch::Receiver<bool>,
@@ -1040,13 +862,13 @@ async fn receive_stream_item(
 }
 
 struct PendingUpdateBatch<'a> {
-    pending: &'a StdMutex<VecDeque<StreamBatchResult>>,
+    pending: &'a PendingUpdates,
     updates: Vec<SubscriptionUpdate>,
     committed: bool,
 }
 
 impl<'a> PendingUpdateBatch<'a> {
-    fn new(pending: &'a StdMutex<VecDeque<StreamBatchResult>>, capacity: usize) -> Self {
+    fn new(pending: &'a PendingUpdates, capacity: usize) -> Self {
         Self {
             pending,
             updates: Vec::with_capacity(capacity),
@@ -1065,19 +887,13 @@ impl Drop for PendingUpdateBatch<'_> {
         if self.committed || self.updates.is_empty() {
             return;
         }
-        let mut pending = self
-            .pending
-            .lock()
-            .expect("subscription pending queue poisoned");
-        for update in self.updates.drain(..).rev() {
-            pending.push_front(Ok(update));
-        }
+        self.pending.restore(self.updates.drain(..));
     }
 }
 
 async fn receive_subscription_updates(
     rx: &mut SubscriptionReceiver,
-    pending: &StdMutex<VecDeque<StreamBatchResult>>,
+    pending: &PendingUpdates,
     close_rx: &mut watch::Receiver<bool>,
     limit: usize,
     max_wait_ms: Option<u32>,
@@ -1087,13 +903,9 @@ async fn receive_subscription_updates(
     }
     let deadline =
         max_wait_ms.map(|wait_ms| Instant::now() + Duration::from_millis(u64::from(wait_ms)));
-    let mut layout = None;
     let mut batch = PendingUpdateBatch::new(pending, subscription_batch_capacity_hint(limit));
     loop {
-        let queued = pending
-            .lock()
-            .expect("subscription pending queue poisoned")
-            .pop_front();
+        let queued = pending.pop_front();
         let item = match queued {
             Some(item) => Some(item),
             None if batch.updates.is_empty() || deadline.is_some() => {
@@ -1102,33 +914,15 @@ async fn receive_subscription_updates(
             None => rx.try_recv().ok(),
         };
 
-        match item {
-            Some(Ok(update)) => {
-                if layout
-                    .as_ref()
-                    .is_some_and(|current| !subscription_layouts_match(current, &update.layout))
-                {
-                    pending
-                        .lock()
-                        .expect("subscription pending queue poisoned")
-                        .push_front(Ok(update));
-                    break;
-                }
-                layout.get_or_insert_with(|| update.layout.clone());
-                batch.updates.push(update);
-                if batch.updates.len() == limit {
-                    break;
-                }
-            }
-            Some(Err(error)) if batch.updates.is_empty() => return Err(Box::new(error)),
-            Some(Err(error)) => {
-                pending
-                    .lock()
-                    .expect("subscription pending queue poisoned")
-                    .push_front(Err(error));
-                break;
-            }
-            None => break,
+        let Some(item) = item else {
+            break;
+        };
+        if !pending
+            .append_to_batch(&mut batch.updates, item)
+            .map_err(Box::new)?
+            || batch.updates.len() == limit
+        {
+            break;
         }
     }
 
@@ -1139,217 +933,33 @@ async fn receive_subscription_updates(
     }
 }
 
-async fn drain_forwarder_into_pending(
-    handle: &SubscriptionHandle,
-    rx: &mut SubscriptionReceiver,
-    pending: &StdMutex<VecDeque<StreamBatchResult>>,
-) -> Result<(), Box<BlpAsyncError>> {
-    let barrier = handle.drain_forwarder();
-    tokio::pin!(barrier);
-    let barrier_result = loop {
-        tokio::select! {
-            biased;
-            item = rx.recv() => {
-                match item {
-                    Some(item) => pending
-                        .lock()
-                        .expect("subscription pending queue poisoned")
-                        .push_back(item),
-                    None => break barrier.await,
-                }
-            }
-            result = &mut barrier => break result,
-        }
-    };
-    while let Ok(item) = rx.try_recv() {
-        pending
-            .lock()
-            .expect("subscription pending queue poisoned")
-            .push_back(item);
-    }
-    barrier_result.map_err(Box::new)
-}
-
 /// Stable machine-readable error code embedded in every native error message
 /// as a `[XBBG:<CODE>] ` prefix. The js-xbbg wrapper parses this prefix to
 /// construct typed error classes; the human-readable message follows it.
-/// Codes: SESSION, REQUEST, LIMIT, DATALOSS, VALIDATION, TIMEOUT, CANCELLED, INTERNAL.
+/// Codes: SESSION, REQUEST, LIMIT, DATALOSS, VALIDATION, TIMEOUT, INTERNAL.
 fn coded(status: Status, code: &str, msg: impl AsRef<str>) -> Error {
     Error::new(status, format!("[XBBG:{code}] {}", msg.as_ref()))
 }
 
-fn request_failure_code(label: Option<&str>) -> &'static str {
-    match label {
-        Some(label)
-            if label.contains("category=LIMIT")
-                || label.contains("DAILY_CAPACITY_REACHED")
-                || label.contains("subcategory=DAILY_CAPACITY_REACHED") =>
-        {
-            "LIMIT"
-        }
-        _ => "REQUEST",
-    }
+fn error_presentation_to_napi(presentation: ErrorPresentation) -> Error {
+    let (status, code) = match presentation.kind {
+        ErrorKind::Session => (Status::GenericFailure, "SESSION"),
+        ErrorKind::Request => (Status::GenericFailure, "REQUEST"),
+        ErrorKind::Limit => (Status::GenericFailure, "LIMIT"),
+        ErrorKind::DataLoss => (Status::GenericFailure, "DATALOSS"),
+        ErrorKind::Validation => (Status::InvalidArg, "VALIDATION"),
+        ErrorKind::Timeout => (Status::GenericFailure, "TIMEOUT"),
+        ErrorKind::Internal => (Status::GenericFailure, "INTERNAL"),
+    };
+    coded(status, code, presentation.message)
 }
 
-fn blp_error_to_napi(e: BlpError) -> Error {
-    match e {
-        BlpError::SessionStart { source, label } => {
-            let msg = format_error_msg("Session start failed", label.as_deref(), source.as_deref());
-            coded(Status::GenericFailure, "SESSION", msg)
-        }
-        BlpError::OpenService {
-            service,
-            source,
-            label,
-        } => {
-            let msg = format!(
-                "Failed to open service '{service}': {}",
-                format_error_msg("", label.as_deref(), source.as_deref())
-            );
-            coded(Status::GenericFailure, "SESSION", msg)
-        }
-        BlpError::RequestFailure {
-            service,
-            operation,
-            cid,
-            label,
-            request_id,
-            source,
-        } => {
-            let mut msg = format!("Request failed on {service}");
-            if let Some(op) = operation {
-                msg.push_str(&format!("::{op}"));
-            }
-            if let Some(c) = cid {
-                msg.push_str(&format!(" (cid={c})"));
-            }
-            if let Some(rid) = request_id {
-                msg.push_str(&format!(" [request_id={rid}]"));
-            }
-            let code = request_failure_code(label.as_deref());
-            if let Some(l) = label {
-                msg.push_str(&format!(" - {l}"));
-            }
-            if let Some(s) = source {
-                msg.push_str(&format!(": {s}"));
-            }
-            coded(Status::GenericFailure, code, msg)
-        }
-        BlpError::InvalidArgument { detail } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Invalid argument: {detail}"),
-        ),
-        BlpError::Timeout => coded(Status::GenericFailure, "TIMEOUT", "Request timed out"),
-        BlpError::TemplateTerminated { cid } => {
-            let msg = match cid {
-                Some(c) => format!("Request template terminated (cid={c})"),
-                None => "Request template terminated".to_string(),
-            };
-            coded(Status::GenericFailure, "REQUEST", msg)
-        }
-        BlpError::SubscriptionDataLoss { topic, detail } => coded(
-            Status::GenericFailure,
-            "DATALOSS",
-            format!("Subscription data loss [topic={topic}]: {detail}"),
-        ),
-        BlpError::SubscriptionFailure { cid, label } => {
-            let mut msg = "Subscription failed".to_string();
-            if let Some(c) = cid {
-                msg.push_str(&format!(" (cid={c})"));
-            }
-            if let Some(l) = label {
-                msg.push_str(&format!(": {l}"));
-            }
-            coded(Status::GenericFailure, "REQUEST", msg)
-        }
-        BlpError::Internal { detail } => coded(
-            Status::GenericFailure,
-            "INTERNAL",
-            format!("Internal error: {detail}"),
-        ),
-        BlpError::SchemaOperationNotFound { service, operation } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Operation not found: {service}::{operation}"),
-        ),
-        BlpError::SchemaElementNotFound { parent, name } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Schema element not found: {parent}.{name}"),
-        ),
-        BlpError::SchemaTypeMismatch {
-            element,
-            expected,
-            found,
-        } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Schema type mismatch at {element}: expected {expected}, found {found}"),
-        ),
-        BlpError::SchemaUnsupported { element, detail } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Unsupported schema construct at {element}: {detail}"),
-        ),
-        BlpError::Validation { message, errors } => {
-            let details: Vec<String> = errors
-                .iter()
-                .map(|e| match &e.suggestion {
-                    Some(suggestion) => format!("{e} (did you mean '{suggestion}'?)"),
-                    None => e.to_string(),
-                })
-                .collect();
-            let msg = if details.is_empty() {
-                message
-            } else {
-                format!("{message}: {}", details.join("; "))
-            };
-            coded(Status::InvalidArg, "VALIDATION", msg)
-        }
-    }
+fn blp_error_to_napi(error: BlpError) -> Error {
+    error_presentation_to_napi(ErrorPresentation::from_blp(error, ErrorStyle::JavaScript))
 }
 
-fn blp_async_error_to_napi(e: BlpAsyncError) -> Error {
-    match e {
-        BlpAsyncError::Blp(blp_err) => blp_error_to_napi(blp_err),
-        BlpAsyncError::BlpError(blp_err) => blp_error_to_napi(blp_err),
-        BlpAsyncError::ConfigError { detail } => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Configuration error: {detail}"),
-        ),
-        BlpAsyncError::ChannelClosed => coded(
-            Status::GenericFailure,
-            "INTERNAL",
-            "Channel closed unexpectedly",
-        ),
-        BlpAsyncError::StreamFull => coded(
-            Status::GenericFailure,
-            "INTERNAL",
-            "Stream buffer full - consumer too slow",
-        ),
-        BlpAsyncError::Cancelled => {
-            coded(Status::GenericFailure, "CANCELLED", "Request was cancelled")
-        }
-        BlpAsyncError::Timeout => coded(Status::GenericFailure, "TIMEOUT", "Request timed out"),
-        BlpAsyncError::SessionLost {
-            worker_id,
-            in_flight_count,
-        } => coded(
-            Status::GenericFailure,
-            "SESSION",
-            format!(
-                "Session lost on worker {worker_id}; {in_flight_count} in-flight requests failed"
-            ),
-        ),
-        BlpAsyncError::AllWorkersDown { pool_size } => coded(
-            Status::GenericFailure,
-            "SESSION",
-            format!("All {pool_size} request workers are down"),
-        ),
-        BlpAsyncError::Internal(msg) => coded(Status::GenericFailure, "INTERNAL", msg),
-    }
+fn blp_async_error_to_napi(error: BlpAsyncError) -> Error {
+    error_presentation_to_napi(ErrorPresentation::from_async(error, ErrorStyle::JavaScript))
 }
 
 fn delayed_policy_from_input(on_delayed: Option<&str>) -> napi::Result<DelayedPolicy> {
@@ -1394,36 +1004,6 @@ fn recipe_error_to_napi(e: xbbg_recipes::RecipeError) -> Error {
         ),
         other => coded(Status::GenericFailure, "INTERNAL", other.to_string()),
     }
-}
-
-fn format_error_msg(
-    base: &str,
-    label: Option<&str>,
-    source: Option<&(dyn std::error::Error + Send + Sync)>,
-) -> String {
-    let mut msg = base.to_string();
-    if let Some(l) = label {
-        if !msg.is_empty() {
-            msg.push_str(": ");
-        }
-        msg.push_str(l);
-    }
-    if let Some(s) = source {
-        if !msg.is_empty() {
-            msg.push_str(" - ");
-        }
-        msg.push_str(&s.to_string());
-    }
-    if msg.is_empty() {
-        "Unknown error".to_string()
-    } else {
-        msg
-    }
-}
-
-#[napi]
-pub fn version() -> String {
-    xbbg_core::version().to_string()
 }
 
 #[napi]
@@ -2404,13 +1984,7 @@ impl JsEngine {
 
 #[napi]
 pub struct JsSubscription {
-    rx: SharedStreamReceiver,
-    close_signal: watch::Sender<bool>,
-    closed: Arc<AtomicBool>,
-    mutation: Arc<Mutex<()>>,
-    // Short control snapshots only; the mutation lock serializes async operations.
-    stream: Arc<StdMutex<Option<SubscriptionHandle>>>,
-    pending: SharedPendingStreamItems,
+    consumer: SubscriptionConsumer,
     scalar_layout: Arc<StdMutex<Option<Arc<FieldLayout>>>>,
     arrow_batcher: Arc<StdMutex<(usize, SubscriptionArrowBatcher)>>,
     arrow_ready: Arc<StdMutex<VecDeque<RecordBatch>>>,
@@ -2425,14 +1999,8 @@ impl JsSubscription {
         let (rx, handle) = stream.into_parts();
         let status = handle.status();
         let deliver_rows = handle.delivers_rows();
-        let (close_signal, _) = watch::channel(false);
         Self {
-            rx: Arc::new(Mutex::new(Some(rx))),
-            close_signal,
-            closed: Arc::new(AtomicBool::new(false)),
-            mutation: Arc::new(Mutex::new(())),
-            stream: Arc::new(StdMutex::new(Some(handle))),
-            pending: Arc::new(StdMutex::new(VecDeque::new())),
+            consumer: SubscriptionConsumer::new(rx, handle),
             scalar_layout: Arc::new(StdMutex::new(None)),
             arrow_batcher: Arc::new(StdMutex::new((
                 batch_items,
@@ -2454,18 +2022,18 @@ impl JsSubscription {
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeSubscriptionUpdateBatch>> {
         self.require_rows()?;
-        if self.closed.load(Ordering::Acquire) {
+        if self.consumer.is_closed() {
             return Ok(None);
         }
         let limit = subscription_limit(max_items, "maxItems", self.batch_items)?;
-        let mut close_rx = self.close_signal.subscribe();
-        let mut rx_guard = self.rx.lock().await;
+        let mut close_rx = self.consumer.close_signal.subscribe();
+        let mut rx_guard = self.consumer.rx.lock().await;
         let Some(rx) = rx_guard.as_mut() else {
             return Ok(None);
         };
         let updates = receive_subscription_updates(
             rx,
-            self.pending.as_ref(),
+            self.consumer.pending.as_ref(),
             &mut close_rx,
             limit,
             max_wait_ms,
@@ -2494,7 +2062,7 @@ impl JsSubscription {
         max_wait_ms: Option<u32>,
     ) -> napi::Result<Option<NativeArrowBatch>> {
         self.require_rows()?;
-        if self.closed.load(Ordering::Acquire) {
+        if self.consumer.is_closed() {
             return Ok(None);
         }
         let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
@@ -2506,14 +2074,14 @@ impl JsSubscription {
         {
             return Ok(Some(to_native_record_batch(batch)?));
         }
-        let mut close_rx = self.close_signal.subscribe();
-        let mut rx_guard = self.rx.lock().await;
+        let mut close_rx = self.consumer.close_signal.subscribe();
+        let mut rx_guard = self.consumer.rx.lock().await;
         let Some(rx) = rx_guard.as_mut() else {
             return Ok(None);
         };
         let updates = receive_subscription_updates(
             rx,
-            self.pending.as_ref(),
+            self.consumer.pending.as_ref(),
             &mut close_rx,
             limit,
             max_wait_ms,
@@ -2572,7 +2140,7 @@ impl JsSubscription {
         tickers: Vec<String>,
         aliases: Option<HashMap<String, String>>,
     ) -> napi::Result<()> {
-        let _mutation = self.mutation.lock().await;
+        let _mutation = self.consumer.operations.lock().await;
         let handle = self.open_handle()?;
         handle
             .add(tickers, aliases.unwrap_or_default().into_iter().collect())
@@ -2583,7 +2151,7 @@ impl JsSubscription {
     /// Grow this consumer's field projection and the shared feed's field union.
     #[napi]
     pub async fn add_fields(&self, fields: Vec<String>) -> napi::Result<()> {
-        let _mutation = self.mutation.lock().await;
+        let _mutation = self.consumer.operations.lock().await;
         let handle = self.open_handle()?;
         handle
             .add_fields(fields)
@@ -2594,14 +2162,12 @@ impl JsSubscription {
     /// Materialized latest values for active consumer labels.
     #[napi]
     pub fn latest(&self) -> napi::Result<NativeArrowBatch> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.consumer.is_closed() {
             return Err(subscription_closed_error());
         }
         let batch = self
-            .stream
-            .lock()
-            .expect("subscription control poisoned")
-            .as_ref()
+            .consumer
+            .handle()
             .ok_or_else(subscription_closed_error)?
             .latest()
             .map_err(subscription_control_error_to_napi)?;
@@ -2621,7 +2187,7 @@ impl JsSubscription {
 
     #[napi]
     pub async fn remove(&self, tickers: Vec<String>) -> napi::Result<()> {
-        let _mutation = self.mutation.lock().await;
+        let _mutation = self.consumer.operations.lock().await;
         let handle = self.open_handle()?;
         handle
             .remove(tickers)
@@ -2636,9 +2202,8 @@ impl JsSubscription {
 
     #[napi(getter)]
     pub fn fields(&self) -> Vec<String> {
-        self.stream
-            .lock()
-            .expect("subscription control poisoned")
+        self.consumer
+            .handle()
             .as_ref()
             .map(SubscriptionHandle::fields)
             .unwrap_or_default()
@@ -2652,11 +2217,10 @@ impl JsSubscription {
 
     #[napi(getter)]
     pub fn is_active(&self) -> bool {
-        !self.closed.load(Ordering::Acquire)
+        !self.consumer.is_closed()
             && self
-                .stream
-                .lock()
-                .expect("subscription control poisoned")
+                .consumer
+                .handle()
                 .as_ref()
                 .is_some_and(SubscriptionHandle::is_active)
     }
@@ -2767,17 +2331,12 @@ impl JsSubscription {
         drain: Option<bool>,
     ) -> napi::Result<Option<Vec<NativeSubscriptionUpdateBatch>>> {
         let drain = drain.unwrap_or(false);
-        let (_mutation, close_result) = self.close_for_unsubscribe(drain).await;
-        let mut rx_guard = self.rx.lock().await;
-        let rx = rx_guard.take();
-        drop(rx_guard);
-        let drained_updates = Self::take_drained_updates(self.pending.as_ref(), rx, drain);
+        let (_mutation, drained_updates) = self.consumer.unsubscribe(drain, None).await;
         self.arrow_ready
             .lock()
             .expect("subscription Arrow output queue poisoned")
             .clear();
-        let drained_updates = drained_updates.map_err(|error| blp_error_to_napi(*error))?;
-        close_result?;
+        let drained_updates = drained_updates.map_err(|error| blp_async_error_to_napi(*error))?;
 
         let mut remaining = Vec::new();
         if !drained_updates.is_empty() {
@@ -2822,11 +2381,7 @@ impl JsSubscription {
         drain: Option<bool>,
     ) -> napi::Result<Option<Vec<NativeArrowBatch>>> {
         let drain = drain.unwrap_or(false);
-        let (_mutation, close_result) = self.close_for_unsubscribe(drain).await;
-        let mut rx_guard = self.rx.lock().await;
-        let rx = rx_guard.take();
-        drop(rx_guard);
-        let drained_updates = Self::take_drained_updates(self.pending.as_ref(), rx, drain);
+        let (_mutation, drained_updates) = self.consumer.unsubscribe(drain, None).await;
 
         let queued_batches: Vec<RecordBatch> = {
             let mut ready = self
@@ -2840,8 +2395,7 @@ impl JsSubscription {
                 Vec::new()
             }
         };
-        let drained_updates = drained_updates.map_err(|error| blp_error_to_napi(*error))?;
-        close_result?;
+        let drained_updates = drained_updates.map_err(|error| blp_async_error_to_napi(*error))?;
         let mut remaining = queued_batches
             .into_iter()
             .map(to_native_record_batch)
@@ -2900,107 +2454,10 @@ impl JsSubscription {
     }
 
     fn open_handle(&self) -> napi::Result<SubscriptionHandle> {
-        if self.closed.load(Ordering::Acquire) {
+        if self.consumer.is_closed() {
             return Err(subscription_closed_error());
         }
-        self.stream
-            .lock()
-            .expect("subscription control poisoned")
-            .as_ref()
-            .cloned()
-            .ok_or_else(subscription_closed_error)
-    }
-
-    async fn close_for_unsubscribe(
-        &self,
-        drain: bool,
-    ) -> (tokio::sync::OwnedMutexGuard<()>, napi::Result<()>) {
-        self.closed.store(true, Ordering::Release);
-        self.close_signal.send_replace(true);
-        let mutation = self.mutation.clone().lock_owned().await;
-        // Keep the owning handle in shared state until every close await
-        // completes, allowing a cancelled close to resume later.
-        let handle = self
-            .stream
-            .lock()
-            .expect("subscription control poisoned")
-            .clone();
-        let mut close_result = if let Some(handle) = handle.as_ref() {
-            handle.unsubscribe().await.map_err(blp_async_error_to_napi)
-        } else {
-            Ok(())
-        };
-
-        if drain {
-            if let Some(handle) = handle.as_ref() {
-                let mut rx_guard = self.rx.lock().await;
-                let forwarding_result = match rx_guard.as_mut() {
-                    Some(rx) => {
-                        let result =
-                            drain_forwarder_into_pending(handle, rx, self.pending.as_ref())
-                                .await
-                                .map_err(|error| blp_async_error_to_napi(*error));
-                        rx.close();
-                        result
-                    }
-                    None => handle
-                        .drain_forwarder()
-                        .await
-                        .map_err(blp_async_error_to_napi),
-                };
-                if close_result.is_ok() {
-                    close_result = forwarding_result;
-                }
-            }
-        }
-
-        // Releasing the last control after completed awaits detaches any
-        // memberships left behind by a failed close.
-        self.stream
-            .lock()
-            .expect("subscription control poisoned")
-            .take();
-        (mutation, close_result)
-    }
-
-    fn take_drained_updates(
-        pending: &StdMutex<VecDeque<StreamBatchResult>>,
-        rx: Option<SubscriptionReceiver>,
-        drain: bool,
-    ) -> Result<Vec<SubscriptionUpdate>, Box<BlpError>> {
-        let mut updates = Vec::new();
-        let mut terminal_error = None;
-        let mut pending = pending.lock().expect("subscription pending queue poisoned");
-        if drain {
-            while let Some(item) = pending.pop_front() {
-                match item {
-                    Ok(update) => updates.push(update),
-                    Err(error) => {
-                        terminal_error.get_or_insert(error);
-                    }
-                }
-            }
-        } else {
-            pending.clear();
-        }
-        drop(pending);
-
-        if drain {
-            if let Some(mut rx) = rx {
-                while let Ok(item) = rx.try_recv() {
-                    match item {
-                        Ok(update) => updates.push(update),
-                        Err(error) => {
-                            terminal_error.get_or_insert(error);
-                        }
-                    }
-                }
-            }
-        }
-        match terminal_error {
-            Some(error) => Err(Box::new(error)),
-            None => Ok(updates),
-        }
+        self.consumer.handle().ok_or_else(subscription_closed_error)
     }
 }
 
@@ -3010,6 +2467,7 @@ mod tests {
     use std::future::Future;
     use xbbg_async::engine::state::{subscription_channel, FieldLayout, FieldMeta, UpdateField};
     use xbbg_async::services::ExtractorType;
+    use xbbg_core::AuthConfig;
 
     fn minimal_input() -> EngineConfigInput {
         EngineConfigInput {
@@ -3085,14 +2543,11 @@ mod tests {
 
     fn subscription_with_receiver(rx: SubscriptionReceiver, deliver_rows: bool) -> JsSubscription {
         let batch_items = 1;
-        let (close_signal, _) = watch::channel(false);
+        let consumer = SubscriptionConsumer::default();
+        *consumer.rx.try_lock().expect("uncontended receiver") = Some(rx);
+        consumer.close_signal.send_replace(false);
         JsSubscription {
-            rx: Arc::new(Mutex::new(Some(rx))),
-            close_signal,
-            closed: Arc::new(AtomicBool::new(false)),
-            mutation: Arc::new(Mutex::new(())),
-            stream: Arc::new(StdMutex::new(None)),
-            pending: Arc::new(StdMutex::new(VecDeque::new())),
+            consumer,
             scalar_layout: Arc::new(StdMutex::new(None)),
             arrow_batcher: Arc::new(StdMutex::new((
                 batch_items,
@@ -3159,7 +2614,7 @@ mod tests {
                 detail: "synthetic terminal failure".to_string(),
             });
             // A row read must fail before taking the receive lock or doing cleanup.
-            let rx_guard = subscription.rx.lock().await;
+            let rx_guard = subscription.consumer.rx.lock().await;
             let mut scalar_read = Box::pin(subscription.next_updates(None, None));
             let mut arrow_read = Box::pin(subscription.next_arrow_batch(None, None));
             std::future::poll_fn(|cx| {
@@ -3181,8 +2636,7 @@ mod tests {
             })
             .await;
             assert!(!subscription.delivers_rows());
-            assert!(!subscription.closed.load(Ordering::Acquire));
-            assert!(!*subscription.close_signal.borrow());
+            assert!(!subscription.consumer.is_closed());
             drop(rx_guard);
 
             let error = match subscription.unsubscribe(Some(true)).await {
@@ -3226,13 +2680,131 @@ mod tests {
     }
 
     #[test]
+    fn core_error_adapters_preserve_napi_status_codes_and_context() {
+        for wrapped in [false, true] {
+            for (error, status, message) in [
+                (
+                    BlpError::SessionStart {
+                        source: Some(Box::new(std::io::Error::other("synthetic cause"))),
+                        label: Some("unavailable".into()),
+                    },
+                    Status::GenericFailure,
+                    "[XBBG:SESSION] Session start failed: unavailable - synthetic cause",
+                ),
+                (
+                    BlpError::SubscriptionFailure { cid: None, label: None },
+                    Status::GenericFailure,
+                    "[XBBG:REQUEST] Subscription failed",
+                ),
+                (
+                    BlpError::RequestFailure {
+                        service: "//blp/refdata".into(),
+                        operation: Some("ReferenceDataRequest".into()),
+                        cid: Some(xbbg_core::errors::CorrelationContext::U64(42)),
+                        label: Some("subcategory=DAILY_CAPACITY_REACHED".into()),
+                        request_id: Some("synthetic-request".into()),
+                        source: Some(Box::new(std::io::Error::other("synthetic cause"))),
+                    },
+                    Status::GenericFailure,
+                    "[XBBG:LIMIT] Request failed on //blp/refdata::ReferenceDataRequest (cid=42) [request_id=synthetic-request] - subcategory=DAILY_CAPACITY_REACHED: synthetic cause",
+                ),
+                (
+                    BlpError::SchemaTypeMismatch {
+                        element: "fields".into(),
+                        expected: "String".into(),
+                        found: "Int32".into(),
+                    },
+                    Status::InvalidArg,
+                    "[XBBG:VALIDATION] Schema type mismatch at fields: expected String, found Int32",
+                ),
+                (
+                    BlpError::Validation {
+                        message: "invalid request".into(),
+                        errors: vec![xbbg_core::errors::ValidationError {
+                            path: "fields[0]".into(),
+                            message: "unknown field".into(),
+                            suggestion: Some("PX_LAST".into()),
+                        }],
+                    },
+                    Status::InvalidArg,
+                    "[XBBG:VALIDATION] invalid request: fields[0]: unknown field (did you mean 'PX_LAST'?)",
+                ),
+            ] {
+                let error = if wrapped {
+                    blp_async_error_to_napi(error.into())
+                } else {
+                    blp_error_to_napi(error)
+                };
+                assert_eq!(error.status, status);
+                assert_eq!(error.reason, message);
+            }
+        }
+    }
+
+    #[test]
+    fn engine_and_recipe_errors_preserve_napi_status_codes() {
+        for recipe in [false, true] {
+            for (error, status, message) in [
+                (
+                    BlpAsyncError::AllWorkersDown { pool_size: 2 },
+                    Status::GenericFailure,
+                    "[XBBG:SESSION] All 2 request workers are down",
+                ),
+                (
+                    BlpAsyncError::ChannelClosed,
+                    Status::GenericFailure,
+                    "[XBBG:INTERNAL] Channel closed unexpectedly",
+                ),
+                (
+                    BlpAsyncError::Internal("synthetic failure".into()),
+                    Status::GenericFailure,
+                    "[XBBG:INTERNAL] synthetic failure",
+                ),
+                (
+                    BlpAsyncError::ConfigError { detail: "synthetic config failure".into() },
+                    Status::InvalidArg,
+                    "[XBBG:VALIDATION] Configuration error: synthetic config failure",
+                ),
+                (
+                    BlpError::Timeout.into(),
+                    Status::GenericFailure,
+                    "[XBBG:TIMEOUT] Request timed out",
+                ),
+                (
+                    BlpError::Internal {
+                        detail: "session connection dropped (worker=2)".into(),
+                    }.into(),
+                    Status::GenericFailure,
+                    "[XBBG:INTERNAL] Internal error: session connection dropped (worker=2)",
+                ),
+                (
+                    BlpError::SubscriptionDataLoss {
+                        topic: "SYNTHETIC Equity".into(),
+                        detail: "synthetic overflow".into(),
+                    }.into(),
+                    Status::GenericFailure,
+                    "[XBBG:DATALOSS] Subscription data loss [topic=SYNTHETIC Equity]: synthetic overflow",
+                ),
+            ] {
+                let error = if recipe {
+                    recipe_error_to_napi(xbbg_recipes::RecipeError::Engine(Box::new(error)))
+                } else {
+                    blp_async_error_to_napi(error)
+                };
+                assert_eq!(error.status, status);
+                assert_eq!(error.reason, message);
+            }
+        }
+    }
+
+    #[test]
     fn closed_subscription_controls_are_validation_errors_without_masking_other_errors() {
         let error = subscription_control_error_to_napi(BlpAsyncError::ChannelClosed);
         assert_eq!(error.status, Status::InvalidArg);
         assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
         assert!(error.reason.contains("already closed"));
 
-        let error = subscription_control_error_to_napi(BlpAsyncError::Timeout);
+        let error = subscription_control_error_to_napi(BlpError::Timeout.into());
         assert_eq!(error.status, Status::GenericFailure);
         assert!(error.reason.starts_with("[XBBG:TIMEOUT]"));
 
@@ -3454,6 +3026,21 @@ mod tests {
         .err()
         .expect("subscription prewarm above session cap should fail");
         assert!(err.to_string().contains("maxSubscriptionSessions"));
+
+        let err = EngineConfig::try_from(EngineConfigInput {
+            request_pool_size: Some(0),
+            ..minimal_input()
+        })
+        .err()
+        .expect("zero request pool should fail during conversion");
+        assert!(err.to_string().contains("requestPoolSize"));
+
+        let config = EngineConfig::try_from(EngineConfigInput {
+            subscription_pool_size: Some(0),
+            ..minimal_input()
+        })
+        .expect("subscription prewarm may be disabled");
+        assert_eq!(config.subscription_pool_size, 0);
     }
 
     #[test]
@@ -3696,6 +3283,141 @@ mod tests {
     }
 
     #[test]
+    fn engine_config_input_rejects_negative_tls_timeouts_without_or_with_credentials() {
+        for with_material in [false, true] {
+            for (handshake, crl, field) in [
+                (Some(-5), None, "tls.handshakeTimeoutMs"),
+                (None, Some(-5), "tls.crlFetchTimeoutMs"),
+            ] {
+                let err = EngineConfig::try_from(EngineConfigInput {
+                    tls: Some(TlsConfigInput {
+                        client_credentials: with_material
+                            .then(|| "fixtures/client.p12".to_string()),
+                        client_credentials_password: None,
+                        trust_material: with_material.then(|| "fixtures/trust.p7".to_string()),
+                        handshake_timeout_ms: handshake,
+                        crl_fetch_timeout_ms: crl,
+                    }),
+                    ..minimal_input()
+                })
+                .err()
+                .expect("negative TLS timeout should fail");
+                assert_eq!(err.status, Status::InvalidArg);
+                assert!(err.to_string().contains(&format!(
+                    "{field} must be a non-negative integer number of milliseconds"
+                )));
+            }
+        }
+    }
+
+    #[test]
+    fn engine_config_input_preserves_tls_pair_error_labels() {
+        for (credentials, trust, expected) in [
+            (
+                Some("fixtures/client.p12".to_string()),
+                None,
+                "tls.clientCredentials set without tls.trustMaterial",
+            ),
+            (
+                None,
+                Some("fixtures/trust.p7".to_string()),
+                "tls.trustMaterial set without tls.clientCredentials",
+            ),
+        ] {
+            let err = EngineConfig::try_from(EngineConfigInput {
+                tls: Some(TlsConfigInput {
+                    client_credentials: credentials,
+                    client_credentials_password: None,
+                    trust_material: trust,
+                    handshake_timeout_ms: None,
+                    crl_fetch_timeout_ms: None,
+                }),
+                ..minimal_input()
+            })
+            .err()
+            .expect("unpaired TLS");
+            assert_eq!(err.status, Status::InvalidArg);
+            assert!(err.to_string().contains(expected));
+        }
+    }
+
+    #[test]
+    fn engine_config_input_rejects_out_of_range_watermarks_before_narrowing() {
+        for (hi, lo, field) in [
+            (Some(1.0 + f64::EPSILON), None, "slowConsumerHiWaterMark"),
+            (Some(f64::NAN), None, "slowConsumerHiWaterMark"),
+            (None, Some(1.0), "slowConsumerLoWaterMark"),
+            (None, Some(-0.1), "slowConsumerLoWaterMark"),
+        ] {
+            let err = EngineConfig::try_from(EngineConfigInput {
+                slow_consumer_hi_water_mark: hi,
+                slow_consumer_lo_water_mark: lo,
+                ..minimal_input()
+            })
+            .err()
+            .expect("out-of-range watermark");
+            assert_eq!(err.status, Status::InvalidArg);
+            assert!(err.to_string().contains(field));
+        }
+        let config = EngineConfig::try_from(EngineConfigInput {
+            slow_consumer_hi_water_mark: Some(1.0),
+            slow_consumer_lo_water_mark: Some(0.0),
+            ..minimal_input()
+        })
+        .expect("watermark endpoints");
+        assert_eq!(config.slow_consumer_hi_water_mark, Some(1.0));
+        assert_eq!(config.slow_consumer_lo_water_mark, Some(0.0));
+    }
+
+    #[test]
+    fn engine_config_input_preserves_keep_alive_and_duration_error_labels() {
+        for (inactivity, response, field) in [
+            (Some(-1), None, "keepAliveInactivityMs"),
+            (None, Some(-1), "keepAliveResponseTimeoutMs"),
+        ] {
+            let err = EngineConfig::try_from(EngineConfigInput {
+                keep_alive_inactivity_ms: inactivity,
+                keep_alive_response_timeout_ms: response,
+                ..minimal_input()
+            })
+            .err()
+            .expect("negative keep-alive duration");
+            assert!(err
+                .to_string()
+                .contains(&format!("{field} must be non-negative")));
+        }
+        let err = EngineConfig::try_from(EngineConfigInput {
+            request_timeout_ms: Some(-1),
+            ..minimal_input()
+        })
+        .err()
+        .expect("negative unsigned duration");
+        assert!(err.to_string().contains("requestTimeoutMs"));
+    }
+
+    #[test]
+    fn engine_config_input_normalizes_auth_aliases() {
+        let config = EngineConfig::try_from(EngineConfigInput {
+            auth: Some(AuthConfigInput {
+                method: " DIRECTORY ".to_string(),
+                app_name: None,
+                dir_property: Some("synthetic-property".to_string()),
+                user_id: None,
+                ip_address: None,
+                token: None,
+            }),
+            ..minimal_input()
+        })
+        .expect("directory alias");
+        assert_eq!(
+            config.auth,
+            Some(AuthConfig::Directory {
+                property_name: "synthetic-property".to_string(),
+            })
+        );
+    }
+
+    #[test]
     fn default_subscription_reads_one_update() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3709,7 +3431,7 @@ mod tests {
             tx.send(Ok(subscription_update(1, 20)))
                 .await
                 .expect("second");
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
 
             let updates = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 1, None)
@@ -3740,7 +3462,7 @@ mod tests {
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("update");
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
 
             let updates =
@@ -3768,7 +3490,7 @@ mod tests {
             tx.send(Ok(subscription_update(2, 20)))
                 .await
                 .expect("second");
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
 
             let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
@@ -3807,7 +3529,7 @@ mod tests {
             tx.send(Ok(subscription_update_with_layout(second_layout, 20)))
                 .await
                 .expect("second");
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
 
             let first = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
@@ -3840,7 +3562,7 @@ mod tests {
             tx.send(Ok(subscription_update(1, 10)))
                 .await
                 .expect("first update");
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
             let mut reader = Box::pin(receive_subscription_updates(
                 &mut rx,
@@ -3884,7 +3606,7 @@ mod tests {
             .expect("runtime");
         runtime.block_on(async {
             let (_tx, mut rx) = subscription_channel(1);
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (close_tx, initial_rx) = watch::channel(false);
             drop(initial_rx);
             close_tx.send_replace(true);
@@ -3912,7 +3634,7 @@ mod tests {
                 topic: "IBM US Equity".to_string(),
                 detail: "stream queue reached capacity".to_string(),
             });
-            let pending = StdMutex::new(VecDeque::new());
+            let pending = PendingUpdates::default();
             let (_close_tx, mut close_rx) = watch::channel(false);
 
             let updates = receive_subscription_updates(&mut rx, &pending, &mut close_rx, 2, None)
@@ -3946,9 +3668,10 @@ mod tests {
             topic: "ES1 Index".to_string(),
             detail: "Bloomberg reported DATALOSS".to_string(),
         });
-        let pending = StdMutex::new(VecDeque::new());
+        let pending = PendingUpdates::default();
 
-        let error = JsSubscription::take_drained_updates(&pending, Some(rx), true)
+        let error = pending
+            .collect_unread(Some(rx), true)
             .expect_err("errors-only drain must fail");
 
         assert!(matches!(

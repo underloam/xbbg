@@ -691,9 +691,7 @@ fn map_recipe_error(error: RecipeError, limits: &ResultLimits) -> ErrorData {
 fn map_request_error(error: BlpAsyncError, limits: &ResultLimits) -> ErrorData {
     match error {
         BlpAsyncError::ConfigError { detail } => bounded_invalid_params(&detail, limits),
-        BlpAsyncError::Blp(blp_error) | BlpAsyncError::BlpError(blp_error) => {
-            map_blp_error(blp_error, limits)
-        }
+        BlpAsyncError::Blp(blp_error) => map_blp_error(blp_error, limits),
         other => bounded_internal_error(&other, limits),
     }
 }

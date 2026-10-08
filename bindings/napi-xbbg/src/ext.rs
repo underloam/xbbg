@@ -4,7 +4,6 @@ use std::io::Cursor;
 use std::str::FromStr;
 
 use arrow::ipc::reader::StreamReader;
-use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use chrono::Datelike;
 use napi::bindgen_prelude::{Buffer, Error, Status};
@@ -63,26 +62,6 @@ fn ipc_to_batch(buf: &[u8]) -> napi::Result<RecordBatch> {
         .next()
         .ok_or_else(|| Error::new(Status::InvalidArg, "empty Arrow IPC stream"))?
         .map_err(|e| Error::new(Status::GenericFailure, format!("Arrow read failed: {e}")))
-}
-
-fn batch_to_ipc(batch: RecordBatch) -> napi::Result<Buffer> {
-    let schema = batch.schema();
-    let mut cursor = Cursor::new(Vec::<u8>::new());
-    {
-        let mut writer = StreamWriter::try_new(&mut cursor, &schema).map_err(|e| {
-            Error::new(
-                Status::GenericFailure,
-                format!("Arrow IPC writer init: {e}"),
-            )
-        })?;
-        writer
-            .write(&batch)
-            .map_err(|e| Error::new(Status::GenericFailure, format!("Arrow IPC write: {e}")))?;
-        writer
-            .finish()
-            .map_err(|e| Error::new(Status::GenericFailure, format!("Arrow IPC finish: {e}")))?;
-    }
-    Ok(Buffer::from(cursor.into_inner()))
 }
 
 fn session_pair(pair: &Option<(String, String)>) -> Option<TimeRange> {
@@ -240,7 +219,7 @@ pub fn ext_fmt_date(year: i32, month: u32, day: u32, fmt: Option<String>) -> nap
 pub fn ext_pivot_to_wide(ipc_buffer: Buffer) -> napi::Result<Buffer> {
     let batch = ipc_to_batch(&ipc_buffer)?;
     let result = pivot_to_wide(&batch).map_err(ext_err)?;
-    batch_to_ipc(result)
+    crate::to_ipc_buffer(result)
 }
 
 /// Check if an Arrow IPC buffer is in long format (ticker, field, value).
@@ -419,15 +398,6 @@ pub fn ext_cdx_gen_to_specific(gen_ticker: String, series: u32) -> napi::Result<
 pub fn ext_auction_field_group(name: String) -> Option<Vec<String>> {
     xbbg_ext::auction::field_group(&name)
         .map(|fields| fields.iter().map(|field| (*field).to_string()).collect())
-}
-
-/// List the available auction field-group names in their canonical order.
-#[napi]
-pub fn ext_auction_field_group_names() -> Vec<String> {
-    xbbg_ext::auction::field_group_names()
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect()
 }
 
 /// Price fields whose numeric zero sentinel can be masked in latest snapshots.
