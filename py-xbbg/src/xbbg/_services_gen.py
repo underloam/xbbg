@@ -148,6 +148,17 @@ class OutputMode(str, Enum):
     """Return raw JSON as a single-column Arrow table."""
 
 
+class VolSurfacePreset(str, Enum):
+    """Built-in Bloomberg implied-volatility field presets."""
+
+    DELTA_1M_2M = "DELTA_1M_2M"
+    MONEYNESS_30D = "MONEYNESS_30D"
+    MONEYNESS_60D = "MONEYNESS_60D"
+    MONEYNESS_3M = "MONEYNESS_3M"
+    MONEYNESS_6M = "MONEYNESS_6M"
+    MONEYNESS_12M = "MONEYNESS_12M"
+
+
 FORMATS: tuple[str, ...] = ("long", "long_typed", "long_metadata", "semi_long")
 """Output format for reference and historical data."""
 
@@ -228,3 +239,95 @@ CDX_RISK_FIELDS: tuple[str, ...] = (
     "RECOVERY_RATE_SEN",
     "CDS_RECOVERY_RT",
 )
+
+TA_STUDIES: dict[str, str] = {
+    "smavg": "smavgStudyAttributes",
+    "sma": "smavgStudyAttributes",
+    "emavg": "emavgStudyAttributes",
+    "ema": "emavgStudyAttributes",
+    "wmavg": "wmavgStudyAttributes",
+    "wma": "wmavgStudyAttributes",
+    "vmavg": "vmavgStudyAttributes",
+    "vma": "vmavgStudyAttributes",
+    "tmavg": "tmavgStudyAttributes",
+    "tma": "tmavgStudyAttributes",
+    "ipmavg": "ipmavgStudyAttributes",
+    "rsi": "rsiStudyAttributes",
+    "macd": "macdStudyAttributes",
+    "mao": "maoStudyAttributes",
+    "momentum": "momentumStudyAttributes",
+    "mom": "momentumStudyAttributes",
+    "roc": "rocStudyAttributes",
+    "boll": "bollStudyAttributes",
+    "bb": "bollStudyAttributes",
+    "kltn": "kltnStudyAttributes",
+    "keltner": "kltnStudyAttributes",
+    "mae": "maeStudyAttributes",
+    "te": "teStudyAttributes",
+    "al": "alStudyAttributes",
+    "dmi": "dmiStudyAttributes",
+    "adx": "dmiStudyAttributes",
+    "tas": "tasStudyAttributes",
+    "stoch": "tasStudyAttributes",
+    "trender": "trenderStudyAttributes",
+    "ptps": "ptpsStudyAttributes",
+    "parabolic": "ptpsStudyAttributes",
+    "sar": "ptpsStudyAttributes",
+    "chko": "chkoStudyAttributes",
+    "ado": "adoStudyAttributes",
+    "vat": "vatStudyAttributes",
+    "tvat": "tvatStudyAttributes",
+    "atr": "atrStudyAttributes",
+    "hurst": "hurstStudyAttributes",
+    "fg": "fgStudyAttributes",
+    "fear_greed": "fgStudyAttributes",
+    "goc": "gocStudyAttributes",
+    "ichimoku": "gocStudyAttributes",
+    "cmci": "cmciStudyAttributes",
+    "wlpr": "wlprStudyAttributes",
+    "williams": "wlprStudyAttributes",
+    "maxmin": "maxminStudyAttributes",
+    "rex": "rexStudyAttributes",
+    "etd": "etdStudyAttributes",
+    "pd": "pdStudyAttributes",
+    "rv": "rvStudyAttributes",
+    "pivot": "pivotStudyAttributes",
+    "or": "orStudyAttributes",
+    "pcr": "pcrStudyAttributes",
+    "bs": "bsStudyAttributes",
+}
+
+TA_DEFAULTS: dict[str, dict[str, str | int | float]] = {
+    "smavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
+    "emavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
+    "wmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
+    "vmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
+    "tmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
+    "rsiStudyAttributes": {"period": 14, "priceSourceClose": "PX_LAST"},
+    "macdStudyAttributes": {"maPeriod1": 12, "maPeriod2": 26, "sigPeriod": 9, "priceSourceClose": "PX_LAST"},
+    "bollStudyAttributes": {"period": 20, "upperBand": 2.0, "lowerBand": 2.0, "priceSourceClose": "PX_LAST"},
+    "dmiStudyAttributes": {
+        "period": 14,
+        "priceSourceHigh": "PX_HIGH",
+        "priceSourceLow": "PX_LOW",
+        "priceSourceClose": "PX_LAST",
+    },
+    "atrStudyAttributes": {
+        "maType": "Simple",
+        "period": 14,
+        "priceSourceHigh": "PX_HIGH",
+        "priceSourceLow": "PX_LOW",
+        "priceSourceClose": "PX_LAST",
+    },
+    "tasStudyAttributes": {
+        "periodK": 14,
+        "periodD": 3,
+        "periodDS": 3,
+        "periodDSS": 3,
+        "priceSourceHigh": "PX_HIGH",
+        "priceSourceLow": "PX_LOW",
+        "priceSourceClose": "PX_LAST",
+    },
+}
+
+INDEX_MEMBER_FIELDS: tuple[str, ...] = ("INDX_MWEIGHT", "INDX_MEMBERS", "INDX_MEMBERS3")

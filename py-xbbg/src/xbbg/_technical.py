@@ -1,8 +1,8 @@
 """Technical-analysis vocabulary, requests, and schema-derived IDE stubs.
 
-Study aliases and defaults are collocated with the request construction and stub
-generator that consume them. Requests use the lower engine module directly;
-this module has no import back into the public facade.
+Study aliases and defaults are generated from ``defs/bloomberg.toml`` and shared
+with the JS package. Requests and schema-derived stubs consume that vocabulary
+here; this module uses the lower engine module, not the public facade.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ from typing import Any, TypeAlias
 import warnings
 
 from . import _engine, _request_options, backend as _backend
+from ._services_gen import TA_DEFAULTS, TA_STUDIES
 from .services import ExtractorHint, Operation, RequestParams, Service
 
 DataFrameResult: TypeAlias = Any
@@ -27,121 +28,12 @@ def _core_arrow_table_class() -> type[Any]:
 # Technical Analysis API - Bloomberg Technical Analysis Service
 # =============================================================================
 
-# Study type to attribute name mapping
-_TA_STUDIES: dict[str, str] = {
-    # Moving Averages
-    "smavg": "smavgStudyAttributes",
-    "sma": "smavgStudyAttributes",
-    "emavg": "emavgStudyAttributes",
-    "ema": "emavgStudyAttributes",
-    "wmavg": "wmavgStudyAttributes",
-    "wma": "wmavgStudyAttributes",
-    "vmavg": "vmavgStudyAttributes",
-    "vma": "vmavgStudyAttributes",
-    "tmavg": "tmavgStudyAttributes",
-    "tma": "tmavgStudyAttributes",
-    "ipmavg": "ipmavgStudyAttributes",
-    # Oscillators
-    "rsi": "rsiStudyAttributes",
-    "macd": "macdStudyAttributes",
-    "mao": "maoStudyAttributes",
-    "momentum": "momentumStudyAttributes",
-    "mom": "momentumStudyAttributes",
-    "roc": "rocStudyAttributes",
-    # Bands & Channels
-    "boll": "bollStudyAttributes",
-    "bb": "bollStudyAttributes",
-    "kltn": "kltnStudyAttributes",
-    "keltner": "kltnStudyAttributes",
-    "mae": "maeStudyAttributes",
-    "te": "teStudyAttributes",
-    "al": "alStudyAttributes",
-    # Trend
-    "dmi": "dmiStudyAttributes",
-    "adx": "dmiStudyAttributes",
-    "tas": "tasStudyAttributes",
-    "stoch": "tasStudyAttributes",
-    "trender": "trenderStudyAttributes",
-    "ptps": "ptpsStudyAttributes",
-    "parabolic": "ptpsStudyAttributes",
-    "sar": "ptpsStudyAttributes",
-    # Volume
-    "chko": "chkoStudyAttributes",
-    "ado": "adoStudyAttributes",
-    "vat": "vatStudyAttributes",
-    "tvat": "tvatStudyAttributes",
-    # Volatility
-    "atr": "atrStudyAttributes",
-    "hurst": "hurstStudyAttributes",
-    # Other
-    "fg": "fgStudyAttributes",
-    "fear_greed": "fgStudyAttributes",
-    "goc": "gocStudyAttributes",
-    "ichimoku": "gocStudyAttributes",
-    "cmci": "cmciStudyAttributes",
-    "wlpr": "wlprStudyAttributes",
-    "williams": "wlprStudyAttributes",
-    "maxmin": "maxminStudyAttributes",
-    "rex": "rexStudyAttributes",
-    "etd": "etdStudyAttributes",
-    "pd": "pdStudyAttributes",
-    "rv": "rvStudyAttributes",
-    "pivot": "pivotStudyAttributes",
-    "or": "orStudyAttributes",
-    "pcr": "pcrStudyAttributes",
-    "bs": "bsStudyAttributes",
-}
-
-# Default study parameters
-_TA_DEFAULTS: dict[str, dict[str, Any]] = {
-    "smavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
-    "emavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
-    "wmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
-    "vmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
-    "tmavgStudyAttributes": {"period": 20, "priceSourceClose": "PX_LAST"},
-    "rsiStudyAttributes": {"period": 14, "priceSourceClose": "PX_LAST"},
-    "macdStudyAttributes": {
-        "maPeriod1": 12,
-        "maPeriod2": 26,
-        "sigPeriod": 9,
-        "priceSourceClose": "PX_LAST",
-    },
-    "bollStudyAttributes": {
-        "period": 20,
-        "upperBand": 2.0,
-        "lowerBand": 2.0,
-        "priceSourceClose": "PX_LAST",
-    },
-    "dmiStudyAttributes": {
-        "period": 14,
-        "priceSourceHigh": "PX_HIGH",
-        "priceSourceLow": "PX_LOW",
-        "priceSourceClose": "PX_LAST",
-    },
-    "atrStudyAttributes": {
-        "maType": "Simple",
-        "period": 14,
-        "priceSourceHigh": "PX_HIGH",
-        "priceSourceLow": "PX_LOW",
-        "priceSourceClose": "PX_LAST",
-    },
-    "tasStudyAttributes": {
-        "periodK": 14,
-        "periodD": 3,
-        "periodDS": 3,
-        "periodDSS": 3,
-        "priceSourceHigh": "PX_HIGH",
-        "priceSourceLow": "PX_LOW",
-        "priceSourceClose": "PX_LAST",
-    },
-}
-
 
 def _get_study_attr_name(study: str) -> str:
     """Get the Bloomberg attribute name for a study."""
     study_lower = study.lower().replace("-", "_").replace(" ", "_")
-    if study_lower in _TA_STUDIES:
-        return _TA_STUDIES[study_lower]
+    if study_lower in TA_STUDIES:
+        return TA_STUDIES[study_lower]
     # Try direct match with StudyAttributes suffix
     if study_lower.endswith("studyattributes"):
         return study_lower
@@ -174,7 +66,7 @@ def _build_study_request(
     attr_name = _get_study_attr_name(study)
 
     # Get defaults and merge with user params
-    defaults = _TA_DEFAULTS.get(attr_name, {})
+    defaults = TA_DEFAULTS.get(attr_name, {})
     params = {**defaults, **study_params}
 
     elements: list[tuple[str, str]] = []
@@ -326,14 +218,7 @@ def ta_studies() -> list[str]:
         >>> xbbg.ta_studies()
         ['sma', 'ema', 'rsi', 'macd', 'boll', 'atr', ...]
     """
-    # Return unique study short names
-    seen = set()
-    result = []
-    for name in _TA_STUDIES:
-        if name not in seen:
-            seen.add(name)
-            result.append(name)
-    return sorted(result)
+    return sorted(TA_STUDIES)
 
 
 def ta_study_params(study: str) -> dict[str, Any]:
@@ -357,7 +242,7 @@ def ta_study_params(study: str) -> dict[str, Any]:
         {'period': 20, 'upperBand': 2.0, 'lowerBand': 2.0, 'priceSourceClose': 'PX_LAST'}
     """
     attr_name = _get_study_attr_name(study)
-    return _TA_DEFAULTS.get(attr_name, {})
+    return TA_DEFAULTS.get(attr_name, {})
 
 
 def generate_ta_stubs(output_dir: str | None = None) -> str:
@@ -424,7 +309,7 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
     ]
 
     # Map of Bloomberg attribute names to friendly names
-    attr_to_friendly = {v: k for k, v in _TA_STUDIES.items()}
+    attr_to_friendly = {v: k for k, v in TA_STUDIES.items()}
 
     # Type mapping
     type_map = {
@@ -462,7 +347,7 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
                     param_type = type_map.get(param.data_type, "str")
 
                 # Add default value comment if we have one
-                defaults = _TA_DEFAULTS.get(attr_name, {})
+                defaults = TA_DEFAULTS.get(attr_name, {})
                 default_val = defaults.get(param_name)
                 if default_val is not None:
                     lines.append(f"    {param_name}: NotRequired[{param_type}]  # default: {default_val}")
@@ -472,7 +357,7 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
         lines.append("")
 
     # Add StudyName literal type
-    study_names = sorted(set(_TA_STUDIES.keys()))
+    study_names = sorted(TA_STUDIES)
     lines.append("# All available study names")
     lines.append(f"StudyName = Literal[{', '.join(repr(s) for s in study_names)}]")
     lines.append("")

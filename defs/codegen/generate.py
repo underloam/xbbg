@@ -151,6 +151,9 @@ def load_defs(path: Path) -> dict[str, Any]:
         "validation_modes",
         "sdk_log_levels",
         "cdx_fields",
+        "technical_analysis",
+        "vol_surface_presets",
+        "index_members",
         "langgraph",
     ]
     for key in required:
@@ -803,6 +806,28 @@ def _python_tuple(name: str, values: list[str]) -> list[str]:
     return [f"{annotated}(", *(f"    {item}," for item in quoted), ")"]
 
 
+def render_technical_python(defs: dict[str, Any]) -> list[str]:
+    technical = defs["technical_analysis"]
+    lines = ["TA_STUDIES: dict[str, str] = {"]
+    for alias, attr in technical["studies"].items():
+        lines.append(f'    "{escape_python_string(alias)}": "{escape_python_string(attr)}",')
+    lines.extend(["}", "", "TA_DEFAULTS: dict[str, dict[str, str | int | float]] = {"])
+    for attr, params in technical["defaults"].items():
+        items = [
+            f'"{escape_python_string(key)}": '
+            + (f'"{escape_python_string(value)}"' if isinstance(value, str) else repr(value))
+            for key, value in params.items()
+        ]
+        prefix = f'    "{escape_python_string(attr)}": {{'
+        inline = prefix + ", ".join(items) + "},"
+        if len(inline) <= RUFF_LINE_LENGTH:
+            lines.append(inline)
+        else:
+            lines.extend([prefix, *(f"        {item}," for item in items), "    },"])
+    lines.extend(["}", ""])
+    return lines
+
+
 def render_python(defs: dict[str, Any]) -> str:
     services: dict[str, dict[str, Any]] = defs["services"]
     operations: dict[str, dict[str, Any]] = defs["operations"]
@@ -853,6 +878,16 @@ def render_python(defs: dict[str, Any]) -> str:
         table=output_modes,
         value_key="value",
     )
+    lines.extend(
+        [
+            "class VolSurfacePreset(str, Enum):",
+            '    """Built-in Bloomberg implied-volatility field presets."""',
+            "",
+            *(f'    {value} = "{escape_python_string(value)}"' for value in defs["vol_surface_presets"]["values"]),
+            "",
+            "",
+        ]
+    )
 
     for section, plural, prefix, _ts_type, set_doc in CLOSED_SETS:
         members = closed_set_members(defs[section])
@@ -875,6 +910,9 @@ def render_python(defs: dict[str, Any]) -> str:
     for name, fields in defs["cdx_fields"].items():
         lines.extend(_python_tuple(name, fields))
         lines.append("")
+
+    lines.extend(render_technical_python(defs))
+    lines.extend(_python_tuple("INDEX_MEMBER_FIELDS", defs["index_members"]["fields"]))
 
     while lines and lines[-1] == "":
         _ = lines.pop()
@@ -947,6 +985,35 @@ def ts_object_key(value: str, quote: str) -> str:
     return ts_literal(value, quote)
 
 
+def render_technical_typescript(defs: dict[str, Any], quote: str) -> list[str]:
+    technical = defs["technical_analysis"]
+    lines = ["", "export const TA_STUDIES: Readonly<Record<string, string>> = Object.freeze({"]
+    for alias, attr in sorted_items(technical["studies"]):
+        lines.extend(ts_object_entry(ts_object_key(alias, quote), ts_literal(attr, quote)))
+    lines.extend(
+        [
+            "});",
+            "",
+            "type StudyDefaults = Readonly<Record<string, string | number>>;",
+            "",
+            "export const TA_DEFAULTS: Readonly<Record<string, StudyDefaults>> = Object.freeze({",
+        ]
+    )
+    for attr, params in sorted_items(technical["defaults"]):
+        items = [
+            f"{ts_object_key(key, quote)}: " + (ts_literal(value, quote) if isinstance(value, str) else repr(value))
+            for key, value in params.items()
+        ]
+        prefix = f"  {ts_object_key(attr, quote)}: Object.freeze({{"
+        inline = prefix + " " + ", ".join(items) + " }),"
+        if len(inline) <= TS_PRINT_WIDTH:
+            lines.append(inline)
+        else:
+            lines.extend([prefix, *(f"    {item}," for item in items), "  }),"])
+    lines.append("});")
+    return lines
+
+
 def render_typescript(defs: dict[str, Any], quote: str, *, langgraph: bool = False) -> str:
     """Render the shared closed-set vocabulary as TypeScript.
 
@@ -1000,6 +1067,20 @@ def render_typescript(defs: dict[str, Any], quote: str, *, langgraph: bool = Fal
         lines.append("")
         lines.append("export type BloombergToolName = (typeof BLOOMBERG_TOOL_NAMES)[number];")
         lines.append("export type ResultTruncationReason = (typeof TRUNCATION_REASON_ORDER)[number];")
+    else:
+        lines.extend(render_technical_typescript(defs, quote))
+        for name, values in (
+            ("VolSurfacePreset", defs["vol_surface_presets"]["values"]),
+            ("IndexMemberField", defs["index_members"]["fields"]),
+        ):
+            literals = [ts_literal(value, quote) for value in values]
+            inline = f"export type {name} = {' | '.join(literals)};"
+            lines.append("")
+            if len(inline) <= TS_PRINT_WIDTH:
+                lines.append(inline)
+            else:
+                lines.extend([f"export type {name} =", *(f"  | {value}" for value in literals)])
+                lines[-1] += ";"
     return "\n".join(lines) + "\n"
 
 

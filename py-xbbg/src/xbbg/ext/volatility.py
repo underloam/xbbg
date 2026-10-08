@@ -3,25 +3,14 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from enum import Enum
 from typing import TYPE_CHECKING, Any
 
 from xbbg._dates import DateLike, _fmt_date
+from xbbg._services_gen import VolSurfacePreset
 from xbbg.ext._utils import _call_native_recipe, _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame
-
-
-class VolSurfacePreset(str, Enum):
-    """Built-in Bloomberg implied-volatility field presets."""
-
-    DELTA_1M_2M = "DELTA_1M_2M"
-    MONEYNESS_30D = "MONEYNESS_30D"
-    MONEYNESS_60D = "MONEYNESS_60D"
-    MONEYNESS_3M = "MONEYNESS_3M"
-    MONEYNESS_6M = "MONEYNESS_6M"
-    MONEYNESS_12M = "MONEYNESS_12M"
 
 
 def _normalize_tickers(tickers: str | Sequence[str]) -> list[str]:

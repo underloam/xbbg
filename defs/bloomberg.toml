@@ -4,12 +4,12 @@
 #
 # Run `python defs/codegen/generate.py` to regenerate:
 #   - crates/xbbg-async/src/services.rs        (Rust enums, bundles + contract tests)
-#   - py-xbbg/src/xbbg/_services_gen.py        (Python enums + bundles)
-#   - js-xbbg/src/_defs_gen.ts                (TypeScript unions, docs + bundles)
+#   - py-xbbg/src/xbbg/_services_gen.py        (Python enums, bundles + study vocabulary)
+#   - js-xbbg/src/_defs_gen.ts                (TypeScript unions, bundles + study vocabulary)
 #   - js-xbbg-langgraph/src/_defs_gen.ts      (TypeScript LangGraph vocabulary)
 #   - py-xbbg-langgraph/src/xbbg_langgraph/_defs_gen.py (Python LangGraph vocabulary)
 #
-# Adding a new service or operation:
+# Adding a new service, operation, or shared vocabulary entry:
 #   1. Add the entry below
 #   2. Run codegen
 #   3. Commit the generated files
@@ -400,6 +400,153 @@ CDX_RISK_FIELDS = [
     "SW_CNV_BPV", "SW_EQV_BPV", "CDS_SPREAD_MID_MODIFIED_DURATION",
     "CDS_SPREAD_MID_CONVEXITY", "RECOVERY_RATE_SEN", "CDS_RECOVERY_RT",
 ]
+
+
+# ============================================================================
+# Technical-analysis studies
+# ============================================================================
+# Core Python and JS consume these without querying a live Bloomberg schema.
+# Keep alias order stable: Python's schema stubs use the last alias for each
+# attribute as its friendly name. Studies without defaults accept explicit params.
+[technical_analysis.studies]
+# Moving averages
+smavg = "smavgStudyAttributes"
+sma = "smavgStudyAttributes"
+emavg = "emavgStudyAttributes"
+ema = "emavgStudyAttributes"
+wmavg = "wmavgStudyAttributes"
+wma = "wmavgStudyAttributes"
+vmavg = "vmavgStudyAttributes"
+vma = "vmavgStudyAttributes"
+tmavg = "tmavgStudyAttributes"
+tma = "tmavgStudyAttributes"
+ipmavg = "ipmavgStudyAttributes"
+# Oscillators
+rsi = "rsiStudyAttributes"
+macd = "macdStudyAttributes"
+mao = "maoStudyAttributes"
+momentum = "momentumStudyAttributes"
+mom = "momentumStudyAttributes"
+roc = "rocStudyAttributes"
+# Bands and channels
+boll = "bollStudyAttributes"
+bb = "bollStudyAttributes"
+kltn = "kltnStudyAttributes"
+keltner = "kltnStudyAttributes"
+mae = "maeStudyAttributes"
+te = "teStudyAttributes"
+al = "alStudyAttributes"
+# Trend
+dmi = "dmiStudyAttributes"
+adx = "dmiStudyAttributes"
+tas = "tasStudyAttributes"
+stoch = "tasStudyAttributes"
+trender = "trenderStudyAttributes"
+ptps = "ptpsStudyAttributes"
+parabolic = "ptpsStudyAttributes"
+sar = "ptpsStudyAttributes"
+# Volume
+chko = "chkoStudyAttributes"
+ado = "adoStudyAttributes"
+vat = "vatStudyAttributes"
+tvat = "tvatStudyAttributes"
+# Volatility
+atr = "atrStudyAttributes"
+hurst = "hurstStudyAttributes"
+# Other
+fg = "fgStudyAttributes"
+fear_greed = "fgStudyAttributes"
+goc = "gocStudyAttributes"
+ichimoku = "gocStudyAttributes"
+cmci = "cmciStudyAttributes"
+wlpr = "wlprStudyAttributes"
+williams = "wlprStudyAttributes"
+maxmin = "maxminStudyAttributes"
+rex = "rexStudyAttributes"
+etd = "etdStudyAttributes"
+pd = "pdStudyAttributes"
+rv = "rvStudyAttributes"
+pivot = "pivotStudyAttributes"
+or = "orStudyAttributes"
+pcr = "pcrStudyAttributes"
+bs = "bsStudyAttributes"
+
+[technical_analysis.defaults.smavgStudyAttributes]
+period = 20
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.emavgStudyAttributes]
+period = 20
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.wmavgStudyAttributes]
+period = 20
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.vmavgStudyAttributes]
+period = 20
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.tmavgStudyAttributes]
+period = 20
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.rsiStudyAttributes]
+period = 14
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.macdStudyAttributes]
+maPeriod1 = 12
+maPeriod2 = 26
+sigPeriod = 9
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.bollStudyAttributes]
+period = 20
+upperBand = 2.0
+lowerBand = 2.0
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.dmiStudyAttributes]
+period = 14
+priceSourceHigh = "PX_HIGH"
+priceSourceLow = "PX_LOW"
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.atrStudyAttributes]
+maType = "Simple"
+period = 14
+priceSourceHigh = "PX_HIGH"
+priceSourceLow = "PX_LOW"
+priceSourceClose = "PX_LAST"
+
+[technical_analysis.defaults.tasStudyAttributes]
+periodK = 14
+periodD = 3
+periodDS = 3
+periodDSS = 3
+priceSourceHigh = "PX_HIGH"
+priceSourceLow = "PX_LOW"
+priceSourceClose = "PX_LAST"
+
+
+# ============================================================================
+# Volatility-surface presets
+# ============================================================================
+# Public Python enum and JS type vocabulary; expansion into fields stays native.
+[vol_surface_presets]
+values = [
+    "DELTA_1M_2M", "MONEYNESS_30D", "MONEYNESS_60D",
+    "MONEYNESS_3M", "MONEYNESS_6M", "MONEYNESS_12M",
+]
+
+
+# ============================================================================
+# Index constituent fields
+# ============================================================================
+# Python validation and JS options share the native index-members recipe inputs.
+[index_members]
+fields = ["INDX_MWEIGHT", "INDX_MEMBERS", "INDX_MEMBERS3"]
 
 
 # ============================================================================

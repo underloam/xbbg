@@ -2,6 +2,7 @@ import type { Table } from 'apache-arrow';
 
 import { DataType, DateUnit, TimeUnit } from 'apache-arrow';
 
+import { TA_DEFAULTS } from '../src/_defs_gen';
 import * as api from '../src/index';
 import type {
   NativeArrowColumn,
@@ -68,6 +69,50 @@ function jsonRoundTrip(value: unknown): unknown {
 function engineWithNative(inner: Partial<NativeEngine>): api.Engine {
   return Object.assign(Object.create(api.Engine.prototype) as api.Engine, { inner });
 }
+
+describe('generated study vocabulary', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('merges shared study defaults with caller parameters', async () => {
+    const engine = engineWithNative({});
+    const request = vi.spyOn(engine, 'request').mockResolvedValue(undefined);
+    await engine.bta('SYNTHETIC Equity', 'rsi', { studyParams: { period: 7 } });
+    expect(request).toHaveBeenCalledWith({
+      backend: undefined,
+      extractor: 'generic',
+      format: undefined,
+      service: '//blp/tasvc',
+      operation: 'studyRequest',
+      elements: [
+        { key: 'priceSource.securityName', value: 'SYNTHETIC Equity' },
+        { key: 'priceSource.dataRange.historical.periodicitySelection', value: 'DAILY' },
+        ...Object.entries({ ...TA_DEFAULTS.rsiStudyAttributes, period: 7 }).map(([key, value]) => ({
+          key: `studyAttributes.rsiStudyAttributes.${key}`,
+          value: String(value),
+        })),
+      ],
+    });
+  });
+
+  it.each([
+    ['SMA', 'smavgStudyAttributes'],
+    ['Fear Greed', 'fgStudyAttributes'],
+    ['FEAR-GREED', 'fgStudyAttributes'],
+    ['custom', 'customStudyAttributes'],
+    ['customStudyAttributes', 'customstudyattributes'],
+  ])('preserves normalization and custom study fallback for %s', async (study, attr) => {
+    const engine = engineWithNative({});
+    const request = vi.spyOn(engine, 'request').mockResolvedValue(undefined);
+    await engine.bta('SYNTHETIC Equity', study, { studyParams: { period: 7 } });
+    expect(request).toHaveBeenCalledWith(
+      expect.objectContaining({
+        elements: expect.arrayContaining([{ key: `studyAttributes.${attr}.period`, value: '7' }]),
+      }),
+    );
+  });
+});
 
 describe('shared subscription controls', () => {
   afterEach(() => {
