@@ -1,11 +1,18 @@
 //! Shared benchmark helpers for xbbg.
 //!
-//! Provides reusable session setup, field name interning, and result
-//! writing utilities used across all benchmark binaries.
+//! Provides reusable session setup, deterministic BQL fixtures, and result
+//! writing utilities used across the benchmark targets.
 
 use std::time::{Duration, Instant};
 
-use xbbg_core::{EventType, Name, Session, SessionOptions};
+use xbbg_core::{EventType, Session, SessionOptions};
+
+#[cfg(test)]
+#[path = "../benches/support/subscription_replay.rs"]
+mod subscription_replay;
+#[cfg(test)]
+#[path = "../benches/support/synthetic_subscriptions.rs"]
+mod synthetic_subscriptions;
 
 // ---------------------------------------------------------------------------
 // Session helpers
@@ -69,60 +76,50 @@ pub fn message_count(event: &xbbg_core::Event) -> usize {
 }
 
 // ---------------------------------------------------------------------------
-// Pre-interned field names
+// Shared BQL workloads
 // ---------------------------------------------------------------------------
 
-/// Commonly used Bloomberg field names, pre-interned for benchmarks.
-pub struct FieldNames {
-    pub securities: Name,
-    pub fields: Name,
-    pub security_data: Name,
-    pub field_data: Name,
-    pub security: Name,
-    pub px_last: Name,
-    pub px_open: Name,
-    pub px_high: Name,
-    pub px_low: Name,
-    pub volume: Name,
-    pub cur_mkt_cap: Name,
-    pub eqy_weighted_avg_px: Name,
-    pub px_bid: Name,
-    pub px_ask: Name,
-    pub last_trade: Name,
-    pub last_price: Name,
-    pub bid: Name,
-    pub ask: Name,
-}
+/// Scenario names and shapes shared by the parser and extractor benchmarks.
+pub const BQL_JSON_SCENARIOS: [(&str, usize, &[&str]); 3] = [
+    ("json_simple_1x1", 1, &["px_last"]),
+    (
+        "json_wide_1x5",
+        1,
+        &["px_last", "px_open", "px_high", "px_low", "px_volume"],
+    ),
+    ("json_rows_1000x2", 1_000, &["px_last", "px_volume"]),
+];
 
-impl FieldNames {
-    pub fn new() -> Self {
-        Self {
-            securities: Name::get_or_intern("securities"),
-            fields: Name::get_or_intern("fields"),
-            security_data: Name::get_or_intern("securityData"),
-            field_data: Name::get_or_intern("fieldData"),
-            security: Name::get_or_intern("security"),
-            px_last: Name::get_or_intern("PX_LAST"),
-            px_open: Name::get_or_intern("PX_OPEN"),
-            px_high: Name::get_or_intern("PX_HIGH"),
-            px_low: Name::get_or_intern("PX_LOW"),
-            volume: Name::get_or_intern("VOLUME"),
-            cur_mkt_cap: Name::get_or_intern("CUR_MKT_CAP"),
-            eqy_weighted_avg_px: Name::get_or_intern("EQY_WEIGHTED_AVG_PX"),
-            px_bid: Name::get_or_intern("PX_BID"),
-            px_ask: Name::get_or_intern("PX_ASK"),
-            last_trade: Name::get_or_intern("LAST_TRADE"),
-            last_price: Name::get_or_intern("LAST_PRICE"),
-            bid: Name::get_or_intern("BID"),
-            ask: Name::get_or_intern("ASK"),
-        }
-    }
-}
+/// Generate the same deterministic Bloomberg-shaped input for both BQL adapters.
+pub fn bql_json_fixture(rows: usize, fields: &[&str]) -> String {
+    let ids = (0..rows)
+        .map(|i| format!("\"TICKER{i} US Equity\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let dates = (0..rows)
+        .map(|i| format!("\"2026-04-{:02}\"", (i % 28) + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    let currencies = (0..rows).map(|_| "\"USD\"").collect::<Vec<_>>().join(",");
 
-impl Default for FieldNames {
-    fn default() -> Self {
-        Self::new()
-    }
+    let field_json = fields
+        .iter()
+        .enumerate()
+        .map(|(field_idx, field)| {
+            let values = (0..rows)
+                .map(|i| format!("{}", 100.0 + field_idx as f64 + i as f64 / 100.0))
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                r#""{field}":{{"idColumn":{{"name":"ID","type":"STRING","values":[{ids}]}} ,"valuesColumn":{{"name":"VALUE","type":"DOUBLE","values":[{values}]}} ,"secondaryColumns":[{{"name":"DATE","type":"DATE","values":[{dates}]}},{{"name":"CURRENCY","type":"STRING","values":[{currencies}]}}],"responseExceptions":[],"partialErrorMap":{{"errorIterator":null}}}}"#
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    format!(
+        r#"{{"clientContext":{{"clientRequestId":"offline-bql-benchmark"}},"responseExceptions":null,"results":{{{field_json}}}}}"#
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -297,10 +294,244 @@ fn json_escape(value: &str) -> String {
     escaped
 }
 
-/// Parse iteration count from env var, with default.
-pub fn env_iterations(var: &str, default: usize) -> usize {
-    std::env::var(var)
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(default)
+#[cfg(test)]
+mod tests {
+    use super::subscription_replay::replay;
+    use super::synthetic_subscriptions::{batch_updates, BATCH_SIZE};
+    use super::{bql_json_fixture, BQL_JSON_SCENARIOS};
+    use arrow_array::{
+        Array, BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
+        TimestampMicrosecondArray,
+    };
+    use xbbg_async::engine::BqlState;
+
+    #[test]
+    fn replay_uses_production_layout_flushes_and_presence_metadata() {
+        let mut batches = Vec::new();
+        replay(10, 8, |batch| batches.push(batch));
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), 4);
+        assert_eq!(batches[1].num_rows(), 6);
+        assert_eq!(batches[0].num_columns(), 11);
+        assert_eq!(batches[1].num_columns(), 15);
+        for batch in &batches {
+            assert_eq!(
+                batch.schema().metadata()["xbbg.subscription_presence"],
+                "column=__xbbg_present;encoding=binary-lsb-first;mapping=bit-i-to-schema-field-(i+2)"
+            );
+        }
+
+        let first = &batches[0];
+        let presence = first
+            .column_by_name("__xbbg_present")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(presence.value(0), &[0b0010_0000]);
+        assert_eq!(presence.value(1), &[0xff]);
+        let prices = first
+            .column_by_name("LAST_PRICE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert!(prices.is_null(0));
+        assert_eq!(prices.value(1), 100.01);
+        let bid_sizes = first
+            .column_by_name("BID_SIZE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(bid_sizes.value(1), 2);
+        let ask_sizes = first
+            .column_by_name("ASK_SIZE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(ask_sizes.value(1), 2);
+        let delayed = first
+            .column_by_name("IS_DELAYED_STREAM")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap();
+        assert!(delayed.value(0));
+        let conditions = first
+            .column_by_name("CONDITION_CODE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(conditions.value(1), "OPEN");
+
+        let late = &batches[1];
+        let presence = late
+            .column_by_name("__xbbg_present")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BinaryArray>()
+            .unwrap();
+        assert_eq!(presence.value(0), &[0xff, 0b0000_1101]);
+        let times = late
+            .column_by_name("timestamp")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        assert_eq!(times.value(0), 1_700_000_000_001_000);
+        let topics = late
+            .column_by_name("topic")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(topics.value(0), "ES1 Index");
+        assert_eq!(topics.value(4), "IBM US Equity");
+    }
+
+    #[test]
+    fn replay_flushes_partial_batches_without_losing_or_duplicating_rows() {
+        for rows in [0, 1, 3, 13] {
+            for flush_threshold in [1, 2, 4, 8, 64] {
+                let mut timestamps = Vec::new();
+                replay(rows, flush_threshold, |batch| {
+                    assert!(batch.num_rows() > 0);
+                    assert!(batch.num_rows() <= flush_threshold);
+                    let times = batch
+                        .column_by_name("timestamp")
+                        .unwrap()
+                        .as_any()
+                        .downcast_ref::<TimestampMicrosecondArray>()
+                        .unwrap();
+                    timestamps.extend_from_slice(times.values());
+                });
+                assert_eq!(timestamps.len(), rows);
+                for (row, timestamp) in timestamps.into_iter().enumerate() {
+                    assert_eq!(timestamp, 1_700_000_000_000_000 + row as i64 * 250);
+                }
+            }
+        }
+    }
+    #[test]
+    fn synthetic_subscriptions_materialize_values_and_partial_final_batch() {
+        let mut batches = Vec::new();
+        batch_updates(BATCH_SIZE + 3, 3, 3, |batch| batches.push(batch));
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].num_rows(), BATCH_SIZE);
+        assert_eq!(batches[1].num_rows(), 3);
+        let mut row = 0;
+        for batch in &batches {
+            assert_eq!(batch.num_columns(), 6);
+            assert_eq!(
+                batch.schema().metadata()["xbbg.subscription_presence"],
+                "column=__xbbg_present;encoding=binary-lsb-first;mapping=bit-i-to-schema-field-(i+2)"
+            );
+            let topics = batch
+                .column_by_name("topic")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            let times = batch
+                .column_by_name("timestamp")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let presence = batch
+                .column_by_name("__xbbg_present")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .unwrap();
+            for offset in 0..batch.num_rows() {
+                let topic = row % 3;
+                assert_eq!(topics.value(offset), format!("SYN{topic:05} US Equity"));
+                assert_eq!(
+                    times.value(offset),
+                    1_700_000_000_000_000 + row as i64 * 250
+                );
+                assert_eq!(presence.value(offset), &[0b0000_0111]);
+                for index in 0..3 {
+                    let values = batch
+                        .column(index + 2)
+                        .as_any()
+                        .downcast_ref::<Float64Array>()
+                        .unwrap();
+                    assert_eq!(values.null_count(), 0);
+                    assert_eq!(
+                        values.value(offset),
+                        ((topic + index + row) % 10_000) as f64 * 0.0001
+                    );
+                }
+                row += 1;
+            }
+        }
+        assert_eq!(row, BATCH_SIZE + 3);
+    }
+
+    #[test]
+    fn synthetic_subscriptions_emit_no_empty_or_extra_batches() {
+        for messages in [0, 1, BATCH_SIZE, BATCH_SIZE * 2] {
+            let mut rows = 0;
+            let mut batches = 0;
+            batch_updates(messages, 1, 1, |batch| {
+                assert!(batch.num_rows() > 0);
+                rows += batch.num_rows();
+                batches += 1;
+            });
+            assert_eq!(rows, messages);
+            assert_eq!(batches, messages.div_ceil(BATCH_SIZE));
+        }
+    }
+
+    #[test]
+    fn shared_bql_scenarios_have_deterministic_columns() {
+        for (_, rows, fields) in BQL_JSON_SCENARIOS {
+            let fixture = bql_json_fixture(rows, fields);
+            assert_eq!(fixture, bql_json_fixture(rows, fields));
+            let json: serde_json::Value = serde_json::from_str(&fixture).unwrap();
+            let results = json["results"].as_object().unwrap();
+            assert_eq!(results.len(), fields.len());
+            for (field_idx, field) in fields.iter().enumerate() {
+                let result = &results[*field];
+                let ids = result["idColumn"]["values"].as_array().unwrap();
+                let values = result["valuesColumn"]["values"].as_array().unwrap();
+                let secondary = result["secondaryColumns"].as_array().unwrap();
+                assert_eq!(ids.len(), rows);
+                assert_eq!(values.len(), rows);
+                assert_eq!(secondary[0]["values"].as_array().unwrap().len(), rows);
+                assert_eq!(secondary[1]["values"].as_array().unwrap().len(), rows);
+                assert_eq!(ids[0], "TICKER0 US Equity");
+                assert_eq!(ids[rows - 1], format!("TICKER{} US Equity", rows - 1));
+                assert_eq!(values[0].as_f64().unwrap(), 100.0 + field_idx as f64);
+                assert_eq!(
+                    values[rows - 1].as_f64().unwrap(),
+                    100.0 + field_idx as f64 + (rows - 1) as f64 / 100.0
+                );
+                assert_eq!(secondary[0]["values"][0], "2026-04-01");
+                assert_eq!(
+                    secondary[0]["values"][rows - 1],
+                    format!("2026-04-{:02}", ((rows - 1) % 28) + 1)
+                );
+                assert_eq!(secondary[1]["values"][rows - 1], "USD");
+            }
+        }
+    }
+
+    #[test]
+    fn shared_bql_scenarios_materialize_through_production_extractor() {
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        let state = BqlState::new(tx);
+        for (_, rows, fields) in BQL_JSON_SCENARIOS {
+            let batch = state
+                .parse_bql_json_for_bench(&bql_json_fixture(rows, fields))
+                .unwrap();
+            assert_eq!(batch.num_rows(), rows);
+            assert_eq!(batch.num_columns(), fields.len() + 3);
+        }
+    }
 }

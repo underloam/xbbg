@@ -29,7 +29,6 @@ const DEFAULT_FIELDS: &str = "LAST_PRICE,BID,ASK";
 const DEFAULT_CAPTURE_MESSAGES: usize = 25;
 const DEFAULT_CAPTURE_TIMEOUT_MS: u64 = 15_000;
 const DEFAULT_REPLAY_LOOPS: usize = 1_000;
-const DEFAULT_COMPATIBILITY_FLUSH_THRESHOLD: usize = 1_024;
 const DEFAULT_CHANNEL_CAPACITY: usize = 1_024;
 const DEFAULT_CONSUMER_POLL_MESSAGES: usize = 1;
 const DEFAULT_CONSUMER_BATCH: usize = 1;
@@ -43,7 +42,6 @@ struct BenchConfig {
     capture_messages: usize,
     capture_timeout_ms: u64,
     replay_loops: usize,
-    compatibility_flush_threshold: usize,
     channel_capacity: usize,
     consumer_poll_messages: usize,
     consumer_batch: usize,
@@ -108,9 +106,8 @@ fn main() {
         config.capture_all_fields
     );
     println!(
-        "replay loops={} compatibility_flush_threshold={} iterations={} channel_capacity={} consumer_poll_messages={} consumer_batch={} consumer_delay_us={} cancel_after_messages={} drain_on_cancel={}\n",
+        "replay loops={} iterations={} channel_capacity={} consumer_poll_messages={} consumer_batch={} consumer_delay_us={} cancel_after_messages={} drain_on_cancel={}\n",
         config.replay_loops,
-        config.compatibility_flush_threshold,
         config.iterations,
         config.channel_capacity,
         config.consumer_poll_messages,
@@ -186,10 +183,6 @@ impl BenchConfig {
                 DEFAULT_CAPTURE_TIMEOUT_MS,
             ),
             replay_loops: env_usize("CACHED_SUB_REPLAY_LOOPS", DEFAULT_REPLAY_LOOPS),
-            compatibility_flush_threshold: env_usize(
-                "CACHED_SUB_COMPAT_FLUSH_THRESHOLD",
-                DEFAULT_COMPATIBILITY_FLUSH_THRESHOLD,
-            ),
             channel_capacity: env_usize("CACHED_SUB_CHANNEL_CAPACITY", DEFAULT_CHANNEL_CAPACITY),
             consumer_poll_messages: env_usize(
                 "CACHED_SUB_CONSUMER_POLL_MESSAGES",
@@ -389,7 +382,6 @@ fn replay_cached_events(iteration: usize, config: &BenchConfig, events: &[Event]
         config.ticker.clone(),
         config.fields.clone(),
         tx,
-        config.compatibility_flush_threshold,
         OverflowPolicy::DropNewest,
         config.capture_all_fields,
     );
@@ -454,8 +446,6 @@ fn replay_cached_events(iteration: usize, config: &BenchConfig, events: &[Event]
         completed_replay_loops += 1;
     }
 
-    state.flush();
-    max_queue_depth = max_queue_depth.max(rx.len());
     let dropped_batches = state.dropped_batches;
     drop(state);
 
@@ -743,13 +733,12 @@ fn write_results(config: &BenchConfig, capture: &CaptureResult, results: &[Repla
         .filter(|result| result.gap_outcome == "expected_data_loss_observed")
         .count();
     let input_descriptor = format!(
-        "ticker={};fields={};captured_events={};captured_messages={};replay_loops={};compatibility_flush_threshold={};channel_capacity={};consumer_poll_messages={};consumer_batch={};consumer_delay_us={};cancel_after_messages={};drain_on_cancel={}",
+        "ticker={};fields={};captured_events={};captured_messages={};replay_loops={};channel_capacity={};consumer_poll_messages={};consumer_batch={};consumer_delay_us={};cancel_after_messages={};drain_on_cancel={}",
         config.ticker,
         config.fields.join("|"),
         capture.events.len(),
         capture.messages,
         config.replay_loops,
-        config.compatibility_flush_threshold,
         config.channel_capacity,
         config.consumer_poll_messages,
         config.consumer_batch,
@@ -761,7 +750,7 @@ fn write_results(config: &BenchConfig, capture: &CaptureResult, results: &[Repla
 
     let mut json = String::new();
     writeln!(&mut json, "{{").unwrap();
-    writeln!(&mut json, "  \"schema_version\": 3,").unwrap();
+    writeln!(&mut json, "  \"schema_version\": 4,").unwrap();
     writeln!(&mut json, "  \"timestamp\": {timestamp},").unwrap();
     writeln!(&mut json, "  \"crate\": \"xbbg-async\",").unwrap();
     writeln!(
@@ -812,12 +801,6 @@ fn write_results(config: &BenchConfig, capture: &CaptureResult, results: &[Repla
     )
     .unwrap();
     writeln!(&mut json, "    \"replay_loops\": {},", config.replay_loops).unwrap();
-    writeln!(
-        &mut json,
-        "    \"compatibility_flush_threshold\": {},",
-        config.compatibility_flush_threshold
-    )
-    .unwrap();
     writeln!(
         &mut json,
         "    \"channel_capacity_batches\": {},",
