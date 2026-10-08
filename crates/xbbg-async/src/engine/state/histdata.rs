@@ -13,25 +13,15 @@ use super::refdata::{LongMode, OutputFormat};
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
     append_long_value_row, common_value_type, get_value_cached_datatype, top_level_response_error,
-    FieldExceptionMeta, LongStringColumns, ResponseMetadata, SecurityErrorMeta, TypedLongColumns,
-    WideColumns,
+    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Message, Name, Value};
 
 struct HistDataElementNames {
     security_data: Name,
     security: Name,
-    security_error: Name,
     field_data: Name,
     date: Name,
-    eid_data: Name,
-    field_exceptions: Name,
-    field_id: Name,
-    error_info: Name,
-    category: Name,
-    code: Name,
-    subcategory: Name,
-    message: Name,
 }
 
 impl HistDataElementNames {
@@ -39,23 +29,14 @@ impl HistDataElementNames {
         Self {
             security_data: Name::get_or_intern("securityData"),
             security: Name::get_or_intern("security"),
-            security_error: Name::get_or_intern("securityError"),
             field_data: Name::get_or_intern("fieldData"),
             date: Name::get_or_intern("date"),
-            eid_data: Name::get_or_intern("eidData"),
-            field_exceptions: Name::get_or_intern("fieldExceptions"),
-            field_id: Name::get_or_intern("fieldId"),
-            error_info: Name::get_or_intern("errorInfo"),
-            category: Name::get_or_intern("category"),
-            code: Name::get_or_intern("code"),
-            subcategory: Name::get_or_intern("subcategory"),
-            message: Name::get_or_intern("message"),
         }
     }
 }
 
-/// State for a historical data request (bdh).
-pub struct HistDataState {
+/// Shared decoder and builders; delivery adapters decide when to finish a batch.
+pub(super) struct HistDataResponse {
     /// Field names as strings
     field_names: Vec<String>,
     /// Pre-interned Bloomberg field names for hot lookups
@@ -80,11 +61,15 @@ pub struct HistDataState {
     typed_long_columns: Option<TypedLongColumns>,
     /// Fixed wide-format builders for requested field columns
     wide_columns: Option<WideColumns>,
-    /// Security identifiers that returned securityError.
-    failed_securities: Vec<String>,
     /// Response-level diagnostics (eidData / securityError / fieldExceptions)
     /// attached to the result batch as schema metadata.
     response_meta: ResponseMetadata,
+}
+
+/// State for a historical data request (bdh).
+pub struct HistDataState {
+    response: HistDataResponse,
+    failed_securities: Vec<String>,
     /// Reply channel
     pub reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
 }
@@ -118,7 +103,62 @@ impl HistDataState {
         field_types: Option<HashMap<String, String>>,
         reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
     ) -> Self {
-        // Convert string types to ArrowType, defaulting to Float64 for historical data
+        Self {
+            response: HistDataResponse::new(fields, format, long_mode, field_types),
+            failed_securities: Vec::new(),
+            reply,
+        }
+    }
+
+    /// Process a PARTIAL_RESPONSE message.
+    pub fn on_partial(&mut self, msg: &Message) {
+        if let Some(ticker) = self.response.process_message(msg) {
+            self.failed_securities.push(ticker.to_string());
+        }
+    }
+
+    /// Process the final RESPONSE message and send the result via reply channel.
+    pub fn finish(mut self, msg: &Message) {
+        if let Some(error) = top_level_response_error(msg, "//blp/refdata", "HistoricalDataRequest")
+        {
+            let _ = self.reply.send(Err(error));
+            return;
+        }
+        self.on_partial(msg);
+        if self.response.row_count() == 0 && !self.failed_securities.is_empty() {
+            let _ = self.reply.send(Err(BlpError::RequestFailure {
+                service: "//blp/refdata".to_string(),
+                operation: Some("HistoricalDataRequest".to_string()),
+                cid: None,
+                label: Some(format!(
+                    "All securities failed: {}",
+                    self.failed_securities.join(", ")
+                )),
+                request_id: None,
+                source: None,
+            }));
+            return;
+        }
+        let result = self.response.finish_batch();
+        if let Ok(batch) = &result {
+            xbbg_log::debug!(
+                rows = batch.num_rows(),
+                cols = batch.num_columns(),
+                "histdata finish"
+            );
+        }
+        let _ = self.reply.send(result);
+    }
+}
+
+impl HistDataResponse {
+    pub(super) fn new(
+        fields: Vec<String>,
+        format: OutputFormat,
+        long_mode: LongMode,
+        field_types: Option<HashMap<String, String>>,
+    ) -> Self {
+        // Hints override the observed Bloomberg scalar type in both delivery modes.
         let arrow_types: HashMap<String, ArrowType> = field_types
             .unwrap_or_default()
             .into_iter()
@@ -157,28 +197,16 @@ impl HistDataState {
             typed_long_columns: (format == OutputFormat::Long && long_mode == LongMode::Typed)
                 .then(TypedLongColumns::histdata),
             wide_columns,
-            failed_securities: Vec::new(),
             response_meta: ResponseMetadata::default(),
-            reply,
         }
     }
 
-    /// Process a PARTIAL_RESPONSE message.
-    pub fn on_partial(&mut self, msg: &Message) {
-        self.process_message(msg);
+    pub(super) fn is_empty(&self) -> bool {
+        self.row_count() == 0 && self.response_meta.is_empty()
     }
 
-    /// Process the final RESPONSE message and send the result via reply channel.
-    pub fn finish(mut self, msg: &Message) {
-        if let Some(error) = top_level_response_error(msg, "//blp/refdata", "HistoricalDataRequest")
-        {
-            let _ = self.reply.send(Err(error));
-            return;
-        }
-
-        self.process_message(msg);
-
-        let row_count = match self.format {
+    fn row_count(&self) -> usize {
+        match self.format {
             OutputFormat::Long => self.long_columns.as_ref().map_or_else(
                 || {
                     self.typed_long_columns
@@ -191,23 +219,10 @@ impl HistDataState {
                 .wide_columns
                 .as_ref()
                 .map_or_else(|| self.columns.row_count(), WideColumns::row_count),
-        };
-        if row_count == 0 && !self.failed_securities.is_empty() {
-            let detail = format!(
-                "All securities failed: {}",
-                self.failed_securities.join(", ")
-            );
-            let _ = self.reply.send(Err(BlpError::RequestFailure {
-                service: "//blp/refdata".to_string(),
-                operation: Some("HistoricalDataRequest".to_string()),
-                cid: None,
-                label: Some(detail),
-                request_id: None,
-                source: None,
-            }));
-            return;
         }
-        let reply = self.reply;
+    }
+
+    pub(super) fn finish_batch(&mut self) -> Result<RecordBatch, BlpError> {
         let response_meta = std::mem::take(&mut self.response_meta);
         let result = match self.format {
             OutputFormat::Long => match self.long_mode {
@@ -215,12 +230,11 @@ impl HistDataState {
                     if let Some(long_columns) = self.long_columns.take() {
                         long_columns.finish_histdata()
                     } else {
-                        self.columns
+                        std::mem::take(&mut self.columns)
                             .finish_with_order(&["ticker", "date", "field", "value"])
                     }
                 }
-                LongMode::WithMetadata => self
-                    .columns
+                LongMode::WithMetadata => std::mem::take(&mut self.columns)
                     .finish_with_order(&["ticker", "date", "field", "value", "dtype"]),
                 LongMode::Typed => self
                     .typed_long_columns
@@ -228,25 +242,13 @@ impl HistDataState {
                     .unwrap_or_else(TypedLongColumns::histdata)
                     .finish(),
             },
-            OutputFormat::Wide => {
-                if let Some(wide_columns) = self.wide_columns.take() {
-                    wide_columns.finish_histdata()
-                } else {
-                    let mut order = vec!["ticker", "date"];
-                    order.extend(self.field_names.iter().map(|s| s.as_str()));
-                    self.columns.finish_with_order(&order)
-                }
-            }
+            OutputFormat::Wide => self
+                .wide_columns
+                .as_mut()
+                .expect("wide historical response has wide builders")
+                .finish_histdata(),
         };
-        let result = result.map(|batch| response_meta.attach(batch));
-        if let Ok(batch) = &result {
-            xbbg_log::debug!(
-                rows = batch.num_rows(),
-                cols = batch.num_columns(),
-                "histdata finish"
-            );
-        }
-        let _ = reply.send(result);
+        result.map(|batch| response_meta.attach(batch))
     }
 
     /// Process a HistoricalDataResponse message using Element API.
@@ -267,13 +269,16 @@ impl HistDataState {
     ///   }
     /// }
     /// ```
-    fn process_message(&mut self, msg: &Message) {
+    pub(super) fn process_message<'a>(&mut self, msg: &Message<'a>) -> Option<&'a str> {
         let root = msg.elements();
 
         // Get securityData (note: singular in HistoricalDataResponse)
-        let Some(security_data) = root.get(&self.names.security_data) else {
+        let Some(security_data) = root
+            .get(&self.names.security_data)
+            .filter(|data| !data.is_null())
+        else {
             trace!("No securityData in message");
-            return;
+            return None;
         };
 
         // Get ticker
@@ -282,78 +287,22 @@ impl HistDataState {
             .and_then(|e| e.get_str(0))
             .unwrap_or("");
 
-        // eidData rides alongside fieldData when returnEids was requested.
-        if let Some(eids) = security_data.get(&self.names.eid_data) {
-            self.response_meta.record_eid_data(ticker, &eids);
-        }
-
-        // Check for security error
-        if let Some(security_error) = security_data.get(&self.names.security_error) {
-            let read_str = |name: &Name| {
-                security_error
-                    .get(name)
-                    .and_then(|e| e.get_str(0))
-                    .map(str::to_string)
-                    .unwrap_or_default()
-            };
-            let error = SecurityErrorMeta {
-                category: read_str(&self.names.category),
-                code: security_error
-                    .get(&self.names.code)
-                    .and_then(|e| e.get_i32(0))
-                    .unwrap_or_default(),
-                subcategory: read_str(&self.names.subcategory),
-                message: read_str(&self.names.message),
-            };
+        let diagnostics = self.response_meta.record_security(ticker, &security_data);
+        if let Some(error) = diagnostics.security_error {
             xbbg_log::warn!(
                 ticker = ticker,
-                category = error.category.as_str(),
+                category = error.category,
                 code = error.code,
-                message = error.message.as_str(),
+                message = error.message,
                 "HistoricalData securityError; skipping security"
             );
-            self.failed_securities.push(ticker.to_string());
-            self.response_meta.record_security_error(ticker, error);
-            return;
-        }
-
-        // Collect per-field exceptions (invalid fields, entitlement misses).
-        if let Some(field_exceptions) = security_data.get(&self.names.field_exceptions) {
-            for exc in field_exceptions.values() {
-                let field = exc
-                    .get(&self.names.field_id)
-                    .and_then(|e| e.get_str(0))
-                    .unwrap_or("?");
-                let err_info = exc.get(&self.names.error_info);
-                let read_err = |name: &Name| {
-                    err_info
-                        .as_ref()
-                        .and_then(|e| e.get(name))
-                        .and_then(|e| e.get_str(0))
-                        .map(str::to_string)
-                        .unwrap_or_default()
-                };
-                self.response_meta.record_field_exception(
-                    ticker,
-                    FieldExceptionMeta {
-                        field: field.to_string(),
-                        category: read_err(&self.names.category),
-                        code: err_info
-                            .as_ref()
-                            .and_then(|e| e.get(&self.names.code))
-                            .and_then(|e| e.get_i32(0))
-                            .unwrap_or_default(),
-                        subcategory: read_err(&self.names.subcategory),
-                        message: read_err(&self.names.message),
-                    },
-                );
-            }
+            return Some(ticker);
         }
 
         // Get fieldData array
         let Some(field_data) = security_data.get(&self.names.field_data) else {
             trace!(ticker = ticker, "No fieldData for security");
-            return;
+            return None;
         };
         if self.format == OutputFormat::Long && self.long_mode == LongMode::Typed {
             if let Some(columns) = self.typed_long_columns.as_mut() {
@@ -377,6 +326,7 @@ impl HistDataState {
                 }
             }
         }
+        None
     }
 
     /// Process row in long format (one row per field).

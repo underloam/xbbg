@@ -27,8 +27,11 @@ subscriptions are claimed from a separate session pool.
 | Module | Purpose |
 |--------|---------|
 | `engine/` | Engine startup, shutdown, command dispatch |
-| `engine/worker/` | Per-worker event loop and request lifecycle |
+| `engine/worker.rs` | Per-worker event loop and request lifecycle |
 | `engine/subscription_pool.rs` | Per-session subscription lifecycle and callbacks |
+| `engine/session_lifecycle.rs` | Shared startup latch and coalesced service-open attempts |
+| `engine/subscription_status.rs` | Topic indexes, lifecycle snapshots, events, and warning publication |
+| `engine/request_sharding.rs` | Shard planning, ordered execution, and schema reconciliation |
 | `engine/state/` | 12 state machines for different Bloomberg operations |
 | `schema/` | Service schema introspection + disk cache |
 | `field_cache.rs` | Global field-type resolver with disk persistence |
@@ -43,6 +46,26 @@ subscriptions are claimed from a separate session pool.
   giving O(1) insert/remove and compact memory layout.
 - **Schema + field caching** — Service schemas and field metadata are cached to
   disk, avoiding repeated introspection on startup.
+- **Shared response decoders** — Historical and intraday-bar requests use the same
+  extraction and Arrow builders for accumulated responses and streamed chunks.
+- **Canonical format vocabulary** — Request planning uses the generated `Format`
+  parser, including aliases declared in `defs/bloomberg.toml`.
+
+## Request response decoding
+
+Historical streaming honors field-type hints and includes `eidData`,
+`securityError`, and `fieldExceptions` metadata just like accumulated responses.
+Intraday-bar responses use a non-nullable `ticker` column in both delivery modes:
+each row carries the request ticker, including an empty request string.
+
+Historical and intraday-bar streams never silently drop a chunk when their
+bounded channel fills. They terminate with an error after previously accepted
+chunks; the SDK callback does not wait for the consumer to drain the channel.
+
+BQL keeps separate small-payload (at most 32 KiB) and large-payload JSON parsers,
+but both use the same Arrow materializer. Secondary columns with omitted values
+are null-padded in either route, and their first occurrence wins when names
+repeat; large payloads no longer skip those columns.
 
 ## Subscription deltas and termination
 
@@ -56,6 +79,11 @@ messages and retains name lookups for narrow or dense messages. Values remain in
 requested order. Changed immutable layouts are built once per message while
 preserving every discovery/type-change version increment. These optimizations
 neither combine messages nor wait for another event before delivering an update.
+
+`SubscriptionState` emits updates immediately; it has no flush threshold or
+`flush()` operation. `SubscriptionArrowBatcher` owns Arrow batching. The public
+`EngineConfig::subscription_flush_threshold` and `SubscribeRequest::flush_threshold`
+options remain consumer-side hints used by bindings, not engine buffering settings.
 
 Arrow conversion appends non-null binary `__xbbg_present`. Bit `i`, LSB-first,
 maps to schema field `i + 2` after `timestamp` and `topic`. A present-null field

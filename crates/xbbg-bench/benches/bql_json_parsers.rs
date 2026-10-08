@@ -6,26 +6,24 @@
 use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
 use serde_json::Value;
 use std::hint::black_box;
+use xbbg_bench::{bql_json_fixture, BQL_JSON_SCENARIOS};
 
 fn bench_bql_json_parsers(c: &mut Criterion) {
-    let cases: [(&'static str, usize, &'static [&'static str]); 3] = [
-        ("json_simple_1x1", 1, &["px_last"]),
-        (
-            "json_wide_1x5",
-            1,
-            &["px_last", "px_open", "px_high", "px_low", "px_volume"],
-        ),
-        ("json_rows_1000x2", 1_000, &["px_last", "px_volume"]),
-    ];
+    let mut input_descriptor = String::from("cases=");
+    for (index, (scenario, _, _)) in BQL_JSON_SCENARIOS.iter().enumerate() {
+        if index != 0 {
+            input_descriptor.push(',');
+        }
+        input_descriptor.push_str(scenario);
+    }
+    input_descriptor.push_str(";lanes=serde_parse,simd_parse_copy_excluded,simd_copy_and_parse");
     println!(
         "XBBG_BENCH_PROVENANCE {}",
-        xbbg_bench::benchmark_provenance_json(
-            "cases=json_simple_1x1,json_wide_1x5,json_rows_1000x2;lanes=serde_parse,simd_parse_copy_excluded,simd_copy_and_parse"
-        )
+        xbbg_bench::benchmark_provenance_json(&input_descriptor)
     );
 
     let mut group = c.benchmark_group("bql_json_parsers");
-    for (scenario, rows, fields) in cases {
+    for (scenario, rows, fields) in BQL_JSON_SCENARIOS {
         let json = bql_json_fixture(rows, fields);
         let bytes = json.len() as u64;
         group.throughput(Throughput::Bytes(bytes));
@@ -73,39 +71,6 @@ fn bench_bql_json_parsers(c: &mut Criterion) {
         );
     }
     group.finish();
-}
-
-// Copied from xbbg_benchmark_suite::bql_json_fixture so parser comparisons use
-// the same synthetic BQL-shaped payloads as the suite's json_* scenarios.
-fn bql_json_fixture(rows: usize, fields: &[&str]) -> String {
-    let ids = (0..rows)
-        .map(|i| format!("\"TICKER{i} US Equity\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let dates = (0..rows)
-        .map(|i| format!("\"2026-04-{:02}\"", (i % 28) + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let currencies = (0..rows).map(|_| "\"USD\"").collect::<Vec<_>>().join(",");
-
-    let field_json = fields
-        .iter()
-        .enumerate()
-        .map(|(field_idx, field)| {
-            let values = (0..rows)
-                .map(|i| format!("{}", 100.0 + field_idx as f64 + i as f64 / 100.0))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                r#""{field}":{{"idColumn":{{"name":"ID","type":"STRING","values":[{ids}]}} ,"valuesColumn":{{"name":"VALUE","type":"DOUBLE","values":[{values}]}} ,"secondaryColumns":[{{"name":"DATE","type":"DATE","values":[{dates}]}},{{"name":"CURRENCY","type":"STRING","values":[{currencies}]}}],"responseExceptions":[],"partialErrorMap":{{"errorIterator":null}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(
-        r#"{{"clientContext":{{"clientRequestId":"offline-bql-benchmark"}},"responseExceptions":null,"results":{{{field_json}}}}}"#
-    )
 }
 
 criterion_group!(benches, bench_bql_json_parsers);

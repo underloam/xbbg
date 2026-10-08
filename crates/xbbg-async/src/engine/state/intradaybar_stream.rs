@@ -5,203 +5,234 @@
 //!
 //! Extracts directly from Bloomberg Elements without JSON intermediate.
 
-use std::sync::Arc;
-
-use arrow_array::builder::{
-    Float64Builder, Int32Builder, StringBuilder, TimestampMicrosecondBuilder,
-};
-use arrow_array::ArrayRef;
 use arrow_array::RecordBatch;
-use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use tokio::sync::mpsc;
 
-use super::value_utils::{top_level_response_error, ResponseMetadata};
+use super::histdata_stream::ResponseStream;
+use super::intradaybar::IntradayBarResponse;
+use super::value_utils::top_level_response_error;
 use xbbg_core::{BlpError, Message};
 
 /// Streaming state for an intraday bar request (bdib).
+///
+/// Chunks share the accumulated response's decoder and non-nullable ticker
+/// schema. Channel overflow yields a terminal error after accepted chunks,
+/// rather than silently dropping data or blocking the SDK dispatcher.
 pub struct IntradayBarStreamState {
-    /// Ticker for this request
-    ticker: String,
-    /// Stream channel for sending chunks
-    stream: mpsc::Sender<Result<RecordBatch, BlpError>>,
-    /// Schema (cached after first build)
-    schema: Option<Arc<Schema>>,
+    response: IntradayBarResponse,
+    stream: ResponseStream,
 }
 
 impl IntradayBarStreamState {
     /// Create a new streaming intraday bar state.
     pub fn new(ticker: String, stream: mpsc::Sender<Result<RecordBatch, BlpError>>) -> Self {
         Self {
-            ticker,
-            stream,
-            schema: None,
+            response: IntradayBarResponse::new(ticker),
+            stream: ResponseStream::new(stream, "IntradayBarRequest"),
         }
     }
 
     /// Process a PARTIAL_RESPONSE message and yield a chunk.
     pub fn on_partial(&mut self, msg: &Message) {
-        if let Some(batch) = self.process_message(msg) {
-            let _ = self.stream.try_send(Ok(batch));
+        if self.stream.is_closed() {
+            return;
+        }
+        if let Some(error) = top_level_response_error(msg, "//blp/refdata", "IntradayBarRequest") {
+            self.stream.send(Err(error));
+            return;
+        }
+        if self.response.process_message(msg) {
+            self.stream.send(self.response.finish_batch());
         }
     }
 
     /// Process the final RESPONSE message and close the stream.
     pub fn finish(mut self, msg: &Message) {
-        if let Some(error) = top_level_response_error(msg, "//blp/refdata", "IntradayBarRequest") {
-            let _ = self.stream.try_send(Err(error));
-            return;
-        }
-
-        if let Some(batch) = self.process_message(msg) {
-            let _ = self.stream.try_send(Ok(batch));
-        }
+        self.on_partial(msg);
     }
 
-    /// Fail the stream with an error.
-    pub fn fail(self, error: BlpError) {
-        let _ = self.stream.try_send(Err(error));
-    }
-
-    /// Process an IntradayBarResponse message using Element API.
-    ///
-    /// Bloomberg structure:
-    /// ```text
-    /// IntradayBarResponse {
-    ///   barData {
-    ///     barTickData[] {
-    ///       time: 2024-01-15T09:30:00
-    ///       open: 150.0
-    ///       high: 151.0
-    ///       low: 149.5
-    ///       close: 150.5
-    ///       volume: 1000000
-    ///       numEvents: 500
-    ///       value: 150500000.0
-    ///     }
-    ///   }
-    /// }
-    /// ```
-    fn process_message(&mut self, msg: &Message) -> Option<RecordBatch> {
-        let root = msg.elements();
-
-        // Get barData
-        let bar_data = root.get_by_str("barData")?;
-        let mut response_meta = ResponseMetadata::default();
-        let has_eids = if let Some(eids) = bar_data.get_by_str("eidData") {
-            response_meta.record_eid_data(&self.ticker, &eids);
-            true
-        } else {
-            false
-        };
-
-        // Get barTickData array
-        let bar_tick_data = bar_data.get_by_str("barTickData");
-        let n = bar_tick_data.as_ref().map_or(0, |data| data.len());
-        if n == 0 && !has_eids {
-            return None;
-        }
-
-        // Create builders
-        let mut ticker_builder =
-            StringBuilder::with_capacity(n, self.ticker.len().saturating_mul(n));
-        let mut time_builder = TimestampMicrosecondBuilder::with_capacity(n);
-        let mut open_builder = Float64Builder::with_capacity(n);
-        let mut high_builder = Float64Builder::with_capacity(n);
-        let mut low_builder = Float64Builder::with_capacity(n);
-        let mut close_builder = Float64Builder::with_capacity(n);
-        let mut volume_builder = Float64Builder::with_capacity(n);
-        let mut num_events_builder = Int32Builder::with_capacity(n);
-        let mut value_builder = Float64Builder::with_capacity(n);
-
-        for i in 0..n {
-            let bar_tick_data = bar_tick_data
-                .as_ref()
-                .expect("nonzero length requires barTickData");
-            let Some(bar) = bar_tick_data.get_element(i) else {
-                continue;
-            };
-
-            ticker_builder.append_value(&self.ticker);
-
-            // Get time - native datetime extraction
-            if let Some(time_elem) = bar.get_by_str("time") {
-                if let Some(micros) = time_elem.get_timestamp_us(0) {
-                    time_builder.append_value(micros);
-                } else {
-                    time_builder.append_null();
-                }
-            } else {
-                time_builder.append_null();
-            }
-
-            // OHLC + Volume
-            append_f64_field(&bar, "open", &mut open_builder);
-            append_f64_field(&bar, "high", &mut high_builder);
-            append_f64_field(&bar, "low", &mut low_builder);
-            append_f64_field(&bar, "close", &mut close_builder);
-            append_f64_field(&bar, "volume", &mut volume_builder);
-
-            // numEvents
-            if let Some(elem) = bar.get_by_str("numEvents") {
-                if let Some(n) = elem.get_i32(0) {
-                    num_events_builder.append_value(n);
-                } else if let Some(n) = elem.get_i64(0) {
-                    num_events_builder.append_value(n as i32);
-                } else {
-                    num_events_builder.append_null();
-                }
-            } else {
-                num_events_builder.append_null();
-            }
-
-            append_f64_field(&bar, "value", &mut value_builder);
-        }
-
-        // Build schema if not cached
-        let schema = self.schema.get_or_insert_with(|| {
-            Arc::new(Schema::new(vec![
-                Field::new("ticker", DataType::Utf8, false),
-                Field::new(
-                    "time",
-                    DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
-                    true,
-                ),
-                Field::new("open", DataType::Float64, true),
-                Field::new("high", DataType::Float64, true),
-                Field::new("low", DataType::Float64, true),
-                Field::new("close", DataType::Float64, true),
-                Field::new("volume", DataType::Float64, true),
-                Field::new("numEvents", DataType::Int32, true),
-                Field::new("value", DataType::Float64, true),
-            ]))
-        });
-
-        let columns: Vec<ArrayRef> = vec![
-            Arc::new(ticker_builder.finish()),
-            Arc::new(time_builder.finish().with_timezone("UTC")),
-            Arc::new(open_builder.finish()),
-            Arc::new(high_builder.finish()),
-            Arc::new(low_builder.finish()),
-            Arc::new(close_builder.finish()),
-            Arc::new(volume_builder.finish()),
-            Arc::new(num_events_builder.finish()),
-            Arc::new(value_builder.finish()),
-        ];
-
-        let batch = RecordBatch::try_new(schema.clone(), columns).ok()?;
-        Some(response_meta.attach(batch))
+    /// Fail the stream, preserving the terminal error even when the channel is full.
+    pub fn fail(mut self, error: BlpError) {
+        self.stream.send(Err(error));
     }
 }
 
-/// Helper to append an f64 field value to a builder.
-fn append_f64_field(elem: &xbbg_core::Element<'_>, field: &str, builder: &mut Float64Builder) {
-    if let Some(field_elem) = elem.get_by_str(field) {
-        if let Some(v) = field_elem.get_f64(0) {
-            builder.append_value(v);
-        } else {
-            builder.append_null();
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::engine::state::IntradayBarState;
+    use arrow_array::{Array, Float64Array, Int32Array, TimestampMicrosecondArray};
+    use tokio::sync::oneshot;
+    use xbbg_core::test_support::TestEvent;
+    use xbbg_core::EventType;
+
+    fn response(event_type: EventType, data: serde_json::Value) -> TestEvent {
+        let schema = r#"<ServiceDefinition name="xbbg.test.bars" version="1.0.0.0">
+            <service name="//xbbg/test/bars" version="1.0.0.0">
+                <event name="IntradayBarResponse" eventType="BarResponse"/>
+            </service>
+            <schema>
+                <sequenceType name="BarResponse">
+                    <element name="barData" type="BarData"/>
+                </sequenceType>
+                <sequenceType name="BarData">
+                    <element name="eidData" type="Int32" minOccurs="0" maxOccurs="unbounded"/>
+                    <element name="barTickData" type="BarRow" minOccurs="0" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="BarRow">
+                    <element name="time" type="Datetime" minOccurs="0"/>
+                    <element name="open" type="Float64" minOccurs="0"/>
+                    <element name="high" type="Float64" minOccurs="0"/>
+                    <element name="low" type="Float64" minOccurs="0"/>
+                    <element name="close" type="Float64" minOccurs="0"/>
+                    <element name="volume" type="Int64" minOccurs="0"/>
+                    <element name="numEvents" type="Int64" minOccurs="0"/>
+                    <element name="value" type="Float64" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        TestEvent::with_schema(
+            schema,
+            event_type,
+            "IntradayBarResponse",
+            &[],
+            |formatter| formatter.json(&serde_json::json!({"barData": data}).to_string()),
+        )
+    }
+
+    #[test]
+    fn streaming_bars_match_oneshot_schema_values_and_nulls() {
+        let (reply, mut result) = oneshot::channel();
+        let mut oneshot = IntradayBarState::new("TEST Equity".into(), "TRADE".into(), 5, reply);
+        assert_eq!(oneshot.event_type(), "TRADE");
+        assert_eq!(oneshot.interval(), 5);
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut stream = IntradayBarStreamState::new("TEST Equity".into(), sender);
+        let first = response(
+            EventType::PartialResponse,
+            serde_json::json!({
+                "barTickData": [{
+                    "time": "1970-01-01T00:00:01Z",
+                    "open": 1.0, "high": 2.0, "low": 0.5, "close": 1.5,
+                    "volume": 7, "numEvents": 3, "value": 10.5
+                }]
+            }),
+        );
+        let last = response(
+            EventType::Response,
+            serde_json::json!({
+                "barTickData": [{"open": 2.0, "volume": null, "numEvents": null}]
+            }),
+        );
+        let mut messages = first.event().messages();
+        let message = messages.next().unwrap();
+        oneshot.on_partial(&message);
+        stream.on_partial(&message);
+        let mut messages = last.event().messages();
+        let message = messages.next().unwrap();
+        oneshot.finish(&message);
+        stream.finish(&message);
+        let expected = result.try_recv().unwrap().unwrap();
+        let chunks = [
+            receiver.try_recv().unwrap().unwrap(),
+            receiver.try_recv().unwrap().unwrap(),
+        ];
+        for chunk in &chunks {
+            assert_eq!(chunk.schema(), expected.schema());
+            assert!(!chunk.schema().field(0).is_nullable());
         }
-    } else {
-        builder.append_null();
+        let combined = arrow_select::concat::concat_batches(&expected.schema(), &chunks).unwrap();
+        assert_eq!(combined, expected);
+        assert_eq!(
+            combined
+                .column_by_name("time")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap()
+                .value(0),
+            1_000_000,
+        );
+        assert_eq!(
+            combined
+                .column_by_name("volume")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap()
+                .value(0),
+            7.0,
+        );
+        assert_eq!(
+            combined
+                .column_by_name("numEvents")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap()
+                .value(0),
+            3,
+        );
+        for field in [
+            "time",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "numEvents",
+            "value",
+        ] {
+            assert!(
+                combined.column_by_name(field).unwrap().is_null(1),
+                "{field}"
+            );
+        }
+    }
+
+    #[test]
+    fn streaming_bars_preserve_metadata_without_rows() {
+        let event = response(
+            EventType::Response,
+            serde_json::json!({"eidData": [11, 22]}),
+        );
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let (reply, mut result) = oneshot::channel();
+        IntradayBarState::new("TEST Equity".into(), "TRADE".into(), 1, reply).finish(&message);
+        let (sender, mut receiver) = mpsc::channel(1);
+        IntradayBarStreamState::new("TEST Equity".into(), sender).finish(&message);
+        let expected = result.try_recv().unwrap().unwrap();
+        let actual = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.num_rows(), 0);
+        assert_eq!(
+            actual.schema_ref().metadata()["xbbg.eid_data"],
+            r#"{"TEST Equity":[11,22]}"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn full_bar_channel_preserves_terminal_error_after_accepted_chunk() {
+        let event = response(
+            EventType::PartialResponse,
+            serde_json::json!({
+                "barTickData": [{"open": 1.0}]
+            }),
+        );
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let (sender, mut receiver) = mpsc::channel(1);
+        let mut stream = IntradayBarStreamState::new("TEST Equity".into(), sender);
+        stream.on_partial(&message);
+        stream.on_partial(&message);
+        stream.finish(&message);
+        assert!(receiver.recv().await.unwrap().is_ok());
+        let terminal = tokio::time::timeout(std::time::Duration::from_secs(1), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(matches!(terminal, Err(BlpError::Internal { detail })
+            if detail.contains("IntradayBarRequest") && detail.contains("channel is full")));
+        assert!(receiver.recv().await.is_none());
     }
 }

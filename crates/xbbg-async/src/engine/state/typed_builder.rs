@@ -123,11 +123,6 @@ impl TypedBuilder {
         }
     }
 
-    /// Create a new builder from a type string.
-    pub fn from_type_str(type_str: &str) -> Self {
-        Self::new(ArrowType::parse(type_str))
-    }
-
     /// Append a value from xbbg_core::Value, converting as needed.
     pub fn append_value(&mut self, value: Option<Value<'_>>) {
         let _ = self.append_value_report_miss(value);
@@ -461,8 +456,9 @@ impl ColumnSet {
         }
     }
 
+    #[cfg(test)]
     /// Create with type hints for specific columns.
-    pub fn with_type_hints(hints: impl IntoIterator<Item = (String, ArrowType)>) -> Self {
+    fn with_type_hints(hints: impl IntoIterator<Item = (String, ArrowType)>) -> Self {
         Self {
             columns: IndexMap::new(),
             type_hints: hints.into_iter().collect(),
@@ -547,11 +543,6 @@ impl ColumnSet {
         self.columns.len()
     }
 
-    /// Check if a column exists.
-    pub fn has_column(&self, name: &str) -> bool {
-        self.columns.contains_key(name)
-    }
-
     /// Get column names in order.
     pub fn column_names(&self) -> impl Iterator<Item = &str> {
         self.columns.keys().map(|s| s.as_str())
@@ -620,11 +611,6 @@ impl Default for ColumnSet {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Create an Arrow Field from a field name and ArrowType.
-pub fn create_field(name: &str, arrow_type: ArrowType, nullable: bool) -> Field {
-    Field::new(name, arrow_type.to_arrow_datatype(), nullable)
 }
 
 #[cfg(test)]

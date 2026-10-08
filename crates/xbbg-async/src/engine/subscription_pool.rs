@@ -5,9 +5,9 @@
 
 use std::collections::{HashMap, HashSet};
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU8, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock, Weak};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use slab::Slab;
@@ -16,10 +16,10 @@ use tokio::task::JoinHandle;
 
 use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionList};
 
-/// Max wall time for an async open_service reply before we give up.
-const SERVICE_OPEN_TIMEOUT_MS: u64 = 10_000;
-
-use super::dispatch::{DispatchKey, SERVICE_OPEN_CID_TAG};
+use super::dispatch::DispatchKey;
+use super::session_lifecycle::{
+    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
+};
 use super::state::{
     subscription_forwarder_channel, FieldKind, MessageOutcome, SubscriptionForwarder,
     SubscriptionMetrics, SubscriptionSender, SubscriptionState, SubscriptionTerminator,
@@ -142,15 +142,10 @@ struct SubscriptionRegistrationRequest {
     field_kinds: HashMap<String, FieldKind>,
     all_fields: bool,
     options: Vec<String>,
-    flush_threshold: Option<usize>,
     overflow_policy: Option<OverflowPolicy>,
     forwarder: Option<SubscriptionForwarder>,
 }
 
-struct PendingServiceOpen {
-    cid: i64,
-    waiters: Vec<oneshot::Sender<Result<(), BlpError>>>,
-}
 enum StatusMutation {
     Started {
         key: SlabKey,
@@ -272,12 +267,6 @@ impl StatusMutation {
     }
 }
 
-#[derive(Default)]
-struct StartupLatch {
-    resolved: bool,
-    result: Option<Result<(), BlpError>>,
-}
-
 struct SubscriptionWorkerState {
     id: usize,
     subs: Slab<SubscriptionState>,
@@ -289,16 +278,14 @@ struct SubscriptionWorkerState {
     pending_cancel: HashSet<SlabKey>,
     status: Option<SharedSubscriptionStatus>,
     last_streams_warn_us: HashMap<SlabKey, i64>,
-    pending_service_opens: HashMap<String, PendingServiceOpen>,
+    pending_service_opens: PendingServiceOpens,
 }
 
 struct SubscriptionWorkerShared {
     id: usize,
     state: Mutex<SubscriptionWorkerState>,
     health: Arc<AtomicU8>,
-    startup: Mutex<StartupLatch>,
-    startup_cv: Condvar,
-    next_service_open_id: AtomicI64,
+    startup: StartupLatch,
     shutdown: AtomicBool,
     /// Commands take a shared guard; explicit shutdown takes the exclusive
     /// guard so no SDK operation starts after the lifecycle gate closes.
@@ -309,41 +296,6 @@ struct SubscriptionWorkerShared {
     changed: tokio::sync::Notify,
 }
 
-struct PendingSubscriptionServiceWaiter<'a> {
-    shared: &'a SubscriptionWorkerShared,
-    service: &'a str,
-    attempt_cid: i64,
-    receiver: Option<oneshot::Receiver<Result<(), BlpError>>>,
-}
-
-impl<'a> PendingSubscriptionServiceWaiter<'a> {
-    fn new(
-        shared: &'a SubscriptionWorkerShared,
-        service: &'a str,
-        attempt_cid: i64,
-        receiver: oneshot::Receiver<Result<(), BlpError>>,
-    ) -> Self {
-        Self {
-            shared,
-            service,
-            attempt_cid,
-            receiver: Some(receiver),
-        }
-    }
-
-    fn receiver(&mut self) -> &mut oneshot::Receiver<Result<(), BlpError>> {
-        self.receiver.as_mut().expect("receiver is present")
-    }
-}
-
-impl Drop for PendingSubscriptionServiceWaiter<'_> {
-    fn drop(&mut self) {
-        self.receiver.take();
-        self.shared
-            .prune_pending_service_waiters(self.service, self.attempt_cid);
-    }
-}
-
 impl SubscriptionWorkerShared {
     fn new(id: usize, config: Arc<EngineConfig>, health: Arc<AtomicU8>) -> Self {
         let forwarder_capacity = config.command_queue_size;
@@ -351,9 +303,7 @@ impl SubscriptionWorkerShared {
             id,
             state: Mutex::new(SubscriptionWorkerState::new(id, config)),
             health,
-            startup: Mutex::new(StartupLatch::default()),
-            startup_cv: Condvar::new(),
-            next_service_open_id: AtomicI64::new(0),
+            startup: StartupLatch::default(),
             shutdown: AtomicBool::new(false),
             lifecycle: RwLock::new(()),
             runtime_handle: OnceLock::new(),
@@ -361,38 +311,6 @@ impl SubscriptionWorkerShared {
             forwarder_capacity,
             changed: tokio::sync::Notify::new(),
         }
-    }
-
-    fn resolve_startup(&self, result: Result<(), BlpError>) {
-        let mut startup = self.startup.lock();
-        if !startup.resolved {
-            startup.resolved = true;
-            startup.result = Some(result);
-            self.startup_cv.notify_all();
-        }
-    }
-
-    fn wait_startup(&self, timeout: Duration) -> Result<(), BlpError> {
-        let deadline = Instant::now() + timeout;
-        let mut startup = self.startup.lock();
-        while startup.result.is_none() {
-            if self
-                .startup_cv
-                .wait_until(&mut startup, deadline)
-                .timed_out()
-            {
-                return Err(BlpError::Timeout);
-            }
-        }
-        startup.result.take().expect("checked above")
-    }
-
-    fn next_service_cid(&self) -> i64 {
-        SERVICE_OPEN_CID_TAG
-            | self
-                .next_service_open_id
-                .fetch_add(1, Ordering::Relaxed)
-                .wrapping_add(1)
     }
 
     fn shutdown_requested(&self) -> bool {
@@ -503,26 +421,13 @@ impl SubscriptionWorkerShared {
         &self,
         service: &str,
     ) -> (bool, i64, oneshot::Receiver<Result<(), BlpError>>) {
-        let (tx, rx) = oneshot::channel();
         let mut state = self.state.lock();
         if state.open_services.contains(service) {
+            let (tx, rx) = oneshot::channel();
             let _ = tx.send(Ok(()));
             return (false, 0, rx);
         }
-        if let Some(open) = state.pending_service_opens.get_mut(service) {
-            open.waiters.retain(|waiter| !waiter.is_closed());
-            open.waiters.push(tx);
-            return (false, open.cid, rx);
-        }
-        let cid = self.next_service_cid();
-        state.pending_service_opens.insert(
-            service.to_string(),
-            PendingServiceOpen {
-                cid,
-                waiters: vec![tx],
-            },
-        );
-        (true, cid, rx)
+        state.pending_service_opens.register(service)
     }
 
     fn remove_pending_service_open(
@@ -530,32 +435,17 @@ impl SubscriptionWorkerShared {
         service: &str,
         attempt_cid: i64,
     ) -> Option<PendingServiceOpen> {
-        let mut state = self.state.lock();
-        if state
+        self.state
+            .lock()
             .pending_service_opens
-            .get(service)
-            .is_some_and(|open| open.cid == attempt_cid)
-        {
-            state.pending_service_opens.remove(service)
-        } else {
-            None
-        }
+            .remove(service, attempt_cid)
     }
 
     fn prune_pending_service_waiters(&self, service: &str, attempt_cid: i64) {
-        let mut state = self.state.lock();
-        let remove_attempt = if let Some(open) = state.pending_service_opens.get_mut(service) {
-            if open.cid != attempt_cid {
-                return;
-            }
-            open.waiters.retain(|waiter| !waiter.is_closed());
-            open.waiters.is_empty()
-        } else {
-            false
-        };
-        if remove_attempt {
-            state.pending_service_opens.remove(service);
-        }
+        self.state
+            .lock()
+            .pending_service_opens
+            .prune(service, attempt_cid);
     }
 
     fn register_subscriptions(
@@ -631,7 +521,7 @@ impl SubscriptionWorkerState {
             pending_cancel: HashSet::new(),
             status: None,
             last_streams_warn_us: HashMap::new(),
-            pending_service_opens: HashMap::new(),
+            pending_service_opens: PendingServiceOpens::default(),
         }
     }
 
@@ -666,11 +556,11 @@ impl SubscriptionWorkerState {
         self.pending_cancel.clear();
         self.last_streams_warn_us.clear();
         for (_, open) in self.pending_service_opens.drain() {
-            for waiter in open.waiters {
-                let _ = waiter.send(Err(BlpError::Internal {
+            open.complete(|| {
+                Err(BlpError::Internal {
                     detail: detail.to_string(),
-                }));
-            }
+                })
+            });
         }
         self.clear_active_status();
     }
@@ -741,7 +631,6 @@ impl SubscriptionWorkerState {
             field_kinds,
             all_fields,
             options,
-            flush_threshold,
             overflow_policy,
             forwarder,
         } = request;
@@ -758,7 +647,6 @@ impl SubscriptionWorkerState {
         let mut keys = Vec::with_capacity(registrations.len());
         let mut metrics = Vec::with_capacity(registrations.len());
         let mut registered_topics = Vec::with_capacity(registrations.len());
-        let ft = flush_threshold.unwrap_or(self.config.subscription_flush_threshold);
         let op = overflow_policy.unwrap_or(self.config.overflow_policy);
 
         for FeedRegistration {
@@ -771,7 +659,6 @@ impl SubscriptionWorkerState {
                 topic.clone(),
                 fields.clone(),
                 stream,
-                ft,
                 op,
                 all_fields,
                 forwarder.clone(),
@@ -1199,7 +1086,7 @@ impl SubscriptionWorkerState {
                         .health
                         .store(WorkerHealth::Healthy as u8, Ordering::Release);
                 }
-                shared.resolve_startup(Ok(()));
+                shared.startup.resolve(Ok(()));
                 xbbg_log::info!(worker_id = self.id, "session started");
                 if let Some(status) = &self.status {
                     status.update(|next| {
@@ -1288,7 +1175,7 @@ impl SubscriptionWorkerState {
                 shared
                     .health
                     .store(WorkerHealth::Dead as u8, Ordering::Release);
-                shared.resolve_startup(Err(session_start_error(
+                shared.startup.resolve(Err(session_start_error(
                     "subscription session startup failure",
                     reason.clone(),
                 )));
@@ -1298,7 +1185,7 @@ impl SubscriptionWorkerState {
                 let reason = extract_reason_description(msg);
                 let context =
                     SubscriptionSessionEvent::Terminated.log_context(shared.shutdown_requested());
-                shared.resolve_startup(Err(session_start_error(
+                shared.startup.resolve(Err(session_start_error(
                     "subscription session terminated during startup",
                     reason.clone(),
                 )));
@@ -1377,15 +1264,9 @@ impl SubscriptionWorkerState {
 
         if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure") {
             if let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0) {
-                let service = self
-                    .pending_service_opens
-                    .iter()
-                    .find_map(|(service, open)| (open.cid == cid_int).then(|| service.clone()));
-                if let Some(service_name) = service {
-                    let open = self
-                        .pending_service_opens
-                        .remove(&service_name)
-                        .expect("found pending open");
+                if let Some((service_name, open)) =
+                    self.pending_service_opens.remove_by_cid(cid_int)
+                {
                     match msg_type {
                         "ServiceOpened" => {
                             self.open_services.insert(service_name.clone());
@@ -1400,9 +1281,7 @@ impl SubscriptionWorkerState {
                                     );
                                 });
                             }
-                            for waiter in open.waiters {
-                                let _ = waiter.send(Ok(()));
-                            }
+                            open.complete(|| Ok(()));
                         }
                         "ServiceOpenFailure" => {
                             let reason = extract_reason_description(msg);
@@ -1418,13 +1297,13 @@ impl SubscriptionWorkerState {
                                     );
                                 });
                             }
-                            for waiter in open.waiters {
-                                let _ = waiter.send(Err(BlpError::OpenService {
+                            open.complete(|| {
+                                Err(BlpError::OpenService {
                                     service: service_name.clone(),
                                     source: None,
                                     label: reason.clone(),
-                                }));
-                            }
+                                })
+                            });
                         }
                         _ => {}
                     }
@@ -1899,7 +1778,7 @@ impl Drop for CommandLeaseRef {
 }
 
 #[derive(Clone)]
-pub struct SubscriptionCommandHandle {
+pub(crate) struct SubscriptionCommandHandle {
     inner: Arc<SubscriptionWorkerHandleInner>,
     lease: CommandLeaseRef,
 }
@@ -1920,7 +1799,6 @@ impl SubscriptionCommandHandle {
         field_kinds: HashMap<String, FieldKind>,
         all_fields: bool,
         options: Vec<String>,
-        flush_threshold: Option<usize>,
         overflow_policy: Option<OverflowPolicy>,
         status: SharedSubscriptionStatus,
     ) -> Result<(Vec<SlabKey>, Vec<Arc<SubscriptionMetrics>>), BlpAsyncError> {
@@ -1982,7 +1860,6 @@ impl SubscriptionCommandHandle {
                 field_kinds,
                 all_fields,
                 options,
-                flush_threshold,
                 overflow_policy,
                 forwarder,
             };
@@ -2057,31 +1934,22 @@ impl SubscriptionCommandHandle {
             }
             (cid_int, rx)
         };
-        let mut waiter =
-            PendingSubscriptionServiceWaiter::new(&self.inner.shared, service, attempt_cid, rx);
-        match tokio::time::timeout(
-            Duration::from_millis(SERVICE_OPEN_TIMEOUT_MS),
-            waiter.receiver(),
-        )
-        .await
-        {
-            Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err(BlpError::Internal {
-                detail: format!("pending service open for {service} was cancelled"),
-            }),
-            Err(_) => {
-                if let Some(open) = self
-                    .inner
+        PendingWaiter::new(rx, || {
+            self.inner
+                .shared
+                .prune_pending_service_waiters(service, attempt_cid);
+        })
+        .wait_service_open(
+            || {
+                self.inner
                     .shared
                     .remove_pending_service_open(service, attempt_cid)
-                {
-                    for waiter in open.waiters {
-                        let _ = waiter.send(Err(BlpError::Timeout));
-                    }
-                }
-                Err(BlpError::Timeout)
-            }
-        }
+            },
+            || BlpError::Internal {
+                detail: format!("pending service open for {service} was cancelled"),
+            },
+        )
+        .await
     }
 
     pub(crate) fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
@@ -2199,12 +2067,12 @@ impl SubscriptionCommandHandle {
         Ok(())
     }
 
-    pub fn worker_id(&self) -> usize {
+    pub(crate) fn worker_id(&self) -> usize {
         self.inner.id
     }
 }
 
-pub struct SubscriptionWorkerHandle {
+pub(crate) struct SubscriptionWorkerHandle {
     inner: Arc<SubscriptionWorkerHandleInner>,
 }
 
@@ -2232,7 +2100,8 @@ impl SubscriptionWorkerHandle {
             .start()
             .map_err(|err| attach_auth_context(err, config.auth.as_ref()))?;
         shared
-            .wait_startup(Duration::from_millis(u64::from(SESSION_STARTUP_TIMEOUT_MS)))
+            .startup
+            .wait(Duration::from_millis(u64::from(SESSION_STARTUP_TIMEOUT_MS)))
             .map_err(|err| attach_auth_context(err, config.auth.as_ref()))?;
         session.open_service(crate::services::Service::MktData.as_str())?;
         shared
@@ -2293,7 +2162,7 @@ impl Drop for SubscriptionWorkerHandle {
     }
 }
 
-pub struct SubscriptionSessionPool {
+pub(crate) struct SubscriptionSessionPool {
     available: Mutex<Vec<SubscriptionWorkerHandle>>,
     all_workers: Mutex<Vec<Weak<SubscriptionWorkerHandleInner>>>,
     admission: Arc<Semaphore>,
@@ -2322,7 +2191,7 @@ impl Drop for CreationGuard {
 }
 
 impl SubscriptionSessionPool {
-    pub fn new(size: usize, config: Arc<EngineConfig>) -> Result<Self, BlpAsyncError> {
+    pub(crate) fn new(size: usize, config: Arc<EngineConfig>) -> Result<Self, BlpAsyncError> {
         if config.max_subscription_sessions == 0 {
             return Err(BlpAsyncError::ConfigError {
                 detail: "max_subscription_sessions must be greater than zero".to_string(),
@@ -2538,10 +2407,6 @@ impl SubscriptionSessionPool {
         available.push(handle);
     }
 
-    pub fn available_count(&self) -> usize {
-        self.available.lock().len()
-    }
-
     fn registered_workers(&self) -> Vec<Arc<SubscriptionWorkerHandleInner>> {
         let mut registry = self.all_workers.lock();
         let mut workers = Vec::with_capacity(registry.len());
@@ -2564,7 +2429,7 @@ impl SubscriptionSessionPool {
         drop(available);
     }
 
-    pub fn signal_shutdown(&self) {
+    pub(crate) fn signal_shutdown(&self) {
         if self.shutdown.swap(true, Ordering::AcqRel) {
             return;
         }
@@ -2580,7 +2445,7 @@ impl SubscriptionSessionPool {
         }
     }
 
-    pub fn shutdown_blocking(&self) {
+    pub(crate) fn shutdown_blocking(&self) {
         self.shutdown.store(true, Ordering::Release);
         self.admission.close();
         {
@@ -2607,7 +2472,7 @@ impl Drop for SubscriptionSessionPool {
     }
 }
 
-pub struct SessionClaim {
+pub(crate) struct SessionClaim {
     handle: Option<SubscriptionWorkerHandle>,
     pool: Arc<SubscriptionSessionPool>,
     cleanup_status: Option<SharedSubscriptionStatus>,
@@ -2615,7 +2480,7 @@ pub struct SessionClaim {
 }
 
 impl SessionClaim {
-    pub fn command_handle(&self) -> Result<SubscriptionCommandHandle, BlpAsyncError> {
+    pub(crate) fn command_handle(&self) -> Result<SubscriptionCommandHandle, BlpAsyncError> {
         let handle = self
             .handle
             .as_ref()
@@ -2626,7 +2491,7 @@ impl SessionClaim {
         Ok(handle.command_handle(lease))
     }
 
-    pub fn set_cleanup_status(&mut self, status: SharedSubscriptionStatus) {
+    pub(crate) fn set_cleanup_status(&mut self, status: SharedSubscriptionStatus) {
         self.cleanup_status = Some(status);
     }
 }
@@ -2706,7 +2571,6 @@ impl TestSubscriptionSession {
                     field_kinds,
                     all_fields,
                     options: Vec::new(),
-                    flush_threshold: Some(1),
                     overflow_policy: Some(OverflowPolicy::DropNewest),
                     forwarder: None,
                 })?;
@@ -2939,7 +2803,6 @@ mod tests {
                 field_kinds: HashMap::new(),
                 all_fields: false,
                 options: Vec::new(),
-                flush_threshold: None,
                 overflow_policy: None,
                 forwarder: None,
             })
@@ -3059,7 +2922,7 @@ mod tests {
         };
 
         assert!(matches!(error, BlpAsyncError::ConfigError { .. }));
-        assert_eq!(pool.available_count(), 0);
+        assert!(pool.available.lock().is_empty());
         assert_eq!(pool.next_id.load(Ordering::Relaxed), 0);
     }
 
@@ -3072,7 +2935,6 @@ mod tests {
             "TEST US Equity".to_string(),
             vec!["PX_LAST".to_string()],
             tx,
-            1,
             false,
         ));
         assert!(!worker.is_clean());
@@ -3386,7 +3248,6 @@ mod tests {
             "EXISTING US Equity".to_string(),
             vec!["PX_LAST".to_string()],
             tx.clone(),
-            1,
             false,
         ));
         let status = Arc::new(crate::engine::SubscriptionStatusHandle::new(
@@ -3420,7 +3281,6 @@ mod tests {
             field_kinds: HashMap::new(),
             all_fields: false,
             options: Vec::new(),
-            flush_threshold: None,
             overflow_policy: None,
             forwarder: None,
         }) {
@@ -3470,39 +3330,23 @@ mod tests {
         let (must_open, first_cid, first_rx) = shared.register_service_waiter(service);
         assert!(must_open);
         drop(first_rx);
-        let (must_open, joined_cid, _joined_rx) = shared.register_service_waiter(service);
+        let (must_open, joined_cid, mut joined_rx) = shared.register_service_waiter(service);
         assert!(!must_open);
         assert_eq!(joined_cid, first_cid);
-        assert_eq!(
-            shared
-                .state
-                .lock()
-                .pending_service_opens
-                .get(service)
-                .expect("pending open")
-                .waiters
-                .len(),
-            1
-        );
-
         shared
             .remove_pending_service_open(service, first_cid)
-            .expect("first generation");
+            .expect("first generation")
+            .complete(|| Ok(()));
+        assert!(matches!(joined_rx.try_recv(), Ok(Ok(()))));
+
         let (_, second_cid, _second_rx) = shared.register_service_waiter(service);
         assert_ne!(second_cid, first_cid);
         assert!(shared
             .remove_pending_service_open(service, first_cid)
             .is_none());
-        assert_eq!(
-            shared
-                .state
-                .lock()
-                .pending_service_opens
-                .get(service)
-                .expect("new generation remains")
-                .cid,
-            second_cid
-        );
+        assert!(shared
+            .remove_pending_service_open(service, second_cid)
+            .is_some());
     }
 
     #[test]
@@ -3515,15 +3359,11 @@ mod tests {
         let service = "//blp/mktdata";
         let (_, cid, rx) = shared.register_service_waiter(service);
 
-        drop(PendingSubscriptionServiceWaiter::new(
-            &shared, service, cid, rx,
-        ));
+        drop(PendingWaiter::new(rx, || {
+            shared.prune_pending_service_waiters(service, cid);
+        }));
 
-        assert!(!shared
-            .state
-            .lock()
-            .pending_service_opens
-            .contains_key(service));
+        assert!(shared.state.lock().pending_service_opens.is_empty());
     }
 
     #[test]

@@ -2,7 +2,7 @@
 //!
 //! Pure Rust only: no Bloomberg session, network, or production hot-path changes.
 //!
-//! Run after wiring this bench target:
+//! Run:
 //!   ARROW_BENCH_ROWS=100000 ARROW_BENCH_ITERATIONS=5 \
 //!     cargo bench --package xbbg-bench --bench arrow_builder_append
 
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use arrow_array::RecordBatch;
-use arrow_array::{ArrayRef, Float64Array};
 use arrow_schema::{ArrowError, DataType, Field, Schema};
 use xbbg_async::engine::state::typed_builder::{ArrowType, TypedBuilder};
 use xbbg_core::Value;
@@ -410,19 +409,6 @@ fn bench_record_batch_finalization(rows: usize, field_names: &[String]) -> usize
     let batch = RecordBatch::try_new(schema, arrays).expect("arrays should share row count");
     black_box(batch.num_rows());
     rows * 5
-}
-
-#[allow(dead_code)]
-fn direct_arrow_record_batch(rows: usize) -> RecordBatch {
-    let array: ArrayRef = Arc::new(Float64Array::from_iter_values(
-        (0..rows).map(|row| row as f64),
-    ));
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "value",
-        DataType::Float64,
-        false,
-    )]));
-    RecordBatch::try_new(schema, vec![array]).expect("direct Arrow batch should be valid")
 }
 
 fn print_table(results: &[BenchResult]) {

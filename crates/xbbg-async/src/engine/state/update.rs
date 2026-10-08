@@ -65,7 +65,7 @@ pub enum UpdateValue {
     Time64Micros(i64),
     TimestampMicros(i64),
 }
-pub type StringValueCache = Option<(u64, Arc<str>)>;
+pub(crate) type StringValueCache = Option<(u64, Arc<str>)>;
 
 impl FieldLayout {
     pub fn new(version: u32, fields: Vec<FieldMeta>) -> Self {
@@ -136,10 +136,6 @@ impl FieldKind {
 }
 
 impl UpdateValue {
-    pub fn from_blp(value: Value<'_>) -> Self {
-        Self::from_blp_with_str_cache(value, None)
-    }
-
     pub fn from_blp_with_str_cache(
         value: Value<'_>,
         str_cache: Option<&mut StringValueCache>,

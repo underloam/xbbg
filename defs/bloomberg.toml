@@ -245,6 +245,8 @@ doc = "Field info extractor: [field, type, description, category]"
 # Output Formats
 # ============================================================================
 # Controls the shape and typing of the output Arrow table.
+# Canonical values and aliases drive the Rust request planner's Format parser.
+# Parsing is case-sensitive; aliases keep the same canonical output strings.
 
 [formats.LONG]
 value = "long"
@@ -272,6 +274,7 @@ doc = "Semi-long format with one row per ticker/timestamp and fields as columns.
 # Output Modes
 # ============================================================================
 # Controls how Bloomberg responses are converted before returning.
+# Python's host-side output selection; Rust requests always return Arrow.
 
 [output_modes.ARROW]
 value = "arrow"
