@@ -170,7 +170,19 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: js-xbbg-langgraph/package-lock.json
+          cache-dependency-path: |
+            js-xbbg/package-lock.json
+            js-xbbg-langgraph/package-lock.json
+
+      # The adapter type-checks against this checkout's @xbbg/core declarations
+      # (tsconfig paths -> js-xbbg/dist/index.d.ts). Without them TypeScript
+      # falls back to the published @xbbg/core in node_modules, which lags the
+      # source, so build them first as the release workflows do.
+      - name: Build @xbbg/core type declarations
+        working-directory: js-xbbg
+        run: |
+          npm ci
+          npm run build:ts
 
       - name: Install js-xbbg-langgraph dependencies
         working-directory: js-xbbg-langgraph

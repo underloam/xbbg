@@ -93,6 +93,16 @@ repos:
         files: ^js-xbbg-langgraph/
         pass_filenames: false
 
+      # The LangGraph adapter type-checks against js-xbbg/dist/index.d.ts
+      # (tsconfig paths); rebuild it so lint never falls back to the published
+      # @xbbg/core types. Hooks run in order, so this precedes the lint below.
+      - id: js-langgraph-core-types
+        name: js-langgraph-core-types
+        entry: npm --prefix js-xbbg run build:ts
+        language: system
+        files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
       - id: js-langgraph-lint
         name: js-langgraph-lint
         entry: npm --prefix js-xbbg-langgraph run lint
