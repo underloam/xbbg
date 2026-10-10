@@ -20,6 +20,8 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep in step with ci-rust.yml so releases build with the uv that CI tested.
+  UV_VERSION: "0.13.0"
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
@@ -57,7 +59,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           # Linux wheels build inside the manylinux_2_28 (AlmaLinux 8) container so
@@ -77,9 +79,9 @@ jobs:
           fetch-depth: 0  # setuptools_scm needs full git history for version
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -162,7 +164,9 @@ jobs:
       - name: Setup uv
         # Exact tag: astral-sh/setup-uv stopped publishing moving major tags
         # after v7, so `@v10` does not resolve.
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
 
       - name: Check release source versions
         if: startsWith(github.ref, 'refs/tags/')
@@ -248,9 +252,9 @@ jobs:
           fetch-depth: 0
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -486,7 +490,9 @@ jobs:
           fetch-depth: 0  # setuptools_scm needs full git history for version
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
 
       - name: Check release source versions
         if: startsWith(github.ref, 'refs/tags/')
