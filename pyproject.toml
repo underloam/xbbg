@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "xbbg"
 description = "Independent client for Bloomberg-connected data workflows"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.10,<3.16"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 # Deliberately a project identity, not a person: this metadata is published to
@@ -32,6 +32,7 @@ classifiers = [
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
+  "Programming Language :: Python :: 3.15",
   "Programming Language :: Rust",
   "Typing :: Typed",
 ]
@@ -73,7 +74,9 @@ test = [
   "pyarrow>=22.0.0",
   "pandas>=2.2.2,<4",
   "polars[timezone]>=0.20.4",
-  "duckdb>=1.5.0",
+  # duckdb publishes no CPython 3.15 wheels yet, and its sdist is a full C++
+  # build. The duckdb tests skip when it is absent.
+  "duckdb>=1.5.0; python_version < '3.15'",
 ]
 
 [project.urls]

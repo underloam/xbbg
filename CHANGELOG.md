@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **More CI coverage.** Pull requests now run the offline Rust test suite (`cargo test --workspace`; tests that need a Bloomberg session are `#[ignore]`d and run with `cargo test -- --ignored`) and the `@xbbg/langgraph` quality suite, and the merge gate waits for every required job.
 - **The shared Rust recipes gained the features Python implemented on its own.** `recipe_earning` supports geography and product breakdowns, a fiscal year, and a period count; `recipe_adjust_ccy` converts long and wide data, categorical inputs, foreign Arrow string layouts, and zoned timestamps; `recipe_turnover` implements the VWAP × volume fallback, FX conversion, scaling, and presentation controls; futures resolution falls back to the historical contract chain; and recipes accept the common request controls (overrides, per-security overrides, elements, validation, field types, EIDs, and timezones).
 - **`Engine.worker_health()`** is available on the public Python `xbbg.Engine`, as earlier release notes described.
+- **Python 3.15.** `xbbg` declares CPython 3.15, and CI and the release workflow build and test 3.15 wheels for Linux x86_64 (manylinux_2_28), Windows x64, and macOS arm64. duckdb publishes no 3.15 wheels yet, so the `test` extra leaves it out on 3.15, the DuckDB tests skip there, and `xbbg[duckdb]` on 3.15 needs a duckdb source build until it does. `xbbg-langgraph` stays on 3.10–3.14: LangGraph's `ormsgpack` dependency has no 3.15 wheels, and its PyO3 version refuses to build for 3.15.
 
 ### Changed
 
@@ -25,6 +26,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **`@xbbg/langgraph` validation matches the Python adapter. BREAKING:** `recoveryRate` is a percentage (0–100, 40 means 40%), fixed CDX bundles enforce `maxFields` and forward `validateFields`, and kwargs and override maps enforce `maxStringChars`, entry limits, and unique normalized keys.
 - **Large modules were split along existing seams** with public names unchanged: Python `blp.py`, the `@xbbg/core` entry module, the Rust engine's `engine/mod.rs`, and the `@xbbg/langgraph` result limiter.
 - **Benchmarks measure production code.** The subscription replay benchmarks drive the real `SubscriptionArrowBatcher`, and the BQL parser and extractor benchmarks share one fixture table.
+- **CI tests against pandas 3 and polars 2.** The Python test matrix requires pandas 3 (on Python 3.11 and later, which pandas 3 needs) and polars 2, the pixi test environments lock polars 2 (1.44 on Python 3.10, where conda-forge has no polars 2), and the declared-floors job still covers pandas 2.2.2 and polars 0.20.4.
+- **CI no longer installs Bloomberg's `blpapi` Python package.** The Python test jobs load the C++ SDK runtime from the SDK setup action on every OS, Windows included.
 
 ### Removed
 
@@ -45,6 +48,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **BQR's default window** is computed from the current UTC time with offset-aware start times.
 - **The README notebook uses the current API** with stale outputs removed, and the Python benchmark harness drops a comparison lane its install instructions could never create.
 - **Large BQL results keep omitted secondary columns.** Results over 32 KiB dropped a secondary column such as `DATE` or `CURRENCY` when Bloomberg omitted its values; they now return it as nulls, as smaller results already did.
+- **The Python LangGraph adapter's CI tests use the wheel under test.** Installing the adapter replaced the freshly built `xbbg` wheel with the newest PyPI release, because the untagged CI build's version sits below the adapter's `xbbg>=1.5.0` floor.
 
 ## [1.5.1] - 2026-10-07
 

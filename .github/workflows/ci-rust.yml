@@ -527,7 +527,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
         exclude:
@@ -644,7 +644,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
 
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
@@ -689,15 +689,26 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
 
-      - name: Install blpapi from Bloomberg
-        run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
+      - name: Setup Bloomberg SDK (Windows)
+        if: runner.os == 'Windows'
+        id: sdk-windows
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Windows
 
       - name: Install wheel and test dependencies
         shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
         run: |
           # Install the specific wheel for this Python version
           WHEEL=$(echo dist/*.whl)
-          uv pip install --system "${WHEEL}[test]"
+          # Hold the suite to the current dataframe majors so a resolver
+          # fallback cannot quietly test older ones. pandas 3 needs Python 3.11+.
+          majors=("polars>=2")
+          if [[ "$PYTHON_VERSION" != "3.10" ]]; then majors+=("pandas>=3"); fi
+          uv pip install --system "${WHEEL}[test]" "${majors[@]}"
 
       - name: Copy tests to temp directory
         # Run from temp dir to avoid importing local source instead of installed package
@@ -722,10 +733,21 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+      # xbbg-langgraph stays below 3.15 until LangGraph's dependency chain
+      # builds there: ormsgpack 1.12.2 (via langgraph-checkpoint) ships no 3.15
+      # wheels and its PyO3 0.27 refuses to compile for 3.15.
       - name: Install Python LangGraph adapter
-        run: uv pip install --system "./py-xbbg-langgraph[test]"
+        if: matrix.python != '3.15'
+        shell: bash
+        # This run's wheel carries an untagged CI version below the adapter's
+        # `xbbg>=1.5.0` floor. Without the override uv swaps it for the newest
+        # PyPI release, and the adapter tests would exercise that instead.
+        run: |
+          python -c "import glob, pathlib; print('xbbg @ ' + pathlib.Path(glob.glob('dist/*.whl')[0]).resolve().as_uri())" > "${{ runner.temp }}/xbbg-override.txt"
+          uv pip install --system --override "${{ runner.temp }}/xbbg-override.txt" "./py-xbbg-langgraph[test]"
 
       - name: Test Python LangGraph adapter
+        if: matrix.python != '3.15'
         run: pytest py-xbbg-langgraph/tests -v
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -768,13 +790,8 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Install blpapi from Bloomberg
-        run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
-
       - name: Install wheel at declared floors
         shell: bash
-        # Scoped to this step on purpose: as a job-level variable it would also
-        # drag the blpapi install above down to its oldest release.
         env:
           UV_RESOLUTION: lowest-direct
         run: |

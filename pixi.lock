@@ -29,7 +29,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.14.6-py314hd8ed1ab_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.14.6-h4df99d1_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314.conda
@@ -118,7 +118,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py314he609de1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py314he55896b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py314h7e6a90b_0_cpu.conda
@@ -236,7 +236,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py314hd70f1f7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py314hd45ef80_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py314h4a0a9a7_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py314h061e8c0_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py314h9de4539_0_cpu.conda
@@ -256,7 +256,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libgcc-devel_linux-64-16.1.0-h59071f9_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-unknown-linux-gnu-1.97.1-h2c6d0dc_1.conda
@@ -280,7 +280,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-h4c7d964_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
@@ -359,7 +359,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py314he4c2ca6_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py314h3736bcd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py314h89c1ac6_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py314h9be668a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py314h4b2c0cd_0_cpu.conda
@@ -403,7 +403,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.14.6-py314hd8ed1ab_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.14.6-h4df99d1_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314.conda
@@ -492,7 +492,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py314he609de1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py314he55896b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py314h7e6a90b_0_cpu.conda
@@ -669,7 +669,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py314hd70f1f7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py314hd45ef80_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py314h4a0a9a7_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py314h061e8c0_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py314h9de4539_0_cpu.conda
@@ -689,7 +689,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libgcc-devel_linux-64-16.1.0-h59071f9_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-unknown-linux-gnu-1.97.1-h2c6d0dc_1.conda
@@ -776,7 +776,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-h4c7d964_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
@@ -855,7 +855,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py314he4c2ca6_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py314h3736bcd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py314h89c1ac6_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py314h9be668a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py314h4b2c0cd_0_cpu.conda
@@ -1189,7 +1189,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.44.1-pyh8da0edf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.10.20-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -1281,7 +1281,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-2.3.3-py310h25f4b65_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.44.1-py310h9b16bf9_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py310hb6292c7_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py310h92a7759_0_cpu.conda
@@ -1399,7 +1399,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-2.3.3-py310h0158d43_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py310h9585f58_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.44.1-py310h90887b8_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py310hff52083_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py310h382fff3_0_cpu.conda
@@ -1422,7 +1422,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.44.1-pyh8da0edf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.10.20-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -1453,7 +1453,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.44.1-pyh8da0edf_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.10.20-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -1535,7 +1535,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-2.3.3-py310hed136d8_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py310h60426dd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.44.1-py310hdaf7fe2_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py310h5588dad_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py310hc34f82c_0_cpu.conda
@@ -1579,7 +1579,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.11.15-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.11-8_cp311.conda
@@ -1669,7 +1669,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py311h8948835_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py311ha1ab1f8_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py311h6894905_0_cpu.conda
@@ -1784,7 +1784,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py311h8032f78_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py310h9585f58_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py311hb519a9e_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py311h38be061_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py311h66caee6_0_cpu.conda
@@ -1807,7 +1807,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.11.15-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.11-8_cp311.conda
@@ -1833,7 +1833,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.11.15-hd8ed1ab_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -1914,7 +1914,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py311h0610301_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py310h60426dd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py311hb4e3305_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py311h1ea47a8_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py311hee28c0d_0_cpu.conda
@@ -1955,7 +1955,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.12.13-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.12-8_cp312.conda
@@ -2045,7 +2045,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py312h6510ced_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py312h1f38498_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py312h7d9569a_0_cpu.conda
@@ -2160,7 +2160,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py312h8ecdadd_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py310h9585f58_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py311hb519a9e_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py312h7900ff3_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py312h2054cf2_0_cpu.conda
@@ -2183,7 +2183,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.12.13-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.12-8_cp312.conda
@@ -2209,7 +2209,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/packaging-26.3-pyhc364b38_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh8b19718_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.12.13-hd8ed1ab_1.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -2290,7 +2290,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py312h95189c4_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py310h60426dd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py311hb4e3305_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py312h2e8e312_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py312h12c7521_0_cpu.conda
@@ -2330,7 +2330,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.13.15-py313hd8ed1ab_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.13.15-h4df99d1_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.13-8_cp313.conda
@@ -2419,7 +2419,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py313h1188861_1.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py313h39782a4_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py313ha5d34ea_0_cpu.conda
@@ -2533,7 +2533,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py313hbfd7664_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py310h9585f58_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py311hb519a9e_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py313h78bf25f_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py313h98bfbea_0_cpu.conda
@@ -2555,7 +2555,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libgcc-devel_linux-64-16.1.0-h59071f9_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.13.15-h4df99d1_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.13-8_cp313.conda
@@ -2578,7 +2578,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.13.15-py313hd8ed1ab_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.13.15-h4df99d1_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
@@ -2658,7 +2658,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py313h26f5e95_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py310h60426dd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py311hb4e3305_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py313hfa70ccb_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py313hc76bb52_0_cpu.conda
@@ -2698,7 +2698,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.14.6-py314hd8ed1ab_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.14.6-h4df99d1_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314.conda
@@ -2787,7 +2787,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py314he609de1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py314he55896b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py314h7e6a90b_0_cpu.conda
@@ -2901,7 +2901,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py314hd70f1f7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py314hd45ef80_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py314h4a0a9a7_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py314h061e8c0_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py314h9de4539_0_cpu.conda
@@ -2921,7 +2921,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libgcc-devel_linux-64-16.1.0-h59071f9_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-unknown-linux-gnu-1.97.1-h2c6d0dc_1.conda
@@ -2941,7 +2941,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-h4c7d964_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
@@ -3020,7 +3020,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py314he4c2ca6_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py314h3736bcd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py314h89c1ac6_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py314h9be668a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py314h4b2c0cd_0_cpu.conda
@@ -3060,7 +3060,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/cpython-3.14.6-py314hd8ed1ab_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-gil-3.14.6-h4df99d1_102.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314.conda
@@ -3149,7 +3149,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/orc-2.3.1-hef2a647_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pandas-3.0.5-py314he609de1_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pkg-config-0.29.2-hdc6e874_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-25.0.0-py314he55896b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/osx-arm64/pyarrow-core-25.0.0-py314h7e6a90b_0_cpu.conda
@@ -3263,7 +3263,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/linux-64/orc-2.3.1-h443056b_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pandas-3.0.5-py314hd70f1f7_1.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pkg-config-0.29.2-h7c397b8_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py314hd45ef80_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py314h4a0a9a7_2.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-25.0.0-py314h061e8c0_0.conda
       - conda: https://conda.anaconda.org/conda-forge/linux-64/pyarrow-core-25.0.0-py314h9de4539_0_cpu.conda
@@ -3283,7 +3283,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/libgcc-devel_linux-64-16.1.0-h59071f9_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/libstdcxx-devel_linux-64-16.1.0-h41cdd0d_101.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/rust-std-x86_64-unknown-linux-gnu-1.97.1-h2c6d0dc_1.conda
@@ -3303,7 +3303,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/noarch/ca-certificates-2026.7.22-h4c7d964_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/duckdb-1.5.5-hff2d567_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/pip-26.2.1-pyh145f28c_0.conda
-      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python-tzdata-2026.3-pyhd8ed1ab_0.conda
       - conda: https://conda.anaconda.org/conda-forge/noarch/python_abi-3.14-8_cp314t.conda
@@ -3382,7 +3382,7 @@ environments:
       - conda: https://conda.anaconda.org/conda-forge/win-64/pandas-3.0.5-py314he4c2ca6_1.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pcre2-10.47-hd2b5f0e_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pkg-config-0.29.2-hffdb5b9_1011.conda
-      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py314h3736bcd_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py314h89c1ac6_2.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-25.0.0-py314h9be668a_0.conda
       - conda: https://conda.anaconda.org/conda-forge/win-64/pyarrow-core-25.0.0-py314h4b2c0cd_0_cpu.conda
@@ -5375,15 +5375,15 @@ packages:
   run_exports: {}
   size: 141002
   timestamp: 1786352333107
-- conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py310h9585f58_0.conda
+- conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.44.1-py310h90887b8_0.conda
   noarch: python
-  sha256: ba6c79dd4c74a41d866b6716e2d22e1d656f099cbd17b2039c7933181d571793
-  md5: 912d8eb6fdbea640f27c5e97859be85b
+  sha256: 954fcef67506ab6ae294e7a148431942cbdc87f4caf5f1f164848557a968841c
+  md5: 24f967fe60ca561c2bed10814d264ad1
   depends:
   - python
-  - libgcc >=14
-  - libstdcxx >=14
+  - libgcc >=15
   - __glibc >=2.17,<3.0.a0
+  - libstdcxx >=15
   - _python_abi3_support 1.*
   - cpython >=3.10
   constrains:
@@ -5393,15 +5393,35 @@ packages:
   purls:
   - pkg:pypi/polars-runtime-32?source=hash-mapping
   run_exports: {}
-  size: 41707372
-  timestamp: 1785582019869
-- conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-1.43.2-py314hd45ef80_0.conda
-  sha256: d5657514f3851c3c122e526469b8da18bc4c979d8c81536a382544ac93838710
-  md5: af451e9bfa37e63117c5813837bdd34c
+  size: 41487215
+  timestamp: 1787748957373
+- conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py311hb519a9e_2.conda
+  noarch: python
+  sha256: de0260778133bcc432db4a3ce4f220c73b32d1d8befed0ab092fa0bed6f71cee
+  md5: 0c125354bff12e802475485434c09624
   depends:
   - python
-  - libstdcxx >=14
-  - libgcc >=14
+  - libstdcxx >=15
+  - libgcc >=15
+  - __glibc >=2.17,<3.0.a0
+  - _python_abi3_support 1.*
+  - cpython >=3.11
+  constrains:
+  - __glibc >=2.17
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/polars-runtime-32?source=hash-mapping
+  run_exports: {}
+  size: 40971980
+  timestamp: 1791561649215
+- conda: https://conda.anaconda.org/conda-forge/linux-64/polars-runtime-32-2.0.0-py314h4a0a9a7_2.conda
+  sha256: fbf362462f1665a9f00aeadb1dc71a3ec4bbde5e188a89933d57d3198ae4d98a
+  md5: c10ebbbc553fb49308996effecb9e391
+  depends:
+  - python
+  - libgcc >=15
+  - libstdcxx >=15
   - __glibc >=2.17,<3.0.a0
   - python_abi 3.14.* *_cp314t
   constrains:
@@ -5410,8 +5430,8 @@ packages:
   license_family: MIT
   purls: []
   run_exports: {}
-  size: 40228412
-  timestamp: 1785582028130
+  size: 40964531
+  timestamp: 1791561654441
 - conda: https://conda.anaconda.org/conda-forge/linux-64/prometheus-cpp-1.3.0-ha5d0236_0.conda
   sha256: 013669433eb447548f21c3c6b16b2ed64356f726b5f77c1b39d5ba17a8a4b8bc
   md5: a83f6a2fdc079e643237887a37460668
@@ -6200,11 +6220,11 @@ packages:
   run_exports: {}
   size: 1199593
   timestamp: 1785914492234
-- conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.43.2-pyh8da0edf_0.conda
-  sha256: 00cdfd4dbf90c68058885e888fb9b1e92d597611206568705214b786229224d5
-  md5: fbca53c3325e69df796fcef948ec9aaa
+- conda: https://conda.anaconda.org/conda-forge/noarch/polars-1.44.1-pyh8da0edf_0.conda
+  sha256: 04a1d4401656be9ab8df89b8a850c9a3e4d0e58176d114ee95dd8d5446b92b4f
+  md5: 2ea66c4626a66a757455650409e92ebc
   depends:
-  - polars-runtime-32 ==1.43.2
+  - polars-runtime-32 ==1.44.1
   - python >=3.10
   - python
   constrains:
@@ -6218,16 +6238,44 @@ packages:
   - pyiceberg >=0.7.1
   - altair >=5.4.0
   - great_tables >=0.8.0
-  - polars-runtime-32 ==1.43.2
-  - polars-runtime-64 ==1.43.2
-  - polars-runtime-compat ==1.43.2
+  - polars-runtime-32 ==1.44.1
+  - polars-runtime-64 ==1.44.1
+  - polars-runtime-compat ==1.44.1
   license: MIT
   license_family: MIT
   purls:
   - pkg:pypi/polars?source=hash-mapping
   run_exports: {}
-  size: 549013
-  timestamp: 1785582019869
+  size: 558812
+  timestamp: 1787748957373
+- conda: https://conda.anaconda.org/conda-forge/noarch/polars-2.0.0-pyh3138b34_2.conda
+  sha256: 4dda7aacaacfb08134155ab32769e4cf74572ae8d2b01191aa19756e023829d7
+  md5: 7c669f4b48a5633d98f239dc2825e45a
+  depends:
+  - polars-runtime-32 ==2.0.0
+  - python >=3.11
+  - python
+  constrains:
+  - numpy >=1.16.0
+  - pyarrow >=7.0.0
+  - fastexcel >=0.9
+  - openpyxl >=3.0.0
+  - xlsx2csv >=0.8.0
+  - connectorx >=0.3.2
+  - deltalake >=1.0.0
+  - pyiceberg >=0.7.1
+  - altair >=5.4.0
+  - great_tables >=0.8.0
+  - polars-runtime-32 ==2.0.0
+  - polars-runtime-64 ==2.0.0
+  - polars-runtime-compat ==2.0.0
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/polars?source=compressed-mapping
+  run_exports: {}
+  size: 570232
+  timestamp: 1791561649215
 - conda: https://conda.anaconda.org/conda-forge/noarch/python-dateutil-2.9.0.post0-pyhe01879c_2.conda
   sha256: d6a17ece93bbd5139e02d2bd7dbfa80bee1a4261dced63f65f679121686bf664
   md5: 5b8d21249ff20967101ffa321cab24e8
@@ -8255,13 +8303,13 @@ packages:
   run_exports: {}
   size: 274286
   timestamp: 1786352332199
-- conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.43.2-py310hcbcba24_0.conda
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-1.44.1-py310h9b16bf9_0.conda
   noarch: python
-  sha256: 2c7e90b2614257da2cb220b19c4dd420444c7ae8d2692caaedcd43c1184fa01a
-  md5: f9c536a3a5d4117e1d5c6b61d8f791ea
+  sha256: 81979d39c2b8204b81bf5560182ea241bf4436f8a4197df6f782273a70e0acec
+  md5: a37c43c7d9d7a7b783e6bca78f1e6b6e
   depends:
   - python
-  - libcxx >=19
+  - libcxx >=21
   - __osx >=11.0
   - _python_abi3_support 1.*
   - cpython >=3.10
@@ -8272,8 +8320,27 @@ packages:
   purls:
   - pkg:pypi/polars-runtime-32?source=hash-mapping
   run_exports: {}
-  size: 36474118
-  timestamp: 1785581928504
+  size: 36966276
+  timestamp: 1787748854971
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/polars-runtime-32-2.0.0-py311h1c79744_2.conda
+  noarch: python
+  sha256: 550370ea84c1fbb14de1cd0b9452b900661462438aadea6524c0f99bb50e44ef
+  md5: a4863f382d507c03141473cd04f7986f
+  depends:
+  - python
+  - __osx >=11.0
+  - libcxx >=21
+  - _python_abi3_support 1.*
+  - cpython >=3.11
+  constrains:
+  - __osx >=11.0
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/polars-runtime-32?source=hash-mapping
+  run_exports: {}
+  size: 36496770
+  timestamp: 1791561493615
 - conda: https://conda.anaconda.org/conda-forge/osx-arm64/prometheus-cpp-1.3.0-h0967b3e_0.conda
   sha256: 851a77ae1a8e90db9b9f3c4466abea7afb52713c3d98ceb0d37ba6ff27df2eff
   md5: 7172339b49c94275ba42fec3eaeda34f
@@ -10462,10 +10529,10 @@ packages:
   run_exports: {}
   size: 37874
   timestamp: 1786352311111
-- conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py310h60426dd_0.conda
+- conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.44.1-py310hdaf7fe2_0.conda
   noarch: python
-  sha256: 12efe150af6565040870d260cb4e5da5d81a2796fb8e01b0232e4da49badf63c
-  md5: 74f09dd575ef234fd3640bddf3a452be
+  sha256: ab206c020bf81f8f3badc67a9e56ddef184e85914a799d1941fb45fd6f10688a
+  md5: 0c865538e74f10234b109c712665c5ed
   depends:
   - python
   - vc >=14.3,<15
@@ -10478,11 +10545,29 @@ packages:
   purls:
   - pkg:pypi/polars-runtime-32?source=hash-mapping
   run_exports: {}
-  size: 42861903
-  timestamp: 1785581869011
-- conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-1.43.2-py314h3736bcd_0.conda
-  sha256: 13f755d67a1655617fe3d5a8a402bf07f117126f6af65f94a0ec536df32f3538
-  md5: e021865f73268b673751ef9c2529208a
+  size: 43285816
+  timestamp: 1787748825821
+- conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py311hb4e3305_2.conda
+  noarch: python
+  sha256: cc265c27d19f2fb765447481308749060e8a7e4d3532d77ccd266708ad708e8a
+  md5: b549007ea71d991be6a8b5f9ab58b23f
+  depends:
+  - python
+  - vc >=14.3,<15
+  - vc14_runtime >=14.44.35208
+  - ucrt >=10.0.20348.0
+  - _python_abi3_support 1.*
+  - cpython >=3.11
+  license: MIT
+  license_family: MIT
+  purls:
+  - pkg:pypi/polars-runtime-32?source=hash-mapping
+  run_exports: {}
+  size: 43398772
+  timestamp: 1791561473245
+- conda: https://conda.anaconda.org/conda-forge/win-64/polars-runtime-32-2.0.0-py314h89c1ac6_2.conda
+  sha256: 10c37d67d9ae74d0b8f8aa1b3102c6601eb7ee2126d6078cf90357ae904d77de
+  md5: 112a47004015f040873c63d0519574fb
   depends:
   - python
   - vc >=14.3,<15
@@ -10494,8 +10579,8 @@ packages:
   purls:
   - pkg:pypi/polars-runtime-32?source=hash-mapping
   run_exports: {}
-  size: 42777294
-  timestamp: 1785581869763
+  size: 43324362
+  timestamp: 1791561552489
 - conda: https://conda.anaconda.org/conda-forge/win-64/prometheus-cpp-1.3.0-hcea2f5d_0.conda
   sha256: ed08acd2ce6c69063693193450df89e8695e8b1251b399d34fb56ab45d900cbc
   md5: 128297355faf0afcb84e22e43d472101
