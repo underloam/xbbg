@@ -59,6 +59,8 @@
     "eslint/require-await": "off",
     "eslint/sort-keys": "off",
     "eslint/sort-imports": "off",
+    // One declarator per statement is the convention here; the default "always" merges unrelated declarations.
+    "eslint/one-var": ["error", "never"],
     "eslint-plugin-import/no-anonymous-default-export": "off",
     "eslint-plugin-import/no-default-export": "off",
     "eslint-plugin-import/no-namespace": "off",
