@@ -45,6 +45,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **BQR's default window** is computed from the current UTC time with offset-aware start times.
 - **The README notebook uses the current API** with stale outputs removed, and the Python benchmark harness drops a comparison lane its install instructions could never create.
 - **Large BQL results keep omitted secondary columns.** Results over 32 KiB dropped a secondary column such as `DATE` or `CURRENCY` when Bloomberg omitted its values; they now return it as nulls, as smaller results already did.
+- **The Python LangGraph adapter's CI tests use the wheel under test.** Installing the adapter replaced the freshly built `xbbg` wheel with the newest PyPI release, because the untagged CI build's version sits below the adapter's `xbbg>=1.5.0` floor.
 
 ## [1.5.1] - 2026-10-07
 

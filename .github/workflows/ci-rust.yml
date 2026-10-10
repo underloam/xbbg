@@ -723,7 +723,13 @@ jobs:
           fail_ci_if_error: false
 
       - name: Install Python LangGraph adapter
-        run: uv pip install --system "./py-xbbg-langgraph[test]"
+        shell: bash
+        # This run's wheel carries an untagged CI version below the adapter's
+        # `xbbg>=1.5.0` floor. Without the override uv swaps it for the newest
+        # PyPI release, and the adapter tests would exercise that instead.
+        run: |
+          python -c "import glob, pathlib; print('xbbg @ ' + pathlib.Path(glob.glob('dist/*.whl')[0]).resolve().as_uri())" > "${{ runner.temp }}/xbbg-override.txt"
+          uv pip install --system --override "${{ runner.temp }}/xbbg-override.txt" "./py-xbbg-langgraph[test]"
 
       - name: Test Python LangGraph adapter
         run: pytest py-xbbg-langgraph/tests -v
