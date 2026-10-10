@@ -11,8 +11,8 @@ use xbbg_log::trace;
 
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
-    append_long_value_row, common_value_type, get_value_cached_datatype, top_level_response_error,
-    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns,
+    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns, append_long_value_row,
+    common_value_type, get_value_cached_datatype, top_level_response_error,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
@@ -292,11 +292,11 @@ impl RefDataState {
             trace!("No securityData in message");
             return;
         };
-        if self.format == OutputFormat::Long && self.long_mode == LongMode::Typed {
-            if let Some(columns) = self.typed_long_columns.as_mut() {
-                columns
-                    .reserve_if_empty(security_data.len().saturating_mul(self.field_names.len()));
-            }
+        if self.format == OutputFormat::Long
+            && self.long_mode == LongMode::Typed
+            && let Some(columns) = self.typed_long_columns.as_mut()
+        {
+            columns.reserve_if_empty(security_data.len().saturating_mul(self.field_names.len()));
         }
 
         // Iterate through each security
@@ -482,8 +482,8 @@ mod tests {
         Array, Date32Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
     };
     use arrow_schema::{DataType, TimeUnit};
-    use xbbg_core::test_support::TestEvent;
     use xbbg_core::EventType;
+    use xbbg_core::test_support::TestEvent;
 
     fn temporal_response(historical: bool) -> TestEvent {
         let (message_type, securities_array, data_array) = if historical {

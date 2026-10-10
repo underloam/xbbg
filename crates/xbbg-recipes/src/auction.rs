@@ -15,8 +15,8 @@ use xbbg_async::engine::state::typed_builder::{ArrowType, TypedBuilder};
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::auction::{
-    normalize_security_input, pfd_pricing_source, route_venue, validate_venue, VenueDecision,
-    VenueReference, VenueStatus, DEFAULT,
+    DEFAULT, VenueDecision, VenueReference, VenueStatus, normalize_security_input,
+    pfd_pricing_source, route_venue, validate_venue,
 };
 
 use crate::error::Result;
@@ -113,10 +113,10 @@ impl VenueCache {
             {
                 continue;
             }
-            if self.entries.len() == self.max_entries {
-                if let Some(key) = self.insertion_order.pop_front() {
-                    self.entries.remove(&key);
-                }
+            if self.entries.len() == self.max_entries
+                && let Some(key) = self.insertion_order.pop_front()
+            {
+                self.entries.remove(&key);
             }
             self.insertion_order.push_back(Arc::clone(&row.cache_key));
             self.entries.insert(
@@ -1112,12 +1112,14 @@ mod tests {
                 )),
                 securities
             );
-            assert!(routing_lookups(&plan_venue_lookups(
-                venue_cache_keys(&securities, &other_overrides),
-                &mut cache,
-                now,
-            ))
-            .is_empty());
+            assert!(
+                routing_lookups(&plan_venue_lookups(
+                    venue_cache_keys(&securities, &other_overrides),
+                    &mut cache,
+                    now,
+                ))
+                .is_empty()
+            );
         }
     }
 
@@ -1206,12 +1208,14 @@ mod tests {
             securities
         );
         seed_equity(&mut cache, "SYNTH_A", "Z1", later);
-        assert!(routing_lookups(&plan_venue_lookups(
-            venue_cache_keys(&securities, &overrides),
-            &mut cache,
-            later,
-        ))
-        .is_empty());
+        assert!(
+            routing_lookups(&plan_venue_lookups(
+                venue_cache_keys(&securities, &overrides),
+                &mut cache,
+                later,
+            ))
+            .is_empty()
+        );
     }
 
     #[test]
@@ -1509,12 +1513,14 @@ mod tests {
                 .collect::<Vec<_>>(),
             expected_names
         );
-        assert!(batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap()
-            .value(0));
+        assert!(
+            batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(0)
+        );
         assert_eq!(
             batch
                 .column(6)
@@ -1809,12 +1815,14 @@ mod tests {
             as_string_col(&batch, "status").unwrap().value(0),
             "resolved"
         );
-        assert!(!batch
-            .column(5)
-            .as_any()
-            .downcast_ref::<BooleanArray>()
-            .unwrap()
-            .value(0));
+        assert!(
+            !batch
+                .column(5)
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .unwrap()
+                .value(0)
+        );
     }
 
     #[test]

@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_array::RecordBatch;
+use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
 use tokio::sync::oneshot;
 

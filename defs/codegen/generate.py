@@ -1200,7 +1200,7 @@ def _rustfmt(text: str) -> str:
     if rustfmt is None:
         return text
     result = subprocess.run(
-        [rustfmt, "--edition", "2021"],
+        [rustfmt, "--edition", "2024"],
         input=text,
         capture_output=True,
         text=True,

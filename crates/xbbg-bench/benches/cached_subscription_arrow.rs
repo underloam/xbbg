@@ -16,11 +16,11 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use xbbg_async::engine::state::{
-    subscription_channel, subscription_update_to_record_batch, MessageOutcome,
-    SubscriptionReceiver, SubscriptionState,
-};
 use xbbg_async::engine::OverflowPolicy;
+use xbbg_async::engine::state::{
+    MessageOutcome, SubscriptionReceiver, SubscriptionState, subscription_channel,
+    subscription_update_to_record_batch,
+};
 use xbbg_bench::{message_count, write_json};
 use xbbg_core::{CorrelationId, Event, EventType, Session, SessionOptions, SubscriptionList};
 

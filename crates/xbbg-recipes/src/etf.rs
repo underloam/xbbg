@@ -25,13 +25,13 @@ use std::collections::hash_map::Entry as HashEntry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
-use arrow_array::builder::{Date32Builder, Float64Builder, Int32Builder, StringBuilder};
 use arrow_array::RecordBatch;
+use arrow_array::builder::{Date32Builder, Float64Builder, Int32Builder, StringBuilder};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::NaiveDate;
 use xbbg_async::engine::state::{
-    FieldExceptionMeta, SecurityErrorMeta, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS,
+    FieldExceptionMeta, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
+    SecurityErrorMeta,
 };
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -1320,9 +1320,11 @@ mod tests {
 
         let error = prepare_etf_inputs(&[QQQ.to_string(), "   ".to_string()]).unwrap_err();
         assert!(matches!(error, RecipeError::InvalidArgument(_)));
-        assert!(error
-            .to_string()
-            .contains("ETF ticker at input_order 1 is empty"));
+        assert!(
+            error
+                .to_string()
+                .contains("ETF ticker at input_order 1 is empty")
+        );
     }
 
     #[test]
@@ -1347,9 +1349,11 @@ mod tests {
 
         let error = parse_history_range("2026-07-01", "2026-06-01").unwrap_err();
         assert!(matches!(error, RecipeError::InvalidArgument(_)));
-        assert!(error
-            .to_string()
-            .contains("end_date 2026-06-01 is before start_date 2026-07-01"));
+        assert!(
+            error
+                .to_string()
+                .contains("end_date 2026-06-01 is before start_date 2026-07-01")
+        );
 
         assert!(parse_history_range("not-a-date", "2026-07-01").is_err());
     }
@@ -1514,15 +1518,19 @@ mod tests {
 
         let malformed = with_metadata(&batch, &[(METADATA_KEY_SECURITY_ERRORS, "{not json")]);
         let error = parse_response_diagnostics(&malformed).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("invalid xbbg.security_errors metadata:"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid xbbg.security_errors metadata:")
+        );
 
         let malformed = with_metadata(&batch, &[(METADATA_KEY_FIELD_EXCEPTIONS, "[42]")]);
         let error = parse_response_diagnostics(&malformed).unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("invalid xbbg.field_exceptions metadata:"));
+        assert!(
+            error
+                .to_string()
+                .contains("invalid xbbg.field_exceptions metadata:")
+        );
     }
 
     #[test]
@@ -2042,9 +2050,11 @@ mod tests {
         assert_eq!(qqq_rows[1].inav_value, Some(500.5));
         assert_eq!(qqq_rows[2].nav_value, None);
         assert_eq!(qqq_rows[2].inav_value, Some(501.5));
-        assert!(qqq_rows
-            .iter()
-            .all(|row| row.nav_source_ticker == QQQ_NAV && row.nav_source_field == "PX_LAST"));
+        assert!(
+            qqq_rows
+                .iter()
+                .all(|row| row.nav_source_ticker == QQQ_NAV && row.nav_source_field == "PX_LAST")
+        );
 
         let at1_rows: Vec<_> = rows.iter().filter(|row| row.input_order == 1).collect();
         assert_eq!(
@@ -2066,10 +2076,12 @@ mod tests {
         // Duplicate inputs re-emit the same ordered series.
         let duplicate_rows: Vec<_> = rows.iter().filter(|row| row.input_order == 2).collect();
         assert_eq!(duplicate_rows.len(), at1_rows.len());
-        assert!(duplicate_rows
-            .iter()
-            .zip(&at1_rows)
-            .all(|(a, b)| a.date == b.date && a.nav_value == b.nav_value));
+        assert!(
+            duplicate_rows
+                .iter()
+                .zip(&at1_rows)
+                .all(|(a, b)| a.date == b.date && a.nav_value == b.nav_value)
+        );
 
         let batch = build_history_batch(&rows).unwrap();
         assert_eq!(batch.num_rows(), rows.len());

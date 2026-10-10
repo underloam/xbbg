@@ -12,7 +12,7 @@ use arrow::record_batch::RecordBatch;
 use arrow::util::display::{ArrayFormatter, FormatOptions};
 use rmcp::ErrorData;
 use serde::Serialize;
-use serde_json::{json, Map, Number, Value};
+use serde_json::{Map, Number, Value, json};
 use xbbg_core::EntitlementCheck;
 
 use crate::request_adapter::MAX_ENTITLEMENT_EIDS;
@@ -856,13 +856,13 @@ fn bound_metadata_value(
                     max_properties.saturating_sub(returned_properties + 1),
                     child_budget,
                 )?;
-                if !child_value.property_count_complete {
-                    if let Some(atomic_properties) = atomic_object_properties(child) {
-                        known_omitted_properties =
-                            known_omitted_properties.saturating_add(1 + atomic_properties);
-                        property_count_complete = false;
-                        continue;
-                    }
+                if !child_value.property_count_complete
+                    && let Some(atomic_properties) = atomic_object_properties(child)
+                {
+                    known_omitted_properties =
+                        known_omitted_properties.saturating_add(1 + atomic_properties);
+                    property_count_complete = false;
+                    continue;
                 }
                 let candidate_bytes = bytes
                     .saturating_add(overhead)
@@ -913,13 +913,13 @@ fn bound_metadata_value(
                     max_properties.saturating_sub(returned_properties + 1),
                     child_budget,
                 )?;
-                if !child_value.property_count_complete {
-                    if let Some(atomic_properties) = atomic_object_properties(child) {
-                        known_omitted_properties =
-                            known_omitted_properties.saturating_add(1 + atomic_properties);
-                        property_count_complete = false;
-                        continue;
-                    }
+                if !child_value.property_count_complete
+                    && let Some(atomic_properties) = atomic_object_properties(child)
+                {
+                    known_omitted_properties =
+                        known_omitted_properties.saturating_add(1 + atomic_properties);
+                    property_count_complete = false;
+                    continue;
                 }
                 let candidate_bytes = bytes
                     .saturating_add(separator)
@@ -1773,9 +1773,11 @@ mod tests {
             payload["metadata"]["xbbg.security_errors"]["A"],
             json!({"category": "BAD_SEC", "message": "first"})
         );
-        assert!(payload["metadata"]["xbbg.security_errors"]
-            .get("B")
-            .is_none());
+        assert!(
+            payload["metadata"]["xbbg.security_errors"]
+                .get("B")
+                .is_none()
+        );
         assert_eq!(
             payload["truncation_counts"]["known_omitted_metadata_properties"],
             1
@@ -1820,13 +1822,17 @@ mod tests {
 
         assert!(!returned.is_empty());
         assert!(returned.len() < diagnostics.len());
-        assert!(returned
-            .values()
-            .all(|record| { record.get("category").is_some() && record.get("message").is_some() }));
-        assert!(returned.values().next().unwrap()["message"]
-            .as_str()
-            .unwrap()
-            .ends_with('…'));
+        assert!(
+            returned.values().all(|record| {
+                record.get("category").is_some() && record.get("message").is_some()
+            })
+        );
+        assert!(
+            returned.values().next().unwrap()["message"]
+                .as_str()
+                .unwrap()
+                .ends_with('…')
+        );
         assert!(
             payload["truncation_counts"]["inspected_metadata_input_bytes"]
                 .as_u64()

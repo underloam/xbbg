@@ -297,8 +297,8 @@ fn json_escape(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::subscription_replay::replay;
-    use super::synthetic_subscriptions::{batch_updates, BATCH_SIZE};
-    use super::{bql_json_fixture, BQL_JSON_SCENARIOS};
+    use super::synthetic_subscriptions::{BATCH_SIZE, batch_updates};
+    use super::{BQL_JSON_SCENARIOS, bql_json_fixture};
     use arrow_array::{
         Array, BinaryArray, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray,
         TimestampMicrosecondArray,

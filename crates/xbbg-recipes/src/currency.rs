@@ -12,13 +12,13 @@ use std::sync::Arc;
 
 use arrow_arith::numeric::div;
 use arrow_array::{
-    builder::GenericStringBuilder, Array, ArrayRef, Date32Array, Float64Array, GenericStringArray,
-    LargeStringArray, OffsetSizeTrait, RecordBatch, StringArray, StringViewArray,
+    Array, ArrayRef, Date32Array, Float64Array, GenericStringArray, LargeStringArray,
+    OffsetSizeTrait, RecordBatch, StringArray, StringViewArray, builder::GenericStringBuilder,
 };
 use arrow_schema::{DataType, Field, Schema};
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
-use xbbg_ext::transforms::currency::{build_fx_pair, same_currency, FxConversionInfo};
+use xbbg_ext::transforms::currency::{FxConversionInfo, build_fx_pair, same_currency};
 use xbbg_ext::{fmt_date, parse_date};
 
 use crate::error::{RecipeError, Result};
@@ -622,10 +622,10 @@ fn resolve_fx_query_dates(
     let min_key = date_keys.iter().flatten().copied().min();
     let max_key = date_keys.iter().flatten().copied().max();
 
-    if let (Some(min_date), Some(max_date)) = (min_key, max_key) {
-        if let (Some(start), Some(end)) = (date32_to_naive(min_date), date32_to_naive(max_date)) {
-            return (fmt_date(start, None), fmt_date(end, None));
-        }
+    if let (Some(min_date), Some(max_date)) = (min_key, max_key)
+        && let (Some(start), Some(end)) = (date32_to_naive(min_date), date32_to_naive(max_date))
+    {
+        return (fmt_date(start, None), fmt_date(end, None));
     }
 
     (fallback_start.to_string(), fallback_end.to_string())

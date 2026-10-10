@@ -3,10 +3,10 @@
 //! Production parsing remains unchanged. The simd-json lanes explicitly separate
 //! parse-only timing (mutable input copy excluded) from inclusive copy+parse timing.
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use serde_json::Value;
 use std::hint::black_box;
-use xbbg_bench::{bql_json_fixture, BQL_JSON_SCENARIOS};
+use xbbg_bench::{BQL_JSON_SCENARIOS, bql_json_fixture};
 
 fn bench_bql_json_parsers(c: &mut Criterion) {
     let mut input_descriptor = String::from("cases=");

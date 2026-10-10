@@ -148,8 +148,8 @@ mod tests {
     use crate::engine::state::{HistDataState, LongMode, OutputFormat};
     use arrow_array::{Array, Int64Array, StringArray};
     use tokio::sync::oneshot;
-    use xbbg_core::test_support::TestEvent;
     use xbbg_core::EventType;
+    use xbbg_core::test_support::TestEvent;
 
     fn response(event_type: EventType, security: serde_json::Value) -> TestEvent {
         // TestUtil materializes declared fields even when JSON omits them.
@@ -351,8 +351,8 @@ mod tests {
     #[test]
     fn streaming_history_preserves_diagnostics_including_metadata_only_failures() {
         use crate::engine::state::value_utils::{
-            ResponseMetadata, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-            METADATA_KEY_SECURITY_ERRORS,
+            METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
+            ResponseMetadata,
         };
 
         let error = serde_json::json!({
@@ -407,10 +407,12 @@ mod tests {
             receiver.try_recv().unwrap().unwrap(),
         ];
         assert_eq!(chunks[1].num_rows(), 0);
-        assert!(chunks[1]
-            .schema_ref()
-            .metadata()
-            .contains_key(METADATA_KEY_SECURITY_ERRORS));
+        assert!(
+            chunks[1]
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_SECURITY_ERRORS)
+        );
         let combined = arrow_select::concat::concat_batches(&expected.schema(), &chunks).unwrap();
         let combined = ResponseMetadata::union_of(&chunks).attach(combined);
         assert_eq!(combined, expected);

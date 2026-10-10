@@ -314,11 +314,13 @@ async fn detach_is_refcounted_and_empty_session_is_released() {
     assert_eq!(session.unsubscribes.load(Ordering::Relaxed), 1);
     assert!(hub.feeds().is_empty());
     tokio::task::yield_now().await;
-    assert!(factory
-        .owners
-        .lock()
-        .iter()
-        .all(|owner| owner.upgrade().is_none()));
+    assert!(
+        factory
+            .owners
+            .lock()
+            .iter()
+            .all(|owner| owner.upgrade().is_none())
+    );
 }
 
 #[tokio::test]
@@ -541,12 +543,14 @@ async fn aliases_remove_and_latest_preserve_typed_values_and_explicit_clears() {
         3.0
     );
     assert!(latest.column(5).is_null(0));
-    assert!(latest
-        .column(2)
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .unwrap()
-        .value(0));
+    assert!(
+        latest
+            .column(2)
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .value(0)
+    );
     assert_eq!(
         stream.status().load().topic_statuses()["IBM"].feed_topic,
         "IBM US Equity"
@@ -685,10 +689,11 @@ async fn shutdown_publishes_terminal_errors_even_for_empty_handles() {
         stream.try_next(),
         Some(Err(BlpError::Internal { .. }))
     ));
-    assert!(hub
-        .subscribe(request(&["IBM US Equity"], &["BID"]))
-        .await
-        .is_err());
+    assert!(
+        hub.subscribe(request(&["IBM US Equity"], &["BID"]))
+            .await
+            .is_err()
+    );
 }
 
 #[tokio::test]
@@ -1033,10 +1038,11 @@ async fn isolated_and_non_market_aliases_create_independent_upstreams_on_the_sam
         assert_eq!(factory.sessions.lock().len(), 1);
         assert_eq!(session.subscribes.load(Ordering::Relaxed), 2);
         assert_eq!(hub.feeds().len(), 2);
-        assert!(hub
-            .feeds()
-            .iter()
-            .all(|feed| feed.isolated && feed.consumers == 1));
+        assert!(
+            hub.feeds()
+                .iter()
+                .all(|feed| feed.isolated && feed.consumers == 1)
+        );
         assert!(
             stream.try_next().is_none(),
             "isolated membership received a synthetic image"
@@ -1523,13 +1529,15 @@ async fn image_only_recovers_after_data_loss_while_row_consumers_fail_closed() {
     ));
     assert!(image.try_next().is_none());
     let latest = image.latest().unwrap();
-    assert!(!latest
-        .column_by_name("live")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .unwrap()
-        .value(0));
+    assert!(
+        !latest
+            .column_by_name("live")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .value(0)
+    );
     assert_eq!(
         latest
             .column_by_name("ASK")
@@ -1542,13 +1550,15 @@ async fn image_only_recovers_after_data_loss_while_row_consumers_fail_closed() {
     );
     assert_eq!(metrics.data_loss_events.load(Ordering::Relaxed), 1);
     let status = image.status();
-    assert!(status
-        .load()
-        .events()
-        .iter()
-        .any(|event| event.message_type == "DataLoss"
-            && event.category == super::super::SubscriptionEventCategory::Subscription
-            && event.level == SubscriptionEventLevel::Warning));
+    assert!(
+        status
+            .load()
+            .events()
+            .iter()
+            .any(|event| event.message_type == "DataLoss"
+                && event.category == super::super::SubscriptionEventCategory::Subscription
+                && event.level == SubscriptionEventLevel::Warning)
+    );
     cleanup(&hub).await;
     assert_eq!(session.resubscribes.load(Ordering::Relaxed), 1);
     assert_eq!(hub.feeds()[0].consumers, 1);
@@ -1586,29 +1596,35 @@ async fn image_only_recovers_after_data_loss_while_row_consumers_fail_closed() {
         latest.column_by_name("ASK").unwrap().is_null(0),
         "recovery retained a stale omitted field"
     );
-    assert!(!latest
-        .column_by_name("live")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .unwrap()
-        .value(0));
-    assert!(status
-        .load()
-        .events()
-        .iter()
-        .any(|event| event.message_type == "FeedRecovered"
-            && event.level == SubscriptionEventLevel::Info));
+    assert!(
+        !latest
+            .column_by_name("live")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .value(0)
+    );
+    assert!(
+        status
+            .load()
+            .events()
+            .iter()
+            .any(|event| event.message_type == "FeedRecovered"
+                && event.level == SubscriptionEventLevel::Info)
+    );
     data(&session, key, r#"{"ASK":13}"#);
-    assert!(image
-        .latest()
-        .unwrap()
-        .column_by_name("live")
-        .unwrap()
-        .as_any()
-        .downcast_ref::<BooleanArray>()
-        .unwrap()
-        .value(0));
+    assert!(
+        image
+            .latest()
+            .unwrap()
+            .column_by_name("live")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<BooleanArray>()
+            .unwrap()
+            .value(0)
+    );
     assert!(image.try_next().is_none());
 }
 
@@ -1809,18 +1825,22 @@ async fn zero_as_null_changes_only_latest_materialization() {
     assert!(latest.column_by_name("COUNT").unwrap().is_null(0));
     assert!(latest.column_by_name("ASK").unwrap().is_valid(0));
     assert!(latest.column_by_name("FLAG").unwrap().is_valid(0));
-    assert!(plain
-        .latest()
-        .unwrap()
-        .column_by_name("BID")
-        .unwrap()
-        .is_valid(0));
-    assert!(plain
-        .latest()
-        .unwrap()
-        .column_by_name("COUNT")
-        .unwrap()
-        .is_valid(0));
+    assert!(
+        plain
+            .latest()
+            .unwrap()
+            .column_by_name("BID")
+            .unwrap()
+            .is_valid(0)
+    );
+    assert!(
+        plain
+            .latest()
+            .unwrap()
+            .column_by_name("COUNT")
+            .unwrap()
+            .is_valid(0)
+    );
 }
 
 #[tokio::test]
@@ -2225,9 +2245,11 @@ async fn unattributable_admin_loss_starts_one_recovery_per_image_feed() {
         .collect();
     let (session, _) = test_feed(&hub, "IBM US Equity");
     session.admin_event("DataLoss");
-    assert!(metrics
-        .iter()
-        .all(|metric| metric.data_loss_events.load(Ordering::Relaxed) == 1));
+    assert!(
+        metrics
+            .iter()
+            .all(|metric| metric.data_loss_events.load(Ordering::Relaxed) == 1)
+    );
     cleanup(&hub).await;
     assert_eq!(session.resubscribes.load(Ordering::Relaxed), 2);
     assert_eq!(
@@ -2287,12 +2309,14 @@ async fn superseded_recovery_paint_is_not_published_or_retained_in_the_restart_i
             .value(0),
         1.0
     );
-    assert!(!image
-        .status()
-        .load()
-        .events()
-        .iter()
-        .any(|event| event.message_type == "FeedRecovered"));
+    assert!(
+        !image
+            .status()
+            .load()
+            .events()
+            .iter()
+            .any(|event| event.message_type == "FeedRecovered")
+    );
     cleanup(&hub).await;
     assert_eq!(session.resubscribes.load(Ordering::Relaxed), 2);
     data(

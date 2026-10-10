@@ -8,7 +8,7 @@ use xbbg_async::engine::{ExtractorType, RequestParams, RequestParamsInput};
 use xbbg_async::services::Operation;
 use xbbg_ext::auction;
 
-use crate::serialization::{bounded_error_display, ResultLimits};
+use crate::serialization::{ResultLimits, bounded_error_display};
 
 #[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -271,17 +271,17 @@ pub(crate) struct AuctionSnapshotParams {
 }
 
 fn build_request_params(input: RequestParamsInput) -> Result<RequestParams, ErrorData> {
-    if let Some(extractor) = input.extractor.as_deref() {
-        if ExtractorType::parse(extractor).is_none() {
-            let (message, truncated) = bounded_error_display(
-                &format_args!("invalid extractor type: {extractor}"),
-                &ResultLimits::default(),
-            );
-            return Err(ErrorData::invalid_params(
-                message,
-                truncated.then(|| serde_json::json!({"message_truncated": true})),
-            ));
-        }
+    if let Some(extractor) = input.extractor.as_deref()
+        && ExtractorType::parse(extractor).is_none()
+    {
+        let (message, truncated) = bounded_error_display(
+            &format_args!("invalid extractor type: {extractor}"),
+            &ResultLimits::default(),
+        );
+        return Err(ErrorData::invalid_params(
+            message,
+            truncated.then(|| serde_json::json!({"message_truncated": true})),
+        ));
     }
 
     input.into_request_params().map_err(|error| {
@@ -585,7 +585,9 @@ fn validate_auction_count(field: &str, count: usize, maximum: usize) -> Result<(
 fn validate_auction_string(field: &str, value: &str) -> Result<(), ErrorData> {
     if value.len() > MAX_AUCTION_STRING_BYTES || value.trim().is_empty() {
         return Err(ErrorData::invalid_params(
-            format!("{field} must contain non-empty strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"),
+            format!(
+                "{field} must contain non-empty strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"
+            ),
             None,
         ));
     }
@@ -618,7 +620,9 @@ fn normalize_pcs_overrides(
         validate_auction_string("pcs_overrides keys", &exchange)?;
         if pcs.len() > MAX_AUCTION_STRING_BYTES {
             return Err(ErrorData::invalid_params(
-                format!("pcs_overrides values must contain strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"),
+                format!(
+                    "pcs_overrides values must contain strings of at most {MAX_AUCTION_STRING_BYTES} UTF-8 bytes"
+                ),
                 None,
             ));
         }
@@ -949,22 +953,26 @@ mod tests {
         assert_eq!(eids, [101, 202]);
 
         let at_limit = (1..=MAX_ENTITLEMENT_EIDS as i32).collect();
-        assert!(check_entitlements_params(CheckEntitlementsArgs {
-            eids: at_limit,
-            service: None,
-        })
-        .is_ok());
+        assert!(
+            check_entitlements_params(CheckEntitlementsArgs {
+                eids: at_limit,
+                service: None,
+            })
+            .is_ok()
+        );
         for rejected in [
             Vec::new(),
             vec![0],
             vec![-1],
             (1..=(MAX_ENTITLEMENT_EIDS as i32 + 1)).collect(),
         ] {
-            assert!(check_entitlements_params(CheckEntitlementsArgs {
-                eids: rejected,
-                service: None,
-            })
-            .is_err());
+            assert!(
+                check_entitlements_params(CheckEntitlementsArgs {
+                    eids: rejected,
+                    service: None,
+                })
+                .is_err()
+            );
         }
     }
 
@@ -1176,11 +1184,13 @@ mod tests {
 
     #[test]
     fn mcp_adapters_reject_invalid_shapes() {
-        assert!(bflds_request_params(BfldsArgs {
-            fields: Some(vec!["PX_LAST".to_string()]),
-            search_spec: Some("price".to_string()),
-        })
-        .is_err());
+        assert!(
+            bflds_request_params(BfldsArgs {
+                fields: Some(vec!["PX_LAST".to_string()]),
+                search_spec: Some("price".to_string()),
+            })
+            .is_err()
+        );
     }
     #[test]
     fn request_parameter_errors_do_not_duplicate_unbounded_user_input() {

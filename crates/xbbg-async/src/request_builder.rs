@@ -522,15 +522,21 @@ mod tests {
             None,
         );
 
-        assert!(routed
-            .elements
-            .contains(&("securities".to_string(), "AAPL US Equity".to_string())));
-        assert!(routed
-            .elements
-            .contains(&("periodicitySelection".to_string(), "DAILY".to_string())));
-        assert!(routed
-            .overrides
-            .contains(&("CRNCY".to_string(), "USD".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("securities".to_string(), "AAPL US Equity".to_string()))
+        );
+        assert!(
+            routed
+                .elements
+                .contains(&("periodicitySelection".to_string(), "DAILY".to_string()))
+        );
+        assert!(
+            routed
+                .overrides
+                .contains(&("CRNCY".to_string(), "USD".to_string()))
+        );
         assert!(routed.warnings.is_empty());
     }
 
@@ -551,12 +557,16 @@ mod tests {
             Some(explicit_overrides),
         );
 
-        assert!(routed
-            .overrides
-            .contains(&("EQY_FUND_CRNCY".to_string(), "USD".to_string())));
-        assert!(routed
-            .overrides
-            .contains(&("PX_LAST".to_string(), "123".to_string())));
+        assert!(
+            routed
+                .overrides
+                .contains(&("EQY_FUND_CRNCY".to_string(), "USD".to_string()))
+        );
+        assert!(
+            routed
+                .overrides
+                .contains(&("PX_LAST".to_string(), "123".to_string()))
+        );
     }
 
     #[test]
@@ -580,12 +590,16 @@ mod tests {
             None,
         );
 
-        assert!(routed
-            .overrides
-            .contains(&("CRNCY".to_string(), "USD".to_string())));
-        assert!(routed
-            .overrides
-            .contains(&("BEST_FPERIOD_OVERRIDE".to_string(), "1FY".to_string())));
+        assert!(
+            routed
+                .overrides
+                .contains(&("CRNCY".to_string(), "USD".to_string()))
+        );
+        assert!(
+            routed
+                .overrides
+                .contains(&("BEST_FPERIOD_OVERRIDE".to_string(), "1FY".to_string()))
+        );
     }
 
     #[test]
@@ -616,18 +630,26 @@ mod tests {
             None,
         );
 
-        assert!(routed
-            .elements
-            .contains(&("periodicitySelection".to_string(), "WEEKLY".to_string())));
-        assert!(routed
-            .elements
-            .contains(&("currency".to_string(), "USD".to_string())));
-        assert!(routed
-            .elements
-            .contains(&("maxDataPoints".to_string(), "1".to_string())));
-        assert!(routed
-            .elements
-            .contains(&("eventType".to_string(), "BID".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("periodicitySelection".to_string(), "WEEKLY".to_string()))
+        );
+        assert!(
+            routed
+                .elements
+                .contains(&("currency".to_string(), "USD".to_string()))
+        );
+        assert!(
+            routed
+                .elements
+                .contains(&("maxDataPoints".to_string(), "1".to_string()))
+        );
+        assert!(
+            routed
+                .elements
+                .contains(&("eventType".to_string(), "BID".to_string()))
+        );
         assert!(routed.overrides.is_empty());
         assert!(routed.warnings.is_empty());
     }
@@ -654,15 +676,21 @@ mod tests {
             Some(explicit_overrides),
         );
 
-        assert!(routed
-            .elements
-            .contains(&("maxDataPoints".to_string(), "1".to_string())));
-        assert!(routed
-            .elements
-            .contains(&("includeExchangeCodes".to_string(), "true".to_string())));
-        assert!(routed
-            .overrides
-            .contains(&("EQY_FUND_CRNCY".to_string(), "EUR".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("maxDataPoints".to_string(), "1".to_string()))
+        );
+        assert!(
+            routed
+                .elements
+                .contains(&("includeExchangeCodes".to_string(), "true".to_string()))
+        );
+        assert!(
+            routed
+                .overrides
+                .contains(&("EQY_FUND_CRNCY".to_string(), "EUR".to_string()))
+        );
     }
 
     #[test]
@@ -724,9 +752,11 @@ mod tests {
                 None,
             );
 
-            assert!(routed
-                .elements
-                .contains(&("periodicitySelection".to_string(), "WEEKLY".to_string())));
+            assert!(
+                routed
+                    .elements
+                    .contains(&("periodicitySelection".to_string(), "WEEKLY".to_string()))
+            );
             assert!(
                 !routed.elements.iter().any(|(key, _)| key == alias),
                 "presentation alias {alias} should not be routed to Bloomberg",
@@ -774,9 +804,11 @@ mod tests {
         assert_eq!(routed.warnings.len(), 1);
         assert!(routed.warnings[0].contains("mystery_param"));
         assert!(routed.warnings[0].contains("ReferenceDataRequest"));
-        assert!(routed
-            .elements
-            .contains(&("mystery_param".to_string(), "value".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("mystery_param".to_string(), "value".to_string()))
+        );
     }
 
     #[test]
@@ -793,9 +825,11 @@ mod tests {
         );
 
         assert!(routed.warnings.is_empty());
-        assert!(routed
-            .elements
-            .contains(&("mystery_param".to_string(), "value".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("mystery_param".to_string(), "value".to_string()))
+        );
     }
 
     #[test]
@@ -813,9 +847,11 @@ mod tests {
             None,
         );
 
-        assert!(routed
-            .elements
-            .contains(&("PX_LAST".to_string(), "yes".to_string())));
+        assert!(
+            routed
+                .elements
+                .contains(&("PX_LAST".to_string(), "yes".to_string()))
+        );
         assert!(routed.overrides.is_empty());
     }
 

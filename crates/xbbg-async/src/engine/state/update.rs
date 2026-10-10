@@ -162,10 +162,11 @@ impl UpdateValue {
         let mut hasher = DefaultHasher::new();
         value.hash(&mut hasher);
         let hash = hasher.finish();
-        if let Some((cached_hash, cached)) = str_cache.as_ref() {
-            if *cached_hash == hash && cached.as_ref() == value {
-                return Arc::clone(cached);
-            }
+        if let Some((cached_hash, cached)) = str_cache.as_ref()
+            && *cached_hash == hash
+            && cached.as_ref() == value
+        {
+            return Arc::clone(cached);
         }
         let interned = Arc::<str>::from(value);
         *str_cache = Some((hash, Arc::clone(&interned)));

@@ -110,7 +110,17 @@ fn main() {
     let wrapper =
         generate_wrapper_header(&include_dir).unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
 
+    // Pin the generated code to this crate's MSRV and edition rather than to the
+    // rustc running the build script: edition 2024 requires `unsafe extern "C"`
+    // blocks, and bindings exported via BLPAPI_BINDINGS_EXPORT_PATH and replayed
+    // via BLPAPI_PREGENERATED_BINDINGS must compile on every supported toolchain.
+    let rust_target = env!("CARGO_PKG_RUST_VERSION")
+        .parse::<bindgen::RustTarget>()
+        .expect("blpapi-sys: rust-version must be a valid bindgen Rust target");
+
     let builder = bindgen::Builder::default()
+        .rust_target(rust_target)
+        .rust_edition(bindgen::RustEdition::Edition2024)
         .header_contents("wrapper.h", &wrapper)
         .clang_arg(format!("-I{}", include_dir.display()))
         .allowlist_function("^blpapi_.*")
@@ -447,12 +457,12 @@ fn generate_wrapper_header(include_dir: &Path) -> Result<String, String> {
     for entry in fs::read_dir(include_dir).map_err(|e| e.to_string())? {
         let entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path();
-        if let (Some(stem), Some(ext)) = (path.file_name(), path.extension()) {
-            if ext == "h" {
-                let name = stem.to_string_lossy().to_string();
-                if name.starts_with("blpapi_") {
-                    headers.push(format!("#include <{}>", stem.to_string_lossy()));
-                }
+        if let (Some(stem), Some(ext)) = (path.file_name(), path.extension())
+            && ext == "h"
+        {
+            let name = stem.to_string_lossy().to_string();
+            if name.starts_with("blpapi_") {
+                headers.push(format!("#include <{}>", stem.to_string_lossy()));
             }
         }
     }

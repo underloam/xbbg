@@ -8,8 +8,8 @@ use futures_util::stream::{self, StreamExt};
 
 use super::state::typed_builder::{ArrowType, TypedBuilder};
 use super::{
-    state, BlpAsyncError, Engine, EngineConfig, Operation, OverridePairs, PlannedRequestShape,
-    PreparedRequest,
+    BlpAsyncError, Engine, EngineConfig, Operation, OverridePairs, PlannedRequestShape,
+    PreparedRequest, state,
 };
 
 fn shard_security_chunks(securities: &[String], chunk_size: usize) -> Vec<Vec<String>> {
@@ -452,9 +452,11 @@ mod tests {
             shards[2].params().overrides.as_deref(),
             Some(&[("CRNCY".to_string(), "JPY".to_string())][..])
         );
-        assert!(shards
-            .iter()
-            .all(|shard| shard.params().security_overrides.is_none()));
+        assert!(
+            shards
+                .iter()
+                .all(|shard| shard.params().security_overrides.is_none())
+        );
     }
 
     #[test]
@@ -543,17 +545,19 @@ mod tests {
         let prepared = prepare_refdata(&["A", "B", "C"]);
 
         assert!(sharded_requests(&EngineConfig::default(), &prepared).is_none());
-        assert!(sharded_requests(
-            &EngineConfig {
-                shard_requests: true,
-                shard_threshold: 4,
-                shard_chunk_size: 2,
-                shard_max_concurrent: 2,
-                ..Default::default()
-            },
-            &prepared,
-        )
-        .is_none());
+        assert!(
+            sharded_requests(
+                &EngineConfig {
+                    shard_requests: true,
+                    shard_threshold: 4,
+                    shard_chunk_size: 2,
+                    shard_max_concurrent: 2,
+                    ..Default::default()
+                },
+                &prepared,
+            )
+            .is_none()
+        );
     }
 
     #[test]

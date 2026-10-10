@@ -7,14 +7,14 @@ use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_array::{Array, ArrayRef, LargeStringArray, RecordBatch, StringArray};
-use arrow_ord::sort::{sort_to_indices, SortOptions};
+use arrow_ord::sort::{SortOptions, sort_to_indices};
 use arrow_schema::{Field, Schema};
 use arrow_select::take::take_record_batch;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::transforms::bql::{build_corporate_bonds_query, build_preferreds_query};
-use xbbg_ext::transforms::fixed_income::{build_yas_overrides, YieldType};
+use xbbg_ext::transforms::fixed_income::{YieldType, build_yas_overrides};
 use xbbg_ext::utils::date::parse_date;
 
 use crate::error::{RecipeError, Result};
@@ -335,24 +335,24 @@ fn shape_bqr_quotes(
                 .to_string(),
         ));
     }
-    if batch.num_rows() > 1 {
-        if let Some(time) = batch.column_by_name("time") {
-            let indices = sort_to_indices(
-                time.as_ref(),
-                Some(SortOptions {
-                    descending: false,
-                    nulls_first: false,
-                }),
-                None,
-            )?;
-            if indices
-                .values()
-                .iter()
-                .enumerate()
-                .any(|(row, &index)| row != index as usize)
-            {
-                batch = take_record_batch(&batch, &indices)?;
-            }
+    if batch.num_rows() > 1
+        && let Some(time) = batch.column_by_name("time")
+    {
+        let indices = sort_to_indices(
+            time.as_ref(),
+            Some(SortOptions {
+                descending: false,
+                nulls_first: false,
+            }),
+            None,
+        )?;
+        if indices
+            .values()
+            .iter()
+            .enumerate()
+            .any(|(row, &index)| row != index as usize)
+        {
+            batch = take_record_batch(&batch, &indices)?;
         }
     }
     let fields = batch

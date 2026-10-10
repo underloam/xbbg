@@ -298,11 +298,11 @@ async fn test_bdp_returns_numeric_for_price() {
     // Check that we have a value column with numeric data
     if let Some((idx, _)) = batch.schema().column_with_name("value_num") {
         let col = batch.column(idx);
-        if let Some(arr) = col.as_any().downcast_ref::<Float64Array>() {
-            if !arr.is_null(0) {
-                let value = arr.value(0);
-                assert!(value > 0.0, "Price should be positive");
-            }
+        if let Some(arr) = col.as_any().downcast_ref::<Float64Array>()
+            && !arr.is_null(0)
+        {
+            let value = arr.value(0);
+            assert!(value > 0.0, "Price should be positive");
         }
     }
 

@@ -19,14 +19,14 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use chrono::{Datelike, Duration as ChronoDuration, Local, NaiveDate, Weekday};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::runtime::Runtime;
 use tokio::sync::{mpsc, oneshot};
 use xbbg_async::engine::state::typed_builder::{ArrowType, TypedBuilder};
 use xbbg_async::engine::state::{
-    subscription_channel, FieldKind, FieldLayout, FieldMeta, MessageOutcome,
-    SubscriptionArrowBatcher, SubscriptionUpdate, UpdateField, UpdateValue,
+    FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionArrowBatcher,
+    SubscriptionUpdate, UpdateField, UpdateValue, subscription_channel,
 };
 use xbbg_async::engine::{
     BqlState, BulkDataState, Engine, EngineConfig, ExtractorType, HistDataState, IntradayTickState,
@@ -34,7 +34,7 @@ use xbbg_async::engine::{
 };
 use xbbg_async::{BlpAsyncError, SubscribeRequest};
 use xbbg_bench::{
-    bql_json_fixture, message_count, open_service, setup_session, BQL_JSON_SCENARIOS,
+    BQL_JSON_SCENARIOS, bql_json_fixture, message_count, open_service, setup_session,
 };
 use xbbg_core::{
     BlpError, CorrelationId, DataType as BlpDataType, Element, Event, EventType, Message, Name,
@@ -64,7 +64,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             ALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         }
-        System.alloc(layout)
+        // SAFETY: forwards the caller's `GlobalAlloc::alloc` contract unchanged.
+        unsafe { System.alloc(layout) }
     }
 
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
@@ -72,7 +73,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             DEALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             DEALLOC_BYTES.fetch_add(layout.size() as u64, Ordering::Relaxed);
         }
-        System.dealloc(ptr, layout);
+        // SAFETY: forwards the caller's `GlobalAlloc::dealloc` contract unchanged.
+        unsafe { System.dealloc(ptr, layout) };
     }
 
     unsafe fn realloc(&self, ptr: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
@@ -82,7 +84,8 @@ unsafe impl GlobalAlloc for TrackingAllocator {
             ALLOC_COUNT.fetch_add(1, Ordering::Relaxed);
             ALLOC_BYTES.fetch_add(new_size as u64, Ordering::Relaxed);
         }
-        System.realloc(ptr, layout, new_size)
+        // SAFETY: forwards the caller's `GlobalAlloc::realloc` contract unchanged.
+        unsafe { System.realloc(ptr, layout, new_size) }
     }
 }
 
@@ -2786,11 +2789,11 @@ fn profile_subscription_components(
                 let datatype = child.datatype();
                 if let Some(Some((cached_key, cached_datatype, captured))) =
                     slots.get(child_idx).copied()
+                    && cached_key == key
+                    && cached_datatype == datatype
                 {
-                    if cached_key == key && cached_datatype == datatype {
-                        black_box(captured);
-                        continue;
-                    }
+                    black_box(captured);
+                    continue;
                 }
                 let captured = component_should_capture_datatype(datatype);
                 if !captured {
@@ -3200,7 +3203,7 @@ async fn live_subscription(engine: &Engine, collect_ms: u64) -> BenchRecord {
                 "sub_3_topics_3_fields",
                 start.elapsed(),
                 err.to_string(),
-            )
+            );
         }
     };
 

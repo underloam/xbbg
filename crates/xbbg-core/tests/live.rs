@@ -132,26 +132,23 @@ fn live_bdp_single_field() {
     let mut got_response = false;
 
     while Instant::now() < deadline && !got_response {
-        if let Ok(ev) = sess.next_event(Some(1000)) {
-            if ev.event_type() == EventType::Response {
-                let mut messages = ev.messages();
-                while let Some(msg) = messages.next() {
-                    println!("Message type: {}", msg.message_type().as_str());
+        if let Ok(ev) = sess.next_event(Some(1000))
+            && ev.event_type() == EventType::Response
+        {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
+                println!("Message type: {}", msg.message_type().as_str());
 
-                    let root = msg.elements();
-                    if let Some(sd) = root.get(&security_data) {
-                        if let Some(first) = sd.get_element(0) {
-                            if let Some(fd) = first.get(&field_data) {
-                                if let Some(px) = fd.get(&px_last) {
-                                    if let Some(value) = px.get_f64(0) {
-                                        println!("PX_LAST = {}", value);
-                                        assert!(value > 0.0, "PX_LAST should be positive");
-                                        got_response = true;
-                                    }
-                                }
-                            }
-                        }
-                    }
+                let root = msg.elements();
+                if let Some(sd) = root.get(&security_data)
+                    && let Some(first) = sd.get_element(0)
+                    && let Some(fd) = first.get(&field_data)
+                    && let Some(px) = fd.get(&px_last)
+                    && let Some(value) = px.get_f64(0)
+                {
+                    println!("PX_LAST = {}", value);
+                    assert!(value > 0.0, "PX_LAST should be positive");
+                    got_response = true;
                 }
             }
         }
@@ -203,31 +200,30 @@ fn live_bdp_multiple_fields() {
     let mut got_name = false;
 
     while Instant::now() < deadline && !(got_px_last && got_name) {
-        if let Ok(ev) = sess.next_event(Some(1000)) {
-            if ev.event_type() == EventType::Response {
-                let mut messages = ev.messages();
-                while let Some(msg) = messages.next() {
-                    let root = msg.elements();
-                    if let Some(sd) = root.get(&security_data) {
-                        if let Some(first) = sd.get_element(0) {
-                            if let Some(fd) = first.get(&field_data) {
-                                // Extract PX_LAST (numeric)
-                                if let Some(px) = fd.get(&px_last) {
-                                    if let Some(value) = px.get_f64(0) {
-                                        println!("PX_LAST = {}", value);
-                                        got_px_last = true;
-                                    }
-                                }
+        if let Ok(ev) = sess.next_event(Some(1000))
+            && ev.event_type() == EventType::Response
+        {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
+                let root = msg.elements();
+                if let Some(sd) = root.get(&security_data)
+                    && let Some(first) = sd.get_element(0)
+                    && let Some(fd) = first.get(&field_data)
+                {
+                    // Extract PX_LAST (numeric)
+                    if let Some(px) = fd.get(&px_last)
+                        && let Some(value) = px.get_f64(0)
+                    {
+                        println!("PX_LAST = {}", value);
+                        got_px_last = true;
+                    }
 
-                                // Extract NAME (string)
-                                if let Some(nm) = fd.get(&name_field) {
-                                    if let Some(value) = nm.get_str(0) {
-                                        println!("NAME = {}", value);
-                                        got_name = true;
-                                    }
-                                }
-                            }
-                        }
+                    // Extract NAME (string)
+                    if let Some(nm) = fd.get(&name_field)
+                        && let Some(value) = nm.get_str(0)
+                    {
+                        println!("NAME = {}", value);
+                        got_name = true;
                     }
                 }
             }
@@ -283,30 +279,28 @@ fn live_get_value_dynamic_extraction() {
     let mut got_response = false;
 
     while Instant::now() < deadline && !got_response {
-        if let Ok(ev) = sess.next_event(Some(1000)) {
-            if ev.event_type() == EventType::Response {
-                let mut messages = ev.messages();
-                while let Some(msg) = messages.next() {
-                    let root = msg.elements();
-                    if let Some(sd) = root.get(&security_data) {
-                        if let Some(first) = sd.get_element(0) {
-                            if let Some(fd) = first.get(&field_data) {
-                                if let Some(px) = fd.get(&px_last) {
-                                    // Use get_value() for dynamic extraction
-                                    if let Some(value) = px.get_value(0) {
-                                        println!("get_value() returned: {:?}", value);
-                                        match value {
-                                            Value::Float64(v) => {
-                                                println!("Extracted as Float64: {}", v);
-                                                assert!(v > 0.0);
-                                                got_response = true;
-                                            }
-                                            other => {
-                                                panic!("Expected Float64, got {:?}", other);
-                                            }
-                                        }
-                                    }
-                                }
+        if let Ok(ev) = sess.next_event(Some(1000))
+            && ev.event_type() == EventType::Response
+        {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
+                let root = msg.elements();
+                if let Some(sd) = root.get(&security_data)
+                    && let Some(first) = sd.get_element(0)
+                    && let Some(fd) = first.get(&field_data)
+                    && let Some(px) = fd.get(&px_last)
+                {
+                    // Use get_value() for dynamic extraction
+                    if let Some(value) = px.get_value(0) {
+                        println!("get_value() returned: {:?}", value);
+                        match value {
+                            Value::Float64(v) => {
+                                println!("Extracted as Float64: {}", v);
+                                assert!(v > 0.0);
+                                got_response = true;
+                            }
+                            other => {
+                                panic!("Expected Float64, got {:?}", other);
                             }
                         }
                     }

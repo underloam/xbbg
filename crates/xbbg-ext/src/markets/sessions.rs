@@ -60,15 +60,15 @@ fn exchanges() -> Option<&'static ExchangesToml> {
 /// Look up a MarketRule by MIC code, then fallback to exchange code.
 pub fn get_market_rule(mic: Option<&str>, exch_code: Option<&str>) -> Option<&'static MarketRule> {
     let data = exchanges()?;
-    if let Some(mic_code) = mic.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(rule) = data.mic.get(mic_code) {
-            return Some(rule);
-        }
+    if let Some(mic_code) = mic.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(rule) = data.mic.get(mic_code)
+    {
+        return Some(rule);
     }
-    if let Some(code) = exch_code.map(str::trim).filter(|s| !s.is_empty()) {
-        if let Some(rule) = data.exch_code.get(code) {
-            return Some(rule);
-        }
+    if let Some(code) = exch_code.map(str::trim).filter(|s| !s.is_empty())
+        && let Some(rule) = data.exch_code.get(code)
+    {
+        return Some(rule);
     }
     None
 }

@@ -120,7 +120,7 @@ fn stdin_pipe_is_open() -> bool {
     const FILE_TYPE_PIPE: u32 = 0x0003;
 
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn GetFileType(handle: Handle) -> u32;
         fn PeekNamedPipe(
             handle: Handle,

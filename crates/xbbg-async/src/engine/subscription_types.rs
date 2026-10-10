@@ -14,13 +14,13 @@ use futures_util::future::BoxFuture;
 use tokio::runtime::Handle;
 
 use crate::errors::BlpAsyncError;
-use crate::field_cache::{global_resolver, FieldTypeResolver};
+use crate::field_cache::{FieldTypeResolver, global_resolver};
 use crate::schema::SchemaCache;
 use crate::services::{ExtractorType, Operation, Service};
 
 use super::request_pool::RequestWorkerPool;
-use super::state::typed_builder::ArrowType;
 use super::state::FieldKind;
+use super::state::typed_builder::ArrowType;
 use super::{PreparedRequestBuilder, RequestParams};
 
 const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -90,9 +90,9 @@ impl SubscriptionTypeResolver {
         cache: Arc<FieldTypeResolver>,
         runtime: Handle,
         query: impl Fn(Vec<String>) -> BoxFuture<'static, Result<RecordBatch, BlpAsyncError>>
-            + Send
-            + Sync
-            + 'static,
+        + Send
+        + Sync
+        + 'static,
     ) -> Self {
         cache.preload();
         Self {

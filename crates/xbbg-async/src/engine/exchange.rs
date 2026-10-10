@@ -6,8 +6,8 @@ use chrono::NaiveDate;
 
 use xbbg_ext::markets::overrides;
 use xbbg_ext::{
-    derive_sessions, infer_timezone_from_country, market_timing, ExchangeInfo, ExchangeInfoSource,
-    MarketInfo, MarketTiming,
+    ExchangeInfo, ExchangeInfoSource, MarketInfo, MarketTiming, derive_sessions,
+    infer_timezone_from_country, market_timing,
 };
 
 use crate::errors::BlpAsyncError;
