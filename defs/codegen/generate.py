@@ -10,13 +10,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = __import__("tomli")
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFS_PATH = ROOT / "defs" / "bloomberg.toml"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from typing import Any
 
 import pytest
@@ -68,7 +68,7 @@ def test_empty_rows_and_datetimes_preserve_native_arrow_contracts() -> None:
 
     when = datetime(2024, 1, 2, 3, 4, 5, 123456)
     table = ArrowTable.from_pylist([{"when": when}, {"when": None}])
-    assert table.to_pylist()[0]["when"] == when.replace(tzinfo=timezone.utc)
+    assert table.to_pylist()[0]["when"] == when.replace(tzinfo=UTC)
     assert table.filter_eq("when", when).num_rows == 1
 
 

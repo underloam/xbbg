@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 import re
 from typing import Any, TypeAlias
 
@@ -218,7 +218,7 @@ def _fmt_datetime(
     # Apply default_tz only when the resulting datetime is naive.
     if base.tzinfo is None and default_tz is not None:
         if default_tz.upper() == "UTC":
-            base = base.replace(tzinfo=timezone.utc)
+            base = base.replace(tzinfo=UTC)
         elif default_tz.lower() == "local":
             base = base.astimezone()
         else:

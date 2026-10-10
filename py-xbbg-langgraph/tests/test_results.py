@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import base64
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 import json
 from typing import Any
@@ -105,7 +105,7 @@ def test_upstream_truncation_does_not_invent_original_row_count() -> None:
 def test_temporal_decimal_and_nonfinite_values_are_json_safe() -> None:
     value = {
         "date": date(2026, 9, 18),
-        "datetime": datetime(2026, 9, 18, 12, 30, tzinfo=timezone.utc),
+        "datetime": datetime(2026, 9, 18, 12, 30, tzinfo=UTC),
         "time": time(12, 30),
         "duration": timedelta(seconds=90),
         "price": Decimal("12345678901234567890.0123456789"),

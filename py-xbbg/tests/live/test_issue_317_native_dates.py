@@ -17,7 +17,7 @@ Run with:
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -131,7 +131,7 @@ def _recent_non_empty_bdtick_frame(*, tz_aware: bool):
         if len(probe) < 1:
             continue
         if tz_aware:
-            start = datetime.combine(day, datetime.min.time()).replace(hour=14, minute=30, tzinfo=timezone.utc)
+            start = datetime.combine(day, datetime.min.time()).replace(hour=14, minute=30, tzinfo=UTC)
         else:
             start = datetime.combine(day, datetime.min.time()).replace(hour=14, minute=30)
         end = start + timedelta(minutes=2)

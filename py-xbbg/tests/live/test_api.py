@@ -1117,7 +1117,7 @@ class TestStreaming:
 
         try:
             await asyncio.wait_for(collect_ticks(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"  Timeout after {timeout_seconds}s (got {ticks_received} ticks)")
 
         assert ticks_received >= 1, (
@@ -1145,7 +1145,7 @@ class TestStreaming:
 
         try:
             await asyncio.wait_for(collect_ticks(), timeout=timeout_seconds)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             logger.warning(f"  Timeout after {timeout_seconds}s (got {ticks_received} ticks)")
         finally:
             await sub.unsubscribe()
@@ -1178,7 +1178,7 @@ class TestStreaming:
 
         try:
             await asyncio.wait_for(collect_ticks(), timeout=20)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.skip(f"No conflated ticks received from {CONFIG.streaming_ticker} within timeout")
 
         assert rows, f"Expected conflated streaming ticks from {CONFIG.streaming_ticker}"
@@ -1972,7 +1972,7 @@ class TestVwap:
 
         try:
             await asyncio.wait_for(collect(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.skip(f"No Market VWAP payload received from {CONFIG.equity_single} after 30s")
         except Exception as exc:
             skip_if_subscription_unavailable(exc, "Market VWAP")
@@ -2005,7 +2005,7 @@ class TestVwap:
 
         try:
             await asyncio.wait_for(collect(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.skip(f"No generic Market VWAP payload received from {CONFIG.equity_single} after 30s")
         except Exception as exc:
             skip_if_subscription_unavailable(exc, "Market VWAP")
@@ -2055,7 +2055,7 @@ class TestMktbar:
 
         try:
             await asyncio.wait_for(collect(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if not rows:
                 pytest.skip(f"No market bars received from {CONFIG.mktbar_ticker} after 30s")
         except Exception as exc:
@@ -2095,7 +2095,7 @@ class TestMktbar:
 
         try:
             await asyncio.wait_for(collect(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if not rows:
                 pytest.skip(f"No generic market-bar payload received from {CONFIG.mktbar_ticker} after 30s")
         except Exception as exc:
@@ -2134,7 +2134,7 @@ class TestMktbar:
 
         try:
             await asyncio.wait_for(collect(), timeout=30)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if not rows:
                 pytest.skip(f"No filtered market-bar payload received from {CONFIG.mktbar_ticker} after 30s")
         except Exception as exc:
@@ -2170,7 +2170,7 @@ class TestDepth:
 
             await asyncio.wait_for(collect(), timeout=15)
             logger.info(f"  Got {updates} depth updates")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.skip("No depth data received (B-PIPE likely not available)")
         except Exception as e:
             pytest.skip(f"B-PIPE not available: {e}")
@@ -2197,7 +2197,7 @@ class TestChains:
 
             await asyncio.wait_for(collect(), timeout=15)
             logger.info(f"  Got {updates} chain updates")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pytest.skip("No chain data received (B-PIPE likely not available)")
         except Exception as e:
             pytest.skip(f"B-PIPE not available: {e}")

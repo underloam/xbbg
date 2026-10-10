@@ -7,7 +7,7 @@ or Python copy of the resolver is needed.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 import inspect
 from typing import Any
 
@@ -57,7 +57,7 @@ RESOLVERS = [
         "15/01/2024",
         date(2024, 1, 15),
         datetime(2024, 1, 15, 16, 30),
-        datetime(2024, 1, 15, 16, 30, tzinfo=timezone.utc),
+        datetime(2024, 1, 15, 16, 30, tzinfo=UTC),
     ],
 )
 async def test_futures_normalizes_dates_and_preserves_string_result(recipes, resolver, recipe, reference_date):
