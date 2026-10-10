@@ -2,8 +2,8 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":dependencyDashboard"],
   "labels": ["dependencies"],
-  "enabledManagers": ["npm", "github-actions", "cargo", "pep621", "pixi", "pre-commit"],
-  "rangeStrategy": "bump",
+  "enabledManagers": ["npm", "github-actions", "cargo", "pep621", "pixi", "pre-commit", "dockerfile"],
+  "rangeStrategy": "update-lockfile",
   "lockFileMaintenance": {
     "enabled": true,
     "schedule": ["before 6am on monday"]
@@ -22,6 +22,12 @@
       "matchFileNames": ["js-xbbg/package.json"],
       "matchDepTypes": ["dependencies", "optionalDependencies", "peerDependencies"],
       "groupName": "js runtime dependencies"
+    },
+    {
+      "description": "Published npm packages keep supporting older majors: widen runtime and peer ranges instead of raising their floors.",
+      "matchManagers": ["npm"],
+      "matchDepTypes": ["dependencies", "peerDependencies"],
+      "rangeStrategy": "widen"
     },
     {
       "description": "Keep internally stamped JS platform package versions under release scripts.",
@@ -49,9 +55,37 @@
       "groupName": "python and pixi dependencies"
     },
     {
+      "description": "Published Python packages keep supporting older dependency majors (e.g. pandas 2, polars 1): widen the upper bound when a new major lands, never raise the floor. The floors CI job tests the lower bounds.",
+      "matchManagers": ["pep621"],
+      "matchDepTypes": ["project.dependencies", "project.optional-dependencies"],
+      "rangeStrategy": "widen"
+    },
+    {
+      "description": "Supported runtime floors change deliberately: requires-python follows the CPython end-of-life schedule and Node engines follow the Node.js release schedule.",
+      "matchDepTypes": ["requires-python", "engines"],
+      "enabled": false
+    },
+    {
+      "description": "Pixi pins that encode support contracts: python mirrors requires-python and the per-version test environments, rust tracks the workspace rust-version (MSRV), libclang is the bindgen floor, and nodejs mirrors engines. Lock-file maintenance still refreshes them within range.",
+      "matchManagers": ["pixi"],
+      "matchPackageNames": ["python", "rust", "libclang", "nodejs"],
+      "enabled": false
+    },
+    {
       "description": "Group pre-commit hook updates.",
       "matchManagers": ["pre-commit"],
       "groupName": "pre-commit hooks"
+    },
+    {
+      "description": "Group CI and wheel-build base image updates.",
+      "matchManagers": ["dockerfile"],
+      "groupName": "docker base images"
+    },
+    {
+      "description": "manylinux images are tagged by build date (YYYY.MM.DD-N).",
+      "matchManagers": ["dockerfile"],
+      "matchPackageNames": ["quay.io/pypa/manylinux_2_28_x86_64"],
+      "versioning": "regex:^(?<major>\\d{4})\\.(?<minor>\\d{2})\\.(?<patch>\\d{2})-(?<build>\\d+)$"
     }
   ]
 }
