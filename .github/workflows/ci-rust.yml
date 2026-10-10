@@ -17,7 +17,7 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  UV_VERSION: "0.11.19"
+  UV_VERSION: "0.13.0"
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
@@ -56,7 +56,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt
           cache: false
@@ -64,7 +64,7 @@ jobs:
       - name: Rust format check
         run: cargo fmt --all -- --check
 
-      - uses: cargo-bins/cargo-binstall@v1.21.1
+      - uses: cargo-bins/cargo-binstall@v1.25.2
       - name: Check unused Rust dependencies
         run: cargo binstall -y cargo-shear && cargo shear
 
@@ -78,7 +78,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rustfmt
           cache: false
@@ -92,7 +92,7 @@ jobs:
         run: python defs/codegen/generate.py --check
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -100,6 +100,9 @@ jobs:
         run: >-
           uv run --no-project --with "pytest>=8.4" --with "pytest-asyncio>=0.24" --with "packaging>=23.2"
           python -m pytest scripts -q
+
+      - name: Check uv.lock is current
+        run: uv lock --check
 
   # ════════════════════════════════════════════════════════════════════════════
   # Python Lint (fast, no SDK needed)
@@ -111,9 +114,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup pixi
-        uses: prefix-dev/setup-pixi@v0.10.1
+        uses: prefix-dev/setup-pixi@v0.11.0
         with:
-          pixi-version: latest
+          pixi-version: v0.81.0
           environments: lint
           cache: true
 
@@ -146,9 +149,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup pixi
-        uses: prefix-dev/setup-pixi@v0.10.1
+        uses: prefix-dev/setup-pixi@v0.11.0
         with:
-          pixi-version: latest
+          pixi-version: v0.81.0
           environments: js
           cache: true
 
@@ -160,15 +163,20 @@ jobs:
         run: pixi run -e js js-quality
 
   lint-js-langgraph:
-    name: Quality (JS LangGraph)
+    name: Quality (JS LangGraph, Node ${{ matrix.node }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The supported floor (engines >=24) and the current release line.
+        node: ["24", "26"]
     steps:
       - uses: actions/checkout@v7
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: "24"
+          node-version: ${{ matrix.node }}
           cache: npm
           cache-dependency-path: |
             js-xbbg/package-lock.json
@@ -200,7 +208,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cargo-bins/cargo-binstall@v1.21.1
+      - uses: cargo-bins/cargo-binstall@v1.25.2
       - run: cargo binstall -y cargo-audit && cargo audit
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -211,7 +219,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: cargo-bins/cargo-binstall@v1.21.1
+      - uses: cargo-bins/cargo-binstall@v1.25.2
       - run: cargo binstall -y cargo-deny && cargo deny check
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -235,11 +243,10 @@ jobs:
           os: Linux
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: x86_64-unknown-linux-gnu
           components: clippy
-          rustflags: ""
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -257,11 +264,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: x86_64-pc-windows-msvc
           components: clippy
-          rustflags: ""
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -299,11 +305,10 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           target: aarch64-apple-darwin
           components: clippy
-          rustflags: ""
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -326,6 +331,57 @@ jobs:
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # MSRV - every workspace member builds with the declared rust-version
+  # ════════════════════════════════════════════════════════════════════════════
+  # The published crates and the Python sdist compile on users' toolchains, so
+  # `rust-version` in the root Cargo.toml is a contract, not a hint.
+  msrv:
+    name: MSRV
+    needs: [sdk-version, generate-bindings]
+    runs-on: ubuntu-latest
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read rust-version
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust ${{ steps.msrv.outputs.version }}
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          # Leave build.warnings unset: older Cargo predates it, and older rustc
+          # warns about lints added after it.
+          build-warnings: ""
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK (Linux)
+        id: sdk-linux
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Cargo check at the MSRV
+        run: cargo check --locked --workspace --all-targets
 
   # ════════════════════════════════════════════════════════════════════════════
   # NAPI core packaging validation
@@ -360,14 +416,14 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '20'
+          node-version: '24'
           cache: 'npm'
           cache-dependency-path: js-xbbg/package-lock.json
 
@@ -435,7 +491,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.3
 
       - name: Run offline JS suite under Bun
         working-directory: js-xbbg
@@ -506,8 +562,10 @@ jobs:
       - name: Build offline bundles
         run: |
           mkdir -p dist-offline
+          # npm --prefix runs the script from js-xbbg/, so a relative --out-dir
+          # would land in js-xbbg/dist-offline instead of the uploaded path.
           for label in linux-x64 win32-x64 darwin-arm64; do
-            npm --prefix js-xbbg run build:offline-bundle -- --label "$label" --out-dir dist-offline
+            npm --prefix js-xbbg run build:offline-bundle -- --label "$label" --out-dir "$GITHUB_WORKSPACE/dist-offline"
           done
           ls -1 dist-offline
 
@@ -516,18 +574,19 @@ jobs:
         with:
           name: offline-bundles
           path: dist-offline/*.zip
+          if-no-files-found: error
           retention-days: 7
 
   # ════════════════════════════════════════════════════════════════════════════
   # Build wheels via setuptools-rust + uv (matrix: OS × Python version)
   # ════════════════════════════════════════════════════════════════════════════
   build:
-    name: Build (Python ${{ matrix.python }}, ${{ matrix.target }})
+    name: Build (Python ${{ matrix.python }}, ${{ matrix.os }})
     needs: [sdk-version, generate-bindings, check-linux, check-windows, check-macos]
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
         exclude:
@@ -545,6 +604,12 @@ jobs:
             target: x86_64-unknown-linux-gnu
           - os: macos-latest
             target: x86_64-pc-windows-msvc
+        include:
+          # Probe for the ubuntu-latest move to Ubuntu 26.04 (gradual rollout
+          # 2026-10-19 to 2026-11-19). Drop this leg once the rollout completes.
+          - os: ubuntu-26.04
+            target: x86_64-unknown-linux-gnu
+            python: "3.14"
 
     runs-on: ${{ matrix.os }}
     env:
@@ -554,9 +619,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -621,7 +686,7 @@ jobs:
       - name: Setup uv
         # Exact tag: astral-sh/setup-uv stopped publishing moving major tags
         # after v7, so `@v10` does not resolve.
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -644,7 +709,11 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        include:
+          # Tests the wheel from the Ubuntu 26.04 build probe leg.
+          - os: ubuntu-26.04
+            python: "3.14"
 
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
@@ -663,7 +732,7 @@ jobs:
           allow-prereleases: true
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
@@ -699,16 +768,13 @@ jobs:
 
       - name: Install wheel and test dependencies
         shell: bash
-        env:
-          PYTHON_VERSION: ${{ matrix.python }}
         run: |
           # Install the specific wheel for this Python version
           WHEEL=$(echo dist/*.whl)
           # Hold the suite to the current dataframe majors so a resolver
-          # fallback cannot quietly test older ones. pandas 3 needs Python 3.11+.
-          majors=("polars>=2")
-          if [[ "$PYTHON_VERSION" != "3.10" ]]; then majors+=("pandas>=3"); fi
-          uv pip install --system "${WHEEL}[test]" "${majors[@]}"
+          # fallback cannot quietly test older ones; the
+          # dataframe-previous-majors job covers pandas 2 and polars 1.
+          uv pip install --system "${WHEEL}[test]" "pandas>=3" "polars>=2"
 
       - name: Copy tests to temp directory
         # Run from temp dir to avoid importing local source instead of installed package
@@ -758,7 +824,7 @@ jobs:
   # supported interpreter because that is where the oldest wheels are selectable
   # (on 3.14 the floors get dragged upward by wheel availability anyway).
   floors:
-    name: Declared floors (lowest-direct, Python 3.10)
+    name: Declared floors (lowest-direct, Python 3.11)
     needs: [sdk-version, build]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -767,20 +833,20 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - name: Setup Python 3.10
+      - name: Setup Python 3.11
         uses: actions/setup-python@v7
         with:
-          python-version: "3.10"
+          python-version: "3.11"
 
       - name: Setup uv
-        uses: astral-sh/setup-uv@v10.0.1
+        uses: astral-sh/setup-uv@v10.3.0
         with:
           version: ${{ env.UV_VERSION }}
 
       - name: Download wheel
         uses: actions/download-artifact@v8
         with:
-          name: wheel-ubuntu-latest-py3.10
+          name: wheel-ubuntu-latest-py3.11
           path: dist
 
       - name: Setup Bloomberg SDK
@@ -820,6 +886,63 @@ jobs:
         run: pytest py-xbbg-langgraph/tests -v
 
   # ════════════════════════════════════════════════════════════════════════════
+  # Previous dataframe majors - pandas 2.x and polars 1.x stay supported
+  # ════════════════════════════════════════════════════════════════════════════
+  # The test matrix pins the current majors and the floors job runs the oldest
+  # releases, so this job covers the newest releases of the previous majors.
+  dataframe-previous-majors:
+    name: Previous dataframe majors (pandas 2, polars 1)
+    needs: [sdk-version, build]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python 3.12
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel-ubuntu-latest-py3.12
+          path: dist
+
+      - name: Setup Bloomberg SDK
+        id: sdk-linux
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Install wheel with pandas 2 and polars 1
+        shell: bash
+        run: |
+          WHEEL=$(echo dist/*.whl)
+          uv pip install --system "${WHEEL}[test]" "pandas<3" "polars<2"
+
+      - name: Show resolved dataframe versions
+        run: uv pip list --system
+
+      - name: Copy tests to temp directory
+        shell: bash
+        run: |
+          mkdir -p "${{ runner.temp }}/test-run"
+          cp -r py-xbbg/tests "${{ runner.temp }}/test-run/"
+
+      - name: Run tests
+        working-directory: ${{ runner.temp }}/test-run
+        run: pytest tests -v -m "not live"
+
+  # ════════════════════════════════════════════════════════════════════════════
   # Unsafe Code Audit (optional, non-blocking)
   # ════════════════════════════════════════════════════════════════════════════
   geiger:
@@ -841,10 +964,10 @@ jobs:
           os: Linux
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           components: rust-src
-          rustflags: ""
+          build-warnings: warn
 
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -884,7 +1007,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install bindgen-cli
-        run: cargo install bindgen-cli --version 0.72.1
+        run: cargo install bindgen-cli --version 0.73.2
 
       - name: Run ABI compatibility check
         run: |
@@ -917,9 +1040,9 @@ jobs:
           os: Linux
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -941,7 +1064,7 @@ jobs:
     name: CI Status
     runs-on: ubuntu-latest
     # geiger, abi-compat, and semver are intentionally advisory.
-    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, core-packages, pack-offline-bundles, build, test, floors]
+    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, build, test, floors, dataframe-previous-majors]
     if: always()
     steps:
       - name: Check required jobs
@@ -990,9 +1113,9 @@ jobs:
           os: Linux
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Build stub generator
         run: cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen

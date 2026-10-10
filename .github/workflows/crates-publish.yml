@@ -151,9 +151,9 @@ jobs:
 
       - name: Setup Rust
         if: steps.pending.outputs.has_work == 'true'
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       # Semantic releases already stamp the tag tree. Reuse the same helper for
       # manual publishing, including retries of older releases.

@@ -2,13 +2,11 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, assert_type
 
 import xbbg
 
 if TYPE_CHECKING:
-    from typing_extensions import assert_type
-
     assert_type(xbbg.request(xbbg.Service.REFDATA, xbbg.Operation.REFERENCE_DATA), Any)
     assert_type(xbbg.seat_type(), str)
     assert_type(xbbg.check_entitlements([1]), xbbg._core.EntitlementReport)

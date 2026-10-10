@@ -189,16 +189,16 @@ pub fn parse_cdx_ticker(ticker: &str) -> Result<ParsedCdxInfo> {
             is_generic = true;
             break;
         }
-        if let Some(num_part) = part.strip_prefix('S') {
-            if let Ok(n) = num_part.parse::<u32>() {
-                if n == 0 {
-                    return Err(ExtError::InvalidTicker(ticker.to_string()));
-                }
-                series_idx = Some(i);
-                series = part.to_string();
-                series_num = Some(n);
-                break;
+        if let Some(num_part) = part.strip_prefix('S')
+            && let Ok(n) = num_part.parse::<u32>()
+        {
+            if n == 0 {
+                return Err(ExtError::InvalidTicker(ticker.to_string()));
             }
+            series_idx = Some(i);
+            series = part.to_string();
+            series_num = Some(n);
+            break;
         }
     }
 
@@ -559,12 +559,16 @@ mod tests {
             .unwrap();
         assert_eq!(prev, "CDX HY CDSI S45 5Y Corp");
 
-        assert!(previous_series_ticker("CDX IG CDSI S1 V1 5Y Corp")
-            .unwrap()
-            .is_none());
-        assert!(previous_series_ticker("CDX IG CDSI GEN 5Y Corp")
-            .unwrap()
-            .is_none());
+        assert!(
+            previous_series_ticker("CDX IG CDSI S1 V1 5Y Corp")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            previous_series_ticker("CDX IG CDSI GEN 5Y Corp")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

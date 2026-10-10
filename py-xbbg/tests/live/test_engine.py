@@ -930,7 +930,7 @@ async def run_tests(test_names: list[str]):
         except pytest.skip.Exception as e:
             skipped += 1
             logger.warning(f"SKIPPED: {name} - {e}")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             failed += 1
             logger.warning(f"TIMEOUT: {name}")
         except Exception as e:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 import re
 from typing import Annotated, Any, Literal
 
@@ -179,7 +179,7 @@ def _epoch_datetime(value: int | float) -> datetime:
     if value < 100_000_000_000:
         raise ValueError("Ambiguous numeric date; use calendar text or epoch milliseconds")
     try:
-        return datetime.fromtimestamp(value / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(value / 1000, tz=UTC)
     except (ValueError, OverflowError, OSError) as exc:
         raise ValueError("Epoch milliseconds are outside the supported calendar range") from exc
 

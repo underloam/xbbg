@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run -p xbbg_core --example bdtick --features live
 
-use xbbg_core::{session::Session, EventType, SessionOptions};
+use xbbg_core::{EventType, SessionOptions, session::Session};
 
 #[allow(clippy::result_large_err)]
 fn main() -> xbbg_core::Result<()> {
@@ -67,39 +67,39 @@ fn main() -> xbbg_core::Result<()> {
             }
 
             // Count ticks
-            if let Some(tick_data_outer) = root.get_by_str("tickData") {
-                if let Some(tick_data) = tick_data_outer.get_by_str("tickData") {
-                    let n = tick_data.len();
-                    let prev_count = tick_count;
-                    tick_count += n;
+            if let Some(tick_data_outer) = root.get_by_str("tickData")
+                && let Some(tick_data) = tick_data_outer.get_by_str("tickData")
+            {
+                let n = tick_data.len();
+                let prev_count = tick_count;
+                tick_count += n;
 
-                    // Print first few ticks with ALL fields
-                    if prev_count == 0 {
-                        for i in 0..std::cmp::min(n, 5) {
-                            if let Some(tick) = tick_data.get_element(i) {
-                                println!("  Tick {}:", i);
+                // Print first few ticks with ALL fields
+                if prev_count == 0 {
+                    for i in 0..std::cmp::min(n, 5) {
+                        if let Some(tick) = tick_data.get_element(i) {
+                            println!("  Tick {}:", i);
 
-                                // Try known fields
-                                for field in &[
-                                    "time",
-                                    "type",
-                                    "value",
-                                    "size",
-                                    "conditionCodes",
-                                    "cc",
-                                    "exchangeCode",
-                                    "tradeCondition",
-                                ] {
-                                    if let Some(f) = tick.get_by_str(field) {
-                                        if let Some(s) = f.get_str(0) {
-                                            println!("    {}: \"{}\"", field, s);
-                                        } else if let Some(v) = f.get_f64(0) {
-                                            println!("    {}: {}", field, v);
-                                        } else if let Some(v) = f.get_i64(0) {
-                                            println!("    {}: {}", field, v);
-                                        } else {
-                                            println!("    {}: <present but empty>", field);
-                                        }
+                            // Try known fields
+                            for field in &[
+                                "time",
+                                "type",
+                                "value",
+                                "size",
+                                "conditionCodes",
+                                "cc",
+                                "exchangeCode",
+                                "tradeCondition",
+                            ] {
+                                if let Some(f) = tick.get_by_str(field) {
+                                    if let Some(s) = f.get_str(0) {
+                                        println!("    {}: \"{}\"", field, s);
+                                    } else if let Some(v) = f.get_f64(0) {
+                                        println!("    {}: {}", field, v);
+                                    } else if let Some(v) = f.get_i64(0) {
+                                        println!("    {}: {}", field, v);
+                                    } else {
+                                        println!("    {}: <present but empty>", field);
                                     }
                                 }
                             }

@@ -475,25 +475,29 @@ mod tests {
         );
         let mut batcher = SubscriptionArrowBatcher::with_capacity(2);
 
-        assert!(batcher
-            .append(&update(
-                10,
-                "IBM US Equity",
-                layout.clone(),
-                [
-                    update_field(0, UpdateValue::F64(1.25)),
-                    update_field(2, UpdateValue::Str(Arc::from("OK"))),
-                ],
-            ))
-            .is_none());
-        assert!(batcher
-            .append(&update(
-                20,
-                "MSFT US Equity",
-                layout,
-                [update_field(1, UpdateValue::F64(2.5))],
-            ))
-            .is_none());
+        assert!(
+            batcher
+                .append(&update(
+                    10,
+                    "IBM US Equity",
+                    layout.clone(),
+                    [
+                        update_field(0, UpdateValue::F64(1.25)),
+                        update_field(2, UpdateValue::Str(Arc::from("OK"))),
+                    ],
+                ))
+                .is_none()
+        );
+        assert!(
+            batcher
+                .append(&update(
+                    20,
+                    "MSFT US Equity",
+                    layout,
+                    [update_field(1, UpdateValue::F64(2.5))],
+                ))
+                .is_none()
+        );
 
         let batch = batcher.flush().unwrap();
         assert_eq!(batch.num_rows(), 2);
@@ -613,14 +617,16 @@ mod tests {
         let second_layout = layout(2, vec![FieldMeta::new("ASK_SIZE", 0, FieldKind::I32)]);
         let mut batcher = SubscriptionArrowBatcher::new();
 
-        assert!(batcher
-            .append(&update(
-                10,
-                "IBM US Equity",
-                first_layout,
-                [update_field(0, UpdateValue::F64(1.25))],
-            ))
-            .is_none());
+        assert!(
+            batcher
+                .append(&update(
+                    10,
+                    "IBM US Equity",
+                    first_layout,
+                    [update_field(0, UpdateValue::F64(1.25))],
+                ))
+                .is_none()
+        );
         let old_batch = batcher
             .append(&update(
                 20,
@@ -700,14 +706,16 @@ mod tests {
         let text_bid_layout = layout(2, vec![FieldMeta::new("BID", 0, FieldKind::Str)]);
         let mut batcher = SubscriptionArrowBatcher::with_capacity(2);
 
-        assert!(batcher
-            .append(&update(
-                10,
-                "IBM US Equity",
-                bid_layout,
-                [update_field(0, UpdateValue::F64(1.25))],
-            ))
-            .is_none());
+        assert!(
+            batcher
+                .append(&update(
+                    10,
+                    "IBM US Equity",
+                    bid_layout,
+                    [update_field(0, UpdateValue::F64(1.25))],
+                ))
+                .is_none()
+        );
         let bid_batch = batcher
             .append(&update(
                 20,
@@ -747,14 +755,16 @@ mod tests {
         let layout = layout(1, vec![FieldMeta::new("SIZE", 0, FieldKind::I32)]);
         let mut batcher = SubscriptionArrowBatcher::with_capacity(2);
         for value in [i64::from(i32::MAX) + 1, i64::from(i32::MIN) - 1] {
-            assert!(batcher
-                .append(&update(
-                    value,
-                    "IBM US Equity",
-                    layout.clone(),
-                    [update_field(0, UpdateValue::I64(value))],
-                ))
-                .is_none());
+            assert!(
+                batcher
+                    .append(&update(
+                        value,
+                        "IBM US Equity",
+                        layout.clone(),
+                        [update_field(0, UpdateValue::I64(value))],
+                    ))
+                    .is_none()
+            );
         }
 
         let batch = batcher.flush().unwrap();

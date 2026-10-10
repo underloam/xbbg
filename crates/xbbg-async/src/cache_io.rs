@@ -334,16 +334,15 @@ impl PendingJsonWrite {
 
 impl Drop for PendingJsonWrite {
     fn drop(&mut self) {
-        if self.cleanup_needed {
-            if let Err(error) = fs::remove_file(&self.temporary) {
-                if error.kind() != std::io::ErrorKind::NotFound {
-                    xbbg_log::warn!(
-                        path = %self.temporary.display(),
-                        error = %error,
-                        "cannot remove unpublished temporary cache file"
-                    );
-                }
-            }
+        if self.cleanup_needed
+            && let Err(error) = fs::remove_file(&self.temporary)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            xbbg_log::warn!(
+                path = %self.temporary.display(),
+                error = %error,
+                "cannot remove unpublished temporary cache file"
+            );
         }
     }
 }
@@ -437,7 +436,7 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
     }
 
     #[link(name = "kernel32")]
-    extern "system" {
+    unsafe extern "system" {
         fn SetFileInformationByHandle(
             file: *mut std::ffi::c_void,
             information_class: i32,
@@ -519,8 +518,8 @@ fn replace_file(temporary: &Path, destination: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::ser::Error as _;
     use serde::Serializer;
+    use serde::ser::Error as _;
     use std::sync::{Arc, Barrier};
 
     struct BlockingValue {
@@ -737,15 +736,19 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let oversized = directory.path().join("oversized.json");
         fs::write(&oversized, b"\"12345\"").unwrap();
-        assert!(read_json_bounded::<String>(&oversized, 4)
-            .unwrap_err()
-            .contains("exceeding"));
+        assert!(
+            read_json_bounded::<String>(&oversized, 4)
+                .unwrap_err()
+                .contains("exceeding")
+        );
 
         let array = directory.path().join("array.json");
         fs::write(&array, b"[1,2,3]").unwrap();
-        assert!(read_json_array_bounded::<u64>(&array, 64, 2)
-            .unwrap_err()
-            .contains("2-entry limit"));
+        assert!(
+            read_json_array_bounded::<u64>(&array, 64, 2)
+                .unwrap_err()
+                .contains("2-entry limit")
+        );
     }
 
     #[test]

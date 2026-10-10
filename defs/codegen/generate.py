@@ -10,13 +10,8 @@ import re
 import shutil
 import subprocess
 import sys
+import tomllib
 from typing import Any
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    tomllib = __import__("tomli")
-
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFS_PATH = ROOT / "defs" / "bloomberg.toml"
@@ -1205,7 +1200,7 @@ def _rustfmt(text: str) -> str:
     if rustfmt is None:
         return text
     result = subprocess.run(
-        [rustfmt, "--edition", "2021"],
+        [rustfmt, "--edition", "2024"],
         input=text,
         capture_output=True,
         text=True,

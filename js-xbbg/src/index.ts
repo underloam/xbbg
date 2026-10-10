@@ -248,6 +248,10 @@ type StudyParams = Record<string, PrimitiveValue | undefined>;
 const ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE =
   'ETF NAV relationship result is not one-to-one with requested ETFs';
 
+function malformedEtfNavRelationship(): BlpValidationError {
+  return new BlpValidationError(ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE, { element: 'tickers' });
+}
+
 function firstSeenDuplicates(values: readonly string[]): string[] {
   const seen = new Set<string>();
   const duplicates: string[] = [];
@@ -271,9 +275,6 @@ function firstSeenDuplicates(values: readonly string[]): string[] {
  * unambiguous iNAV reverse mapping — all before any subscription is opened.
  */
 function validatedInavTickers(etfList: readonly string[], table: Table): string[] {
-  const malformed = (): BlpValidationError =>
-    new BlpValidationError(ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE, { element: 'tickers' });
-
   const inputOrder = table.getChild('input_order');
   const etfTicker = table.getChild('etf_ticker');
   const inavTicker = table.getChild('inav_ticker');
@@ -284,17 +285,17 @@ function validatedInavTickers(etfList: readonly string[], table: Table): string[
     inavTicker === null ||
     inavValidationError === null
   ) {
-    throw malformed();
+    throw malformedEtfNavRelationship();
   }
   if (table.numRows !== etfList.length) {
-    throw malformed();
+    throw malformedEtfNavRelationship();
   }
 
   const rowByOrder = new Map<number, number>();
   for (let rowIndex = 0; rowIndex < table.numRows; rowIndex += 1) {
     const order: unknown = inputOrder.get(rowIndex);
     if (typeof order !== 'number' || rowByOrder.has(order)) {
-      throw malformed();
+      throw malformedEtfNavRelationship();
     }
     rowByOrder.set(order, rowIndex);
   }
@@ -303,7 +304,7 @@ function validatedInavTickers(etfList: readonly string[], table: Table): string[
   for (const [index, etf] of etfList.entries()) {
     const rowIndex = rowByOrder.get(index);
     if (rowIndex === undefined || etfTicker.get(rowIndex) !== etf) {
-      throw malformed();
+      throw malformedEtfNavRelationship();
     }
     rows.push({ etf, rowIndex });
   }

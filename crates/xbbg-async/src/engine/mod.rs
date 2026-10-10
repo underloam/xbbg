@@ -33,7 +33,7 @@ use std::sync::Arc;
 use arrow_array::{Array, RecordBatch};
 use tokio::sync::watch;
 
-use xbbg_core::{apply_session_identity_options, AuthConfig, BlpError, SessionOptions};
+use xbbg_core::{AuthConfig, BlpError, SessionOptions, apply_session_identity_options};
 
 use crate::errors::BlpAsyncError;
 use crate::services::{Operation, Service};
@@ -58,7 +58,6 @@ pub use state::{
 };
 use state::{SubscriptionMetrics, SubscriptionReceiver};
 use subscription_pool::{SessionClaim, SubscriptionCommandHandle, SubscriptionSessionPool};
-use subscription_status::{timestamp_now_us, SubscriptionStatusScope};
 pub use subscription_status::{
     AdminStatusInfo, ServiceStatusInfo, SessionLifecycleState, SessionStatusInfo,
     SharedSubscriptionStatus, SubscriptionEventCategory, SubscriptionEventInfo,
@@ -66,6 +65,7 @@ pub use subscription_status::{
     SubscriptionStatusHandle, SubscriptionStatusState, TopicLifecycleState, TopicStatusInfo,
     WorkerHealth,
 };
+use subscription_status::{SubscriptionStatusScope, timestamp_now_us};
 use subscription_types::SubscriptionTypeResolver;
 pub use worker::UnifiedRequestState;
 
@@ -402,7 +402,7 @@ impl RequestParamsInput {
             None => {
                 return Err(RequestParamsInputError::new(
                     "operation is required unless request_operation is used for RawRequest",
-                ))
+                ));
             }
         };
 
@@ -1357,10 +1357,10 @@ impl Engine {
 fn release_runtime(rt: Option<Arc<tokio::runtime::Runtime>>) {
     let Some(rt) = rt else { return };
 
-    if tokio::runtime::Handle::try_current().is_ok() {
-        if let Some(rt) = Arc::into_inner(rt) {
-            rt.shutdown_background();
-        }
+    if tokio::runtime::Handle::try_current().is_ok()
+        && let Some(rt) = Arc::into_inner(rt)
+    {
+        rt.shutdown_background();
     }
 }
 
@@ -1517,17 +1517,16 @@ impl SubscriptionStream {
         let mut remaining = Vec::new();
         let mut first_error = None;
         let mut cleanup_error = self.handle.unsubscribe().await.err();
-        if drain {
-            if let Err(error) = collect_subscription_updates_until_drained(
+        if drain
+            && let Err(error) = collect_subscription_updates_until_drained(
                 &mut self.rx,
                 self.handle.drain_forwarder(),
                 &mut remaining,
                 &mut first_error,
             )
             .await
-            {
-                cleanup_error.get_or_insert(error);
-            }
+        {
+            cleanup_error.get_or_insert(error);
         }
         self.rx.close();
         if drain {
@@ -1982,9 +1981,11 @@ mod tests {
         release_barrier.send(()).expect("release cleanup barrier");
         let (remaining, error) = task.await.expect("drain task");
         assert_eq!(remaining.len(), 1);
-        assert!(error
-            .expect("terminal error")
-            .to_string()
-            .contains("terminal before cleanup"));
+        assert!(
+            error
+                .expect("terminal error")
+                .to_string()
+                .contains("terminal before cleanup")
+        );
     }
 }

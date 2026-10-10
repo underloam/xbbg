@@ -7,7 +7,7 @@
 //! Messages borrow the [`MessageIterator`] that yields them and are valid only
 //! until it advances or is dropped.
 
-use crate::{ffi, Message};
+use crate::{Message, ffi};
 use std::marker::PhantomData;
 use std::rc::Rc;
 

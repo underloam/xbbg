@@ -19,7 +19,9 @@ pub(crate) fn prepare_windows_libclang_alias(out_dir: &Path) -> Result<(), Strin
 
     for dir in libclang_candidate_dirs() {
         if has_bindgen_libclang_name(&dir) {
-            env::set_var("LIBCLANG_PATH", &dir);
+            // SAFETY: build scripts run in their own process, and this helper runs
+            // on the main thread before bindgen or anything else spawns a thread.
+            unsafe { env::set_var("LIBCLANG_PATH", &dir) };
             return Ok(());
         }
 
@@ -43,7 +45,9 @@ pub(crate) fn prepare_windows_libclang_alias(out_dir: &Path) -> Result<(), Strin
                 )
             })?;
 
-            env::set_var("LIBCLANG_PATH", &alias_dir);
+            // SAFETY: build scripts run in their own process, and this helper runs
+            // on the main thread before bindgen or anything else spawns a thread.
+            unsafe { env::set_var("LIBCLANG_PATH", &alias_dir) };
             println!("cargo:rerun-if-changed={}", versioned_dll.display());
             return Ok(());
         }

@@ -13,7 +13,7 @@ use xbbg_log::trace;
 
 use super::typed_builder::{ArrowType, TypedBuilder};
 use super::value_utils::{
-    arrow_type_for_element, should_emit_scalar_field, top_level_response_error, ResponseMetadata,
+    ResponseMetadata, arrow_type_for_element, should_emit_scalar_field, top_level_response_error,
 };
 use xbbg_core::{BlpError, Element, Message, Name};
 

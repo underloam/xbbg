@@ -19,11 +19,11 @@ use chrono::{Datelike, Duration, NaiveDate};
 use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::resolvers::cdx::{
-    build_resolved_cdx_ticker_with_options, cdx_next_series_window, cdx_prior_series_window,
-    gen_to_specific, parse_cdx_ticker, ResolvedCdxInfo,
+    ResolvedCdxInfo, build_resolved_cdx_ticker_with_options, cdx_next_series_window,
+    cdx_prior_series_window, gen_to_specific, parse_cdx_ticker,
 };
 use xbbg_ext::resolvers::futures::{
-    contract_index, generate_futures_candidates, validate_generic_ticker, RollFrequency,
+    RollFrequency, contract_index, generate_futures_candidates, validate_generic_ticker,
 };
 use xbbg_ext::{fmt_date, parse_date, parse_ticker_parts};
 
@@ -136,21 +136,20 @@ pub async fn recipe_active_futures(
         &dt,
         second_idx,
     );
-    if pair.as_ref().map_or(true, |(_, second)| second.is_none()) {
-        if let Ok(chain) =
+    if pair.as_ref().map_or(true, |(_, second)| second.is_none())
+        && let Ok(chain) =
             request_futures_chain_maturities(engine, &front_gen, dt_parsed, freq, &options).await
-        {
-            // A missing bulk field must not discard an otherwise usable front.
-            if chain.len() > second_idx || pair.is_err() {
-                pair = select_active_futures_pair(
-                    &chain,
-                    &chain,
-                    &front_gen,
-                    &second_gen,
-                    &dt,
-                    second_idx,
-                );
-            }
+    {
+        // A missing bulk field must not discard an otherwise usable front.
+        if chain.len() > second_idx || pair.is_err() {
+            pair = select_active_futures_pair(
+                &chain,
+                &chain,
+                &front_gen,
+                &second_gen,
+                &dt,
+                second_idx,
+            );
         }
     }
     let ((front_ticker, front_maturity), second_contract) = pair?;
@@ -481,12 +480,12 @@ fn pick_cdx_ladder_series(
         let series = lo + offset as u32;
         let accrual_start = required_cdx_date(batch, alias, CDX_ACCRUAL_FIELD)?;
 
-        if let Some((above_series, above_accrual)) = above {
-            if accrual_start >= above_accrual {
-                return Err(RecipeError::Other(format!(
-                    "'{gen_ticker}' S{series} starts {accrual_start}, not before S{above_series} at {above_accrual}"
-                )));
-            }
+        if let Some((above_series, above_accrual)) = above
+            && accrual_start >= above_accrual
+        {
+            return Err(RecipeError::Other(format!(
+                "'{gen_ticker}' S{series} starts {accrual_start}, not before S{above_series} at {above_accrual}"
+            )));
         }
         above = Some((series, accrual_start));
 
@@ -1451,11 +1450,13 @@ mod tests {
                     Some("long")
                 }
             );
-            assert!(params
-                .overrides
-                .as_ref()
-                .unwrap()
-                .contains(&("PRICING_SOURCE".to_string(), "BGN".to_string())));
+            assert!(
+                params
+                    .overrides
+                    .as_ref()
+                    .unwrap()
+                    .contains(&("PRICING_SOURCE".to_string(), "BGN".to_string()))
+            );
         }
         assert_eq!(maturity.security_overrides, options.security_overrides);
         assert_eq!(volume.security_overrides, options.security_overrides);
@@ -1472,11 +1473,13 @@ mod tests {
         );
         assert_eq!(chain.extractor, ExtractorType::BulkData);
         assert!(chain.extractor_set);
-        assert!(chain
-            .overrides
-            .as_ref()
-            .unwrap()
-            .contains(&("CHAIN_DATE".to_string(), "20240312".to_string())));
+        assert!(
+            chain
+                .overrides
+                .as_ref()
+                .unwrap()
+                .contains(&("CHAIN_DATE".to_string(), "20240312".to_string()))
+        );
         assert_eq!(mapping.fields.as_ref().unwrap(), &["FUT_CUR_GEN_TICKER"]);
         assert_eq!(mapping.securities.as_ref().unwrap(), &["ES1 Index"]);
         assert_eq!(volume.fields.as_ref().unwrap(), &["VOLUME"]);
@@ -1646,7 +1649,7 @@ mod tests {
             1,
         )
         .unwrap();
-        assert_eq!(pair.0 .0, "ABCH24 Index");
+        assert_eq!(pair.0.0, "ABCH24 Index");
         assert_eq!(pair.1.unwrap().0, "ABCM24 Index");
     }
 

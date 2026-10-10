@@ -15,8 +15,8 @@
 
 use std::fmt;
 
-use xbbg_core::zfp::ZfpRemote;
 use xbbg_core::BlpError;
+use xbbg_core::zfp::ZfpRemote;
 
 /// A SOCKS5 proxy applied to a single [`ServerAddr`].
 ///

@@ -770,11 +770,13 @@ mod tests {
             },
         );
         assert_eq!(decision.status, VenueStatus::Mismatch);
-        assert!(decision
-            .error
-            .as_deref()
-            .unwrap()
-            .contains("PRICING_SOURCE"));
+        assert!(
+            decision
+                .error
+                .as_deref()
+                .unwrap()
+                .contains("PRICING_SOURCE")
+        );
         validate_venue(&mut decision, &VenueReference::default());
         assert_eq!(decision.status, VenueStatus::Unresolved);
         let overrides = HashMap::from([("new york".to_string(), "CUSTOM".to_string())]);

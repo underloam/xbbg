@@ -3,8 +3,8 @@
 //! Adapters retain their public input shapes and numeric extraction. Session
 //! options and engine invariants are checked here before starting any workers.
 
-use crate::engine::{EngineConfig, ServerAddr, Socks5Proxy, TlsConfig, Transport};
 use crate::BlpAsyncError;
+use crate::engine::{EngineConfig, ServerAddr, Socks5Proxy, TlsConfig, Transport};
 use xbbg_core::AuthConfig;
 
 /// Borrowed authentication fields, before selecting an authentication method.
@@ -648,14 +648,16 @@ mod tests {
             |field| field,
         ));
         assert!(detail.starts_with("zfp_remote cannot be combined with host/port/servers"));
-        assert!(error_detail(convert(ConfigInput {
-            transport: TransportInput {
-                zfp_remote: Some("8195"),
-                ..TransportInput::default()
-            },
-            ..ConfigInput::default()
-        }))
-        .contains("invalid ZFP remote port"));
+        assert!(
+            error_detail(convert(ConfigInput {
+                transport: TransportInput {
+                    zfp_remote: Some("8195"),
+                    ..TransportInput::default()
+                },
+                ..ConfigInput::default()
+            }))
+            .contains("invalid ZFP remote port")
+        );
     }
 
     #[test]
@@ -704,13 +706,15 @@ mod tests {
             subscription_pool_size: 0,
             ..EngineConfig::default()
         };
-        assert!(normalize(
-            config,
-            ConfigInput::default(),
-            std::iter::empty(),
-            |field| field
-        )
-        .is_ok());
+        assert!(
+            normalize(
+                config,
+                ConfigInput::default(),
+                std::iter::empty(),
+                |field| field
+            )
+            .is_ok()
+        );
     }
 
     #[test]

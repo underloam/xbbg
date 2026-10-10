@@ -168,7 +168,7 @@ in `scripts/mcp_release_config.py`; their schema-specific JSON formats remain se
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.10–3.15), sdist, publish to PyPI, attach to GitHub release |
+| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15), sdist, publish to PyPI, attach to GitHub release |
 | Release | `npm-publish.yml` | Build and publish stable `@xbbg/core` prebuilt native packages for supported platforms, then publish the `@xbbg/core` wrapper and `@xbbg/langgraph` package via npm trusted publishing |
 
 ### crates.io publishing

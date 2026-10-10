@@ -65,10 +65,10 @@ pub fn parse_date(s: &str) -> Result<NaiveDate> {
                 if let Ok(d) = NaiveDate::parse_from_str(s, "%d-%m-%Y") {
                     return Ok(d);
                 }
-            } else if s.as_bytes()[2] == b'/' {
-                if let Ok(d) = NaiveDate::parse_from_str(s, "%d/%m/%Y") {
-                    return Ok(d);
-                }
+            } else if s.as_bytes()[2] == b'/'
+                && let Ok(d) = NaiveDate::parse_from_str(s, "%d/%m/%Y")
+            {
+                return Ok(d);
             }
         }
         _ => {}

@@ -63,8 +63,8 @@ mod tests {
     use crate::engine::state::IntradayBarState;
     use arrow_array::{Array, Float64Array, Int32Array, TimestampMicrosecondArray};
     use tokio::sync::oneshot;
-    use xbbg_core::test_support::TestEvent;
     use xbbg_core::EventType;
+    use xbbg_core::test_support::TestEvent;
 
     fn response(event_type: EventType, data: serde_json::Value) -> TestEvent {
         let schema = r#"<ServiceDefinition name="xbbg.test.bars" version="1.0.0.0">

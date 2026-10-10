@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterable, Mapping
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from langchain_core.tools import StructuredTool
@@ -239,7 +239,7 @@ async def _market_session(input: BaseModel, options: BloombergToolsOptions) -> A
             arguments["date"] = (date(year, month, day) + timedelta(days=1)).isoformat()
             _, end = _core.ext_session_times_to_utc(**arguments)
         return {
-            key: datetime.fromisoformat(value).replace(tzinfo=timezone.utc).isoformat()
+            key: datetime.fromisoformat(value).replace(tzinfo=UTC).isoformat()
             for key, value in (("start", start), ("end", end))
         }
     if operation == "default_turnover_dates":

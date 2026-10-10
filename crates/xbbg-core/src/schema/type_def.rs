@@ -9,9 +9,9 @@ use crate::datatype::DataType;
 use crate::ffi;
 use crate::name::Name;
 
+use super::SchemaStatus;
 use super::constant::ConstantList;
 use super::element_def::SchemaElementDefinition;
-use super::SchemaStatus;
 
 /// Definition of a schema type.
 ///

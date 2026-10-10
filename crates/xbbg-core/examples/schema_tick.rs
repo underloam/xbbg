@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run -p xbbg_core --example schema_tick --features live
 
-use xbbg_core::{session::Session, EventType, SessionOptions};
+use xbbg_core::{EventType, SessionOptions, session::Session};
 
 #[allow(clippy::result_large_err)]
 fn main() -> xbbg_core::Result<()> {

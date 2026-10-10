@@ -23,7 +23,7 @@
 //! due to Bloomberg SDK internal work. Value extraction is fast (~7ns) once you
 //! have the element handle.
 
-use crate::{ffi, DataType, HighPrecisionDatetime, Name};
+use crate::{DataType, HighPrecisionDatetime, Name, ffi};
 use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -156,8 +156,12 @@ impl<'a> Element<'a> {
     #[inline(always)]
     pub unsafe fn get_at_unchecked(&self, i: usize) -> Element<'a> {
         let mut out = MaybeUninit::uninit();
-        ffi::blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i);
-        Element::new(out.assume_init())
+        // SAFETY: self.ptr is a live element handle and `out` is writable; the
+        // return code is deliberately ignored per this function's contract.
+        unsafe { ffi::blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i) };
+        // SAFETY: the caller guarantees `i` is a valid child index, so the call
+        // above succeeded and initialized `out`.
+        Element::new(unsafe { out.assume_init() })
     }
 
     /// Element name (allocates).

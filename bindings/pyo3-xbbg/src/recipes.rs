@@ -12,7 +12,7 @@ use xbbg_async::engine::RequestParams;
 
 use xbbg_ext::transforms::fixed_income::YieldType;
 
-use crate::{native_arrow::record_batch_to_arrow_record_batch, PyEngine};
+use crate::{PyEngine, native_arrow::record_batch_to_arrow_record_batch};
 
 /// Convert a RecipeError to a Python exception.
 fn recipe_err(e: xbbg_recipes::RecipeError) -> PyErr {
@@ -760,8 +760,8 @@ mod tests {
     };
     use pyo3::exceptions::{PyRuntimeError, PyValueError};
     use xbbg_async::BlpAsyncError;
-    use xbbg_core::errors::CorrelationContext;
     use xbbg_core::BlpError;
+    use xbbg_core::errors::CorrelationContext;
     use xbbg_recipes::RecipeError;
 
     #[test]
@@ -776,10 +776,12 @@ mod tests {
             })));
             assert!(engine.is_instance_of::<BlpValidationError>(py));
             assert!(!engine.is_instance_of::<PyValueError>(py));
-            assert!(engine
-                .value(py)
-                .to_string()
-                .contains("invalid recipe configuration"));
+            assert!(
+                engine
+                    .value(py)
+                    .to_string()
+                    .contains("invalid recipe configuration")
+            );
         });
     }
 
@@ -889,10 +891,12 @@ mod tests {
         Python::attach(|py| {
             let error = recipe_err(RecipeError::Other("synthetic recipe failure".into()));
             assert!(error.is_instance_of::<PyRuntimeError>(py));
-            assert!(error
-                .value(py)
-                .to_string()
-                .contains("synthetic recipe failure"));
+            assert!(
+                error
+                    .value(py)
+                    .to_string()
+                    .contains("synthetic recipe failure")
+            );
         });
     }
 }

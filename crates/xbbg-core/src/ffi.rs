@@ -5,9 +5,9 @@
 // --- Opaque types ---
 pub use blpapi_sys::{
     blpapi_AuthApplication_t, blpapi_AuthOptions_t, blpapi_AuthToken_t, blpapi_AuthUser_t,
-    blpapi_CorrelationId_t, blpapi_Element_t, blpapi_Event_t, blpapi_Identity_t,
-    blpapi_MessageIterator_t, blpapi_Message_t, blpapi_Name_t, blpapi_Request_t, blpapi_Service_t,
-    blpapi_SessionOptions_t, blpapi_Session_t, blpapi_SubscriptionList_t, blpapi_TlsOptions_t,
+    blpapi_CorrelationId_t, blpapi_Element_t, blpapi_Event_t, blpapi_Identity_t, blpapi_Message_t,
+    blpapi_MessageIterator_t, blpapi_Name_t, blpapi_Request_t, blpapi_Service_t, blpapi_Session_t,
+    blpapi_SessionOptions_t, blpapi_SubscriptionList_t, blpapi_TlsOptions_t,
 };
 
 // SDK-generated layouts required by the test message formatter. The core
@@ -30,7 +30,7 @@ pub use blpapi_sys::{
 
 // --- Schema opaque types ---
 pub use blpapi_sys::{
-    blpapi_ConstantList_t, blpapi_Constant_t, blpapi_Operation_t, blpapi_SchemaElementDefinition_t,
+    blpapi_Constant_t, blpapi_ConstantList_t, blpapi_Operation_t, blpapi_SchemaElementDefinition_t,
     blpapi_SchemaTypeDefinition_t,
 };
 
@@ -52,9 +52,10 @@ pub use blpapi_sys::{
 
 // --- Element setters ---
 pub use blpapi_sys::{
-    blpapi_Element_appendElement, blpapi_Element_setElementFloat64, blpapi_Element_setElementInt32,
-    blpapi_Element_setElementString, blpapi_Element_setValueFloat64, blpapi_Element_setValueInt32,
-    blpapi_Element_setValueInt64, blpapi_Element_setValueString, BLPAPI_ELEMENT_INDEX_END,
+    BLPAPI_ELEMENT_INDEX_END, blpapi_Element_appendElement, blpapi_Element_setElementFloat64,
+    blpapi_Element_setElementInt32, blpapi_Element_setElementString,
+    blpapi_Element_setValueFloat64, blpapi_Element_setValueInt32, blpapi_Element_setValueInt64,
+    blpapi_Element_setValueString,
 };
 
 // --- Message functions ---
@@ -116,8 +117,8 @@ pub use blpapi_sys::blpapi_SchemaTypeDefinition_status;
 
 // --- ConstantList/Constant functions ---
 pub use blpapi_sys::{
-    blpapi_ConstantList_getConstantAt, blpapi_ConstantList_numConstants,
-    blpapi_Constant_description, blpapi_Constant_name,
+    blpapi_Constant_description, blpapi_Constant_name, blpapi_ConstantList_getConstantAt,
+    blpapi_ConstantList_numConstants,
 };
 
 // --- Request functions ---
@@ -281,7 +282,7 @@ pub struct blpapi_TimePoint_t {
 }
 
 // Declare datetime + timepoint FFI using our local types (not blpapi-sys's)
-extern "C" {
+unsafe extern "C" {
     pub fn blpapi_Element_getValueAsHighPrecisionDatetime(
         element: *mut blpapi_Element_t,
         buffer: *mut blpapi_HighPrecisionDatetime_t,

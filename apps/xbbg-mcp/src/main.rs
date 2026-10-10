@@ -5,32 +5,32 @@ use std::sync::Arc;
 use arrow::record_batch::RecordBatch;
 use rmcp::handler::server::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerInfo};
-use rmcp::{tool, tool_handler, tool_router, ErrorData, ServerHandler, ServiceExt};
-use serde_json::{json, Value};
+use rmcp::model::{CallToolResult, Implementation, ServerCapabilities, ServerConfig};
+use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router};
+use serde_json::{Value, json};
 use tokio::sync::{OnceCell, Semaphore};
-use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, ServerAddr, Transport};
 use xbbg_async::BlpAsyncError;
+use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, ServerAddr, Transport};
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
-use xbbg_recipes::{recipe_auction_snapshot, recipe_resolve_venues, RecipeError};
+use xbbg_recipes::{RecipeError, recipe_auction_snapshot, recipe_resolve_venues};
 
 mod request_adapter;
 mod serialization;
 mod stdin;
 
 use request_adapter::{
-    auction_snapshot_params, bdh_request_params, bdib_request_params, bdp_request_params,
-    bds_request_params, bflds_request_params, bql_request_params, bsrch_request_params,
-    check_entitlements_params, generic_request_params, resolve_venues_params, AuctionSnapshotArgs,
-    BdhArgs, BdibArgs, BdpArgs, BdsArgs, BfldsArgs, BqlArgs, BsrchArgs, CheckEntitlementsArgs,
-    RequestArgs, ResolveVenuesArgs,
+    AuctionSnapshotArgs, BdhArgs, BdibArgs, BdpArgs, BdsArgs, BfldsArgs, BqlArgs, BsrchArgs,
+    CheckEntitlementsArgs, RequestArgs, ResolveVenuesArgs, auction_snapshot_params,
+    bdh_request_params, bdib_request_params, bdp_request_params, bds_request_params,
+    bflds_request_params, bql_request_params, bsrch_request_params, check_entitlements_params,
+    generic_request_params, resolve_venues_params,
 };
 
 use serialization::{
-    bounded_error_display, bounded_error_text, bounded_json_text, entitlement_check_to_json,
-    json_serialized_len, record_batch_to_json, should_offload, should_offload_items, ResultLimits,
-    MIN_RESULT_BYTES,
+    MIN_RESULT_BYTES, ResultLimits, bounded_error_display, bounded_error_text, bounded_json_text,
+    entitlement_check_to_json, json_serialized_len, record_batch_to_json, should_offload,
+    should_offload_items,
 };
 
 struct XbbgMcpServer {
@@ -360,10 +360,10 @@ fn server_version() -> &'static str {
 
 #[tool_handler]
 impl ServerHandler for XbbgMcpServer {
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         // The server only advertises tools for now; request execution stays lazy so stdio startup
         // does not require a live Bloomberg session before the client can initialize.
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(
                 Implementation::new(env!("CARGO_PKG_NAME"), server_version())
                     .with_title("xbbg MCP")
@@ -1074,11 +1074,13 @@ mod tests {
             data["returned_errors"].as_u64().unwrap() + data["omitted_errors"].as_u64().unwrap(),
             100
         );
-        assert!(data["errors"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| { entry.get("path").is_some() && entry.get("message").is_some() }));
+        assert!(
+            data["errors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|entry| { entry.get("path").is_some() && entry.get("message").is_some() })
+        );
         let primary = &data["errors"][0];
         assert_eq!(primary["path"], "field.0");
         assert!(primary["message"].as_str().unwrap().ends_with('…'));

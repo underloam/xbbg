@@ -25,12 +25,18 @@ unsafe extern "C" fn sdk_callback(
     let cat = if category.is_null() {
         "sdk"
     } else {
-        CStr::from_ptr(category).to_str().unwrap_or("sdk")
+        // SAFETY: non-null was checked above; the SDK passes a NUL-terminated
+        // category string that stays valid for the duration of this callback.
+        unsafe { CStr::from_ptr(category) }
+            .to_str()
+            .unwrap_or("sdk")
     };
     let msg = if message.is_null() {
         ""
     } else {
-        CStr::from_ptr(message).to_str().unwrap_or("")
+        // SAFETY: non-null was checked above; the SDK passes a NUL-terminated
+        // message string that stays valid for the duration of this callback.
+        unsafe { CStr::from_ptr(message) }.to_str().unwrap_or("")
     };
 
     match severity {

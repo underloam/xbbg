@@ -14,7 +14,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 import sys
 
 if sys.platform == "win32":
@@ -153,11 +153,11 @@ async def test_timestamp_source():
             ts_val = rows[0].get("timestamp")
             timestamps.append(ts_val)
 
-            now = datetime.now(timezone.utc)
+            now = datetime.now(UTC)
             # Bloomberg SDK receive time should be within a few seconds of wall clock
             if ts_val is not None and hasattr(ts_val, "timestamp"):
                 assert ts_val.tzinfo is not None, f"Expected timezone-aware timestamp, got {ts_val!r}"
-                assert ts_val.utcoffset() == timezone.utc.utcoffset(ts_val), f"Expected UTC timestamp, got {ts_val!r}"
+                assert ts_val.utcoffset() == UTC.utcoffset(ts_val), f"Expected UTC timestamp, got {ts_val!r}"
                 diff_seconds = abs((now - ts_val).total_seconds())
                 print(f"  Batch {batch_count}: ts={ts_val}  wall_diff={diff_seconds:.3f}s")
             else:
@@ -198,7 +198,7 @@ async def test_tick_mode_timestamp_timezone_issue_273():
 
     ts = tick["timestamp"]
     assert ts.tzinfo is not None, f"Expected timezone-aware timestamp, got {ts!r}"
-    assert ts.utcoffset() == timezone.utc.utcoffset(ts), f"Expected UTC timestamp, got {ts!r}"
+    assert ts.utcoffset() == UTC.utcoffset(ts), f"Expected UTC timestamp, got {ts!r}"
     print(f"PASSED: tick_mode timestamp is UTC-aware: {ts!r}\n")
 
 
@@ -252,7 +252,7 @@ async def test_error_propagation():
             got_data = got_data or bool(rows)
         except StopAsyncIteration:
             print("  Stream ended after wait")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print("  Timed out waiting for response (no error, no data)")
         except Exception as e:
             got_error = True

@@ -7,7 +7,7 @@ date-typed override values to Bloomberg's expected ``YYYYMMDD`` form.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -34,7 +34,7 @@ class TestNormalizeOverrideValue:
         assert _normalize_override_value(datetime(2023, 1, 17, 10, 30)) == "20230117"
 
     def test_datetime_aware(self) -> None:
-        dt = datetime(2023, 1, 17, 10, 30, tzinfo=timezone.utc)
+        dt = datetime(2023, 1, 17, 10, 30, tzinfo=UTC)
         assert _normalize_override_value(dt) == "20230117"
 
     def test_iso_date_string_normalized(self) -> None:

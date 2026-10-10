@@ -23,10 +23,9 @@ pub(crate) fn emit() -> Result<(), Box<dyn std::error::Error>> {
             if let Some(path) = git_output(
                 root,
                 &["rev-parse", "--path-format=absolute", "--git-path", name],
-            ) {
-                if Path::new(&path).exists() {
-                    println!("cargo:rerun-if-changed={path}");
-                }
+            ) && Path::new(&path).exists()
+            {
+                println!("cargo:rerun-if-changed={path}");
             }
         }
     }

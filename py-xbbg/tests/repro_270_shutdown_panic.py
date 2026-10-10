@@ -65,7 +65,7 @@ async def run_scenario(scenario: str) -> None:
             _engine._atexit_cleanup()
             try:
                 await asyncio.wait_for(sub.remove([]), timeout=0.25)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 print(json.dumps({"scenario": scenario, "native_completion_suppressed": True}))
             else:
                 raise AssertionError("native future completed after interpreter shutdown was signalled")

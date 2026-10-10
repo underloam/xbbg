@@ -8,8 +8,8 @@ use std::rc::Rc;
 use crate::ffi;
 use crate::name::Name;
 
-use super::type_def::SchemaTypeDefinition;
 use super::SchemaStatus;
+use super::type_def::SchemaTypeDefinition;
 
 /// Definition of a schema element (field).
 ///

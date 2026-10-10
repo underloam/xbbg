@@ -3,9 +3,9 @@
 //! This module bridges the gap between xbbg_core's raw FFI schema wrappers
 //! and the serde-enabled types used for JSON serialization.
 
+use xbbg_core::DataType;
 use xbbg_core::schema::{Operation, SchemaElementDefinition, SchemaTypeDefinition};
 use xbbg_core::service::Service;
-use xbbg_core::DataType;
 
 use super::types::{ElementInfo, OperationSchema, ServiceSchema};
 

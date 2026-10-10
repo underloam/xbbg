@@ -6,7 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "xbbg"
 description = "Independent client for Bloomberg-connected data workflows"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.10,<3.16"
+requires-python = ">=3.11,<3.16"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 # Deliberately a project identity, not a person: this metadata is published to
@@ -27,7 +27,6 @@ classifiers = [
   "Topic :: Software Development :: Libraries :: Python Modules",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
-  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
@@ -51,7 +50,7 @@ dependencies = [
 # Runtime stays minimal; extras opt into optional conversion/test surfaces.
 #
 # Every floor below is measured, not guessed: the `floors` CI job resolves this
-# table with `--resolution lowest-direct` on Python 3.10 and runs the suite
+# table with `--resolution lowest-direct` on Python 3.11 and runs the suite
 # against it. Three of these were previously false claims:
 #   * pandas 2.0.x declares no `numpy<2` bound, so a fresh resolve pairs it with
 #     numpy 2.x and pandas then fails to import ("numpy.dtype size changed").
@@ -114,7 +113,7 @@ where = ["py-xbbg/src"]
 include = ["xbbg*"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 120
 exclude = [
   "dist",
@@ -177,6 +176,7 @@ ignore = [
   "PT012",   # pytest-raises-with-multiple-statements
   "PT017",   # pytest-assert-in-except
   "PT018",   # pytest-composite-assertion
+  "UP042",   # (str, Enum) keeps Enum.__str__; StrEnum would change str()/format() output
 ]
 
 [tool.ruff.lint.per-file-ignores]
@@ -204,7 +204,7 @@ convention = "google"
 runtime-evaluated-base-classes = ["pydantic.BaseModel"]
 
 [tool.ty.environment]
-python-version = "3.10"
+python-version = "3.11"
 root = ["py-xbbg/src"]
 
 [tool.ty.rules]

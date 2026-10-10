@@ -101,7 +101,7 @@ the wheel is just the easiest discovery path for many users:
 pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/
 ```
 
-Supported Python versions: **3.10 through 3.15**.
+Supported Python versions: **3.11 through 3.15**.
 
 Requirements and notes:
 
@@ -271,7 +271,7 @@ pip install langchain langchain-openai
 pip install "langgraph>=1.2,<2"
 ```
 
-Requires Python 3.10–3.14, xbbg 1.5.0+, and `langchain-core` 1.4+. Graph workflows target LangGraph 1.2+. The adapter installs `langchain-core` and Pydantic; ordinary xbbg installs remain unchanged. Live requests still require authorized Bloomberg connectivity and SDK runtime libraries. Tool creation and schema inspection do not import the native extension or start a session.
+Requires Python 3.11–3.14, xbbg 1.5.0+, and `langchain-core` 1.4+. Graph workflows target LangGraph 1.2+. The adapter installs `langchain-core` and Pydantic; ordinary xbbg installs remain unchanged. Live requests still require authorized Bloomberg connectivity and SDK runtime libraries. Tool creation and schema inspection do not import the native extension or start a session.
 
 ```python
 from langchain.agents import create_agent

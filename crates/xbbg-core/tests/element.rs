@@ -3,7 +3,7 @@
 #![cfg(feature = "test-support")]
 
 use xbbg_core::test_support::TestEvent;
-use xbbg_core::{ffi, Value};
+use xbbg_core::{Value, ffi};
 
 #[test]
 fn checked_and_cached_dispatch_preserve_scalar_values() {

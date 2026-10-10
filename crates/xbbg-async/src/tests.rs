@@ -3,7 +3,7 @@
 //! These tests don't require a Bloomberg connection.
 
 use crate::engine::state::{
-    subscription_update_to_record_batch, FieldKind, FieldLayout, FieldMeta, SubscriptionUpdate,
+    FieldKind, FieldLayout, FieldMeta, SubscriptionUpdate, subscription_update_to_record_batch,
 };
 use crate::engine::{EngineConfig, OutputFormat, OverflowPolicy, ServerAddr, Transport};
 use arrow_schema::{DataType, TimeUnit};
