@@ -699,10 +699,16 @@ jobs:
 
       - name: Install wheel and test dependencies
         shell: bash
+        env:
+          PYTHON_VERSION: ${{ matrix.python }}
         run: |
           # Install the specific wheel for this Python version
           WHEEL=$(echo dist/*.whl)
-          uv pip install --system "${WHEEL}[test]"
+          # Hold the suite to the current dataframe majors so a resolver
+          # fallback cannot quietly test older ones. pandas 3 needs Python 3.11+.
+          majors=("polars>=2")
+          if [[ "$PYTHON_VERSION" != "3.10" ]]; then majors+=("pandas>=3"); fi
+          uv pip install --system "${WHEEL}[test]" "${majors[@]}"
 
       - name: Copy tests to temp directory
         # Run from temp dir to avoid importing local source instead of installed package

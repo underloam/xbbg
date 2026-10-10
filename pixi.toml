@@ -74,7 +74,7 @@ pytest-cov = ">=5.0"
 [feature.test.dependencies]
 pyarrow = ">=22.0"
 pandas = ">=2.3.3,<4"
-polars = ">=0.20.26,<2"
+polars = ">=0.20.26,<3"
 duckdb = ">=1.5.0"
 
 [feature.lint.dependencies]

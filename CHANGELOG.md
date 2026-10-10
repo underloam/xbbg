@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **`@xbbg/langgraph` validation matches the Python adapter. BREAKING:** `recoveryRate` is a percentage (0–100, 40 means 40%), fixed CDX bundles enforce `maxFields` and forward `validateFields`, and kwargs and override maps enforce `maxStringChars`, entry limits, and unique normalized keys.
 - **Large modules were split along existing seams** with public names unchanged: Python `blp.py`, the `@xbbg/core` entry module, the Rust engine's `engine/mod.rs`, and the `@xbbg/langgraph` result limiter.
 - **Benchmarks measure production code.** The subscription replay benchmarks drive the real `SubscriptionArrowBatcher`, and the BQL parser and extractor benchmarks share one fixture table.
+- **CI tests against pandas 3 and polars 2.** The Python test matrix requires pandas 3 (on Python 3.11 and later, which pandas 3 needs) and polars 2, the pixi test environments lock polars 2 (1.44 on Python 3.10, where conda-forge has no polars 2), and the declared-floors job still covers pandas 2.2.2 and polars 0.20.4.
 - **CI no longer installs Bloomberg's `blpapi` Python package.** The Python test jobs load the C++ SDK runtime from the SDK setup action on every OS, Windows included.
 
 ### Removed
