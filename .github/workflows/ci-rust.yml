@@ -333,6 +333,57 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
 
   # ════════════════════════════════════════════════════════════════════════════
+  # MSRV - every workspace member builds with the declared rust-version
+  # ════════════════════════════════════════════════════════════════════════════
+  # The published crates and the Python sdist compile on users' toolchains, so
+  # `rust-version` in the root Cargo.toml is a contract, not a hint.
+  msrv:
+    name: MSRV
+    needs: [sdk-version, generate-bindings]
+    runs-on: ubuntu-latest
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Read rust-version
+        id: msrv
+        run: |
+          version=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          test -n "$version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Setup Rust ${{ steps.msrv.outputs.version }}
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: ${{ steps.msrv.outputs.version }}
+          # Leave build.warnings unset: older Cargo predates it, and older rustc
+          # warns about lints added after it.
+          build-warnings: ""
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK (Linux)
+        id: sdk-linux
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Cargo check at the MSRV
+        run: cargo check --locked --workspace --all-targets
+
+  # ════════════════════════════════════════════════════════════════════════════
   # NAPI core packaging validation
   # ════════════════════════════════════════════════════════════════════════════
   core-packages:
@@ -956,7 +1007,7 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Install bindgen-cli
-        run: cargo install bindgen-cli --version 0.72.1
+        run: cargo install bindgen-cli --version 0.73.2
 
       - name: Run ABI compatibility check
         run: |
@@ -1013,7 +1064,7 @@ jobs:
     name: CI Status
     runs-on: ubuntu-latest
     # geiger, abi-compat, and semver are intentionally advisory.
-    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, core-packages, pack-offline-bundles, build, test, floors, dataframe-previous-majors]
+    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, build, test, floors, dataframe-previous-majors]
     if: always()
     steps:
       - name: Check required jobs
