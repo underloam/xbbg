@@ -689,8 +689,13 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
 
-      - name: Install blpapi from Bloomberg
-        run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
+      - name: Setup Bloomberg SDK (Windows)
+        if: runner.os == 'Windows'
+        id: sdk-windows
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Windows
 
       - name: Install wheel and test dependencies
         shell: bash
@@ -774,13 +779,8 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Install blpapi from Bloomberg
-        run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
-
       - name: Install wheel at declared floors
         shell: bash
-        # Scoped to this step on purpose: as a job-level variable it would also
-        # drag the blpapi install above down to its oldest release.
         env:
           UV_RESOLUTION: lowest-direct
         run: |

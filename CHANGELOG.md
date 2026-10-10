@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **`@xbbg/langgraph` validation matches the Python adapter. BREAKING:** `recoveryRate` is a percentage (0–100, 40 means 40%), fixed CDX bundles enforce `maxFields` and forward `validateFields`, and kwargs and override maps enforce `maxStringChars`, entry limits, and unique normalized keys.
 - **Large modules were split along existing seams** with public names unchanged: Python `blp.py`, the `@xbbg/core` entry module, the Rust engine's `engine/mod.rs`, and the `@xbbg/langgraph` result limiter.
 - **Benchmarks measure production code.** The subscription replay benchmarks drive the real `SubscriptionArrowBatcher`, and the BQL parser and extractor benchmarks share one fixture table.
+- **CI no longer installs Bloomberg's `blpapi` Python package.** The Python test jobs load the C++ SDK runtime from the SDK setup action on every OS, Windows included.
 
 ### Removed
 
