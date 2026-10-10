@@ -5,6 +5,7 @@ on:
     branches: [main, feat/**, fix/**]
     paths:
       - docker/**
+      - py-xbbg/docker/**
       - .github/workflows/ci-docker.yml
   workflow_dispatch:
 

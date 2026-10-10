@@ -89,6 +89,14 @@ const tools = createBloombergTools({ engine, maxRows: 200 });
 
 Defaults include 25 securities and 25 fields per request, 500 artifact rows, 50 model-facing rows, and 10 updates or 15 seconds per live snapshot. Tools honor LangGraph's `AbortSignal`. The [tool reference](https://github.com/underloam/xbbg/blob/main/js-xbbg-langgraph/REFERENCE.md) lists every limit, the result format, and each tool's inputs.
 
+## Development checks
+
+`npm run quality` includes type checking, linting, tests, the built-entrypoint smoke check,
+dead-code detection (`lint:deadcode`), and import-layer checks (`lint:imports`).
+The shared tool names, limit defaults, CDX bundles, result-policy vocabulary, and chart
+fields come from `defs/bloomberg.toml`; regenerate all package-local copies with
+`python defs/codegen/generate.py` from the repository root.
+
 ## License
 
 [Apache-2.0](https://github.com/underloam/xbbg/blob/main/LICENSE)

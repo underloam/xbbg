@@ -46,7 +46,6 @@ impl<'session> Service<'session> {
     }
 
     /// Get the raw pointer (internal use only).
-    #[allow(dead_code)] // Used in integration, not unit tests
     pub(crate) fn as_ptr(&self) -> *mut crate::ffi::blpapi_Service_t {
         self.ptr
     }

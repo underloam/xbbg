@@ -11,7 +11,6 @@ use xbbg_log::trace;
 use super::typed_builder::ColumnSet;
 use super::value_utils::{
     arrow_type_for_element, should_emit_scalar_field, top_level_response_error, ResponseMetadata,
-    SecurityErrorMeta,
 };
 use xbbg_core::{BlpError, Element, Message};
 
@@ -27,7 +26,7 @@ pub struct BulkDataState {
     subfield_index_by_key: HashMap<usize, usize>,
     /// Per-row scratch bitmap for fields seen while walking one bulk row.
     seen_subfields: Vec<bool>,
-    /// Response-level diagnostics (eidData / securityError) attached to the
+    /// Response-level diagnostics (eidData / securityError / fieldExceptions) attached to the
     /// result batch as schema metadata.
     response_meta: ResponseMetadata,
     /// Reply channel
@@ -120,37 +119,15 @@ impl BulkDataState {
                 .and_then(|e| e.get_str(0))
                 .unwrap_or("");
 
-            // eidData rides alongside fieldData when returnEids was requested.
-            if let Some(eids) = sec.get_by_str("eidData") {
-                self.response_meta.record_eid_data(ticker, &eids);
-            }
-
-            // Check for security error
-            if let Some(security_error) = sec.get_by_str("securityError") {
-                let read_str = |name: &str| {
-                    security_error
-                        .get_by_str(name)
-                        .and_then(|e| e.get_str(0))
-                        .map(str::to_string)
-                        .unwrap_or_default()
-                };
-                let error = SecurityErrorMeta {
-                    category: read_str("category"),
-                    code: security_error
-                        .get_by_str("code")
-                        .and_then(|e| e.get_i32(0))
-                        .unwrap_or_default(),
-                    subcategory: read_str("subcategory"),
-                    message: read_str("message"),
-                };
+            let diagnostics = self.response_meta.record_security(ticker, &sec);
+            if let Some(error) = diagnostics.security_error {
                 xbbg_log::warn!(
                     ticker = ticker,
-                    category = error.category.as_str(),
+                    category = error.category,
                     code = error.code,
-                    message = error.message.as_str(),
+                    message = error.message,
                     "BulkData securityError; skipping security"
                 );
-                self.response_meta.record_security_error(ticker, error);
                 continue;
             }
 

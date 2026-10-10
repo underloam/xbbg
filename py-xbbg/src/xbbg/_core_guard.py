@@ -25,6 +25,25 @@ if TYPE_CHECKING:
 
 CORE_MODULE = "xbbg._core"
 _PACKAGE_DIR = Path(__file__).resolve().parent
+_NATIVE_IMPORT_ERROR_MARKERS = (
+    "DLL load failed",
+    "cannot open shared object file",
+    "image not found",
+    "Library not loaded",
+)
+
+
+def is_native_import_error(error: ImportError) -> bool:
+    """Distinguish a missing native library from an outdated loaded extension."""
+    message = str(error)
+    native_loader_error = any(marker in message for marker in _NATIVE_IMPORT_ERROR_MARKERS) and (
+        "_core" in message or "xbbg" in message
+    )
+    # Missing helper names mean the extension loaded but is outdated. Callers
+    # must not silently replace those failures with an unavailable-core fallback.
+    return not message.startswith("cannot import name") and (
+        error.name == "xbbg._core" or "No module named 'xbbg._core'" in message or native_loader_error
+    )
 
 
 def install(distribution_version: str | None) -> None:

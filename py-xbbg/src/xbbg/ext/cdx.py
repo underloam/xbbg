@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+from xbbg._services_gen import CDX_INFO_FIELDS, CDX_PRICING_FIELDS, CDX_RISK_FIELDS
 from xbbg.ext._utils import _abdp_fields, _abds_field, _syncify
 
 if TYPE_CHECKING:
@@ -56,40 +57,8 @@ __all__ = [
     "cdx_curve",
 ]
 
-# Field constants
-_CDX_INFO_FIELDS = [
-    "ROLLING_SERIES",
-    "VERSION",
-    "ON_THE_RUN_CURRENT_BD_INDICATOR",
-    "CDS_FIRST_ACCRUAL_START_DATE",
-    "NAME",
-    "NUM_CURRENT_COMPANIES_CCY_TKR",
-    "NUM_ORIG_COMPANIES_CRNCY_TKR",
-    "PX_LAST",
-]
-
-_CDX_PRICING_FIELDS = [
-    "PX_LAST",
-    "PX_BID",
-    "PX_ASK",
-    "UPFRONT_LAST",
-    "UPFRONT_BID",
-    "UPFRONT_ASK",
-    "CDS_FLAT_SPREAD",
-    "UPFRONT_FEE",
-    "PV_CDS_PREMIUM_LEG",
-    "PV_CDS_DEFAULT_LEG",
-]
-
-_CDX_RISK_FIELDS = [
-    "SW_CNV_BPV",
-    "SW_EQV_BPV",
-    "CDS_SPREAD_MID_MODIFIED_DURATION",
-    "CDS_SPREAD_MID_CONVEXITY",
-    "RECOVERY_RATE_SEN",
-    "CDS_RECOVERY_RT",
-]
-
+# CDX_INFO_FIELDS / CDX_PRICING_FIELDS / CDX_RISK_FIELDS are generated from
+# defs/bloomberg.toml so every package requests the same bundles.
 _CDX_BASIS_FIELDS = [
     "CDS_INDEX_INTRINSIC_VALUE",
     "CDS_INDEX_INTRINSIC_BASIS_VALUE",
@@ -149,7 +118,7 @@ async def acdx_info(ticker: str, **kwargs) -> IntoDataFrame:
 
         asyncio.run(main())
     """
-    return await _abdp_fields(tickers=ticker, fields=_CDX_INFO_FIELDS, **kwargs)
+    return await _abdp_fields(tickers=ticker, fields=CDX_INFO_FIELDS, **kwargs)
 
 
 async def acdx_defaults(ticker: str, **kwargs) -> IntoDataFrame:
@@ -225,7 +194,7 @@ async def acdx_pricing(ticker: str, *, recovery_rate: float | None = None, **kwa
     if recovery_rate is not None:
         overrides["CDS_RR"] = str(recovery_rate)
 
-    return await _abdp_fields(tickers=ticker, fields=_CDX_PRICING_FIELDS, overrides=overrides, **kwargs)
+    return await _abdp_fields(tickers=ticker, fields=CDX_PRICING_FIELDS, overrides=overrides, **kwargs)
 
 
 async def acdx_risk(ticker: str, *, recovery_rate: float | None = None, **kwargs) -> IntoDataFrame:
@@ -269,7 +238,7 @@ async def acdx_risk(ticker: str, *, recovery_rate: float | None = None, **kwargs
     if recovery_rate is not None:
         overrides["CDS_RR"] = str(recovery_rate)
 
-    return await _abdp_fields(tickers=ticker, fields=_CDX_RISK_FIELDS, overrides=overrides, **kwargs)
+    return await _abdp_fields(tickers=ticker, fields=CDX_RISK_FIELDS, overrides=overrides, **kwargs)
 
 
 async def acdx_basis(ticker: str, **kwargs) -> IntoDataFrame:

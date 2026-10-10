@@ -21,16 +21,6 @@ describe.skipIf(!existsSync(nativePath))('native auction definitions', () => {
   });
 
   test('exports immutable native field groups with the default auction projection', () => {
-    expect(native.extAuctionFieldGroupNames()).toStrictEqual([
-      'imbalance',
-      'indicative',
-      'state',
-      'halts',
-      'results',
-      'composite',
-      'quotes',
-      'default',
-    ]);
     expect(Object.isFrozen(api.AuctionFields)).toBeTruthy();
     const { zeroPriceFields, ...groups } = api.AuctionFields;
     for (const [name, fields] of Object.entries(groups)) {

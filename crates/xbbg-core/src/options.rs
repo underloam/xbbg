@@ -103,44 +103,12 @@ impl SessionOptions {
         Ok(CorrelationId::from_ffi(&cid))
     }
 
-    pub fn set_authentication_options(&mut self, auth_options: &str) -> Result<&mut Self> {
-        let auth_options = CString::new(auth_options).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid auth options: {e}"),
-        })?;
-        unsafe {
-            ffi::blpapi_SessionOptions_setAuthenticationOptions(self.ptr, auth_options.as_ptr());
-        }
-        Ok(self)
-    }
-
     pub fn set_num_start_attempts(&mut self, attempts: usize) -> Result<&mut Self> {
         let attempts = i32::try_from(attempts).map_err(|_| BlpError::InvalidArgument {
             detail: format!("num_start_attempts out of range: {attempts}"),
         })?;
         unsafe {
             ffi::blpapi_SessionOptions_setNumStartAttempts(self.ptr, attempts);
-        }
-        Ok(self)
-    }
-
-    pub fn set_default_subscription_service(&mut self, svc: &str) -> Result<&mut Self> {
-        let cs = CString::new(svc).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service: {e}"),
-        })?;
-        // SAFETY: FFI call with valid pointers
-        unsafe {
-            ffi::blpapi_SessionOptions_setDefaultSubscriptionService(self.ptr, cs.as_ptr());
-        }
-        Ok(self)
-    }
-
-    pub fn set_default_topic_prefix(&mut self, prefix: &str) -> Result<&mut Self> {
-        let cs = CString::new(prefix).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid prefix: {e}"),
-        })?;
-        // SAFETY: FFI call with valid pointers
-        unsafe {
-            ffi::blpapi_SessionOptions_setDefaultTopicPrefix(self.ptr, cs.as_ptr());
         }
         Ok(self)
     }
@@ -175,29 +143,6 @@ impl SessionOptions {
         if rc != 0 {
             return Err(BlpError::InvalidArgument {
                 detail: format!("connect timeout invalid: rc={rc}"),
-            });
-        }
-        Ok(self)
-    }
-
-    pub fn set_service_check_timeout_ms(&mut self, timeout_ms: i32) -> Result<&mut Self> {
-        // SAFETY: FFI call with valid pointer
-        let rc = unsafe { ffi::blpapi_SessionOptions_setServiceCheckTimeout(self.ptr, timeout_ms) };
-        if rc != 0 {
-            return Err(BlpError::InvalidArgument {
-                detail: format!("service check timeout invalid: rc={rc}"),
-            });
-        }
-        Ok(self)
-    }
-
-    pub fn set_service_download_timeout_ms(&mut self, timeout_ms: i32) -> Result<&mut Self> {
-        // SAFETY: FFI call with valid pointer
-        let rc =
-            unsafe { ffi::blpapi_SessionOptions_setServiceDownloadTimeout(self.ptr, timeout_ms) };
-        if rc != 0 {
-            return Err(BlpError::InvalidArgument {
-                detail: format!("service download timeout invalid: rc={rc}"),
             });
         }
         Ok(self)
@@ -322,22 +267,6 @@ impl SessionOptions {
         if rc != 0 {
             return Err(BlpError::InvalidArgument {
                 detail: format!("bandwidth save mode disabled invalid: rc={rc}"),
-            });
-        }
-        Ok(self)
-    }
-
-    /// Set the flush published events timeout in milliseconds.
-    ///
-    /// Controls how long to wait when flushing events. Default is typically 2000ms.
-    pub fn set_flush_published_events_timeout_ms(&mut self, timeout_ms: i32) -> Result<&mut Self> {
-        // SAFETY: FFI call with valid pointer
-        let rc = unsafe {
-            ffi::blpapi_SessionOptions_setFlushPublishedEventsTimeout(self.ptr, timeout_ms)
-        };
-        if rc != 0 {
-            return Err(BlpError::InvalidArgument {
-                detail: format!("flush published events timeout invalid: rc={rc}"),
             });
         }
         Ok(self)

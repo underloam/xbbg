@@ -23,7 +23,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
-from xbbg.ext._utils import DateLike, _call_native_recipe, _fmt_date, _syncify
+from xbbg._dates import DateLike, _fmt_date
+from xbbg.ext._utils import _call_native_recipe, _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame

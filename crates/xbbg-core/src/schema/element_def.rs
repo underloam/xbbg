@@ -124,20 +124,11 @@ impl<'owner> SchemaElementDefinition<'owner> {
     }
 
     /// Get the deprecation status of this element.
-    #[cfg(feature = "live")]
     pub fn status(&self) -> SchemaStatus {
         unsafe {
             let status = ffi::blpapi_SchemaElementDefinition_status(self.ptr);
             SchemaStatus::from_raw(status)
         }
-    }
-
-    /// Get the deprecation status of this element.
-    ///
-    /// Note: In mock mode, always returns Active.
-    #[cfg(not(feature = "live"))]
-    pub fn status(&self) -> SchemaStatus {
-        SchemaStatus::Active
     }
 }
 

@@ -27,3 +27,6 @@ xbbg-ext = { workspace = true }
 xbbg-recipes = { workspace = true }
 xbbg_core = { workspace = true, features = ["live"] }
 xbbg-log = { workspace = true }
+
+[lints]
+workspace = true

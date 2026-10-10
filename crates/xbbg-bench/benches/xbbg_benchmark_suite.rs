@@ -33,11 +33,16 @@ use xbbg_async::engine::{
     LongMode, OutputFormat, RefDataState, RequestParams, ServerAddr, SubscriptionState, Transport,
 };
 use xbbg_async::{BlpAsyncError, SubscribeRequest};
-use xbbg_bench::{message_count, open_service, setup_session};
+use xbbg_bench::{
+    bql_json_fixture, message_count, open_service, setup_session, BQL_JSON_SCENARIOS,
+};
 use xbbg_core::{
     BlpError, CorrelationId, DataType as BlpDataType, Element, Event, EventType, Message, Name,
     SubscriptionList,
 };
+
+#[path = "support/synthetic_subscriptions.rs"]
+mod synthetic_subscriptions;
 
 fn subscription_update_shape(update: &SubscriptionUpdate) -> (usize, usize) {
     (1, update.layout.fields.len() + 3)
@@ -2593,17 +2598,8 @@ fn component_record_batch_with_values(
 
 fn run_bql_json_suite(config: &SuiteConfig) -> Vec<BenchRecord> {
     let base_iterations = config.profile.bql_json_iterations();
-    let cases: [(&'static str, usize, &'static [&'static str]); 3] = [
-        ("json_simple_1x1", 1, &["px_last"]),
-        (
-            "json_wide_1x5",
-            1,
-            &["px_last", "px_open", "px_high", "px_low", "px_volume"],
-        ),
-        ("json_rows_1000x2", 1_000, &["px_last", "px_volume"]),
-    ];
     let mut records = Vec::new();
-    for (scenario, rows, fields) in cases {
+    for (scenario, rows, fields) in BQL_JSON_SCENARIOS {
         if !config.should_run("bql_json", scenario) {
             continue;
         }
@@ -2618,37 +2614,6 @@ fn run_bql_json_suite(config: &SuiteConfig) -> Vec<BenchRecord> {
         }));
     }
     records
-}
-
-fn bql_json_fixture(rows: usize, fields: &[&str]) -> String {
-    let ids = (0..rows)
-        .map(|i| format!("\"TICKER{i} US Equity\""))
-        .collect::<Vec<_>>()
-        .join(",");
-    let dates = (0..rows)
-        .map(|i| format!("\"2026-04-{:02}\"", (i % 28) + 1))
-        .collect::<Vec<_>>()
-        .join(",");
-    let currencies = (0..rows).map(|_| "\"USD\"").collect::<Vec<_>>().join(",");
-
-    let field_json = fields
-        .iter()
-        .enumerate()
-        .map(|(field_idx, field)| {
-            let values = (0..rows)
-                .map(|i| format!("{}", 100.0 + field_idx as f64 + i as f64 / 100.0))
-                .collect::<Vec<_>>()
-                .join(",");
-            format!(
-                r#""{field}":{{"idColumn":{{"name":"ID","type":"STRING","values":[{ids}]}} ,"valuesColumn":{{"name":"VALUE","type":"DOUBLE","values":[{values}]}} ,"secondaryColumns":[{{"name":"DATE","type":"DATE","values":[{dates}]}},{{"name":"CURRENCY","type":"STRING","values":[{currencies}]}}],"responseExceptions":[],"partialErrorMap":{{"errorIterator":null}}}}"#
-            )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    format!(
-        r#"{{"clientContext":{{"clientRequestId":"offline-bql-benchmark"}},"responseExceptions":null,"results":{{{field_json}}}}}"#
-    )
 }
 
 fn replay_bql_json_fixture(
@@ -3041,7 +3006,6 @@ fn replay_subscription_events(
                 format!("SYN{idx:05} US Equity"),
                 field_vec.clone(),
                 tx.clone(),
-                1,
                 all_fields,
             )
         })
@@ -3086,11 +3050,6 @@ fn replay_subscription_events(
     }
     let process_elapsed = process_start.elapsed();
 
-    let flush_start = Instant::now();
-    for state in &mut states {
-        state.flush();
-    }
-    let flush_elapsed = flush_start.elapsed();
     let dropped_batches = states
         .iter()
         .map(|state| state.dropped_batches)
@@ -3129,7 +3088,7 @@ fn replay_subscription_events(
         processed,
         "messages",
         format!(
-            "target_messages={target_messages}, processed_messages={processed}, accepted_rows={}, topics={topic_count}, batches={}, dropped_batches={dropped_batches}, stop_reason={stop_reason}, expected_data_loss={expected_data_loss}, gap_outcome={gap_outcome}, terminal_errors={}, data_loss_errors={}, unexpected_errors={}, terminal_eof={}, error_detail={error_detail:?}, all_fields={all_fields}, cached_events={}, cached_messages={cached_messages}, repeats_per_message={repeats_per_message}, compatibility_flush_threshold=1 (does not batch output), queue_capacity_units=SubscriptionUpdate batches, producer interleaved with consumer dequeue",
+            "target_messages={target_messages}, processed_messages={processed}, accepted_rows={}, topics={topic_count}, updates={}, dropped_batches={dropped_batches}, stop_reason={stop_reason}, expected_data_loss={expected_data_loss}, gap_outcome={gap_outcome}, terminal_errors={}, data_loss_errors={}, unexpected_errors={}, terminal_eof={}, error_detail={error_detail:?}, all_fields={all_fields}, cached_events={}, cached_messages={cached_messages}, repeats_per_message={repeats_per_message}, queue_capacity_units=SubscriptionUpdate, producer interleaved with consumer dequeue; Arrow adaptation excluded",
             drain.accepted_rows,
             drain.accepted_batches,
             drain.terminal_error_count,
@@ -3147,7 +3106,6 @@ fn replay_subscription_events(
             "process_messages_and_interleaved_consumer_dequeue",
             process_elapsed,
         ),
-        phase("compatibility_flush_call", flush_elapsed),
         phase(
             "final_queue_drain_and_terminal_classification",
             drain_elapsed,
@@ -3603,15 +3561,21 @@ fn synthetic_bql(shape: SyntheticShape, detail: bool) -> BenchRecord {
 fn synthetic_subscriptions(shape: SyntheticShape, detail: bool) -> BenchRecord {
     let start = Instant::now();
     let process_start = Instant::now();
-    let mut checksum = 0.0f64;
-    for i in 0..shape.sub_messages {
-        let topic_id = i % shape.sub_topics;
-        for f in 0..shape.sub_fields {
-            checksum += ((topic_id + f + i) % 10_000) as f64 * 0.0001;
-        }
-    }
+    let mut rows = 0;
+    let mut columns = 0;
+    let mut batches = 0;
+    synthetic_subscriptions::batch_updates(
+        shape.sub_messages,
+        shape.sub_topics,
+        shape.sub_fields,
+        |batch| {
+            rows += batch.num_rows();
+            columns = columns.max(batch.num_columns());
+            batches += 1;
+            black_box(batch);
+        },
+    );
     let process_elapsed = process_start.elapsed();
-    black_box(checksum);
     let mut record = BenchRecord::ok(
         "synthetic_subscriptions",
         format!(
@@ -3619,15 +3583,19 @@ fn synthetic_subscriptions(shape: SyntheticShape, detail: bool) -> BenchRecord {
             shape.sub_topics, shape.sub_messages, shape.sub_fields
         ),
         start.elapsed(),
-        shape.sub_messages,
-        shape.sub_fields,
-        shape.sub_messages,
+        rows,
+        columns,
+        rows,
         "messages",
-        format!("checksum={checksum:.4}"),
+        format!(
+            "SubscriptionUpdate -> SubscriptionArrowBatcher; batches={batches}, batch_size={}, fields={}, columns include timestamp/topic/presence",
+            synthetic_subscriptions::BATCH_SIZE,
+            shape.sub_fields,
+        ),
     );
     if detail {
         record.phases = vec![
-            phase("process_messages", process_elapsed),
+            phase("generate_updates_and_batch_arrow", process_elapsed),
             phase("total", Duration::from_micros(record.elapsed_us as u64)),
         ];
     }

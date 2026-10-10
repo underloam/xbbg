@@ -1,4 +1,4 @@
-"""Unit tests for ``xbbg.ext._utils._fmt_date`` and ``_fmt_datetime`` (#317).
+"""Unit tests for ``xbbg._dates._fmt_date`` and ``_fmt_datetime`` (#317).
 
 These helpers are the single source of truth for normalizing user-supplied
 date / datetime values across both the public ``blp.py`` API and the ``ext``
@@ -13,7 +13,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import pytest
 
-from xbbg.ext._utils import (
+from xbbg._dates import (
     _fmt_date,
     _fmt_datetime,
     _normalize_to_date,

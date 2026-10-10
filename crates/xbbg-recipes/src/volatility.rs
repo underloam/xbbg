@@ -498,20 +498,6 @@ fn append_derived_rows(
     }
 }
 
-fn append_string_opt(builder: &mut StringBuilder, value: Option<&String>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
-fn append_f64_opt(builder: &mut Float64Builder, value: Option<f64>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
 fn build_surface_batch(rows: &[SurfaceRow]) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
     let mut date = Date32Builder::new();
@@ -526,9 +512,9 @@ fn build_surface_batch(rows: &[SurfaceRow]) -> Result<RecordBatch> {
         ticker.append_value(&row.ticker);
         date.append_value(naive_to_date32(row.date));
         metric.append_value(&row.metric);
-        append_string_opt(&mut tenor, row.tenor.as_ref());
-        append_string_opt(&mut point_type, row.point_type.as_ref());
-        append_f64_opt(&mut point, row.point);
+        tenor.append_option(row.tenor.as_ref());
+        point_type.append_option(row.point_type.as_ref());
+        point.append_option(row.point);
         field.append_value(&row.field);
         value.append_value(row.value);
     }

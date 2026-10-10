@@ -8,27 +8,25 @@ from typing import Annotated, Any, Literal
 
 from pydantic import (
     AfterValidator,
-    BeforeValidator,
     Field,
     StrictBool,
-    StrictInt,
-    StringConstraints,
     create_model,
     model_validator,
 )
 
+from ._bounded_schemas import (
+    FiniteNumber,
+    PositiveInteger,
+    bounded_array,
+    bounded_map,
+    bounded_primitive,
+    bounded_strings,
+    bounded_text,
+)
 from ._bql import currency, equity_ticker, field_expression
+from ._defs_gen import MAX_BLOOMBERG_EID, MAX_ENTITLEMENT_EIDS, HistoricalFormat, OverflowPolicy, ReferenceFormat
 from ._runtime import ToolInput
 from .options import BloombergToolsOptions
-
-MAX_ENTITLEMENT_EIDS = 10_000
-MAX_BLOOMBERG_EID = 2_147_483_647
-
-ReferenceFormat = Literal["long", "long_typed", "long_metadata"]
-HistoricalFormat = Literal["long", "long_typed", "long_metadata", "semi_long"]
-OverflowPolicy = Literal["drop_newest", "block"]
-FiniteNumber = Annotated[float, Field(strict=True, allow_inf_nan=False)]
-PositiveInteger = Annotated[int, Field(strict=True, gt=0)]
 
 _DATE_RE = re.compile(r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{8})$")
 _DATETIME_RE = re.compile(
@@ -177,19 +175,6 @@ def _check_request_keys(values: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
-def _check_map_keys(value: Any) -> Any:
-    if not isinstance(value, dict):
-        return value
-    seen: set[str] = set()
-    for key in value:
-        if isinstance(key, str):
-            normalized = key.strip()
-            if normalized in seen:
-                raise ValueError("Map keys must be distinct after trimming whitespace")
-            seen.add(normalized)
-    return value
-
-
 def _epoch_datetime(value: int | float) -> datetime:
     if value < 100_000_000_000:
         raise ValueError("Ambiguous numeric date; use calendar text or epoch milliseconds")
@@ -273,41 +258,31 @@ def _raw_isin(value: str) -> str:
 
 def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolInput]:
     """Build one schema with the caller's limits visible to the language model."""
-    text = Annotated[
-        str,
-        StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=options.max_string_chars),
-    ]
-    primitive = text | StrictBool | StrictInt | FiniteNumber
+    text = bounded_text(options)
+    primitive = bounded_primitive(options)
     flat_map = Annotated[
-        dict[text, primitive],
-        Field(max_length=options.max_fields),
-        BeforeValidator(_check_map_keys),
+        bounded_map(text, primitive, options.max_fields),
         AfterValidator(_check_request_keys),
     ]
     override_map = Annotated[
-        dict[text, primitive | flat_map],
-        Field(max_length=options.max_fields + options.max_securities),
-        BeforeValidator(_check_map_keys),
+        bounded_map(text, primitive | flat_map, options.max_fields + options.max_securities),
         AfterValidator(_check_request_keys),
     ]
-    securities = Annotated[list[text], Field(min_length=1, max_length=options.max_securities)]
-    fields = Annotated[list[text], Field(min_length=1, max_length=options.max_fields)]
+    securities = bounded_array(text, options.max_securities)
+    fields = bounded_array(text, options.max_fields)
     date_input = Annotated[
-        Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=8, max_length=10)]
+        bounded_text(options, minimum=8, maximum=10)
         | Annotated[int, Field(strict=True, ge=19_000_101, le=_MAX_EPOCH_MS)]
         | Annotated[float, Field(strict=True, ge=100_000_000_000, le=_MAX_EPOCH_MS, allow_inf_nan=False)],
         AfterValidator(_normalize_date),
     ]
     datetime_input = Annotated[
-        Annotated[str, StringConstraints(strict=True, strip_whitespace=True, min_length=16, max_length=32)]
+        bounded_text(options, minimum=16, maximum=32)
         | Annotated[int, Field(strict=True, ge=100_000_000_000, le=_MAX_EPOCH_MS)]
         | Annotated[float, Field(strict=True, ge=100_000_000_000, le=_MAX_EPOCH_MS, allow_inf_nan=False)],
         AfterValidator(_normalize_datetime),
     ]
-    search = Annotated[
-        str,
-        StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=options.max_search_spec_chars),
-    ]
+    search = bounded_text(options, maximum=options.max_search_spec_chars)
 
     def required(annotation: Any, description: str) -> tuple[Any, Any]:
         return annotation, Field(description=description)
@@ -389,7 +364,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
         service = Annotated[text, Field(pattern=r"^//[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")]
         shape = {
             "eids": required(
-                Annotated[list[eid], Field(min_length=1, max_length=MAX_ENTITLEMENT_EIDS)],
+                bounded_array(eid, MAX_ENTITLEMENT_EIDS),
                 "Positive signed 32-bit Bloomberg entitlement IDs.",
             ),
             "service": (
@@ -398,10 +373,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             ),
         }
     elif name == "xbbg_bql":
-        query = Annotated[
-            str,
-            StringConstraints(strict=True, strip_whitespace=True, min_length=1, max_length=options.max_bql_query_chars),
-        ]
+        query = bounded_text(options, maximum=options.max_bql_query_chars)
         shape = {"query": required(query, "Complete BQL expression with an explicit bounded universe.")}
     elif name == "xbbg_bsrch":
         shape = {
@@ -448,7 +420,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             "xbbg_etf_holdings": "etf_ticker",
         }[name]
         recipe_field = Annotated[text, AfterValidator(field_expression)]
-        extra_fields = Annotated[list[recipe_field], Field(max_length=options.max_fields)]
+        extra_fields = bounded_array(recipe_field, options.max_fields, minimum=0)
         shape = {
             ticker_name: required(
                 Annotated[text, AfterValidator(equity_ticker)],
@@ -474,20 +446,14 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             ),
         }
     elif name in {"xbbg_resolve_isins", "xbbg_issuer_isins"}:
-        ids = Annotated[
-            list[Annotated[text, AfterValidator(_raw_isin)]], Field(min_length=1, max_length=options.max_securities)
-        ]
+        ids = bounded_array(Annotated[text, AfterValidator(_raw_isin)], options.max_securities)
         shape = {
             "isins" if name == "xbbg_resolve_isins" else "bond_isins": required(
                 ids, "Exact raw ISIN strings, without /isin/ prefixes."
             )
         }
     elif name in {"xbbg_resolve_venues", "xbbg_auction_snapshot"}:
-        pcs_overrides = Annotated[
-            dict[text, text],
-            Field(max_length=options.max_securities),
-            BeforeValidator(_check_map_keys),
-        ]
+        pcs_overrides = bounded_map(text, text, options.max_securities)
         shape = {
             "securities": required(
                 securities,
@@ -499,18 +465,14 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
         }
         if name == "xbbg_auction_snapshot":
             shape["fields"] = optional(
-                Annotated[list[text], Field(max_length=options.max_fields)],
+                bounded_strings(options, minimum=0),
                 "Auction field mnemonics in requested order. Omit or pass an empty list for AUCTION.DEFAULT.",
             )
     elif name in {"xbbg_stream_snapshot", "xbbg_mktbar_snapshot", "xbbg_depth_snapshot"}:
         if name == "xbbg_stream_snapshot":
             shape = {"tickers": securities_field, "fields": fields_field}
         else:
-            stream_fields = (
-                Annotated[list[Literal["LAST_PRICE"]], Field(min_length=1, max_length=1)]
-                if name == "xbbg_mktbar_snapshot"
-                else fields
-            )
+            stream_fields = bounded_array(Literal["LAST_PRICE"], 1) if name == "xbbg_mktbar_snapshot" else fields
             shape = {
                 "ticker": ticker_field,
                 "fields": optional(stream_fields, "Optional service fields; market bars require LAST_PRICE only."),

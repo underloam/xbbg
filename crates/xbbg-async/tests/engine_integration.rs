@@ -3,7 +3,8 @@
 //! These tests mirror the Python integration tests in py-xbbg/tests/test_integration.py
 //! to ensure consistent behavior across the Python and Rust APIs.
 //!
-//! Enable these tests with: cargo test --features live
+//! Live tests are ignored by default; run with:
+//! cargo test -p xbbg-async --test engine_integration -- --ignored
 //!
 //! Data usage summary (same as Python tests):
 //! - Engine connection tests: 0 data points
@@ -14,8 +15,6 @@
 //! - BDIB tests: ~60-120 bars
 //! - BDTICK tests: Variable, uses short time windows
 //! - Error tests: 0 data points
-
-#![cfg(feature = "live")]
 
 use arrow_array::{Array, Float64Array, RecordBatch, StringArray};
 use chrono::Datelike;
@@ -38,10 +37,10 @@ fn init_tracing() {
             .try_init();
         // Suppress noisy BLPAPI WARN logs in tests
         unsafe {
-            let _ = blpapi_sys::blpapi_Logging_registerCallback(
+            let _ = xbbg_core::ffi::blpapi_Logging_registerCallback(
                 None,
-                blpapi_sys::blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_ERROR
-                    as blpapi_sys::blpapi_Logging_Severity_t,
+                xbbg_core::ffi::blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_ERROR
+                    as xbbg_core::ffi::blpapi_Logging_Severity_t,
             );
         }
     });
@@ -113,6 +112,7 @@ fn print_batch_summary(name: &str, batch: &RecordBatch) {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_engine_connects_successfully() {
     init_tracing();
 
@@ -151,6 +151,7 @@ async fn test_engine_config_custom_values() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_field_info_single_field() {
     init_tracing();
     let engine = create_engine();
@@ -172,6 +173,7 @@ async fn test_field_info_single_field() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_field_info_multiple_fields() {
     init_tracing();
     let engine = create_engine();
@@ -197,6 +199,7 @@ async fn test_field_info_multiple_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_field_search() {
     init_tracing();
     let engine = create_engine();
@@ -222,6 +225,7 @@ async fn test_field_search() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdp_single_ticker_single_field() {
     init_tracing();
     let engine = create_engine();
@@ -248,6 +252,7 @@ async fn test_bdp_single_ticker_single_field() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdp_multiple_tickers_multiple_fields() {
     init_tracing();
     let engine = create_engine();
@@ -274,6 +279,7 @@ async fn test_bdp_multiple_tickers_multiple_fields() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdp_returns_numeric_for_price() {
     init_tracing();
     let engine = create_engine();
@@ -308,6 +314,7 @@ async fn test_bdp_returns_numeric_for_price() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdh_single_ticker() {
     init_tracing();
     let engine = create_engine();
@@ -336,6 +343,7 @@ async fn test_bdh_single_ticker() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdh_multiple_tickers() {
     init_tracing();
     let engine = create_engine();
@@ -375,6 +383,7 @@ async fn test_bdh_multiple_tickers() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdh_request_options_apply_periodicity() {
     init_tracing();
     let engine = create_engine();
@@ -418,6 +427,7 @@ async fn test_bdh_request_options_apply_periodicity() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bds_index_members() {
     init_tracing();
     let engine = create_engine();
@@ -441,6 +451,7 @@ async fn test_bds_index_members() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bds_dividend_history() {
     init_tracing();
     let engine = create_engine();
@@ -467,6 +478,7 @@ async fn test_bds_dividend_history() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdib_1min_bars() {
     init_tracing();
     let engine = create_engine();
@@ -493,6 +505,7 @@ async fn test_bdib_1min_bars() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdib_5min_bars() {
     init_tracing();
     let engine = create_engine();
@@ -522,6 +535,7 @@ async fn test_bdib_5min_bars() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_bdtick_short_window() {
     init_tracing();
     let engine = create_engine();
@@ -574,6 +588,7 @@ async fn test_bdtick_short_window() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_generic_reference_data() {
     init_tracing();
     let engine = create_engine();
@@ -596,6 +611,7 @@ async fn test_generic_reference_data() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_generic_with_overrides() {
     init_tracing();
     let engine = create_engine();
@@ -622,6 +638,7 @@ async fn test_generic_with_overrides() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_raw_request_marker_uses_explicit_operation() {
     init_tracing();
     let engine = create_engine();
@@ -662,6 +679,7 @@ async fn test_raw_request_marker_uses_explicit_operation() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_invalid_ticker_returns_error() {
     init_tracing();
     let engine = create_engine();
@@ -684,6 +702,7 @@ async fn test_invalid_ticker_returns_error() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_invalid_field_returns_error() {
     init_tracing();
     let engine = create_engine();
@@ -709,6 +728,7 @@ async fn test_invalid_field_returns_error() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_concurrent_requests() {
     init_tracing();
     let engine = create_engine();
@@ -748,6 +768,7 @@ async fn test_concurrent_requests() {
 // =============================================================================
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_tracing_captures_request() {
     // This test verifies that tracing is active and capturing events
     init_tracing();
@@ -786,6 +807,7 @@ fn parse_meta_map<T: serde::de::DeserializeOwned>(batch: &RecordBatch, key: &str
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_identity_seat_type_and_authorization() {
     init_tracing();
     let engine = create_engine();
@@ -838,6 +860,7 @@ async fn test_identity_seat_type_and_authorization() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_return_eids_roundtrip_with_entitlement_check() {
     init_tracing();
     let engine = create_engine();
@@ -890,6 +913,7 @@ async fn test_return_eids_roundtrip_with_entitlement_check() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_return_eids_historical() {
     init_tracing();
     let engine = create_engine();
@@ -920,6 +944,7 @@ async fn test_return_eids_historical() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_security_error_and_field_exception_metadata() {
     init_tracing();
     let engine = create_engine();
@@ -985,6 +1010,7 @@ async fn test_security_error_and_field_exception_metadata() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn test_raw_generic_preserves_error_and_eid_elements() {
     init_tracing();
     let engine = create_engine();

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://unpkg.com/knip/schema.json",
+  "entry": [
+    "src/index.ts",
+    "scripts/*.ts",
+    "benchmarks/*.ts",
+    "test/**/*.test.ts",
+    // build-package-loaders reads and transpiles these platform entrypoints dynamically.
+    "packages/*/index.ts",
+  ],
+  "project": [
+    "src/**/*.ts",
+    "scripts/**/*.ts",
+    "benchmarks/**/*.ts",
+    "test/**/*.ts",
+    "packages/*/index.ts",
+    "*.config.ts",
+  ],
+  // Include helper exports even though script/benchmark globs also make them entries.
+  "includeEntryExports": true,
+  // Native ABI and public option types used in their own declarations remain meaningful.
+  "ignoreExportsUsedInFile": { "interface": true, "type": true },
+  "ignoreIssues": {
+    // The published entry exposes APIs for external consumers, not just this repository.
+    "src/index.ts": ["exports", "types"],
+    // The native resolver loads binaryPath from these generated platform packages dynamically.
+    "packages/*/index.{ts,d.ts}": ["exports"],
+    // Shared vocabulary is generated for multiple language bindings, not only JS consumers.
+    "src/_defs_gen.ts": ["exports", "types"],
+  },
+  // validate-packages invokes publint via the shared npm runner, not a static import.
+  "ignoreDependencies": ["publint"],
+}

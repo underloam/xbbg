@@ -38,7 +38,7 @@ podman run --rm \
     bash ./scripts/sdktool.sh --version "$BLPAPI_VERSION" --no-set-active
     export BLPAPI_ROOT=/work/vendor/blpapi-sdk/$BLPAPI_VERSION
     export LD_LIBRARY_PATH=/work/vendor/blpapi-sdk/$BLPAPI_VERSION/Linux:$LD_LIBRARY_PATH
-    cargo build -p blpapi-sys
+    cargo build -p xbbg-blpapi-sys
   '
 ```
 

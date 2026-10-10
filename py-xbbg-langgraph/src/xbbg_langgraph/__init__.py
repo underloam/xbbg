@@ -6,6 +6,7 @@ from typing import Any
 
 from langchain_core.tools import StructuredTool
 
+from ._defs_gen import BLOOMBERG_TOOL_NAMES
 from .core_tools import (
     BLOOMBERG_CORE_TOOL_NAMES,
     create_auction_snapshot_tool,
@@ -49,7 +50,7 @@ from .ext_tools import (
     create_ext_yas_overrides_tool,
 )
 from .instructions import BLOOMBERG_TOOL_INSTRUCTIONS, get_bloomberg_tool_instructions
-from .options import BLOOMBERG_TOOL_NAMES, BloombergToolsOptions, resolve_options
+from .options import BloombergToolsOptions, resolve_options
 
 __all__ = [
     "BLOOMBERG_CORE_TOOL_NAMES",

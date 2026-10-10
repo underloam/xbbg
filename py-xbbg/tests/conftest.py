@@ -45,7 +45,7 @@ def _fail_engine_construction(*_args: object, **_kwargs: object) -> None:
     pytest.fail(
         "unit test constructed a real Bloomberg engine (xbbg._core.PyEngine). Without a "
         "terminal the SDK blocks for its whole start-attempt cycle and has hung Windows CI "
-        "runners until the job timeout. Patch blp._get_engine with a fake engine, or mark "
+        "runners until the job timeout. Patch xbbg._engine._get_engine with a fake engine, or mark "
         "the test live/integration."
     )
 
@@ -73,15 +73,3 @@ def _no_real_engine(request, monkeypatch):
     from xbbg import _core
 
     monkeypatch.setattr(_core, "PyEngine", _ForbiddenPyEngine)
-
-
-@pytest.fixture
-def sample_tickers():
-    """Fixture providing sample ticker symbols."""
-    return ["AAPL US Equity", "MSFT US Equity", "IBM US Equity"]
-
-
-@pytest.fixture
-def sample_fields():
-    """Fixture providing sample field names."""
-    return ["PX_LAST", "VOLUME", "NAME"]

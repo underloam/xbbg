@@ -1,4 +1,4 @@
-"""Benchmark BQL (Bloomberg Query Language) across packages.
+"""Benchmark BQL (Bloomberg Query Language) with the current xbbg build.
 
 Data usage: ~10-20 data points per run
 """
@@ -46,17 +46,6 @@ def run_xbbg_rust(query: str):
     return xbbg.bql(query)
 
 
-def run_xbbg_legacy(query: str):
-    """Benchmark legacy xbbg Python version."""
-    try:
-        import xbbg_legacy
-
-        return xbbg_legacy.bql(query)
-    except ImportError:
-        logger.warning("xbbg legacy not installed")
-        return None
-
-
 def main():
     """Run all BQL benchmarks."""
     logger.info("=" * 70)
@@ -84,18 +73,6 @@ def main():
         except Exception as e:
             logger.error(f"  ✗ Error: {e}")
 
-    if True:  # xbbg Legacy
-        logger.info("Running xbbg (legacy)...")
-        try:
-            result = benchmark_bql("xbbg-legacy", run_xbbg_legacy, BQL_SIMPLE)
-            if result:
-                results.append(result)
-                logger.info(
-                    f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB, shape={result.data_shape}"
-                )
-        except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
-
     # Test 2: Multi-security query
     logger.info("\n\nTest 2: Multi-security BQL query")
     logger.info("-" * 70)
@@ -105,18 +82,6 @@ def main():
         logger.info("\nRunning xbbg (Rust)...")
         try:
             result = benchmark_bql("xbbg-rust", run_xbbg_rust, BQL_MULTI)
-            if result:
-                results.append(result)
-                logger.info(
-                    f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB, shape={result.data_shape}"
-                )
-        except Exception as e:
-            logger.error(f"  ✗ Error: {e}")
-
-    if True:  # xbbg Legacy
-        logger.info("Running xbbg (legacy)...")
-        try:
-            result = benchmark_bql("xbbg-legacy", run_xbbg_legacy, BQL_MULTI)
             if result:
                 results.append(result)
                 logger.info(
@@ -140,19 +105,6 @@ def main():
         logger.info(f"  Warm max:   {result.warm_max_ms:.2f}ms ({result.warm_sample_count} samples)")
         logger.info(f"  CPython tracemalloc peak (untimed call): {result.python_tracemalloc_peak_mb:.2f}MB")
         logger.info(f"  Shape:      {result.data_shape}")
-
-    # Calculate speedups
-    xbbg_rust_results = [r for r in results if r.package == "xbbg-rust"]
-    legacy_results = [r for r in results if r.package == "xbbg-legacy"]
-
-    if xbbg_rust_results and legacy_results:
-        rust_time = sum(r.warm_mean_ms for r in xbbg_rust_results)
-        legacy_time = sum(r.warm_mean_ms for r in legacy_results)
-        speedup = legacy_time / rust_time if rust_time > 0 else 0
-
-        logger.info(f"\n\n{'=' * 70}")
-        logger.info(f"xbbg Rust vs Legacy Speedup: {speedup:.2f}x faster")
-        logger.info(f"{'=' * 70}")
 
     return results
 

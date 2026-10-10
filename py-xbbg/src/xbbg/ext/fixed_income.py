@@ -1,8 +1,8 @@
 """Fixed income extension functions.
 
-Convenience wrappers for fixed income and bond analysis queries.
-Returns DataFrame in the configured backend format.
-Uses high-performance Rust utilities from xbbg._core.
+Convenience adapters for Rust fixed income and bond analysis recipes.
+Request construction and quote shaping run in Rust; results use the configured
+DataFrame backend.
 
 Sync functions (wrap async with asyncio.run):
     - yas(): Yield & Spread Analysis
@@ -10,7 +10,7 @@ Sync functions (wrap async with asyncio.run):
     - corporate_bonds(): Find corporate bonds for a company
     - bqr(): Bloomberg Quote Request (dealer quotes)
 
-Async functions (primary implementation):
+Async functions (native recipe adapters):
     - ayas(): Async yield & spread analysis
     - apreferreds(): Async find preferred stocks
     - acorporate_bonds(): Async find corporate bonds
@@ -22,14 +22,8 @@ from __future__ import annotations
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-# Import Rust ext utilities for max performance
-from xbbg._core import (
-    ext_build_corporate_bonds_query,
-    ext_build_preferreds_query,
-    ext_build_yas_overrides,
-    ext_normalize_tickers,
-)
-from xbbg.ext._utils import DateLike, _fmt_date, _syncify
+from xbbg._dates import DateLike, _fmt_date, _fmt_datetime
+from xbbg.ext._utils import _call_native_recipe, _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame
@@ -64,16 +58,8 @@ class YieldType(IntEnum):
     YTAL = 9
 
 
-def _normalize_tickers(tickers: str | list[str]) -> list[str]:
-    """Normalize tickers to a list using Rust."""
-    # ext_normalize_tickers expects a list, so wrap single string
-    if isinstance(tickers, str):
-        return ext_normalize_tickers([tickers])
-    return ext_normalize_tickers(tickers)
-
-
 # =============================================================================
-# Async implementations (primary)
+# Async native recipe adapters
 # =============================================================================
 
 
@@ -91,8 +77,8 @@ async def ayas(
 ) -> IntoDataFrame:
     """Async yield and spread analysis for fixed income securities.
 
-    Convenience wrapper around abdp() for Bloomberg's YAS (Yield & Spread Analysis).
-    Maps named parameters to Bloomberg YAS override fields.
+    Executes the native YAS recipe and maps named parameters to Bloomberg
+    overrides. Explicit overrides in ``kwargs`` take precedence.
 
     Args:
         tickers: Single ticker or list of bond tickers.
@@ -120,10 +106,12 @@ async def ayas(
         yield_: Input yield value (for reverse calculation from yield to price).
         price: Input price value (for reverse calculation from price to yield/spread).
         benchmark: Benchmark security for spread calculation (e.g., "T 4.5 05/15/38 Govt").
-        **kwargs: Additional arguments passed to abdp().
+        **kwargs: Request controls, including additional overrides, per-security
+            overrides, field types, validation, format, and output backend.
 
     Returns:
-        DataFrame with yield analysis data (type depends on configured backend).
+        Native reference-data result in the configured backend. The default is
+        canonical long format; ``format`` selects supported native layouts.
 
     Example::
 
@@ -152,41 +140,19 @@ async def ayas(
 
         asyncio.run(main())
     """
-    from xbbg import abdp
-
-    tickers_list = _normalize_tickers(tickers)
-
-    # Normalize fields
-    if isinstance(flds, str):
-        fields_list = [flds]
-    else:
-        fields_list = list(flds)
-
-    # Build overrides using Rust (high performance)
-    formatted_dt = _fmt_date(settle_dt) if settle_dt is not None else None
-    yt_flag = int(yield_type) if yield_type is not None else None
-
-    yas_pairs = ext_build_yas_overrides(
-        settle_dt=formatted_dt,
-        yield_type=yt_flag,
+    return await _call_native_recipe(
+        "recipe_yas",
+        [tickers] if isinstance(tickers, str) else list(tickers),
+        [flds] if isinstance(flds, str) else list(flds),
+        settle_dt=_fmt_date(settle_dt),
+        yield_type=int(yield_type) if yield_type is not None else None,
         spread=spread,
         yield_val=yield_,
         price=price,
         benchmark=benchmark,
+        backend=kwargs.pop("backend", None),
+        request_options=kwargs,
     )
-    overrides: dict[str, str] = dict(yas_pairs)
-
-    # Merge with any additional overrides from kwargs
-    if "overrides" in kwargs:
-        existing = kwargs.pop("overrides")
-        if isinstance(existing, dict):
-            overrides.update(existing)
-        elif isinstance(existing, list):
-            for k, v in existing:
-                overrides[k] = str(v)
-
-    # Call abdp with the overrides
-    return await abdp(tickers=tickers_list, flds=fields_list, overrides=overrides, **kwargs)
 
 
 async def apreferreds(
@@ -205,7 +171,7 @@ async def apreferreds(
             If no suffix is provided, " US Equity" will be appended.
         fields: Optional list of additional fields to retrieve.
             Default fields are: id, name.
-        **kwargs: Additional options passed to the underlying BQL query.
+        **kwargs: Native BQL request controls and output backend.
 
     Returns:
         DataFrame with preferred stock information (type depends on configured backend).
@@ -227,13 +193,13 @@ async def apreferreds(
 
         asyncio.run(main())
     """
-    from xbbg import abql
-
-    # Build BQL query using Rust (handles ticker normalization, field dedup)
-    extra = list(fields) if fields else []
-    bql_query = ext_build_preferreds_query(equity_ticker, extra)
-
-    return await abql(bql_query, **kwargs)
+    return await _call_native_recipe(
+        "recipe_preferreds",
+        equity_ticker,
+        fields=fields,
+        backend=kwargs.pop("backend", None),
+        request_options=kwargs,
+    )
 
 
 async def acorporate_bonds(
@@ -241,7 +207,6 @@ async def acorporate_bonds(
     *,
     ccy: str | None = "USD",
     fields: list[str] | None = None,
-    active_only: bool = True,
     **kwargs,
 ) -> IntoDataFrame:
     """Async find corporate bonds for a company using BQL.
@@ -255,8 +220,7 @@ async def acorporate_bonds(
         ccy: Currency filter (default: "USD"). Set to None for all currencies.
         fields: Optional list of additional fields to retrieve.
             Default field is: id.
-        active_only: If True (default), only return active bonds.
-        **kwargs: Additional options passed to the underlying BQL query.
+        **kwargs: Native BQL request controls and output backend.
 
     Returns:
         DataFrame with corporate bond information (type depends on configured backend).
@@ -269,7 +233,7 @@ async def acorporate_bonds(
 
 
         async def main():
-            # Get active USD corporate bonds for Apple
+            # Get USD corporate bonds for Apple
             df = await acorporate_bonds("AAPL")
 
             # Get all currency bonds with additional fields
@@ -278,13 +242,14 @@ async def acorporate_bonds(
 
         asyncio.run(main())
     """
-    from xbbg import abql
-
-    # Build BQL query using Rust (handles field dedup, filter construction)
-    extra = list(fields) if fields else []
-    bql_query = ext_build_corporate_bonds_query(ticker, ccy, extra, active_only)
-
-    return await abql(bql_query, **kwargs)
+    return await _call_native_recipe(
+        "recipe_corporate_bonds",
+        ticker,
+        ccy=ccy,
+        fields=fields,
+        backend=kwargs.pop("backend", None),
+        request_options=kwargs,
+    )
 
 
 async def abqr(
@@ -306,18 +271,25 @@ async def abqr(
 
     Args:
         ticker: Security ticker (e.g., "US912810TM69 Govt").
-        start_datetime: Start datetime (ISO format or "YYYY-MM-DD HH:MM").
-            Default: 1 hour ago.
-        end_datetime: End datetime (ISO format or "YYYY-MM-DD HH:MM").
-            Default: now.
+        start_datetime: Start datetime (ISO format, date, or datetime object).
+            Default: one hour before ``end_datetime``.
+        end_datetime: End datetime. Default: the current UTC instant.
         event_types: List of event types to retrieve (default: ["BID", "ASK"]).
             Options: "TRADE", "BID", "ASK", "BID_BEST", "ASK_BEST", etc.
-        include_broker_codes: Whether to include broker/dealer codes (default: True).
-        **kwargs: Additional options passed to abdtick.
+        include_broker_codes: Request and require broker attribution on nonempty
+            results (default: True).
+        **kwargs: Native tick request controls, including extra include flags,
+            ``request_tz`` for naive inputs, ``output_tz`` for returned timestamps,
+            and output backend. Aware datetime inputs retain their offsets.
 
     Returns:
-        DataFrame with fixed-income dealer quote data. Columns typically include
-        ticker, time, event_type, price, size, broker_buy, and broker_sell.
+        Time-sorted native dealer quote data in the configured backend. Columns
+        typically include ticker, time, event_type, price, size, broker_buy, and
+        broker_sell. Extra include fields and timezone metadata are preserved.
+
+    Raises:
+        RuntimeError: Nonempty quotes have no broker attribution when
+            ``include_broker_codes=True``.
 
     Example::
 
@@ -339,39 +311,20 @@ async def abqr(
 
         asyncio.run(main())
     """
-    from xbbg import abdtick
-    from xbbg._core import ext_default_bqr_datetimes
-    from xbbg.blp import _postprocess_bqr_result, _warn_bqr_dealer_input
+    from xbbg._endpoints import _warn_bqr_dealer_input
 
-    backend = kwargs.pop("backend", None)
-
-    # Compute default datetime range using Rust (handles normalization + defaults)
-    start_datetime, end_datetime = ext_default_bqr_datetimes(start_datetime, end_datetime)
-
-    # Default event types
-    if event_types is None:
-        event_types = ["BID", "ASK"]
-
-    # Add broker code request to kwargs if desired
     if include_broker_codes:
-        kwargs["includeBrokerCodes"] = True
         _warn_bqr_dealer_input(ticker, stacklevel=3)
 
-    # Use abdtick to get the data. Keep BID/ASK as the default BQR contract;
-    # otherwise abdtick defaults to TRADE ticks and returns transaction rows.
-    table = await abdtick(
-        ticker=ticker,
-        start_datetime=start_datetime,
-        end_datetime=end_datetime,
+    return await _call_native_recipe(
+        "recipe_bqr",
+        ticker,
+        start_datetime=_fmt_datetime(start_datetime, default_tz=None),
+        end_datetime=_fmt_datetime(end_datetime, default_tz=None),
         event_types=event_types,
-        backend="native",
-        **kwargs,
-    )
-    return _postprocess_bqr_result(
-        table,
-        ticker=ticker,
-        backend=backend,
-        enforce_broker_codes=include_broker_codes,
+        include_broker_codes=include_broker_codes,
+        backend=kwargs.pop("backend", None),
+        request_options=kwargs,
     )
 
 

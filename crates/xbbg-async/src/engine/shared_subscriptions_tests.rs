@@ -1314,7 +1314,7 @@ async fn batched_topic_failures_keep_wire_order_kind_and_reason_with_linear_rout
         .iter()
         .rev()
         .zip(&messages)
-        .skip(COUNT - super::super::SUBSCRIPTION_EVENT_HISTORY_LIMIT)
+        .skip(COUNT - super::super::subscription_status::SUBSCRIPTION_EVENT_HISTORY_LIMIT)
         .map(|(topic, (_, kind, reason))| {
             (kind.to_string(), Some(topic.clone()), Some(reason.clone()))
         })

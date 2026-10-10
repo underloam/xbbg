@@ -12,8 +12,7 @@ use xbbg_log::trace;
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
     append_long_value_row, common_value_type, get_value_cached_datatype, top_level_response_error,
-    FieldExceptionMeta, LongStringColumns, ResponseMetadata, SecurityErrorMeta, TypedLongColumns,
-    WideColumns,
+    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
@@ -43,16 +42,7 @@ pub enum LongMode {
 struct RefDataElementNames {
     security_data: Name,
     security: Name,
-    security_error: Name,
-    field_exceptions: Name,
     field_data: Name,
-    category: Name,
-    code: Name,
-    message: Name,
-    subcategory: Name,
-    field_id: Name,
-    error_info: Name,
-    eid_data: Name,
 }
 
 impl RefDataElementNames {
@@ -60,16 +50,7 @@ impl RefDataElementNames {
         Self {
             security_data: Name::get_or_intern("securityData"),
             security: Name::get_or_intern("security"),
-            security_error: Name::get_or_intern("securityError"),
-            field_exceptions: Name::get_or_intern("fieldExceptions"),
             field_data: Name::get_or_intern("fieldData"),
-            category: Name::get_or_intern("category"),
-            code: Name::get_or_intern("code"),
-            message: Name::get_or_intern("message"),
-            subcategory: Name::get_or_intern("subcategory"),
-            field_id: Name::get_or_intern("fieldId"),
-            error_info: Name::get_or_intern("errorInfo"),
-            eid_data: Name::get_or_intern("eidData"),
         }
     }
 }
@@ -326,109 +307,30 @@ impl RefDataState {
                 .and_then(|e| e.get_str(0))
                 .unwrap_or("");
 
-            // eidData rides alongside fieldData when returnEids was requested;
-            // failed securities can still carry it, so record before the
-            // securityError skip.
-            if let Some(eids) = sec.get(&self.names.eid_data) {
-                self.response_meta.record_eid_data(ticker, &eids);
-            }
-
-            // Check for security error
-            if let Some(security_error) = sec.get(&self.names.security_error) {
-                let category = security_error
-                    .get(&self.names.category)
-                    .and_then(|e| e.get_str(0))
-                    .unwrap_or("");
-                let code = security_error
-                    .get(&self.names.code)
-                    .and_then(|e| e.get_i32(0))
-                    .unwrap_or_default();
-                let message = security_error
-                    .get(&self.names.message)
-                    .and_then(|e| e.get_str(0))
-                    .unwrap_or("");
-                let subcategory = security_error
-                    .get(&self.names.subcategory)
-                    .and_then(|e| e.get_str(0))
-                    .unwrap_or("");
-
+            let diagnostics = self.response_meta.record_security(ticker, &sec);
+            if let Some(error) = diagnostics.security_error {
                 xbbg_log::warn!(
                     ticker = ticker,
-                    category = category,
-                    code = code,
-                    message = message,
+                    category = error.category,
+                    code = error.code,
+                    message = error.message,
                     "ReferenceData securityError; skipping security"
                 );
-
                 self.failed_securities.push(ticker.to_string());
-                self.response_meta.record_security_error(
-                    ticker,
-                    SecurityErrorMeta {
-                        category: category.to_string(),
-                        code,
-                        subcategory: subcategory.to_string(),
-                        message: message.to_string(),
-                    },
-                );
-
                 if self.include_security_errors {
-                    self.append_security_error_row(ticker, code, category, subcategory, message);
+                    self.append_security_error_row(
+                        ticker,
+                        error.code,
+                        error.category,
+                        error.subcategory,
+                        error.message,
+                    );
                 }
                 continue;
             }
-
-            if let Some(field_exceptions) = sec.get(&self.names.field_exceptions) {
-                let n = field_exceptions.len();
-                if n > 0 {
-                    // Collect field names and error messages for diagnostics
-                    let mut details: Vec<String> = Vec::with_capacity(n);
-                    for exc in field_exceptions.values() {
-                        let field_id = exc
-                            .get(&self.names.field_id)
-                            .and_then(|e| e.get_str(0))
-                            .unwrap_or("?");
-                        let err_info = exc.get(&self.names.error_info);
-                        let message = err_info
-                            .as_ref()
-                            .and_then(|e| e.get(&self.names.message))
-                            .and_then(|e| e.get_str(0))
-                            .unwrap_or("");
-                        let category = err_info
-                            .as_ref()
-                            .and_then(|e| e.get(&self.names.category))
-                            .and_then(|e| e.get_str(0))
-                            .unwrap_or("");
-                        let code = err_info
-                            .as_ref()
-                            .and_then(|e| e.get(&self.names.code))
-                            .and_then(|e| e.get_i32(0))
-                            .unwrap_or_default();
-                        let subcategory = err_info
-                            .as_ref()
-                            .and_then(|e| e.get(&self.names.subcategory))
-                            .and_then(|e| e.get_str(0))
-                            .unwrap_or("");
-                        self.response_meta.record_field_exception(
-                            ticker,
-                            FieldExceptionMeta {
-                                field: field_id.to_string(),
-                                category: category.to_string(),
-                                code,
-                                subcategory: subcategory.to_string(),
-                                message: message.to_string(),
-                            },
-                        );
-                        details.push(format!("{field_id}: {message}"));
-                    }
-                    self.field_exception_securities.insert(ticker.to_string());
-                    self.field_exception_count += n;
-                    xbbg_log::debug!(
-                        ticker = ticker,
-                        count = n,
-                        fields = details.join(", ").as_str(),
-                        "ReferenceData fieldExceptions"
-                    );
-                }
+            if diagnostics.field_exception_count > 0 {
+                self.field_exception_securities.insert(ticker.to_string());
+                self.field_exception_count += diagnostics.field_exception_count;
             }
 
             // Get fieldData

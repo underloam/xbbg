@@ -17,6 +17,8 @@ name = "xbbg_bench"
 # `live` is named explicitly because the workspace entries disable default
 # features; these benchmarks previously inherited it.
 xbbg_core = { workspace = true, features = ["live"] }
+
+[dev-dependencies]
 xbbg-async = { workspace = true, features = ["bench-internals", "live"] }
 # Benchmark runner/runtime
 arrow-array = { workspace = true }
@@ -24,23 +26,13 @@ arrow-schema = { workspace = true }
 # Spells out chrono's default feature set, previously picked up implicitly.
 chrono = { workspace = true, features = ["clock", "std", "oldtime", "wasmbind"] }
 tokio = { workspace = true, features = ["rt-multi-thread", "time"] }
-
-# Existing experimental benchmark dependencies kept for unregistered local benches.
-arc-swap = { workspace = true }
 criterion = { workspace = true }
-dhat = { workspace = true }
-hdrhistogram = { workspace = true }
-tempfile = { workspace = true }
 
-[dev-dependencies]
 serde_json = { workspace = true }
 simd-json = { workspace = true }
 
-[package.metadata.cargo-udeps.ignore]
-normal = ["criterion", "dhat", "hdrhistogram", "tempfile"]
-
 # =============================================================================
-# Supported benchmark suite
+# Registered benchmark targets
 # =============================================================================
 # Run with: cargo bench --package xbbg-bench --bench xbbg_benchmark_suite
 # Offline checks: cargo bench --package xbbg-bench --bench bql_json_parsers -- --test
@@ -67,3 +59,6 @@ harness = false
 [[bench]]
 name = "bql_json_parsers"
 harness = false
+
+[lints]
+workspace = true

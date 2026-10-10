@@ -134,20 +134,11 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     }
 
     /// Get the deprecation status of this type.
-    #[cfg(feature = "live")]
     pub fn status(&self) -> SchemaStatus {
         unsafe {
             let status = ffi::blpapi_SchemaTypeDefinition_status(self.ptr);
             SchemaStatus::from_raw(status)
         }
-    }
-
-    /// Get the deprecation status of this type.
-    ///
-    /// Note: In mock mode, always returns Active.
-    #[cfg(not(feature = "live"))]
-    pub fn status(&self) -> SchemaStatus {
-        SchemaStatus::Active
     }
 }
 

@@ -110,14 +110,14 @@ def test_markets_modules_do_not_require_pandas(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "xbbg.markets.bloomberg", bloomberg_module)
     bloomberg_spec.loader.exec_module(bloomberg_module)
 
-    real_import_module = bloomberg_module.importlib.import_module
+    real_import_module = importlib.import_module
 
     def guarded_import_module(name: str, package: str | None = None):
         if name == "pandas" or name.startswith("pandas."):
             raise ImportError(f"blocked optional dataframe backend: {name}")
         return real_import_module(name, package)
 
-    monkeypatch.setattr(bloomberg_module.importlib, "import_module", guarded_import_module)
+    monkeypatch.setattr(importlib, "import_module", guarded_import_module)
 
     info_spec = importlib.util.spec_from_file_location("xbbg.markets.info", markets_dir / "info.py")
     assert info_spec is not None
@@ -126,9 +126,24 @@ def test_markets_modules_do_not_require_pandas(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setitem(sys.modules, "xbbg.markets.info", info_module)
     info_spec.loader.exec_module(info_module)
 
-    assert bloomberg_module.ExchangeInfo is not None
-    with pytest.raises(ImportError, match=r"fetch_exchange_info\(\) requires optional backend 'pandas'"):
-        bloomberg_module.fetch_exchange_info("AAPL US Equity")
+    from xbbg import _engine
+
+    class FakeEngine:
+        async def resolve_exchange(self, ticker):
+            return {
+                "ticker": ticker,
+                "mic": "XNYS",
+                "exch_code": "US",
+                "timezone": "America/New_York",
+                "utc_offset": None,
+                "source": "override",
+                "day": ("09:30", "16:00"),
+            }
+
+    monkeypatch.setattr(_engine, "_get_engine", lambda **_kwargs: FakeEngine())
+    result = bloomberg_module.fetch_exchange_info("ACME US Equity")
+    assert isinstance(result, bloomberg_module.ExchangeInfo)
+    assert result.sessions == {"day": ("09:30", "16:00")}
 
     with pytest.raises(ImportError, match="exch_info\\(\\) requires optional backend 'pandas'"):
         info_module.exch_info("AAPL US Equity")

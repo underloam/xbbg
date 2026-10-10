@@ -5,8 +5,22 @@ import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import { tableFromNativeArrowBatch } from './arrow-zero-copy';
-import { Backend, Format } from './backends';
+import {
+  CDX_INFO_FIELDS as GENERATED_CDX_INFO_FIELDS,
+  CDX_PRICING_FIELDS as GENERATED_CDX_PRICING_FIELDS,
+  CDX_RISK_FIELDS as GENERATED_CDX_RISK_FIELDS,
+  TA_DEFAULTS,
+  TA_STUDIES,
+} from './_defs_gen';
+import {
+  Backend,
+  Format,
+  ipcToPolars,
+  nativeArrowToBackend,
+  nativeRecipeResult,
+  normalizeBackend,
+  toArrowTableFromNative,
+} from './backends';
 // Date / datetime helpers (#317): isolated module so they can be tested
 // Without loading the native NAPI addon. Re-exported as public API below.
 import { formatDate, formatDateTime, hasToJSDate } from './dates';
@@ -21,18 +35,12 @@ import {
   BlpValidationError,
   wrapError,
 } from './errors';
-import type {
-  NativeAddon,
-  NativeArrowZeroCopyBatch,
-  NativeEngine,
-  NativeSubscription,
-  NativeSubscriptionFieldKind,
-  NativeSubscriptionLayout,
-  NativeSubscriptionRow,
-  NativeSubscriptionUpdateBatch,
-} from './napi';
+import type { NativeAddon, NativeEngine } from './napi';
 import { resolveNativeAddon } from './native/resolve-native';
+import { isPlainObject } from './objects';
 import { configureRuntimeSearchPath } from './runtime-search-path';
+import { createSubscription, MKTDATA_SERVICE, validateStreamControls } from './subscriptions';
+import type { Subscription } from './subscriptions';
 import type {
   ActiveCdxOptions,
   AdminStatus,
@@ -121,10 +129,6 @@ interface PackageJsonShape {
   readonly version: string;
 }
 
-interface PolarsModule {
-  readIPC(buffer: Buffer): unknown;
-}
-
 function parsePackageJsonShape(value: unknown): PackageJsonShape {
   if (isPlainObject(value) && typeof value.version === 'string') {
     return { version: value.version };
@@ -150,18 +154,6 @@ function requireNativeAddon(modulePath: string): NativeAddon {
     return loaded;
   }
   throw new TypeError(`Native addon ${modulePath} does not expose the expected @xbbg/core surface`);
-}
-
-function isPolarsModule(value: unknown): value is PolarsModule {
-  return isPlainObject(value) && typeof value.readIPC === 'function';
-}
-
-function requirePolarsModule(): PolarsModule {
-  const loaded: unknown = nodeRequire('nodejs-polars');
-  if (isPolarsModule(loaded)) {
-    return loaded;
-  }
-  throw new TypeError('nodejs-polars did not expose readIPC(buffer)');
 }
 
 function isBdhOptionsInput(value: DateLike | BdhOptions | undefined): value is BdhOptions {
@@ -212,6 +204,8 @@ const native = loadNative();
 
 // ── Constants ───────────────────────────────────────────────────────────
 export { Backend, Format };
+export { ArrowSubscription, FieldHandle, Subscription, Tick } from './subscriptions';
+export type { TickValue } from './subscriptions';
 
 function auctionFields(name: string): readonly string[] {
   const fields = native.extAuctionFieldGroup(name);
@@ -239,148 +233,17 @@ export function imbalanceSide(code: string): 'buy' | 'sell' | 'none' | null {
   return native.extImbalanceSide(code);
 }
 
-export const CDX_INFO_FIELDS = Object.freeze([
-  'ROLLING_SERIES',
-  'VERSION',
-  'ON_THE_RUN_CURRENT_BD_INDICATOR',
-  'CDS_FIRST_ACCRUAL_START_DATE',
-  'NAME',
-  'NUM_CURRENT_COMPANIES_CCY_TKR',
-  'NUM_ORIG_COMPANIES_CRNCY_TKR',
-  'PX_LAST',
-]);
+// CDX field bundles are generated from defs/bloomberg.toml and shared with the
+// Python package and both LangGraph adapters. Public exports stay frozen arrays.
+export const CDX_INFO_FIELDS = Object.freeze([...GENERATED_CDX_INFO_FIELDS]);
 
-export const CDX_PRICING_FIELDS = Object.freeze([
-  'PX_LAST',
-  'PX_BID',
-  'PX_ASK',
-  'UPFRONT_LAST',
-  'UPFRONT_BID',
-  'UPFRONT_ASK',
-  'CDS_FLAT_SPREAD',
-  'UPFRONT_FEE',
-  'PV_CDS_PREMIUM_LEG',
-  'PV_CDS_DEFAULT_LEG',
-]);
+export const CDX_PRICING_FIELDS = Object.freeze([...GENERATED_CDX_PRICING_FIELDS]);
 
-export const CDX_RISK_FIELDS = Object.freeze([
-  'SW_CNV_BPV',
-  'SW_EQV_BPV',
-  'CDS_SPREAD_MID_MODIFIED_DURATION',
-  'CDS_SPREAD_MID_CONVEXITY',
-  'RECOVERY_RATE_SEN',
-  'CDS_RECOVERY_RT',
-]);
-
-const TA_STUDIES: Readonly<Record<string, string>> = Object.freeze({
-  ado: 'adoStudyAttributes',
-  adx: 'dmiStudyAttributes',
-  al: 'alStudyAttributes',
-  atr: 'atrStudyAttributes',
-  bb: 'bollStudyAttributes',
-  boll: 'bollStudyAttributes',
-  bs: 'bsStudyAttributes',
-  chko: 'chkoStudyAttributes',
-  cmci: 'cmciStudyAttributes',
-  dmi: 'dmiStudyAttributes',
-  ema: 'emavgStudyAttributes',
-  emavg: 'emavgStudyAttributes',
-  etd: 'etdStudyAttributes',
-  fear_greed: 'fgStudyAttributes',
-  fg: 'fgStudyAttributes',
-  goc: 'gocStudyAttributes',
-  hurst: 'hurstStudyAttributes',
-  ichimoku: 'gocStudyAttributes',
-  ipmavg: 'ipmavgStudyAttributes',
-  keltner: 'kltnStudyAttributes',
-  kltn: 'kltnStudyAttributes',
-  macd: 'macdStudyAttributes',
-  mae: 'maeStudyAttributes',
-  mao: 'maoStudyAttributes',
-  maxmin: 'maxminStudyAttributes',
-  mom: 'momentumStudyAttributes',
-  momentum: 'momentumStudyAttributes',
-  or: 'orStudyAttributes',
-  parabolic: 'ptpsStudyAttributes',
-  pcr: 'pcrStudyAttributes',
-  pd: 'pdStudyAttributes',
-  pivot: 'pivotStudyAttributes',
-  ptps: 'ptpsStudyAttributes',
-  rex: 'rexStudyAttributes',
-  roc: 'rocStudyAttributes',
-  rsi: 'rsiStudyAttributes',
-  rv: 'rvStudyAttributes',
-  sar: 'ptpsStudyAttributes',
-  sma: 'smavgStudyAttributes',
-  smavg: 'smavgStudyAttributes',
-  stoch: 'tasStudyAttributes',
-  tas: 'tasStudyAttributes',
-  te: 'teStudyAttributes',
-  tma: 'tmavgStudyAttributes',
-  tmavg: 'tmavgStudyAttributes',
-  trender: 'trenderStudyAttributes',
-  tvat: 'tvatStudyAttributes',
-  vat: 'vatStudyAttributes',
-  vma: 'vmavgStudyAttributes',
-  vmavg: 'vmavgStudyAttributes',
-  williams: 'wlprStudyAttributes',
-  wlpr: 'wlprStudyAttributes',
-  wma: 'wmavgStudyAttributes',
-  wmavg: 'wmavgStudyAttributes',
-});
+export const CDX_RISK_FIELDS = Object.freeze([...GENERATED_CDX_RISK_FIELDS]);
 
 type StudyParams = Record<string, PrimitiveValue | undefined>;
 
-const TA_DEFAULTS: Readonly<Record<string, Readonly<StudyParams>>> = Object.freeze({
-  atrStudyAttributes: Object.freeze({
-    maType: 'Simple',
-    period: 14,
-    priceSourceHigh: 'PX_HIGH',
-    priceSourceLow: 'PX_LOW',
-    priceSourceClose: 'PX_LAST',
-  }),
-  bollStudyAttributes: Object.freeze({
-    period: 20,
-    upperBand: 2.0,
-    lowerBand: 2.0,
-    priceSourceClose: 'PX_LAST',
-  }),
-  dmiStudyAttributes: Object.freeze({
-    period: 14,
-    priceSourceHigh: 'PX_HIGH',
-    priceSourceLow: 'PX_LOW',
-    priceSourceClose: 'PX_LAST',
-  }),
-  emavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
-  macdStudyAttributes: Object.freeze({
-    maPeriod1: 12,
-    maPeriod2: 26,
-    sigPeriod: 9,
-    priceSourceClose: 'PX_LAST',
-  }),
-  rsiStudyAttributes: Object.freeze({ period: 14, priceSourceClose: 'PX_LAST' }),
-  smavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
-  tasStudyAttributes: Object.freeze({
-    periodK: 14,
-    periodD: 3,
-    periodDS: 3,
-    periodDSS: 3,
-    priceSourceHigh: 'PX_HIGH',
-    priceSourceLow: 'PX_LOW',
-    priceSourceClose: 'PX_LAST',
-  }),
-  tmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
-  vmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
-  wmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
-});
-
-const MKTDATA_SERVICE = '//blp/mktdata';
-
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-function toArrowTableFromNative(batch: NativeArrowZeroCopyBatch): Table & ResultMetadata {
-  return attachResultMetadata(tableFromNativeArrowBatch(batch), batch.metadata);
-}
 
 const ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE =
   'ETF NAV relationship result is not one-to-one with requested ETFs';
@@ -560,110 +423,6 @@ function validatedAuctionTopics(
     });
   }
   return { topics, aliases: Object.fromEntries(labels) };
-}
-
-const METADATA_KEY_EID_DATA = 'xbbg.eid_data';
-const METADATA_KEY_SECURITY_ERRORS = 'xbbg.security_errors';
-const METADATA_KEY_FIELD_EXCEPTIONS = 'xbbg.field_exceptions';
-
-function metadataRecordFromMap(metadata: ReadonlyMap<string, string>): Record<string, string> {
-  return Object.fromEntries(metadata.entries());
-}
-
-function parseJsonMetadata<T>(
-  metadata: Record<string, string>,
-  key: string,
-  guard: (value: unknown) => value is T,
-): T | undefined {
-  const raw = metadata[key];
-  if (raw === undefined) {
-    return undefined;
-  }
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    return guard(parsed) ? parsed : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
-function isNumberArrayRecord(value: unknown): value is Record<string, number[]> {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-  return Object.values(value).every(
-    (entry) => Array.isArray(entry) && entry.every((eid) => typeof eid === 'number'),
-  );
-}
-
-function isMetadataError(value: unknown): value is BloombergMetadataError {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-  const { category, code, message, subcategory } = value;
-  return (
-    (category === undefined || typeof category === 'string') &&
-    (code === undefined || typeof code === 'string' || typeof code === 'number') &&
-    (message === undefined || typeof message === 'string') &&
-    (subcategory === undefined || typeof subcategory === 'string')
-  );
-}
-
-function isMetadataErrorRecord(value: unknown): value is Record<string, BloombergMetadataError> {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-  return Object.values(value).every(isMetadataError);
-}
-
-function isFieldException(value: unknown): value is BloombergFieldException {
-  if (!isMetadataError(value)) {
-    return false;
-  }
-  if (!('field' in value)) {
-    return true;
-  }
-  return typeof value.field === 'string';
-}
-
-function isFieldExceptionRecord(
-  value: unknown,
-): value is Record<string, BloombergFieldException[]> {
-  if (!isPlainObject(value)) {
-    return false;
-  }
-  return Object.values(value).every(
-    (entry) => Array.isArray(entry) && entry.every(isFieldException),
-  );
-}
-
-function attachResultMetadata<T extends object>(
-  result: T,
-  metadata: Record<string, string>,
-): T & ResultMetadata {
-  const eidData = parseJsonMetadata(metadata, METADATA_KEY_EID_DATA, isNumberArrayRecord);
-  const securityErrors = parseJsonMetadata(
-    metadata,
-    METADATA_KEY_SECURITY_ERRORS,
-    isMetadataErrorRecord,
-  );
-  const fieldExceptions = parseJsonMetadata(
-    metadata,
-    METADATA_KEY_FIELD_EXCEPTIONS,
-    isFieldExceptionRecord,
-  );
-  Object.defineProperties(result, {
-    eidData: { enumerable: true, value: eidData },
-    fieldExceptions: { enumerable: true, value: fieldExceptions },
-    metadata: { enumerable: true, value: { ...metadata } },
-    securityErrors: { enumerable: true, value: securityErrors },
-  });
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.defineProperties attaches the ResultMetadata fields above.
-  return result as T & ResultMetadata;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function toRequestString(value: unknown): string {
@@ -1017,113 +776,6 @@ function normalizeVolPresets(preset: VolSurfaceOptions['preset'] | undefined): s
   return isVolSurfacePresetArray(preset) ? [...preset] : [preset];
 }
 
-function subscriptionOptionKey(option: string): string {
-  return normalizeSubscriptionOption(option).split('=')[0]?.trim().toLowerCase() ?? '';
-}
-
-function normalizeSubscriptionOption(option: string): string {
-  let clean = option.trim();
-  while (clean.startsWith('&')) {
-    clean = clean.slice(1).trim();
-  }
-  return clean;
-}
-
-function validateAliases(aliases: unknown): void {
-  if (aliases === undefined) {
-    return;
-  }
-  if (isPlainObject(aliases)) {
-    const prototype: unknown = Object.getPrototypeOf(aliases);
-    if (
-      (prototype === Object.prototype || prototype === null) &&
-      Object.values(aliases).every((label) => typeof label === 'string')
-    ) {
-      return;
-    }
-  }
-  throw new BlpValidationError('aliases must map topic strings to label strings', {
-    element: 'aliases',
-  });
-}
-
-function validateStreamControls(options: StreamOptions): void {
-  validateAliases(options.aliases);
-  const policy: unknown = options.onDelayed;
-  if (policy !== undefined && policy !== 'warn' && policy !== 'raise' && policy !== 'ignore') {
-    throw new BlpValidationError('onDelayed must be warn, raise, or ignore', {
-      element: 'onDelayed',
-    });
-  }
-  const isolated: unknown = options.isolated;
-  if (isolated !== undefined && typeof isolated !== 'boolean') {
-    throw new BlpValidationError('isolated must be a boolean', { element: 'isolated' });
-  }
-  const rows: unknown = options.rows;
-  if (rows !== undefined && typeof rows !== 'boolean') {
-    throw new BlpValidationError('rows must be a boolean', { element: 'rows' });
-  }
-  const fieldPolicy: unknown = options.onFieldError;
-  if (
-    fieldPolicy !== undefined &&
-    fieldPolicy !== 'warn' &&
-    fieldPolicy !== 'raise' &&
-    fieldPolicy !== 'ignore'
-  ) {
-    throw new BlpValidationError('onFieldError must be warn, raise, or ignore', {
-      element: 'onFieldError',
-    });
-  }
-  const zeroAsNull: unknown = options.zeroAsNull;
-  if (
-    zeroAsNull !== undefined &&
-    (!Array.isArray(zeroAsNull) || zeroAsNull.some((field: unknown) => typeof field !== 'string'))
-  ) {
-    throw new BlpValidationError('zeroAsNull must be an array of field names', {
-      element: 'zeroAsNull',
-    });
-  }
-}
-
-function buildStreamSubscriptionOptions(
-  service: string,
-  options: StreamOptions,
-): readonly string[] | undefined {
-  validateStreamControls(options);
-  const rawOptions = options.options;
-  const { conflate } = options;
-
-  if (rawOptions === undefined && conflate !== true) {
-    return undefined;
-  }
-
-  const subscriptionOptions = (rawOptions ?? [])
-    .map((option) => normalizeSubscriptionOption(option))
-    .filter((option) => option.length > 0);
-
-  if (conflate === true) {
-    if (service !== MKTDATA_SERVICE) {
-      throw new BlpValidationError(
-        'conflate=true is only supported for //blp/mktdata subscriptions',
-        { element: 'conflate' },
-      );
-    }
-    if (subscriptionOptions.some((option) => subscriptionOptionKey(option) === 'interval')) {
-      throw new BlpValidationError(
-        'conflate=true cannot be combined with interval options; intervalization overrides conflation',
-        { element: 'conflate' },
-      );
-    }
-    if (!subscriptionOptions.some((option) => subscriptionOptionKey(option) === 'conflate')) {
-      subscriptionOptions.push('conflate');
-    }
-  }
-
-  return subscriptionOptions.length > 0 || rawOptions !== undefined
-    ? subscriptionOptions
-    : undefined;
-}
-
 function normalizeConfigureArgs(
   configOrHost?: EngineConfig | string,
   port?: number,
@@ -1305,65 +957,6 @@ function stringOrUndef(value: unknown): string | undefined {
   return typeof value === 'string' ? value : undefined;
 }
 
-let polarsModule: PolarsModule | undefined;
-let polarsLoadError: Error | undefined;
-
-function cachePolarsLoadError(err: unknown): Error {
-  const error = new Error(
-    'nodejs-polars is required for Polars backend. Install: npm install nodejs-polars',
-  );
-  Object.defineProperty(error, 'cause', { configurable: true, value: err });
-  polarsLoadError = error;
-  return error;
-}
-
-function loadPolars(): PolarsModule {
-  if (polarsModule !== undefined) {
-    return polarsModule;
-  }
-  if (polarsLoadError !== undefined) {
-    throw polarsLoadError;
-  }
-  try {
-    polarsModule = requirePolarsModule();
-    return polarsModule;
-  } catch (error) {
-    throw cachePolarsLoadError(error);
-  }
-}
-
-function normalizeBackend(backend: BackendKind | undefined): BackendKind {
-  const selected: unknown = backend ?? Backend.ARROW;
-  if (selected === Backend.ARROW || selected === Backend.JSON || selected === Backend.POLARS) {
-    return selected;
-  }
-  throw new TypeError(
-    `Unsupported @xbbg/core backend "${toRequestString(selected)}". Expected one of: ${Object.values(
-      Backend,
-    ).join(', ')}`,
-  );
-}
-
-function nativeArrowToBackend(
-  batch: NativeArrowZeroCopyBatch,
-  backend: BackendKind | undefined,
-): unknown {
-  const selected = normalizeBackend(backend);
-  const table = tableFromNativeArrowBatch(batch);
-  const metadata = metadataRecordFromMap(table.schema.metadata);
-  if (selected === Backend.JSON) {
-    return attachResultMetadata([...table], metadata);
-  }
-  if (selected === Backend.POLARS) {
-    throw new TypeError('Polars backend requires the IPC requestRaw path');
-  }
-  return attachResultMetadata(table, metadata);
-}
-
-function ipcToPolars(buffer: Buffer): unknown {
-  return loadPolars().readIPC(buffer);
-}
-
 // ── Configured engine state ─────────────────────────────────────────────
 
 let configuredEngineConfig: EngineConfig | undefined;
@@ -1395,850 +988,6 @@ async function getConfiguredEngine(): Promise<Engine> {
     configuredEnginePromise = pending;
   }
   return await configuredEnginePromise;
-}
-
-// ── Subscription class ──────────────────────────────────────────────────
-
-export type TickValue = null | boolean | number | bigint | string | Date;
-
-export class FieldHandle {
-  public constructor(public readonly name: string) {}
-}
-
-interface TickLayout {
-  readonly version: number;
-  readonly fields: readonly string[];
-  readonly kinds: readonly NativeSubscriptionFieldKind[];
-  readonly positions: Map<string, number>;
-}
-
-function createTickLayout(layout: NativeSubscriptionLayout): TickLayout {
-  return {
-    fields: layout.fields,
-    kinds: layout.kinds,
-    positions: new Map(layout.fields.map((field, index) => [field, index])),
-    version: layout.version,
-  };
-}
-
-export class Tick {
-  private readonly decodedSet: boolean[] = [];
-  private readonly decodedValues: (TickValue | undefined)[] = [];
-  private rowPositions: number[] | undefined;
-
-  public constructor(
-    private readonly update: NativeSubscriptionRow,
-    private readonly layout: TickLayout,
-  ) {}
-
-  public get topic(): string {
-    return this.update.topic;
-  }
-
-  public get timestampUs(): number {
-    return this.update.timestampUs;
-  }
-
-  public get layoutVersion(): number {
-    return this.update.layoutVersion;
-  }
-
-  public has(field: string | FieldHandle): boolean {
-    const name = typeof field === 'string' ? field : field.name;
-    const fieldIndex = this.layout.positions.get(name);
-    return fieldIndex !== undefined && this.valuePosition(fieldIndex) !== undefined;
-  }
-
-  public get(field: string | FieldHandle): TickValue | undefined {
-    const name = typeof field === 'string' ? field : field.name;
-    const fieldIndex = this.layout.positions.get(name);
-    return fieldIndex === undefined ? undefined : this.getByFieldIndex(fieldIndex);
-  }
-
-  private getByFieldIndex(fieldIndex: number): TickValue | undefined {
-    if (this.decodedSet[fieldIndex] === true) {
-      return this.decodedValues[fieldIndex];
-    }
-    const position = this.valuePosition(fieldIndex);
-    if (position === undefined) {
-      this.decodedSet[fieldIndex] = true;
-      this.decodedValues[fieldIndex] = undefined;
-      return undefined;
-    }
-
-    const kind = this.layout.kinds[fieldIndex] ?? 'unknown';
-    let value: TickValue;
-    if (kind === 'bool') {
-      value = this.update.boolValues[position] ?? null;
-    } else if (kind === 'i32') {
-      value = this.update.i32Values[position] ?? null;
-    } else if (kind === 'f64') {
-      value = this.update.f64Values[position] ?? null;
-    } else if (kind === 'str' || kind === 'unknown') {
-      value = this.update.stringValues[position] ?? null;
-    } else if (kind === 'date32') {
-      const days = this.update.i32Values[position];
-      value = days === null || days === undefined ? null : new Date(Date.UTC(1970, 0, 1 + days));
-    } else {
-      const raw = this.update.i64Values[position];
-      if (raw === null || raw === undefined) {
-        value = null;
-      } else {
-        try {
-          value = BigInt(raw);
-        } catch {
-          value = null;
-        }
-      }
-    }
-    this.decodedSet[fieldIndex] = true;
-    this.decodedValues[fieldIndex] = value;
-    return value;
-  }
-
-  private valuePosition(fieldIndex: number): number | undefined {
-    let positions = this.rowPositions;
-    if (positions === undefined) {
-      const built: number[] = [];
-      for (const [position, index] of this.update.fieldIndices.entries()) {
-        built[index] = position;
-      }
-      positions = built;
-      this.rowPositions = positions;
-    }
-    return positions[fieldIndex];
-  }
-
-  public f64(field: string | FieldHandle): number | null | undefined {
-    const value = this.get(field);
-    if (value === null || value === undefined) {
-      return value;
-    }
-    const parsed = Number(value);
-    return Number.isFinite(parsed) ? parsed : null;
-  }
-
-  public i64(field: string | FieldHandle): bigint | null | undefined {
-    const value = this.get(field);
-    if (value === null || value === undefined) {
-      return value;
-    }
-    if (typeof value === 'bigint') {
-      return value;
-    }
-    try {
-      return BigInt(typeof value === 'string' ? value : String(value));
-    } catch {
-      return null;
-    }
-  }
-
-  public str(field: string | FieldHandle): string | null | undefined {
-    const value = this.get(field);
-    return value === null || value === undefined ? value : String(value);
-  }
-
-  public toObject(): Record<string, unknown> {
-    const out: Record<string, unknown> = { timestampUs: this.timestampUs, topic: this.topic };
-    for (const fieldIndex of this.update.fieldIndices) {
-      const field = this.layout.fields[fieldIndex];
-      if (field !== undefined) {
-        out[field] = this.getByFieldIndex(fieldIndex);
-      }
-    }
-    return out;
-  }
-}
-
-class SubscriptionReadQueue {
-  private tail: Promise<void> = Promise.resolve();
-
-  public enqueue<T>(read: () => Promise<T>): Promise<T> {
-    const result = this.tail.then(read);
-    this.tail = result.then(
-      () => undefined,
-      () => undefined,
-    );
-    return result;
-  }
-
-  public barrier(): Promise<void> {
-    return this.tail;
-  }
-}
-
-type SubscriptionIteratorPhase = 'open' | 'closing' | 'closed';
-type SubscriptionReadMode = 'scalar' | 'arrow';
-
-type SubscriptionBatchProjection<TBatch, TValue> =
-  | {
-      readonly cardinality: 'many';
-      readonly project: (batch: TBatch) => TValue[];
-    }
-  | {
-      readonly cardinality: 'one';
-      readonly project: (batch: TBatch) => TValue;
-    };
-
-class SubscriptionCoordinator {
-  public readonly reads = new SubscriptionReadQueue();
-  private phase: SubscriptionIteratorPhase = 'open';
-  private readMode: SubscriptionReadMode | undefined;
-  private readonly closeObservers = new Set<(owner: object | undefined) => void>();
-  private readonly closed: Promise<void>;
-  private readonly resolveClosed: () => void;
-  private closeError: Error | undefined;
-  private lateReadError: Error | undefined;
-  private readonly deliversRows: boolean;
-
-  public constructor(private readonly inner: NativeSubscription) {
-    this.deliversRows = inner.deliversRows;
-    let resolveClosed!: () => void;
-    this.closed = new Promise<void>((resolve) => {
-      resolveClosed = resolve;
-    });
-    this.resolveClosed = resolveClosed;
-  }
-
-  public emitWarnings(): void {
-    for (const warning of this.inner.takeWarnings()) {
-      const delayed = warning.messageType === 'DelayedStream';
-      const message = `${warning.messageType}${warning.topic === undefined || warning.topic === null ? '' : `: ${warning.topic}`}`;
-      process.emitWarning(message, {
-        type: delayed ? 'BlpDelayedDataWarning' : 'BlpFieldWarning',
-        code: delayed ? 'XBBG_DELAYED_STREAM' : 'XBBG_FIELD_EXCEPTION',
-        ...(warning.detail === undefined || warning.detail === null
-          ? {}
-          : { detail: warning.detail }),
-      });
-    }
-  }
-
-  public ensureRowDelivery(): void {
-    if (!this.deliversRows) {
-      throw new BlpValidationError(
-        'Subscription has rows=false; use latest() instead of reading rows',
-        {
-          element: 'rows',
-        },
-      );
-    }
-  }
-
-  public get isOpen(): boolean {
-    return this.phase === 'open';
-  }
-
-  public get closeReadError(): Error | undefined {
-    return this.lateReadError;
-  }
-
-  public recordCloseReadError(error: unknown): void {
-    this.lateReadError ??= wrapError(error);
-  }
-
-  public claimReadMode(mode: SubscriptionReadMode): void {
-    const mismatch = this.readModeMismatch(mode);
-    if (mismatch !== undefined) {
-      throw mismatch;
-    }
-    this.readMode = mode;
-  }
-
-  public readModeMismatch(mode: SubscriptionReadMode): TypeError | undefined {
-    if (this.readMode !== undefined && this.readMode !== mode) {
-      return new TypeError(
-        `subscription is already being read as ${this.readMode}; cannot also read as ${mode}`,
-      );
-    }
-    return undefined;
-  }
-
-  public observeClose(observer: (owner: object | undefined) => void): void {
-    if (this.phase === 'open') {
-      this.closeObservers.add(observer);
-    } else {
-      observer(undefined);
-    }
-  }
-
-  public beginClose(owner: object): { readonly barrier: Promise<void>; readonly started: boolean } {
-    if (this.phase !== 'open') {
-      return { barrier: this.closed, started: false };
-    }
-    this.phase = 'closing';
-    for (const observer of this.closeObservers) {
-      observer(owner);
-    }
-    this.closeObservers.clear();
-    return { barrier: this.reads.barrier(), started: true };
-  }
-
-  public finishNaturalClose(owner: object): void {
-    if (this.phase !== 'open') {
-      return;
-    }
-    this.phase = 'closed';
-    for (const observer of this.closeObservers) {
-      observer(owner);
-    }
-    this.closeObservers.clear();
-    this.resolveClosed();
-  }
-
-  public finishClose(error: Error | undefined): void {
-    if (this.phase === 'closed') {
-      return;
-    }
-    this.phase = 'closed';
-    this.closeError = error;
-    this.lateReadError = undefined;
-    this.closeObservers.clear();
-    this.resolveClosed();
-  }
-
-  public async whenClosed(): Promise<void> {
-    await this.closed;
-    if (this.closeError !== undefined) {
-      throw this.closeError;
-    }
-  }
-}
-
-const subscriptionCoordinators = new WeakMap<NativeSubscription, SubscriptionCoordinator>();
-
-function subscriptionCoordinatorFor(inner: NativeSubscription): SubscriptionCoordinator {
-  const existing = subscriptionCoordinators.get(inner);
-  if (existing !== undefined) {
-    return existing;
-  }
-  const created = new SubscriptionCoordinator(inner);
-  subscriptionCoordinators.set(inner, created);
-  created.emitWarnings();
-  return created;
-}
-
-function abortReason(signal: AbortSignal): Error {
-  return signal.reason instanceof Error
-    ? signal.reason
-    : new DOMException('The operation was aborted', 'AbortError');
-}
-
-function throwIfSubscriptionReadAborted(signal: AbortSignal | undefined): void {
-  if (signal?.aborted === true) {
-    throw abortReason(signal);
-  }
-}
-
-async function rejectAfterSubscriptionCleanup(
-  primary: Error,
-  cleanup: Promise<unknown>,
-): Promise<never> {
-  try {
-    await cleanup;
-  } catch (cleanupError) {
-    if (cleanupError === primary) {
-      throw primary;
-    }
-    throw new AggregateError(
-      [primary, cleanupError],
-      `${primary.message}; subscription cleanup failed`,
-      { cause: cleanupError },
-    );
-  }
-  throw primary;
-}
-
-class SubscriptionIterator<TBatch, TValue> {
-  private pending: (TValue | undefined)[] = [];
-  private pendingCursor = 0;
-  private phase: SubscriptionIteratorPhase = 'open';
-  private closeDrain = false;
-  private readonly closingPending: TValue[] = [];
-  private closeInFlight: Promise<TValue[]> | undefined;
-  private readonly owner = {};
-  private readonly nextSerializedWithoutSignal = this.nextSerialized.bind(this, undefined);
-
-  public constructor(
-    private readonly readBatch: () => Promise<TBatch | null>,
-    private readonly closeNative: (drain: boolean) => Promise<readonly TBatch[] | null>,
-    private readonly projection: SubscriptionBatchProjection<TBatch, TValue>,
-    private readonly coordinator: SubscriptionCoordinator,
-    private readonly readMode: SubscriptionReadMode,
-  ) {
-    this.coordinator.observeClose((owner) => {
-      if (owner === this.owner) {
-        return;
-      }
-      this.phase = 'closing';
-      this.closeDrain = false;
-      this.clearPending();
-      this.closingPending.length = 0;
-    });
-  }
-
-  private isOpen(): boolean {
-    return this.phase === 'open';
-  }
-
-  public next(options?: SubscriptionReadOptions): Promise<IteratorResult<TValue, undefined>> {
-    const signal = options?.signal;
-    return signal === undefined ? this.nextWithoutSignal() : this.nextWithSignal(signal);
-  }
-
-  private async nextWithoutSignal(): Promise<IteratorResult<TValue, undefined>> {
-    this.coordinator.ensureRowDelivery();
-    if (!this.isOpen()) {
-      return { done: true, value: undefined };
-    }
-
-    this.coordinator.claimReadMode(this.readMode);
-    const queued = this.coordinator.reads.enqueue(this.nextSerializedWithoutSignal);
-    try {
-      return await queued;
-    } catch (error) {
-      return await rejectAfterSubscriptionCleanup(wrapError(error), this.startClose(false));
-    }
-  }
-
-  private async nextWithSignal(signal: AbortSignal): Promise<IteratorResult<TValue, undefined>> {
-    this.coordinator.ensureRowDelivery();
-    if (signal.aborted) {
-      return await rejectAfterSubscriptionCleanup(abortReason(signal), this.startClose(false));
-    }
-    if (!this.isOpen()) {
-      return { done: true, value: undefined };
-    }
-
-    this.coordinator.claimReadMode(this.readMode);
-
-    let abortError: Error | undefined;
-    const onAbort = (): void => {
-      abortError = abortReason(signal);
-      void this.startClose(false).catch(() => undefined);
-    };
-    signal.addEventListener('abort', onAbort, { once: true });
-    const queued = this.coordinator.reads.enqueue(this.nextSerialized.bind(this, signal));
-    try {
-      return await queued;
-    } catch (error) {
-      const primary = abortError ?? wrapError(error);
-      return await rejectAfterSubscriptionCleanup(primary, this.startClose(false));
-    } finally {
-      signal.removeEventListener('abort', onAbort);
-    }
-  }
-
-  private async nextSerialized(
-    signal: AbortSignal | undefined,
-  ): Promise<IteratorResult<TValue, undefined>> {
-    throwIfSubscriptionReadAborted(signal);
-    if (!this.isOpen()) {
-      return { done: true, value: undefined };
-    }
-
-    const pending = this.takePending();
-    if (pending !== undefined) {
-      return { done: false, value: pending };
-    }
-
-    while (this.isOpen()) {
-      let batch: TBatch | null;
-      try {
-        batch = await this.readBatch();
-      } catch (error) {
-        if (!this.isOpen()) {
-          this.coordinator.recordCloseReadError(error);
-          throwIfSubscriptionReadAborted(signal);
-          return { done: true, value: undefined };
-        }
-        throwIfSubscriptionReadAborted(signal);
-        throw error;
-      } finally {
-        this.coordinator.emitWarnings();
-      }
-
-      if (!this.isOpen()) {
-        if (batch !== null && this.closeDrain) {
-          try {
-            this.appendBatch(this.closingPending, batch);
-          } catch (error) {
-            this.coordinator.recordCloseReadError(error);
-          }
-        }
-        throwIfSubscriptionReadAborted(signal);
-        return { done: true, value: undefined };
-      }
-      throwIfSubscriptionReadAborted(signal);
-      if (batch === null) {
-        this.phase = 'closed';
-        this.clearPending();
-        this.coordinator.finishNaturalClose(this.owner);
-        return { done: true, value: undefined };
-      }
-
-      if (this.projection.cardinality === 'one') {
-        return { done: false, value: this.projection.project(batch) };
-      }
-      const values = this.projection.project(batch);
-      if (values.length === 0) {
-        continue;
-      }
-
-      this.pending = values;
-      this.pendingCursor = 0;
-      const value = this.takePending();
-      if (value !== undefined) {
-        return { done: false, value };
-      }
-    }
-
-    return { done: true, value: undefined };
-  }
-
-  private appendBatch(target: TValue[], batch: TBatch): void {
-    if (this.projection.cardinality === 'one') {
-      target.push(this.projection.project(batch));
-      return;
-    }
-    for (const value of this.projection.project(batch)) {
-      target.push(value);
-    }
-  }
-
-  private takePending(): TValue | undefined {
-    const value = this.pending[this.pendingCursor];
-    if (value === undefined) {
-      this.clearPending();
-      return undefined;
-    }
-    this.pending[this.pendingCursor] = undefined;
-    this.pendingCursor += 1;
-    if (this.pendingCursor === this.pending.length) {
-      this.pending = [];
-      this.pendingCursor = 0;
-    }
-    return value;
-  }
-
-  private drainPendingToClosing(): void {
-    for (let index = this.pendingCursor; index < this.pending.length; index += 1) {
-      const value = this.pending[index];
-      this.pending[index] = undefined;
-      if (value !== undefined) {
-        this.closingPending.push(value);
-      }
-    }
-    this.pending = [];
-    this.pendingCursor = 0;
-  }
-
-  private clearPending(): void {
-    this.pending.fill(undefined);
-    this.pending = [];
-    this.pendingCursor = 0;
-  }
-
-  public unsubscribe(drain = false): Promise<TValue[]> {
-    return this.startClose(drain);
-  }
-
-  private async startClose(drain: boolean): Promise<TValue[]> {
-    const formatError = drain ? this.coordinator.readModeMismatch(this.readMode) : undefined;
-    if (formatError !== undefined) {
-      const cleanup = this.coordinator.isOpen ? this.startClose(false) : this.waitForSharedClose();
-      return await rejectAfterSubscriptionCleanup(formatError, cleanup);
-    }
-    if (drain) {
-      this.coordinator.claimReadMode(this.readMode);
-    }
-    if (this.closeInFlight !== undefined) {
-      return await this.closeInFlight;
-    }
-    if (!this.coordinator.isOpen) {
-      return await this.waitForSharedClose();
-    }
-
-    this.phase = 'closing';
-    this.closeDrain = drain;
-    if (drain) {
-      this.drainPendingToClosing();
-    } else {
-      this.clearPending();
-    }
-
-    const { barrier: readBarrier, started } = this.coordinator.beginClose(this.owner);
-    if (!started) {
-      return await this.waitForSharedClose();
-    }
-
-    let nativeClose: Promise<readonly TBatch[] | null>;
-    try {
-      nativeClose = this.closeNative(drain);
-    } catch (error) {
-      nativeClose = Promise.reject(wrapError(error));
-    }
-    const closePromise = (async (): Promise<TValue[]> => {
-      let nativeBatches: readonly TBatch[] | null = null;
-      let nativeError: Error | undefined;
-      let closeError: Error | undefined;
-      try {
-        try {
-          nativeBatches = await nativeClose;
-        } catch (error) {
-          nativeError = wrapError(error);
-        }
-        await readBarrier;
-
-        const readError = this.coordinator.closeReadError;
-        if (nativeError !== undefined && readError !== undefined && nativeError !== readError) {
-          const cleanupError = wrapError(nativeError);
-          closeError = new AggregateError(
-            [wrapError(readError), cleanupError],
-            `${readError.message}; subscription cleanup failed`,
-            { cause: cleanupError },
-          );
-          throw closeError;
-        }
-        if (nativeError !== undefined) {
-          throw nativeError;
-        }
-        if (readError !== undefined) {
-          throw readError;
-        }
-        if (!drain) {
-          return [];
-        }
-        const drained = [...this.closingPending];
-        for (const batch of nativeBatches ?? []) {
-          this.appendBatch(drained, batch);
-        }
-        return drained;
-      } catch (error) {
-        closeError ??= wrapError(error);
-        throw closeError;
-      } finally {
-        this.phase = 'closed';
-        this.closeDrain = false;
-        this.clearPending();
-        this.closingPending.length = 0;
-        this.coordinator.finishClose(closeError);
-        this.coordinator.emitWarnings();
-      }
-    })();
-    this.closeInFlight = closePromise;
-    const releaseClose = (): void => {
-      if (this.closeInFlight === closePromise) {
-        this.closeInFlight = undefined;
-      }
-    };
-    void closePromise.then(releaseClose, releaseClose);
-    return await closePromise;
-  }
-
-  private async waitForSharedClose(): Promise<TValue[]> {
-    try {
-      await this.coordinator.whenClosed();
-      return [];
-    } finally {
-      this.phase = 'closed';
-      this.closeDrain = false;
-      this.clearPending();
-      this.closingPending.length = 0;
-    }
-  }
-}
-export class ArrowSubscription
-  implements
-    AsyncIterator<Table, undefined, SubscriptionReadOptions | undefined>,
-    AsyncIterable<Table>
-{
-  private readonly iterator: SubscriptionIterator<NativeArrowZeroCopyBatch, Table>;
-
-  public constructor(inner: NativeSubscription) {
-    const coordinator = subscriptionCoordinatorFor(inner);
-    this.iterator = new SubscriptionIterator(
-      inner.nextArrowBatch.bind(inner),
-      inner.unsubscribeArrow.bind(inner),
-      { cardinality: 'one', project: toArrowTableFromNative },
-      coordinator,
-      'arrow',
-    );
-  }
-
-  /** Return the next zero-copy Arrow table; one native crossing may contain many rows. */
-  public next(options?: SubscriptionReadOptions): Promise<IteratorResult<Table, undefined>> {
-    return this.iterator.next(options);
-  }
-
-  public unsubscribe(drain = false): Promise<Table[]> {
-    return this.iterator.unsubscribe(drain);
-  }
-
-  public async return(): Promise<IteratorResult<Table, undefined>> {
-    await this.unsubscribe(false);
-    return { done: true, value: undefined };
-  }
-
-  public [Symbol.asyncIterator](): this {
-    return this;
-  }
-}
-
-export class Subscription
-  implements
-    AsyncIterator<Tick, undefined, SubscriptionReadOptions | undefined>,
-    AsyncIterable<Tick>
-{
-  private readonly layouts = new Map<number, TickLayout>();
-  private readonly coordinator: SubscriptionCoordinator;
-  private readonly iterator: SubscriptionIterator<NativeSubscriptionUpdateBatch, Tick>;
-  private arrowView: ArrowSubscription | undefined;
-
-  public constructor(private readonly inner: NativeSubscription) {
-    this.coordinator = subscriptionCoordinatorFor(this.inner);
-    this.iterator = new SubscriptionIterator(
-      this.inner.nextUpdates.bind(this.inner),
-      this.inner.unsubscribe.bind(this.inner),
-      { cardinality: 'many', project: (batch) => this.ticksFromBatch(batch) },
-      this.coordinator,
-      'scalar',
-    );
-  }
-
-  public next(options?: SubscriptionReadOptions): Promise<IteratorResult<Tick, undefined>> {
-    return this.iterator.next(options);
-  }
-
-  private ticksFromBatch(batch: NativeSubscriptionUpdateBatch): Tick[] {
-    if (batch.layout !== undefined) {
-      this.layouts.set(batch.layout.version, createTickLayout(batch.layout));
-    }
-    return batch.updates.map((update) => {
-      const layout = this.layouts.get(update.layoutVersion);
-      if (layout === undefined) {
-        throw new Error(`subscription layout ${update.layoutVersion} was not supplied by native`);
-      }
-      return new Tick(update, layout);
-    });
-  }
-
-  public async add(tickers: readonly string[], aliases?: Record<string, string>): Promise<void> {
-    validateAliases(aliases);
-    try {
-      await this.inner.add(tickers, aliases);
-    } catch (error) {
-      throw wrapError(error);
-    } finally {
-      this.coordinator.emitWarnings();
-    }
-  }
-
-  /** Grow this consumer's projection and the shared feed's field union. */
-  public async addFields(fields: readonly string[]): Promise<void> {
-    try {
-      await this.inner.addFields(fields);
-    } catch (error) {
-      throw wrapError(error);
-    } finally {
-      this.coordinator.emitWarnings();
-    }
-  }
-
-  /** Materialized last values, independent of the scalar/Arrow iterator read mode. */
-  public latest(options: RecipeBackendOptions = {}): unknown {
-    try {
-      return nativeArrowToBackend(this.inner.latest(), options.backend);
-    } catch (error) {
-      throw wrapError(error);
-    } finally {
-      this.coordinator.emitWarnings();
-    }
-  }
-
-  public async remove(tickers: readonly string[]): Promise<void> {
-    try {
-      await this.inner.remove(tickers);
-    } catch (error) {
-      throw wrapError(error);
-    } finally {
-      this.coordinator.emitWarnings();
-    }
-  }
-
-  public unsubscribe(drain = false): Promise<Tick[]> {
-    return this.iterator.unsubscribe(drain);
-  }
-
-  public async return(): Promise<IteratorResult<Tick, undefined>> {
-    await this.unsubscribe(false);
-    return { done: true, value: undefined };
-  }
-
-  public field(name: string): FieldHandle {
-    return new FieldHandle(name);
-  }
-
-  public arrow(): ArrowSubscription {
-    this.arrowView ??= new ArrowSubscription(this.inner);
-    return this.arrowView;
-  }
-
-  public get tickers(): string[] {
-    return this.inner.tickers;
-  }
-
-  public get fields(): string[] {
-    return this.inner.fields;
-  }
-
-  public get isActive(): boolean {
-    return this.inner.isActive;
-  }
-
-  public get stats(): SubscriptionStats {
-    return this.inner.stats;
-  }
-
-  public get status(): SubscriptionStatus {
-    return this.inner.status;
-  }
-
-  public get events(): SubscriptionEvent[] {
-    return this.inner.events;
-  }
-
-  public get failures(): SubscriptionFailure[] {
-    return this.inner.failures;
-  }
-
-  public get failedTickers(): string[] {
-    return this.inner.failedTickers;
-  }
-
-  public get topicStates(): Record<string, TopicState> {
-    return this.inner.topicStates;
-  }
-
-  public get fieldErrors(): Record<string, Record<string, string>> {
-    return this.inner.fieldErrors;
-  }
-
-  public get sessionStatus(): SessionStatus {
-    return this.inner.sessionStatus;
-  }
-
-  public get adminStatus(): AdminStatus {
-    return this.inner.adminStatus;
-  }
-
-  public get serviceStatus(): Record<string, ServiceStatus> {
-    return this.inner.serviceStatus;
-  }
-
-  public [Symbol.asyncIterator](): this {
-    return this;
-  }
 }
 
 // ── Engine class ────────────────────────────────────────────────────────
@@ -2725,45 +1474,14 @@ export class Engine {
     fields: readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    try {
-      const subscriptionOptions = buildStreamSubscriptionOptions(MKTDATA_SERVICE, options);
-      const useOptions =
-        subscriptionOptions !== undefined ||
-        options.flushThreshold !== undefined ||
-        options.overflowPolicy !== undefined ||
-        options.streamCapacity !== undefined;
-      const stream = useOptions
-        ? await this.inner.subscribeWithOptions(
-            MKTDATA_SERVICE,
-            tickers,
-            fields,
-            subscriptionOptions,
-            options.flushThreshold,
-            options.overflowPolicy,
-            options.streamCapacity,
-            options.allFields,
-            options.aliases,
-            options.onDelayed,
-            options.isolated,
-            options.rows,
-            options.onFieldError,
-            options.zeroAsNull,
-          )
-        : await this.inner.subscribe(
-            tickers,
-            fields,
-            options.allFields,
-            options.aliases,
-            options.onDelayed,
-            options.isolated,
-            options.rows,
-            options.onFieldError,
-            options.zeroAsNull,
-          );
-      return new Subscription(stream);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await createSubscription(
+      this.inner,
+      MKTDATA_SERVICE,
+      tickers,
+      fields,
+      options,
+      'default',
+    );
   }
 
   public async subscribeWithOptions(
@@ -2782,12 +1500,12 @@ export class Engine {
     onFieldError?: StreamOptions['onFieldError'],
     zeroAsNull?: readonly string[],
   ): Promise<Subscription> {
-    try {
-      validateStreamControls({ aliases, onDelayed, isolated, rows, onFieldError, zeroAsNull });
-      const stream = await this.inner.subscribeWithOptions(
-        service,
-        tickers,
-        fields,
+    return await createSubscription(
+      this.inner,
+      service,
+      tickers,
+      fields,
+      {
         options,
         flushThreshold,
         overflowPolicy,
@@ -2799,11 +1517,9 @@ export class Engine {
         rows,
         onFieldError,
         zeroAsNull,
-      );
-      return new Subscription(stream);
-    } catch (error) {
-      throw wrapError(error);
-    }
+      },
+      'raw',
+    );
   }
 
   public subscriptionFeeds(): FeedInfo[] {
@@ -2823,22 +1539,7 @@ export class Engine {
     fields: readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    return await this.subscribeWithOptions(
-      MKTDATA_SERVICE,
-      tickers,
-      fields,
-      buildStreamSubscriptionOptions(MKTDATA_SERVICE, options),
-      options.flushThreshold,
-      options.overflowPolicy,
-      options.streamCapacity,
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
-    );
+    return await createSubscription(this.inner, MKTDATA_SERVICE, tickers, fields, options);
   }
 
   public async vwap(
@@ -2846,78 +1547,36 @@ export class Engine {
     fields: readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    return await this.subscribeWithOptions(
-      '//blp/mktvwap',
-      tickers,
-      fields,
-      buildStreamSubscriptionOptions('//blp/mktvwap', options),
-      options.flushThreshold,
-      options.overflowPolicy,
-      options.streamCapacity,
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
-    );
+    return await createSubscription(this.inner, '//blp/mktvwap', tickers, fields, options);
   }
 
   public async mktbar(ticker: string, options: StreamOptions = {}): Promise<Subscription> {
-    return await this.subscribeWithOptions(
+    return await createSubscription(
+      this.inner,
       '//blp/mktbar',
       [ticker],
       options.fields ?? [],
-      buildStreamSubscriptionOptions('//blp/mktbar', options),
-      options.flushThreshold,
-      options.overflowPolicy,
-      options.streamCapacity,
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
+      options,
     );
   }
 
   public async depth(ticker: string, options: StreamOptions = {}): Promise<Subscription> {
-    return await this.subscribeWithOptions(
+    return await createSubscription(
+      this.inner,
       '//blp/mktdepthdata',
       [ticker],
       options.fields ?? [],
-      buildStreamSubscriptionOptions('//blp/mktdepthdata', options),
-      options.flushThreshold,
-      options.overflowPolicy,
-      options.streamCapacity,
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
+      options,
     );
   }
 
   public async chains(ticker: string, options: StreamOptions = {}): Promise<Subscription> {
-    return await this.subscribeWithOptions(
+    return await createSubscription(
+      this.inner,
       '//blp/mktlist',
       [ticker],
       options.fields ?? [],
-      buildStreamSubscriptionOptions('//blp/mktlist', options),
-      options.flushThreshold,
-      options.overflowPolicy,
-      options.streamCapacity,
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
+      options,
     );
   }
 
@@ -2948,19 +1607,17 @@ export class Engine {
   // ── Recipes ─────────────────────────────────────────────────────────
 
   public async bqr(ticker: string, options: BqrOptions = {}): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeBqr(
-        toRequestString(ticker),
-        formatDateTime(options.startDatetime),
-        formatDateTime(options.endDatetime),
-        options.eventTypes ?? null,
-        options.includeBrokerCodes !== false,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeBqr(
+          toRequestString(ticker),
+          formatDateTime(options.startDatetime),
+          formatDateTime(options.endDatetime),
+          options.eventTypes ?? null,
+          options.includeBrokerCodes !== false,
+        ),
+    );
   }
 
   public async yas(
@@ -2968,53 +1625,46 @@ export class Engine {
     fields: string | readonly string[],
     options: YasOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeYas(
-        toStringArray(tickers),
-        toStringArray(fields),
-        formatDate(options.settleDt),
-        options.yieldType ?? undefined,
-        options.spread ?? undefined,
-        options.yieldVal ?? undefined,
-        options.price ?? undefined,
-        options.benchmark ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeYas(
+          toStringArray(tickers),
+          toStringArray(fields),
+          formatDate(options.settleDt),
+          options.yieldType ?? undefined,
+          options.spread ?? undefined,
+          options.yieldVal ?? undefined,
+          options.price ?? undefined,
+          options.benchmark ?? undefined,
+        ),
+    );
   }
 
   public async preferreds(equityTicker: string, options: PreferredsOptions = {}): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipePreferreds(
-        toRequestString(equityTicker),
-        options.fields !== undefined ? toStringArray(options.fields) : null,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipePreferreds(
+          toRequestString(equityTicker),
+          options.fields !== undefined ? toStringArray(options.fields) : null,
+        ),
+    );
   }
 
   public async corporateBonds(
     ticker: string,
     options: CorporateBondsOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeCorporateBonds(
-        toRequestString(ticker),
-        options.ccy ?? undefined,
-        options.fields !== undefined ? toStringArray(options.fields) : null,
-        options.activeOnly !== false,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeCorporateBonds(
+          toRequestString(ticker),
+          options.ccy ?? undefined,
+          options.fields !== undefined ? toStringArray(options.fields) : null,
+        ),
+    );
   }
 
   public async futTicker(
@@ -3022,17 +1672,15 @@ export class Engine {
     dt: DateLike,
     options: FuturesResolveOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeFutTicker(
-        toRequestString(genTicker),
-        formatDate(dt) ?? '',
-        options.freq ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeFutTicker(
+          toRequestString(genTicker),
+          formatDate(dt) ?? '',
+          options.freq ?? undefined,
+        ),
+    );
   }
 
   public async activeFutures(
@@ -3040,36 +1688,32 @@ export class Engine {
     dt: DateLike,
     options: FuturesResolveOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeActiveFutures(
-        toRequestString(genTicker),
-        formatDate(dt) ?? '',
-        options.freq ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeActiveFutures(
+          toRequestString(genTicker),
+          formatDate(dt) ?? '',
+          options.freq ?? undefined,
+        ),
+    );
   }
 
   public async futuresCurve(
     genTicker: string,
     options: FuturesCurveOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeFuturesCurve(
-        toRequestString(genTicker),
-        options.asof === undefined ? undefined : (formatDate(options.asof) ?? ''),
-        options.chainField ?? undefined,
-        options.fields !== undefined ? toStringArray(options.fields) : null,
-        options.maxContracts ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeFuturesCurve(
+          toRequestString(genTicker),
+          options.asof === undefined ? undefined : (formatDate(options.asof) ?? ''),
+          options.chainField ?? undefined,
+          options.fields !== undefined ? toStringArray(options.fields) : null,
+          options.maxContracts ?? undefined,
+        ),
+    );
   }
 
   /**
@@ -3090,17 +1734,15 @@ export class Engine {
     dt: DateLike,
     options: CdxResolveOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeCdxTicker(
-        toRequestString(genTicker),
-        formatDate(dt) ?? '',
-        options.versionless ?? false,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeCdxTicker(
+          toRequestString(genTicker),
+          formatDate(dt) ?? '',
+          options.versionless ?? false,
+        ),
+    );
   }
 
   /**
@@ -3119,18 +1761,16 @@ export class Engine {
     dt: DateLike,
     options: ActiveCdxOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeActiveCdx(
-        toRequestString(genTicker),
-        formatDate(dt) ?? '',
-        options.lookbackDays ?? undefined,
-        options.versionless ?? false,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeActiveCdx(
+          toRequestString(genTicker),
+          formatDate(dt) ?? '',
+          options.lookbackDays ?? undefined,
+          options.versionless ?? false,
+        ),
+    );
   }
 
   public async dividend(
@@ -3139,18 +1779,16 @@ export class Engine {
     endDate: DateLike,
     options: DividendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeDividend(
-        toStringArray(tickers),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-        options.dvdType ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeDividend(
+          toStringArray(tickers),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+          options.dvdType ?? undefined,
+        ),
+    );
   }
 
   public async dividendYield(
@@ -3159,19 +1797,17 @@ export class Engine {
     endDate: DateLike,
     options: DividendYieldOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeDividendYield(
-        toStringArray(tickers),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-        options.dividendTypes !== undefined ? toStringArray(options.dividendTypes) : null,
-        options.windowDays ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeDividendYield(
+          toStringArray(tickers),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+          options.dividendTypes !== undefined ? toStringArray(options.dividendTypes) : null,
+          options.windowDays ?? undefined,
+        ),
+    );
   }
 
   public async turnover(
@@ -3180,32 +1816,28 @@ export class Engine {
     endDate: DateLike,
     options: TurnoverOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeTurnover(
-        toStringArray(tickers),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-        options.ccy ?? undefined,
-        options.factor ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeTurnover(
+          toStringArray(tickers),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+          options.ccy ?? undefined,
+          options.factor ?? undefined,
+        ),
+    );
   }
 
   public async etfHoldings(etfTicker: string, options: EtfHoldingsOptions = {}): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeEtfHoldings(
-        toRequestString(etfTicker),
-        options.fields !== undefined ? toStringArray(options.fields) : null,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeEtfHoldings(
+          toRequestString(etfTicker),
+          options.fields !== undefined ? toStringArray(options.fields) : null,
+        ),
+    );
   }
 
   public async volSurface(
@@ -3214,83 +1846,69 @@ export class Engine {
     endDate: DateLike,
     options: VolSurfaceOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeVolSurface(
-        toStringArray(tickers),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-        normalizeVolPresets(options.preset ?? 'MONEYNESS_30D'),
-        normalizeVolFieldSpecs(options.fields),
-        options.asDecimal ?? true,
-        options.includeDerived ?? false,
-        options.riskFreeRate ?? undefined,
-        options.dividendYieldField ?? undefined,
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeVolSurface(
+          toStringArray(tickers),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+          normalizeVolPresets(options.preset ?? 'MONEYNESS_30D'),
+          normalizeVolFieldSpecs(options.fields),
+          options.asDecimal ?? true,
+          options.includeDerived ?? false,
+          options.riskFreeRate ?? undefined,
+          options.dividendYieldField ?? undefined,
+        ),
+    );
   }
 
   public async indexMembers(index: string, options: IndexMembersOptions = {}): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeIndexMembers(
-        toRequestString(index),
-        options.field ?? undefined,
-        options.asof === undefined ? undefined : (formatDate(options.asof) ?? ''),
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeIndexMembers(
+          toRequestString(index),
+          options.field ?? undefined,
+          options.asof === undefined ? undefined : (formatDate(options.asof) ?? ''),
+        ),
+    );
   }
 
   public async resolveIsins(
     isins: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeResolveIsins(toStringArray(isins));
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () => await this.inner.recipeResolveIsins(toStringArray(isins)),
+    );
   }
 
   public async resolveVenues(
     securities: string | readonly string[],
     options: ResolveVenuesOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const batch = await this.inner.recipeResolveVenues(
-        toStringArray(securities),
-        options.pcsOverrides,
-      );
-      return nativeArrowToBackend(batch, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeResolveVenues(toStringArray(securities), options.pcsOverrides),
+    );
   }
 
   public async auctionSnapshot(
     securities: string | readonly string[],
     options: AuctionSnapshotOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const batch = await this.inner.recipeAuctionSnapshot(
-        toStringArray(securities),
-        options.fields ?? AuctionFields.default,
-        options.pcsOverrides,
-      );
-      return nativeArrowToBackend(batch, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeAuctionSnapshot(
+          toStringArray(securities),
+          options.fields ?? AuctionFields.default,
+          options.pcsOverrides,
+        ),
+    );
   }
 
   /** Resolve every input before opening a single, venue-only subscription. */
@@ -3346,43 +1964,36 @@ export class Engine {
     bondIsins: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeIssuerIsins(toStringArray(bondIsins));
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () => await this.inner.recipeIssuerIsins(toStringArray(bondIsins)),
+    );
   }
 
   public async etfNavRelationships(
     tickers: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeEtfNavRelationships(
-        toStringArray(tickers).map((ticker) => ticker.trim()),
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeEtfNavRelationships(
+          toStringArray(tickers).map((ticker) => ticker.trim()),
+        ),
+    );
   }
 
   public async etfNavSnapshot(
     tickers: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeEtfNavSnapshot(
-        toStringArray(tickers).map((ticker) => ticker.trim()),
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeEtfNavSnapshot(
+          toStringArray(tickers).map((ticker) => ticker.trim()),
+        ),
+    );
   }
 
   public async etfNavHistory(
@@ -3391,17 +2002,15 @@ export class Engine {
     endDate: DateLike,
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeEtfNavHistory(
-        toStringArray(tickers).map((ticker) => ticker.trim()),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeEtfNavHistory(
+          toStringArray(tickers).map((ticker) => ticker.trim()),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+        ),
+    );
   }
 
   /**
@@ -3447,18 +2056,16 @@ export class Engine {
     endDate: DateLike,
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    const backend = normalizeBackend(options.backend);
-    try {
-      const buffer = await this.inner.recipeCurrencyConversion(
-        toRequestString(ticker),
-        toRequestString(targetCcy),
-        formatDate(startDate) ?? '',
-        formatDate(endDate) ?? '',
-      );
-      return nativeArrowToBackend(buffer, backend);
-    } catch (error) {
-      throw wrapError(error);
-    }
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeCurrencyConversion(
+          toRequestString(ticker),
+          toRequestString(targetCcy),
+          formatDate(startDate) ?? '',
+          formatDate(endDate) ?? '',
+        ),
+    );
   }
 }
 

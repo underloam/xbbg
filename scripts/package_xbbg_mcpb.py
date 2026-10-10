@@ -11,6 +11,11 @@ import re
 import shutil
 import sys
 
+if __package__:
+    from .mcp_release_config import mcpb_environment, mcpb_user_config
+else:
+    from mcp_release_config import mcpb_environment, mcpb_user_config
+
 UNSUPPORTED_PLATFORM_MESSAGE = (
     "MCPB supports macOS arm64, Linux amd64, and Windows amd64; use GitHub release assets "
     "or build from source for this platform"
@@ -478,19 +483,7 @@ def build_manifest(version: str) -> dict[str, object]:
             "mcp_config": {
                 "command": "${__dirname}/server/xbbg-mcp",
                 "args": [],
-                "env": {
-                    "XBBG_MCP_LIB_DIR": "${user_config.blpapi_lib_dir}",
-                    "XBBG_MCP_HOST": "${user_config.host}",
-                    "XBBG_MCP_PORT": "${user_config.port}",
-                    "XBBG_MCP_AUTH_METHOD": "${user_config.auth_method}",
-                    "XBBG_MCP_MAX_ROWS": "${user_config.max_rows}",
-                    "XBBG_MCP_MAX_CELLS": "${user_config.max_cells}",
-                    "XBBG_MCP_MAX_METADATA_PROPERTIES": "${user_config.max_metadata_properties}",
-                    "XBBG_MCP_MAX_METADATA_BYTES": "${user_config.max_metadata_bytes}",
-                    "XBBG_MCP_MAX_STRING_CHARS": "${user_config.max_string_chars}",
-                    "XBBG_MCP_MAX_STRING_BYTES": "${user_config.max_string_bytes}",
-                    "XBBG_MCP_MAX_RESULT_BYTES": "${user_config.max_result_bytes}",
-                },
+                "env": mcpb_environment(),
                 "platform_overrides": {
                     "win32": {
                         "command": "powershell.exe",
@@ -532,100 +525,7 @@ def build_manifest(version: str) -> dict[str, object]:
             "claude_desktop": ">=1.0.0",
             "platforms": ["darwin", "linux", "win32"],
         },
-        "user_config": {
-            "blpapi_lib_dir": {
-                "type": "directory",
-                "title": "Bloomberg runtime library directory",
-                "description": (
-                    "Optional directory containing libblpapi3.dylib, libblpapi3.so, libblpapi3_64.so, "
-                    "or blpapi3_64.dll. Leave empty to let the launcher try BLPAPI_ROOT, a vendored "
-                    "authorized SDK layout, PATH (Windows), or Python blpapi."
-                ),
-                "required": False,
-            },
-            "host": {
-                "type": "string",
-                "title": "Bloomberg host",
-                "description": "Bloomberg API host for DAPI/BPIPE.",
-                "default": "localhost",
-                "required": False,
-            },
-            "port": {
-                "type": "number",
-                "title": "Bloomberg port",
-                "description": "Bloomberg API port.",
-                "default": 8194,
-                "min": 1,
-                "max": 65535,
-                "required": False,
-            },
-            "auth_method": {
-                "type": "string",
-                "title": "Authentication method",
-                "description": (
-                    "Bloomberg auth method. Use none for local Desktop API/DAPI unless your environment requires "
-                    "SAPI/BPIPE auth."
-                ),
-                "default": "none",
-                "required": False,
-            },
-            "max_rows": {
-                "type": "number",
-                "title": "Maximum returned rows",
-                "description": "Maximum rows returned to the MCP client per response.",
-                "default": 500,
-                "min": 1,
-                "required": False,
-            },
-            "max_cells": {
-                "type": "number",
-                "title": "Maximum returned cells",
-                "description": "Maximum data cells across returned rows and columns per response.",
-                "default": 50000,
-                "min": 1,
-                "required": False,
-            },
-            "max_metadata_properties": {
-                "type": "number",
-                "title": "Maximum metadata properties",
-                "description": "Maximum metadata properties retained per response.",
-                "default": 50000,
-                "min": 1,
-                "required": False,
-            },
-            "max_metadata_bytes": {
-                "type": "number",
-                "title": "Maximum metadata bytes",
-                "description": "Maximum metadata bytes parsed or returned per response.",
-                "default": 65536,
-                "min": 1,
-                "required": False,
-            },
-            "max_string_chars": {
-                "type": "number",
-                "title": "Maximum string characters",
-                "description": "Maximum characters per string value returned to the MCP client.",
-                "default": 2048,
-                "min": 1,
-                "required": False,
-            },
-            "max_string_bytes": {
-                "type": "number",
-                "title": "Maximum UTF-8 string bytes",
-                "description": "Maximum UTF-8 bytes per string value, including any truncation marker.",
-                "default": 8192,
-                "min": 3,
-                "required": False,
-            },
-            "max_result_bytes": {
-                "type": "number",
-                "title": "Maximum JSON result bytes",
-                "description": "Maximum compact-JSON bytes in the structured result, including truncation diagnostics.",
-                "default": 1048576,
-                "min": 2048,
-                "required": False,
-            },
-        },
+        "user_config": mcpb_user_config(),
     }
 
 

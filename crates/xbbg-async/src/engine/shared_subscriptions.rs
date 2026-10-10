@@ -108,6 +108,8 @@ pub struct SubscribeRequest {
     pub session_wait: Option<Duration>,
     pub isolated: bool,
     pub stream_capacity: Option<usize>,
+    /// Consumer-side Arrow batch size hint. Bindings apply this when collecting
+    /// native updates; engine subscription delivery is always immediate.
     pub flush_threshold: Option<usize>,
     pub overflow_policy: Option<OverflowPolicy>,
 }
@@ -1541,7 +1543,6 @@ impl FeedSession {
                 kinds,
                 all_fields,
                 first.identity.options.clone(),
-                Some(1),
                 Some(OverflowPolicy::DropNewest),
                 self.status.clone(),
             )
@@ -2300,10 +2301,6 @@ impl SharedSubscriptions {
                         consumer.stream.clone(),
                         consumer
                             .request
-                            .flush_threshold
-                            .unwrap_or(self.config.subscription_flush_threshold),
-                        consumer
-                            .request
                             .overflow_policy
                             .unwrap_or(self.config.overflow_policy),
                         consumer.request.all_fields,
@@ -2385,7 +2382,7 @@ impl SharedSubscriptions {
                 let growth = {
                     let mut state = feed.state.lock();
                     if matches!(state.lifecycle, "failed" | "closed") {
-                        return Err(BlpAsyncError::BlpError(BlpError::SubscriptionFailure {
+                        return Err(BlpAsyncError::Blp(BlpError::SubscriptionFailure {
                             cid: None,
                             label: Some("upstream feed ended while attaching".into()),
                         }));

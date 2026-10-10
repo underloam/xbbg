@@ -126,3 +126,20 @@ def test_importing_names_from_a_mismatched_extension_is_refused():
 
     assert result.returncode == 0, result.stdout + result.stderr
     assert "but the installed xbbg is 0.0.0" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("message", "name", "unavailable"),
+    [
+        ("No module named 'xbbg._core'", "xbbg._core", True),
+        ("DLL load failed while importing _core", None, True),
+        ("xbbg: cannot open shared object file", None, True),
+        ("xbbg._core: image not found", None, True),
+        ("Library not loaded: xbbg._core", None, True),
+        ("cannot import name 'ext_missing' from 'xbbg._core'", "xbbg._core", False),
+        ("No module named 'pandas'", "pandas", False),
+        ("DLL load failed while importing unrelated", "unrelated", False),
+    ],
+)
+def test_native_import_classifier_distinguishes_missing_from_outdated(message, name, unavailable):
+    assert _core_guard.is_native_import_error(ImportError(message, name=name)) is unavailable

@@ -15,6 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use arc_swap::ArcSwap;
 use arrow_array::{Array, RecordBatch, StringArray};
+#[cfg(test)]
 use arrow_schema::{DataType, TimeUnit};
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -76,8 +77,9 @@ impl BlpFieldType {
         }
     }
 
+    #[cfg(test)]
     /// Convert to Arrow DataType.
-    pub fn to_arrow_type(&self) -> DataType {
+    fn to_arrow_type(&self) -> DataType {
         match self {
             BlpFieldType::Boolean => DataType::Boolean,
             BlpFieldType::Character => DataType::Utf8,
@@ -392,8 +394,9 @@ impl FieldTypeResolver {
         self.cache.load().get(&field_id.to_uppercase()).cloned()
     }
 
+    #[cfg(test)]
     /// Get Arrow type string for a field.
-    pub fn get_arrow_type(&self, field_id: &str) -> Option<String> {
+    pub(crate) fn get_arrow_type(&self, field_id: &str) -> Option<String> {
         self.get(field_id).map(|info| info.arrow_type)
     }
 

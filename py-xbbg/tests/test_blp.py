@@ -17,6 +17,8 @@ from unittest import TestCase
 
 import pytest
 
+from xbbg import _endpoints, _engine, _request_options, _sync, blp
+
 _CASE = TestCase()
 
 
@@ -25,13 +27,12 @@ class TestNotebookSyncBridge:
 
     def test_generic_async_context_still_raises(self, monkeypatch):
         """Non-notebook async callers should be directed to the async API."""
-        from xbbg import blp
 
         async def fake_request():
             return "ok"
 
-        wrapper = blp._build_sync_wrapper("bdp", fake_request)
-        monkeypatch.setattr(blp, "_is_notebook_context", lambda: False)
+        wrapper = _sync._build_sync_wrapper("bdp", fake_request)
+        monkeypatch.setattr(_sync, "_is_notebook_context", lambda: False)
 
         async def call_wrapper():
             wrapper()
@@ -41,14 +42,13 @@ class TestNotebookSyncBridge:
 
     def test_marimo_context_uses_notebook_bridge(self, monkeypatch):
         """Marimo callers should use the notebook bridge without requiring IPykernel."""
-        from xbbg import blp
 
         marimo = ModuleType("marimo")
         marimo.running_in_notebook = lambda: True
         monkeypatch.setitem(sys.modules, "marimo", marimo)
         monkeypatch.setitem(sys.modules, "IPython", None)
         monkeypatch.setattr(
-            blp,
+            _sync,
             "_run_in_notebook_sync_bridge",
             lambda async_func, args, kwargs: async_func.__name__,
         )
@@ -60,7 +60,6 @@ class TestNotebookSyncBridge:
 
     def test_imported_marimo_outside_notebook_still_raises(self, monkeypatch):
         """Importing marimo alone should not make a generic event loop a notebook."""
-        from xbbg import blp
 
         marimo = ModuleType("marimo")
         marimo.running_in_notebook = lambda: False
@@ -75,15 +74,14 @@ class TestNotebookSyncBridge:
 
     def test_notebook_context_uses_background_loop_and_preserves_contextvars(self, monkeypatch):
         """Notebook callers should block on a background loop without losing context."""
-        from xbbg import blp
 
         scoped_value = contextvars.ContextVar("scoped_value", default="missing")
 
         async def fake_request():
             return scoped_value.get(), threading.current_thread().name
 
-        wrapper = blp._build_sync_wrapper("bdp", fake_request)
-        monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
+        wrapper = _sync._build_sync_wrapper("bdp", fake_request)
+        monkeypatch.setattr(_sync, "_is_notebook_context", lambda: True)
         token = scoped_value.set("active-engine")
 
         async def call_wrapper():
@@ -93,14 +91,13 @@ class TestNotebookSyncBridge:
             value, thread_name = asyncio.run(call_wrapper())
         finally:
             scoped_value.reset(token)
-            blp._stop_notebook_sync_loop()
+            _sync._stop_notebook_sync_loop()
 
         _CASE.assertEqual(value, "active-engine")
         _CASE.assertNotEqual(thread_name, threading.current_thread().name)
 
     def test_notebook_context_propagates_async_exceptions(self, monkeypatch):
         """Async failures should surface unchanged to the sync caller."""
-        from xbbg import blp
 
         class ExpectedError(Exception):
             pass
@@ -108,8 +105,8 @@ class TestNotebookSyncBridge:
         async def fake_request():
             raise ExpectedError("boom")
 
-        wrapper = blp._build_sync_wrapper("bdh", fake_request)
-        monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
+        wrapper = _sync._build_sync_wrapper("bdh", fake_request)
+        monkeypatch.setattr(_sync, "_is_notebook_context", lambda: True)
 
         async def call_wrapper():
             wrapper()
@@ -118,10 +115,9 @@ class TestNotebookSyncBridge:
             with pytest.raises(ExpectedError, match="boom"):
                 asyncio.run(call_wrapper())
         finally:
-            blp._stop_notebook_sync_loop()
+            _sync._stop_notebook_sync_loop()
 
     def test_notebook_context_propagates_base_exceptions_without_hanging(self):
-        from xbbg import blp
 
         class BridgeAbort(BaseException):
             pass
@@ -134,7 +130,7 @@ class TestNotebookSyncBridge:
 
         def call_bridge():
             try:
-                blp._run_in_notebook_sync_bridge(fake_request, (), {})
+                _sync._run_in_notebook_sync_bridge(fake_request, (), {})
             except BaseException as error:
                 received.append(error)
 
@@ -145,10 +141,9 @@ class TestNotebookSyncBridge:
             assert not caller.is_alive()
             assert received == [expected]
         finally:
-            blp._stop_notebook_sync_loop()
+            _sync._stop_notebook_sync_loop()
 
     def test_stopping_notebook_bridge_cancels_active_call_and_releases_thread(self):
-        from xbbg import blp
 
         started = threading.Event()
         received: list[BaseException] = []
@@ -159,7 +154,7 @@ class TestNotebookSyncBridge:
 
         def call_bridge():
             try:
-                blp._run_in_notebook_sync_bridge(fake_request, (), {})
+                _sync._run_in_notebook_sync_bridge(fake_request, (), {})
             except BaseException as error:
                 received.append(error)
 
@@ -167,7 +162,7 @@ class TestNotebookSyncBridge:
         caller.start()
         assert started.wait(timeout=1)
 
-        blp._stop_notebook_sync_loop()
+        _sync._stop_notebook_sync_loop()
         caller.join(timeout=1)
 
         assert not caller.is_alive()
@@ -178,9 +173,11 @@ class TestNotebookSyncBridge:
         )
 
     def test_stop_cancels_call_accepted_before_loop_dispatch(self, monkeypatch):
-        from xbbg import blp
 
-        loop = blp._ensure_notebook_sync_loop()
+        async def get_loop():
+            return asyncio.get_running_loop()
+
+        loop = _sync._notebook_sync_bridge.submit(get_loop, (), {})
         loop_blocked = threading.Event()
         release_loop = threading.Event()
         call_accepted = threading.Event()
@@ -193,7 +190,7 @@ class TestNotebookSyncBridge:
         loop.call_soon_threadsafe(block_loop)
         assert loop_blocked.wait(timeout=1)
 
-        original_start = blp._notebook_sync_bridge.start
+        original_start = _sync._notebook_sync_bridge.start
 
         def mark_accepted(*args, **kwargs):
             call = original_start(*args, **kwargs)
@@ -205,16 +202,16 @@ class TestNotebookSyncBridge:
 
         def call_bridge():
             try:
-                blp._run_in_notebook_sync_bridge(fake_request, (), {})
+                _sync._run_in_notebook_sync_bridge(fake_request, (), {})
             except BaseException as error:
                 received.append(error)
 
-        monkeypatch.setattr(blp._notebook_sync_bridge, "start", mark_accepted)
+        monkeypatch.setattr(_sync._notebook_sync_bridge, "start", mark_accepted)
         caller = threading.Thread(target=call_bridge, daemon=True)
         caller.start()
         assert call_accepted.wait(timeout=1)
 
-        stopper = threading.Thread(target=blp._stop_notebook_sync_loop, daemon=True)
+        stopper = threading.Thread(target=_sync._stop_notebook_sync_loop, daemon=True)
         stopper.start()
         try:
             caller.join(timeout=1)
@@ -228,13 +225,12 @@ class TestNotebookSyncBridge:
 
     def test_public_sync_wrappers_use_notebook_bridge(self, monkeypatch):
         """Generated and manual sync wrappers, including BQL (#353) and streams, bridge in notebooks."""
-        from xbbg import blp
 
         def fake_bridge(async_func, args, kwargs):
             return async_func.__name__, args, kwargs
 
-        monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
-        monkeypatch.setattr(blp, "_run_in_notebook_sync_bridge", fake_bridge)
+        monkeypatch.setattr(_sync, "_is_notebook_context", lambda: True)
+        monkeypatch.setattr(_sync, "_run_in_notebook_sync_bridge", fake_bridge)
 
         query = "get(px_last) for(['AAPL US Equity'])"
 
@@ -256,7 +252,7 @@ class TestEngineContextScopes:
 
     @staticmethod
     def _make_engine(monkeypatch):
-        from xbbg import _core, blp
+        from xbbg import _core
 
         native_engine = object()
 
@@ -271,24 +267,24 @@ class TestEngineContextScopes:
 
         monkeypatch.setattr(_core, "PyEngineConfig", FakeConfig)
         monkeypatch.setattr(_core, "PyEngine", FakePyEngine)
-        return blp, blp.Engine(), native_engine
+        return blp.Engine(), native_engine
 
     def test_nested_same_engine_scope_restores_previous_routing(self, monkeypatch):
-        blp, engine, native_engine = self._make_engine(monkeypatch)
+        engine, native_engine = self._make_engine(monkeypatch)
         previous = object()
-        previous_token = blp._active_engine.set(previous)
+        previous_token = _engine._active_engine.set(previous)
         try:
             with engine:
-                assert blp._get_engine() is native_engine
+                assert _engine._get_engine() is native_engine
                 with engine:
-                    assert blp._get_engine() is native_engine
-                assert blp._get_engine() is native_engine
-            assert blp._active_engine.get() is previous
+                    assert _engine._get_engine() is native_engine
+                assert _engine._get_engine() is native_engine
+            assert _engine._active_engine.get() is previous
         finally:
-            blp._active_engine.reset(previous_token)
+            _engine._active_engine.reset(previous_token)
 
     def test_concurrent_same_engine_scopes_restore_each_task_context(self, monkeypatch):
-        blp, engine, native_engine = self._make_engine(monkeypatch)
+        engine, native_engine = self._make_engine(monkeypatch)
 
         async def exercise_scopes():
             entered = 0
@@ -296,17 +292,17 @@ class TestEngineContextScopes:
 
             async def worker(previous):
                 nonlocal entered
-                previous_token = blp._active_engine.set(previous)
+                previous_token = _engine._active_engine.set(previous)
                 try:
                     async with engine:
                         entered += 1
                         if entered == 2:
                             both_entered.set()
                         await both_entered.wait()
-                        assert blp._get_engine() is native_engine
-                    assert blp._active_engine.get() is previous
+                        assert _engine._get_engine() is native_engine
+                    assert _engine._active_engine.get() is previous
                 finally:
-                    blp._active_engine.reset(previous_token)
+                    _engine._active_engine.reset(previous_token)
 
             await asyncio.gather(worker(object()), worker(object()))
 
@@ -352,7 +348,7 @@ class TestExtSyncify:
         _CASE.assertFalse(created)
 
     def test_notebook_context_uses_core_bridge(self, monkeypatch):
-        from xbbg import blp
+
         from xbbg.ext._utils import _syncify
 
         async def afake_ext(*args, **kwargs):
@@ -363,8 +359,8 @@ class TestExtSyncify:
         def fake_bridge(async_func, args, kwargs):
             return async_func.__name__, args, kwargs
 
-        monkeypatch.setattr(blp, "_is_notebook_context", lambda: True)
-        monkeypatch.setattr(blp, "_run_in_notebook_sync_bridge", fake_bridge)
+        monkeypatch.setattr(_sync, "_is_notebook_context", lambda: True)
+        monkeypatch.setattr(_sync, "_run_in_notebook_sync_bridge", fake_bridge)
 
         async def call_wrapper():
             return wrapper("abc", flag=True)
@@ -382,7 +378,6 @@ class TestBdtick:
     def test_bdtick_sync_signature_matches_async(self):
         """bdtick exposes the generated sync signature for IDE/runtime help."""
         import xbbg
-        from xbbg import blp
 
         sync_sig = inspect.signature(blp.bdtick)
         async_sig = inspect.signature(blp.abdtick)
@@ -409,7 +404,6 @@ class TestGeneratedEndpointFieldTypeCache:
     """Generated endpoint plans reuse resolved field metadata without leaking overrides."""
 
     def test_invalidation_during_resolution_does_not_republish_stale_entry(self, monkeypatch):
-        from xbbg import blp
 
         async def exercise_invalidation():
             started = asyncio.Event()
@@ -421,21 +415,21 @@ class TestGeneratedEndpointFieldTypeCache:
                     await release.wait()
                     return dict.fromkeys(fields, default_type)
 
-            monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
-            blp._clear_field_type_resolution_cache()
-            resolution = asyncio.create_task(blp._resolve_field_types_cached(["PX_LAST"], None, "float64"))
+            monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+            _engine._clear_field_type_resolution_cache()
+            resolution = asyncio.create_task(_engine._resolve_field_types_cached(["PX_LAST"], None, "float64"))
             await started.wait()
-            blp._clear_field_type_resolution_cache()
+            _engine._clear_field_type_resolution_cache()
             release.set()
 
             assert await resolution == {"PX_LAST": "float64"}
-            with blp._FIELD_TYPE_RESOLUTION_CACHE_LOCK:
-                assert blp._FIELD_TYPE_RESOLUTION_CACHE == {}
+            with _engine._FIELD_TYPE_RESOLUTION_CACHE_LOCK:
+                assert _engine._FIELD_TYPE_RESOLUTION_CACHE == {}
 
         try:
             asyncio.run(exercise_invalidation())
         finally:
-            blp._clear_field_type_resolution_cache()
+            _engine._clear_field_type_resolution_cache()
 
     @pytest.mark.parametrize(
         ("builder_name", "default_type", "extra_args"),
@@ -449,7 +443,6 @@ class TestGeneratedEndpointFieldTypeCache:
         ],
     )
     def test_repeated_fields_resolve_types_once(self, monkeypatch, builder_name, default_type, extra_args):
-        from xbbg import blp
 
         class FakeEngine:
             def __init__(self):
@@ -463,9 +456,9 @@ class TestGeneratedEndpointFieldTypeCache:
             return [], []
 
         fake_engine = FakeEngine()
-        monkeypatch.setattr(blp, "_get_engine", lambda: fake_engine)
-        monkeypatch.setattr(blp, "_aroute_kwargs", route_kwargs)
-        blp._clear_field_type_resolution_cache()
+        monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
+        monkeypatch.setattr(_request_options, "_aroute_kwargs", route_kwargs)
+        _engine._clear_field_type_resolution_cache()
         args = {
             "tickers": ["IBM US Equity"],
             "flds": ["PX_LAST", "VOLUME"],
@@ -480,10 +473,10 @@ class TestGeneratedEndpointFieldTypeCache:
         }
 
         try:
-            first = asyncio.run(getattr(blp, builder_name)(args))
-            second = asyncio.run(getattr(blp, builder_name)(args))
+            first = asyncio.run(getattr(_endpoints, builder_name)(args))
+            second = asyncio.run(getattr(_endpoints, builder_name)(args))
         finally:
-            blp._clear_field_type_resolution_cache()
+            _engine._clear_field_type_resolution_cache()
 
         expected_types = {
             "PX_LAST": f"{default_type}:PX_LAST",
@@ -507,7 +500,6 @@ class TestGeneratedEndpointFieldTypeCache:
     def test_per_call_field_type_overrides_do_not_poison_cached_resolution(
         self, monkeypatch, builder_name, default_type, extra_args
     ):
-        from xbbg import blp
 
         class FakeEngine:
             def __init__(self):
@@ -521,9 +513,9 @@ class TestGeneratedEndpointFieldTypeCache:
             return [], []
 
         fake_engine = FakeEngine()
-        monkeypatch.setattr(blp, "_get_engine", lambda: fake_engine)
-        monkeypatch.setattr(blp, "_aroute_kwargs", route_kwargs)
-        blp._clear_field_type_resolution_cache()
+        monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
+        monkeypatch.setattr(_request_options, "_aroute_kwargs", route_kwargs)
+        _engine._clear_field_type_resolution_cache()
 
         def plan_args(field_types):
             return {
@@ -541,11 +533,11 @@ class TestGeneratedEndpointFieldTypeCache:
 
         try:
             override_plan = asyncio.run(
-                getattr(blp, builder_name)(plan_args({"PX_LAST": "decimal128", "VOLUME": "int64"}))
+                getattr(_endpoints, builder_name)(plan_args({"PX_LAST": "decimal128", "VOLUME": "int64"}))
             )
-            base_plan = asyncio.run(getattr(blp, builder_name)(plan_args(None)))
+            base_plan = asyncio.run(getattr(_endpoints, builder_name)(plan_args(None)))
         finally:
-            blp._clear_field_type_resolution_cache()
+            _engine._clear_field_type_resolution_cache()
 
         _CASE.assertEqual(
             override_plan.request_kwargs["field_types"],
@@ -559,3 +551,18 @@ class TestGeneratedEndpointFieldTypeCache:
             },
         )
         _CASE.assertEqual(fake_engine.calls, [(["PX_LAST", "VOLUME"], None, default_type)])
+
+
+@pytest.mark.parametrize(
+    ("async_name", "sync_name"),
+    [(spec.async_name, spec.sync_name) for spec in _endpoints._GENERATED_ENDPOINT_SPECS.values()],
+)
+def test_sync_wrappers_preserve_original_async_functions(async_name, sync_name):
+    async_func = getattr(blp, async_name)
+    sync_func = getattr(blp, sync_name)
+
+    assert async_func is getattr(_endpoints, async_name)
+    assert inspect.iscoroutinefunction(async_func)
+    assert Path(async_func.__code__.co_filename).name == "_endpoints.py"
+    assert sync_func.__wrapped__ is async_func
+    assert inspect.signature(sync_func) == inspect.signature(async_func)

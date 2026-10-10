@@ -7,7 +7,7 @@ from typing import Any
 import pytest
 
 import xbbg
-from xbbg import blp
+from xbbg import _engine, blp
 from xbbg.testing import (
     append_message_dict,
     create_mock_event,
@@ -19,19 +19,19 @@ from xbbg.testing import (
 
 @pytest.fixture(autouse=True)
 def reset_blp_state():
-    old_config = blp._config
-    old_engine = blp._engine
+    old_config = _engine._config
+    old_engine = _engine._engine
     old_middleware = blp.get_middleware()
     blp.clear_middleware()
-    blp._config = None
-    blp._engine = None
+    _engine._config = None
+    _engine._engine = None
     try:
         yield
     finally:
         blp.clear_middleware()
         blp.set_middleware(old_middleware)
-        blp._config = old_config
-        blp._engine = old_engine
+        _engine._config = old_config
+        _engine._engine = old_engine
 
 
 def test_create_mock_response_builds_reference_rows_without_blpapi():
@@ -58,7 +58,7 @@ def test_mock_engine_intercepts_bdp_requests(monkeypatch):
         async def request(self, _params_dict):
             raise AssertionError("live engine should not be called")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
 
     response = create_mock_response(
         service="//blp/refdata",
@@ -97,7 +97,7 @@ def test_mock_engine_raises_for_unmatched_request(monkeypatch):
         async def request(self, _params_dict):
             raise AssertionError("live engine should not be called")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
 
     response = create_mock_response(
         service="//blp/refdata",
@@ -114,7 +114,7 @@ def test_mock_engine_intercepts_generic_request(monkeypatch):
         async def request(self, _params_dict):
             raise AssertionError("live engine should not be called")
 
-    monkeypatch.setattr(blp, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda *args, **kwargs: UnexpectedEngine())
 
     response = create_mock_response(
         service="//blp/refdata",

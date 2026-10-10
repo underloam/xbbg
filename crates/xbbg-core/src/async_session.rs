@@ -28,7 +28,6 @@
 //!   because events can outrun the submitting call (`blpapi_session.h:490-495`).
 //!   Register request state *before* calling [`AsyncSession::send_request`].
 
-use std::ffi::CString;
 use std::os::raw::c_void;
 
 use crate::correlation::CorrelationId;
@@ -37,6 +36,7 @@ use crate::event::Event;
 use crate::options::SessionOptions;
 use crate::request::Request;
 use crate::service::Service;
+use crate::session_operations::SessionOperations;
 
 /// Stable-address holder for the user handler; the SDK keeps a pointer to
 /// this allocation for the lifetime of the session.
@@ -72,10 +72,8 @@ unsafe extern "C" fn event_trampoline(
 /// See the module docs for the threading and callback contracts.
 pub struct AsyncSession {
     ptr: *mut crate::ffi::blpapi_Session_t,
-    /// Kept alive for the SDK's `userData` pointer; consumed by
-    /// [`AsyncSession::shutdown_nonblocking`], dropped (after stop+destroy)
-    /// otherwise.
-    handler: Option<Box<HandlerShared>>,
+    /// Kept alive for the SDK's `userData` pointer until after stop and destroy.
+    _handler: Box<HandlerShared>,
 }
 
 // SAFETY: asynchronous sessions are the SDK's documented multi-threaded mode:
@@ -88,6 +86,12 @@ unsafe impl Send for AsyncSession {}
 unsafe impl Sync for AsyncSession {}
 
 impl AsyncSession {
+    fn operations(&self) -> SessionOperations<'_> {
+        // SAFETY: the borrow keeps the session alive; asynchronous sessions
+        // permit these operations from concurrent calling threads.
+        unsafe { SessionOperations::new(&self.ptr) }
+    }
+
     /// Create an asynchronous session delivering events to `handler`.
     ///
     /// The session is created but not started; call [`AsyncSession::start`].
@@ -124,7 +128,7 @@ impl AsyncSession {
 
         Ok(Self {
             ptr,
-            handler: Some(shared),
+            _handler: shared,
         })
     }
 
@@ -166,18 +170,6 @@ impl AsyncSession {
         }
     }
 
-    /// Leak-and-signal shutdown for process-exit paths (interpreter teardown)
-    /// where blocking in [`AsyncSession::stop`] is unacceptable.
-    ///
-    /// Issues `stopAsync` and deliberately leaks the session handle and the
-    /// handler allocation: callbacks may still be in flight, so freeing the
-    /// handler would be a use-after-free. The leak is bounded (one session +
-    /// one closure) and the process is exiting anyway.
-    pub fn shutdown_nonblocking(self) {
-        self.stop_async();
-        std::mem::forget(self);
-    }
-
     /// Open a service, blocking until it is opened or fails.
     ///
     /// Unlike on a synchronous session this does not stall event delivery —
@@ -185,73 +177,20 @@ impl AsyncSession {
     /// session construction; prefer [`AsyncSession::open_service_async`] on
     /// latency-sensitive paths.
     pub fn open_service(&self, name: &str) -> Result<()> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        // SAFETY: valid session pointer and service name.
-        let rc = unsafe { crate::ffi::blpapi_Session_openService(self.ptr, c_name.as_ptr()) };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Ok(())
+        self.operations().open_service(name)
     }
 
     /// Open a service asynchronously; the `ServiceOpened` /
     /// `ServiceOpenFailure` reply reaches the handler tagged with the
     /// returned correlation ID.
     pub fn open_service_async(&self, name: &str, cid: &CorrelationId) -> Result<CorrelationId> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        let mut cid_ffi = cid.to_ffi();
-
-        // SAFETY: valid pointers; out-param filled with the SDK-assigned CID.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_openServiceAsync(self.ptr, c_name.as_ptr(), &mut cid_ffi)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations().open_service_async(name, cid)
     }
 
     /// Get a service handle. The service must already be open; the handle
     /// borrows this session's reference and cannot outlive it.
     pub fn get_service(&self, name: &str) -> Result<Service<'_>> {
-        let c_name = CString::new(name).map_err(|e| BlpError::InvalidArgument {
-            detail: format!("invalid service name: {}", e),
-        })?;
-
-        let mut service_ptr: *mut crate::ffi::blpapi_Service_t = std::ptr::null_mut();
-
-        // SAFETY: valid session pointer, name, and out-parameter.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_getService(self.ptr, &mut service_ptr, c_name.as_ptr())
-        };
-
-        if rc != 0 {
-            return Err(BlpError::OpenService {
-                service: name.to_string(),
-                source: None,
-                label: None,
-            });
-        }
-
-        Service::from_raw(service_ptr)
+        self.operations().get_service(name)
     }
 
     /// Send a request. Register any state keyed on `cid` *before* calling —
@@ -271,60 +210,12 @@ impl AsyncSession {
         cid: Option<&CorrelationId>,
         label: Option<&str>,
     ) -> Result<CorrelationId> {
-        let mut cid_ffi = match cid {
-            Some(c) => c.to_ffi(),
-            None => CorrelationId::default().to_ffi(),
-        };
-
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(value) => {
-                let cstring = CString::new(value).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid request label: {e}"),
-                })?;
-                (cstring.as_ptr(), value.len() as i32, Some(cstring))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: valid session/request pointers; identity null (session
-        // identity from SessionOptions applies); eventQueue null (events go
-        // to the handler).
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_sendRequest(
-                self.ptr,
-                req.as_ptr(),
-                &mut cid_ffi,
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                label_ptr,
-                label_len,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_sendRequest failed with rc={}", rc),
-            });
-        }
-
-        Ok(CorrelationId::from_ffi(&cid_ffi))
+        self.operations().send_request(req, None, cid, label)
     }
 
     /// Cancel an in-flight correlation ID.
     pub fn cancel(&self, cid: &CorrelationId) -> Result<()> {
-        let cid_ffi = cid.to_ffi();
-        // SAFETY: valid session pointer; one CID by pointer+count.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_cancel(self.ptr, &cid_ffi, 1, std::ptr::null(), 0)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_cancel failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations().cancel(cid)
     }
 
     /// Begin subscriptions for every entry in `subs`
@@ -335,35 +226,8 @@ impl AsyncSession {
     /// Register per-CID state *before* calling — `SubscriptionStatus` /
     /// `SubscriptionData` events can reach the handler before this returns.
     pub fn subscribe(&self, subs: &crate::SubscriptionList, label: Option<&str>) -> Result<()> {
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(l) => {
-                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid subscription label: {}", e),
-                })?;
-                (cs.as_ptr(), l.len() as i32, Some(cs))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: valid session/list pointers; identity null (session
-        // identity from SessionOptions applies).
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_subscribe(
-                self.ptr,
-                subs.as_ptr(),
-                std::ptr::null(),
-                label_ptr,
-                label_len,
-            )
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_subscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations()
+            .subscribe(subs, None, label, "subscription label")
     }
 
     /// Update existing subscriptions, matched by their correlation IDs.
@@ -372,47 +236,15 @@ impl AsyncSession {
     /// Update per-CID state before calling: status and repaint data may reach
     /// the handler before this returns, as with [`AsyncSession::subscribe`].
     pub fn resubscribe(&self, subs: &crate::SubscriptionList, label: Option<&str>) -> Result<()> {
-        let (label_ptr, label_len, _label_cstring) = match label {
-            Some(l) => {
-                let cs = CString::new(l).map_err(|e| BlpError::InvalidArgument {
-                    detail: format!("invalid subscription label: {}", e),
-                })?;
-                (cs.as_ptr(), l.len() as i32, Some(cs))
-            }
-            None => (std::ptr::null(), 0, None),
-        };
-
-        // SAFETY: valid session/list pointers; the optional label remains alive
-        // for the duration of the SDK call.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_resubscribe(self.ptr, subs.as_ptr(), label_ptr, label_len)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_resubscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations()
+            .resubscribe(subs, label, "subscription label")
     }
 
     /// Cancel the subscriptions in `subs`; entries are matched by
     /// correlation ID. Termination is confirmed to the handler via
     /// `SubscriptionTerminated` / `SubscriptionFailure` status messages.
     pub fn unsubscribe(&self, subs: &crate::SubscriptionList) -> Result<()> {
-        // SAFETY: valid session/list pointers.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_unsubscribe(self.ptr, subs.as_ptr(), std::ptr::null(), 0)
-        };
-
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_unsubscribe failed with rc={}", rc),
-            });
-        }
-
-        Ok(())
+        self.operations().unsubscribe(subs)
     }
 
     /// Begin asynchronous authorization of an identity described by
@@ -482,27 +314,13 @@ impl AsyncSession {
     /// `TOKEN_STATUS` event tagged with `cid`: `TokenGenerationSuccess`
     /// carries a `token` element, `TokenGenerationFailure` a `reason`.
     pub fn generate_token(&self, cid: &CorrelationId) -> Result<()> {
-        let mut cid_ffi = cid.to_ffi();
-        // SAFETY: valid session pointer; null event queue routes the
-        // TOKEN_STATUS event to the session handler.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_generateToken(self.ptr, &mut cid_ffi, std::ptr::null_mut())
-        };
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_generateToken failed with rc={rc}"),
-            });
-        }
-        Ok(())
+        self.operations().generate_token(Some(cid)).map(|_| ())
     }
 
     /// Create a fresh, not-yet-authorized identity handle for this session.
     /// Authorize it with [`AsyncSession::send_authorization_request`].
     pub fn create_identity(&self) -> Result<crate::Identity> {
-        // SAFETY: valid session pointer; the returned handle is owned by the
-        // new `Identity` (released exactly once in its Drop).
-        let identity_ptr = unsafe { crate::ffi::blpapi_Session_createIdentity(self.ptr) };
-        crate::Identity::from_raw(identity_ptr)
+        self.operations().create_identity()
     }
 
     /// Send an `AuthorizationRequest` (from `//blp/apiauth`) that authorizes
@@ -515,26 +333,9 @@ impl AsyncSession {
         identity: &mut crate::Identity,
         cid: &CorrelationId,
     ) -> Result<()> {
-        let mut cid_ffi = cid.to_ffi();
-        // SAFETY: valid session/request/identity pointers; null event queue
-        // routes the outcome to the session handler.
-        let rc = unsafe {
-            crate::ffi::blpapi_Session_sendAuthorizationRequest(
-                self.ptr,
-                request.as_ptr(),
-                identity.as_ptr(),
-                &mut cid_ffi,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                0,
-            )
-        };
-        if rc != 0 {
-            return Err(BlpError::Internal {
-                detail: format!("blpapi_Session_sendAuthorizationRequest failed with rc={rc}"),
-            });
-        }
-        Ok(())
+        self.operations()
+            .send_authorization_request(request, identity, Some(cid))
+            .map(|_| ())
     }
 }
 
@@ -551,6 +352,5 @@ impl Drop for AsyncSession {
             }
             self.ptr = std::ptr::null_mut();
         }
-        debug_assert!(self.handler.is_some() || self.ptr.is_null());
     }
 }

@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from . import _ext_schemas as schemas
 from ._bql import build_query
+from ._defs_gen import CDX_INFO_FIELDS, CDX_PRICING_FIELDS, CDX_RISK_FIELDS
 from ._runtime import make_tool
 from .chart_spec import create_chart_spec
 from .options import BloombergToolsOptions, resolve_options
@@ -155,9 +156,9 @@ async def _cdx(input: BaseModel, options: BloombergToolsOptions) -> Any:
         from xbbg.ext import cdx
 
         recipes = {
-            "cdx_info": (cdx.acdx_info, cdx._CDX_INFO_FIELDS),
-            "cdx_pricing": (cdx.acdx_pricing, cdx._CDX_PRICING_FIELDS),
-            "cdx_risk": (cdx.acdx_risk, cdx._CDX_RISK_FIELDS),
+            "cdx_info": (cdx.acdx_info, CDX_INFO_FIELDS),
+            "cdx_pricing": (cdx.acdx_pricing, CDX_PRICING_FIELDS),
+            "cdx_risk": (cdx.acdx_risk, CDX_RISK_FIELDS),
         }
         recipe, fields = recipes[operation]
         if len(fields) > options.max_fields:

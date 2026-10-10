@@ -44,3 +44,10 @@ bindgen = { workspace = true, features = ["runtime"] }
 # pregenerated binding surface, which the SDK license does not clearly permit.
 [package.metadata.docs.rs]
 features = ["dynamic"]
+
+[package.metadata.cargo-shear]
+# bindgen emits cty references into OUT_DIR/bindings.rs, outside the source tree.
+ignored = ["cty"]
+
+[lints]
+workspace = true

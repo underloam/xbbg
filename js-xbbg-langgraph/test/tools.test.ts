@@ -1,6 +1,7 @@
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { AIMessage, ToolMessage } from "@langchain/core/messages";
 import { ToolNode } from "@langchain/langgraph/prebuilt";
+import * as z from "zod/v3";
 
 import {
   BLOOMBERG_TOOL_NAMES,
@@ -10,7 +11,10 @@ import {
   createResolveVenuesTool,
   toolParameterJsonSchema,
 } from "../src";
-import { createToolResult, limitResult, type ResultLimitOptions } from "../src/result-limits";
+import { createToolResult } from "../src/result-envelope";
+import { limitResultWithRowPriority, projectResult } from "../src/result-limits";
+import type { ResultLimitOptions } from "../src/result-types";
+import { createBloombergStructuredTool } from "../src/langchain-tool";
 import type { XbbgCoreLike, XbbgEngineLike } from "../src/core-loader";
 import { normalizeBloombergToolsOptions } from "../src/options";
 
@@ -436,7 +440,6 @@ describe("Bloomberg request tools", () => {
     expect(vi.mocked(engine.preferreds).mock.calls.at(-1)?.[1]?.fields).toBeUndefined();
 
     await invokeJson(byName(tools, "xbbg_corporate_bonds"), {
-      activeOnly: false,
       ccy: " USD ",
       fields: [" id "],
       ticker: " AAPL US Equity ",
@@ -444,7 +447,6 @@ describe("Bloomberg request tools", () => {
     expect(engine.corporateBonds).toHaveBeenCalledWith(
       "AAPL US Equity",
       expect.objectContaining({
-        activeOnly: false,
         backend: "json",
         ccy: "USD",
         fields: ["id"],
@@ -952,58 +954,67 @@ describe("Bloomberg request tools", () => {
     expect(failingSub.unsubscribe).toHaveBeenCalledWith(false);
   });
 
-  it("bounds Arrow materialization across all snapshot updates", async () => {
-    const engine = fakeEngine();
-    const firstGet = vi.fn((index: number) => ({ index, table: 1 }));
-    const secondGet = vi.fn((index: number) => ({ index, table: 2 }));
-    const toArray = vi.fn(() => {
-      throw new Error("must not materialize the full Arrow table");
-    });
-    const subscription = fakeSubscription([
-      { get: firstGet, numRows: 100_000, toArray },
-      { get: secondGet, numRows: 200_000, toArray },
-    ]);
-    vi.mocked(engine.mktbar).mockResolvedValueOnce(subscription.subscription);
-    const tools = createBloombergTools({
-      core: fakeCore(engine),
-      maxContentRows: 3,
-      maxRows: 3,
-    });
+  it.each(["stream", "mktbar", "depth"] as const)(
+    "bounds Arrow materialization across all %s snapshot updates",
+    async (method) => {
+      const engine = fakeEngine();
+      const firstGet = vi.fn((index: number) => ({ index, table: 1 }));
+      const secondGet = vi.fn((index: number) => ({ index, table: 2 }));
+      const toArray = vi.fn(() => {
+        throw new Error("must not materialize the full Arrow table");
+      });
+      const subscription = fakeSubscription([
+        { get: firstGet, numRows: 100_000, toArray },
+        { get: secondGet, numRows: 200_000, toArray },
+      ]);
+      vi.mocked(engine[method]).mockResolvedValueOnce(subscription.subscription);
+      const tools = createBloombergTools({
+        core: fakeCore(engine),
+        maxContentRows: 3,
+        maxRows: 3,
+      });
 
-    const result = await invokeJson(byName(tools, "xbbg_mktbar_snapshot"), {
-      maxUpdates: 2,
-      ticker: "AAPL US Equity",
-      timeoutMs: 1_000,
-    });
+      const result = await invokeJson(byName(tools, `xbbg_${method}_snapshot`), {
+        maxUpdates: 2,
+        ...(method === "stream"
+          ? { tickers: ["SYNTH US Equity"], fields: ["PX_LAST"] }
+          : { ticker: "SYNTH US Equity" }),
+        timeoutMs: 1_000,
+      });
 
-    expect(firstGet).toHaveBeenCalledTimes(3);
-    expect(secondGet).not.toHaveBeenCalled();
-    expect(firstGet.mock.calls.length + secondGet.mock.calls.length).toBeLessThanOrEqual(3);
-    expect(toArray).not.toHaveBeenCalled();
-    expect(result).toMatchObject({
-      truncated: true,
-      data: {
-        updates: [
-          {
-            rowCount: 100_000,
-            rows: [
-              { index: 0, table: 1 },
-              { index: 1, table: 1 },
-              { index: 2, table: 1 },
-            ],
-            truncated: true,
-            truncation: { omittedRowsAtLeast: 99_997, reason: "max_rows" },
-          },
-          {
-            rowCount: 200_000,
-            rows: [],
-            truncated: true,
-            truncation: { omittedRowsAtLeast: 200_000, reason: "max_rows" },
-          },
-        ],
-      },
-    });
-  });
+      expect(firstGet).toHaveBeenCalledTimes(3);
+      expect(secondGet).not.toHaveBeenCalled();
+      expect(firstGet.mock.calls.length + secondGet.mock.calls.length).toBeLessThanOrEqual(3);
+      expect(toArray).not.toHaveBeenCalled();
+      expect(result).toMatchObject({
+        truncated: true,
+        data: {
+          updates: [
+            {
+              rowCount: 100_000,
+              rows: [
+                { index: 0, table: 1 },
+                { index: 1, table: 1 },
+                { index: 2, table: 1 },
+              ],
+              truncated: true,
+              truncation: { omittedRowsAtLeast: 99_997, reason: "max_rows" },
+            },
+            {
+              rowCount: 200_000,
+              rows: [],
+              truncated: true,
+              truncation: { omittedRowsAtLeast: 200_000, reason: "max_rows" },
+            },
+          ],
+        },
+      });
+      expect(result.truncation.inspectedNodes).toBeLessThanOrEqual(
+        DEFAULT_RESULT_LIMITS.maxResultNodes,
+      );
+      expect(subscription.unsubscribe).toHaveBeenCalled();
+    },
+  );
 
   it("rejects unsafe or ambiguous request inputs", async () => {
     const tools = createBloombergTools({
@@ -1138,17 +1149,25 @@ describe("Bloomberg request tools", () => {
     const exactRows = Object.assign([], {
       eidData: { "AAPL US Equity": first, "MSFT US Equity": second.slice(0, 5_000) },
     });
-    expect(limitResult(exactRows, resultLimits({ maxRows: 1, maxStringChars: 100 }))).toMatchObject(
-      {
-        truncated: false,
-        value: { eidData: { "AAPL US Equity": first, "MSFT US Equity": second.slice(0, 5_000) } },
-      },
-    );
+    expect(
+      limitResultWithRowPriority(
+        exactRows,
+        resultLimits({ maxRows: 1, maxStringChars: 100 }),
+        false,
+      ),
+    ).toMatchObject({
+      truncated: false,
+      value: { eidData: { "AAPL US Equity": first, "MSFT US Equity": second.slice(0, 5_000) } },
+    });
 
     const overRows = Object.assign([], {
       eidData: { "AAPL US Equity": first, "MSFT US Equity": second },
     });
-    const result = limitResult(overRows, resultLimits({ maxRows: 1, maxStringChars: 100 }));
+    const result = limitResultWithRowPriority(
+      overRows,
+      resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
+    );
     expect(result).toMatchObject({
       truncated: true,
       value: {
@@ -1198,15 +1217,20 @@ describe("Bloomberg request tools", () => {
   it("keeps EID provenance unknown after an earlier projection omits it", () => {
     const eids = Array.from({ length: 10_001 }, (_, index) => index + 1);
     const rows = Object.assign([], { eidData: { "AAPL US Equity": eids } });
-    const first = limitResult(
+    const first = limitResultWithRowPriority(
       rows,
       resultLimits({ maxResultBytes: 80, maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     const firstData = first.value as Record<string, any>;
 
     expect(firstData.eidDataTruncation).toBeDefined();
     expect(firstData.eidDataTruncation).not.toHaveProperty("totalEidCount");
-    const second = limitResult(first.value, resultLimits({ maxRows: 1, maxStringChars: 100 }));
+    const second = limitResultWithRowPriority(
+      first.value,
+      resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
+    );
     const secondSummary = (second.value as Record<string, any>).eidDataTruncation;
 
     expect(secondSummary.totalEidCount).toBeNull();
@@ -1218,7 +1242,11 @@ describe("Bloomberg request tools", () => {
     const eids = Array.from({ length: 10_000 }, (_, index) => index + 1);
     const rows = Object.assign([], { eidData: { "AAPL US Equity": eids } });
 
-    const result = limitResult(rows, resultLimits({ maxResultNodes: 128, maxRows: 1 }));
+    const result = limitResultWithRowPriority(
+      rows,
+      resultLimits({ maxResultNodes: 128, maxRows: 1 }),
+      false,
+    );
     const data = result.value as Record<string, any>;
 
     expect(result.truncation?.reasons).toContain("max_result_nodes");
@@ -1235,17 +1263,19 @@ describe("Bloomberg request tools", () => {
     const manySecurities = Object.fromEntries(
       Array.from({ length: 1_001 }, (_, index) => [`SEC${String(index)}`, [index + 1]]),
     );
-    const exactCount = limitResult(
+    const exactCount = limitResultWithRowPriority(
       Object.assign([], {
         eidData: Object.fromEntries(Object.entries(manySecurities).slice(0, 1_000)),
       }),
       resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     expect(exactCount.truncated).toBe(false);
 
-    const countLimited = limitResult(
+    const countLimited = limitResultWithRowPriority(
       Object.assign([], { eidData: manySecurities }),
       resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     expect(countLimited).toMatchObject({
       truncated: true,
@@ -1266,14 +1296,16 @@ describe("Bloomberg request tools", () => {
     ).toHaveLength(1_000);
 
     const exactName = "é".repeat(32_768);
-    const exactBytes = limitResult(
+    const exactBytes = limitResultWithRowPriority(
       Object.assign([], { eidData: { [exactName]: [1] } }),
       resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     expect(exactBytes.truncated).toBe(false);
-    const byteLimited = limitResult(
+    const byteLimited = limitResultWithRowPriority(
       Object.assign([], { eidData: { [exactName]: [1], overflow: [2] } }),
       resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     expect(byteLimited).toMatchObject({
       truncated: true,
@@ -1298,9 +1330,10 @@ describe("Bloomberg request tools", () => {
       enumerable: true,
       value: [101],
     });
-    const result = limitResult(
+    const result = limitResultWithRowPriority(
       Object.assign([], { eidData }),
       resultLimits({ maxRows: 1, maxStringChars: 100 }),
+      false,
     );
     const limited = result.value as Record<string, any>;
     expect(result.truncated).toBe(false);
@@ -1326,30 +1359,38 @@ describe("Bloomberg request tools", () => {
         G: partiallySparse,
       },
     });
-    expect(limitResult(malformed, resultLimits({ maxRows: 1, maxStringChars: 100 }))).toMatchObject(
-      {
-        truncated: true,
-        value: {
-          eidData: {},
-          eidDataTruncation: {
-            invalidSecurityCount: 7,
-            omittedSecurityCount: 0,
-            retainedEidCount: 0,
-            retainedSecurityCount: 0,
-            securityCounts: [],
-            totalEidCount: 0,
-            totalSecurityCount: 7,
-          },
+    expect(
+      limitResultWithRowPriority(
+        malformed,
+        resultLimits({ maxRows: 1, maxStringChars: 100 }),
+        false,
+      ),
+    ).toMatchObject({
+      truncated: true,
+      value: {
+        eidData: {},
+        eidDataTruncation: {
+          invalidSecurityCount: 7,
+          omittedSecurityCount: 0,
+          retainedEidCount: 0,
+          retainedSecurityCount: 0,
+          securityCounts: [],
+          totalEidCount: 0,
+          totalSecurityCount: 7,
         },
       },
-    );
+    });
   });
 
   it("limits cyclic and excessively deep artifacts without recursion failure", () => {
     const cyclic: Record<string, unknown> = {};
     cyclic.self = cyclic;
 
-    const cyclicResult = limitResult(cyclic, resultLimits({ maxRows: 10, maxStringChars: 100 }));
+    const cyclicResult = limitResultWithRowPriority(
+      cyclic,
+      resultLimits({ maxRows: 10, maxStringChars: 100 }),
+      false,
+    );
     expect(cyclicResult).toMatchObject({
       truncated: true,
       value: { self: "[Circular]" },
@@ -1357,9 +1398,10 @@ describe("Bloomberg request tools", () => {
 
     const cyclicError = new Error("boom");
     cyclicError.cause = cyclicError;
-    const cyclicErrorResult = limitResult(
+    const cyclicErrorResult = limitResultWithRowPriority(
       cyclicError,
       resultLimits({ maxRows: 10, maxStringChars: 100 }),
+      false,
     );
     expect(cyclicErrorResult.truncation?.reasons).toContain("circular_reference");
     expect(JSON.stringify(cyclicErrorResult.value)).toContain("[Circular]");
@@ -1369,7 +1411,11 @@ describe("Bloomberg request tools", () => {
       deep = { child: deep };
     }
 
-    const deepResult = limitResult(deep, resultLimits({ maxRows: 10, maxStringChars: 100 }));
+    const deepResult = limitResultWithRowPriority(
+      deep,
+      resultLimits({ maxRows: 10, maxStringChars: 100 }),
+      false,
+    );
     expect(deepResult.truncated).toBe(true);
     expect(deepResult.truncation?.reasons).toContain("max_result_depth");
   });
@@ -1384,7 +1430,7 @@ describe("Bloomberg request tools", () => {
       message: "not entitled to requested field",
     };
 
-    const limited = limitResult(
+    const limited = limitResultWithRowPriority(
       wide,
       resultLimits({
         maxResultBytes: 4_096,
@@ -1392,6 +1438,7 @@ describe("Bloomberg request tools", () => {
         maxRows: 10,
         maxStringChars: 200,
       }),
+      false,
     );
     expect(limited.truncation?.inspectedNodes).toBeLessThanOrEqual(128);
     const serialized = JSON.stringify(limited.value);
@@ -1438,7 +1485,7 @@ describe("Bloomberg request tools", () => {
   });
 
   it("accounts for UTF-8 and JSON escaping before producing valid bounded JSON", () => {
-    const limited = limitResult(
+    const limited = limitResultWithRowPriority(
       {
         emoji: "😀".repeat(200),
         quoted: '"\\\n'.repeat(200),
@@ -1449,6 +1496,7 @@ describe("Bloomberg request tools", () => {
         maxRows: 10,
         maxStringChars: 10_000,
       }),
+      false,
     );
     const serialized = JSON.stringify(limited.value);
 
@@ -1494,7 +1542,7 @@ describe("Bloomberg request tools", () => {
       }
     }
 
-    const limited = limitResult(
+    const limited = limitResultWithRowPriority(
       {
         custom: new JsonRows(),
         accessorJson: new AccessorJson(),
@@ -1503,6 +1551,7 @@ describe("Bloomberg request tools", () => {
         throwingJson: new ThrowingJson(),
       },
       resultLimits({ maxRows: 2 }),
+      false,
     );
     const output = limited.value as Record<string, any>;
 
@@ -1534,7 +1583,7 @@ describe("Bloomberg request tools", () => {
       truncatedInput: true,
     });
 
-    const limited = limitResult(rows, resultLimits({ maxRows: 10 }));
+    const limited = limitResultWithRowPriority(rows, resultLimits({ maxRows: 10 }), false);
 
     expect(limited.hasErrors).toBe(false);
     expect(limited.truncation?.reasons).toContain("upstream_truncation");
@@ -2061,9 +2110,10 @@ describe("Bloomberg tool hardening", () => {
   });
 
   it("bounds binary payloads instead of serializing raw bytes", () => {
-    const limited = limitResult(
+    const limited = limitResultWithRowPriority(
       { blob: new Uint8Array(2048) },
       resultLimits({ maxRows: 10, maxStringChars: 100 }),
+      false,
     );
 
     expect(limited.truncated).toBe(true);
@@ -2153,5 +2203,118 @@ describe("Bloomberg tool hardening", () => {
     expect(toolParameterJsonSchema(bdh)).toBe(parameters);
     expect(Object.isFrozen(parameters)).toBe(true);
     expect(Object.isFrozen((parameters as { properties?: object }).properties)).toBe(true);
+  });
+  it.each([
+    ["xbbg_bdp", { securities: ["SYNTH"], fields: ["PX_LAST"] }],
+    [
+      "xbbg_bdh",
+      { securities: ["SYNTH"], fields: ["PX_LAST"], start: "20240101", end: "20240102" },
+    ],
+    ["xbbg_bds", { securities: ["SYNTH"], field: "MEMBERS" }],
+  ] as const)("bounds maps consistently for %s", async (name, request) => {
+    const engine = fakeEngine();
+    const tool = byName(
+      createBloombergTools({
+        core: fakeCore(engine),
+        maxFields: 1,
+        maxSecurities: 1,
+        maxStringChars: 8,
+      }),
+      name,
+    );
+    const rejectedMaps = [
+      { kwargs: { A: 1, B: 2 } },
+      { kwargs: { TOOLONGKEY: 1 } },
+      { kwargs: { A: "123456789" } },
+      { kwargs: { " A ": 1, A: 2 } },
+      { overrides: { A: 1, B: 2, C: 3 } },
+      { overrides: { SYNTH: { A: 1, B: 2 } } },
+      { overrides: { SYNTH: { A: "123456789" } } },
+      { overrides: { SYNTH: { TOOLONGKEY: 1 } } },
+    ];
+    for (const maps of rejectedMaps) {
+      await expect(tool.invoke({ ...request, ...maps })).rejects.toThrow();
+    }
+    await tool.invoke({
+      ...request,
+      kwargs: { " FLAG ": " yes " },
+      overrides: { GLOBAL: false, SYNTH: { PX_LAST: " value " } },
+    });
+    const method = name === "xbbg_bdp" ? engine.bdp : name === "xbbg_bdh" ? engine.bdh : engine.bds;
+    expect(method).toHaveBeenCalledTimes(1);
+    expect(method).toHaveBeenCalledWith(
+      ["SYNTH"],
+      expect.any(Array),
+      expect.objectContaining({
+        kwargs: { FLAG: "yes" },
+        overrides: { GLOBAL: false, SYNTH: { PX_LAST: "value" } },
+      }),
+    );
+  });
+
+  it("omits the removed corporate-bond activeOnly option from schema and requests", async () => {
+    const engine = fakeEngine();
+    const tool = byName(createBloombergTools({ core: fakeCore(engine) }), "xbbg_corporate_bonds");
+    expect(JSON.stringify(toolParameterJsonSchema(tool))).not.toContain("activeOnly");
+    await tool.invoke({ ticker: "SYNTH US Equity", activeOnly: false });
+    expect(engine.corporateBonds).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(engine.corporateBonds).mock.calls[0]?.[1]).not.toHaveProperty("activeOnly");
+  });
+
+  it("keeps raw value-shaped objects inside the result envelope", async () => {
+    const engine = fakeEngine();
+    const payload = { value: [1], materializedNodes: 17 };
+    vi.mocked(engine.bdp).mockResolvedValueOnce(payload);
+    const result = await invokeJson(
+      byName(createBloombergTools({ core: fakeCore(engine) }), "xbbg_bdp"),
+      {
+        securities: ["SYNTH"],
+        fields: ["PX_LAST"],
+      },
+    );
+    expect(result.data).toEqual(payload);
+  });
+
+  it("adds tool context to sync, async, and result-conversion errors", async () => {
+    const cause = new RangeError("synthetic failure");
+    const fields = {
+      description: "Test invocation error handling",
+      name: "xbbg_bdp" as const,
+      limits: normalizeBloombergToolsOptions(),
+      schema: z.object({}),
+    };
+    for (const invoke of [
+      () => {
+        throw cause;
+      },
+      async () => {
+        throw cause;
+      },
+    ]) {
+      const tool = createBloombergStructuredTool(invoke, fields);
+      await expect(tool.invoke({})).rejects.toMatchObject({
+        cause,
+        name: "RangeError",
+        message: "xbbg_bdp failed: synthetic failure",
+      });
+    }
+    const invalid = createBloombergStructuredTool(
+      () => ({ value: [], materializedNodes: -1 }),
+      fields,
+    );
+    await expect(invalid.invoke({})).rejects.toThrow(/xbbg_bdp failed: materializedNodes/u);
+    expect(cause.message).toBe("synthetic failure");
+  });
+
+  it("projects an exhausted aggregate node budget without traversing input", () => {
+    const input = Object.defineProperty({}, "data", {
+      enumerable: true,
+      get: () => {
+        throw new Error("must not inspect input");
+      },
+    });
+    const result = projectResult(input, resultLimits({ maxResultNodes: 0 }), false);
+    expect(result.inspectedNodes).toBe(0);
+    expect(result.truncation?.reasons).toContain("max_result_nodes");
   });
 });

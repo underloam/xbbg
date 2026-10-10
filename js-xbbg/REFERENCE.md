@@ -274,7 +274,9 @@ if (eids.length > 0) {
 
 ## Recipes
 
-High-level workflows wrap common Bloomberg request patterns. Recipes return an Arrow `Table` by default or JSON rows with `backend: 'json'`, and errors use the standard `BlpError` hierarchy. Polars is available on the general request IPC path, not the native recipe table path.
+High-level workflows wrap common Bloomberg request patterns. Recipes return an Arrow `Table` by default or JSON rows with `backend: 'json'`, and errors use the standard `BlpError` hierarchy. Polars is available on the general request IPC path, not the native recipe table path; recipes reject an unsupported backend before making a Bloomberg request.
+
+CDX pricing and risk options express `recoveryRate` (or `recovery_rate`) in percent: `40` means 40%. Corporate-bond options are `ccy`, `fields`, and `backend`.
 
 ```javascript
 import * as xbbg from '@xbbg/core';
@@ -411,3 +413,11 @@ The JS binding forwards these fields directly to the Rust engine, so Node can co
 Engine shutdown closes admission and signals idle and checked-out subscription sessions so blocked operations can terminate. Await subscription cleanup while the engine is still available.
 
 Field-cache publication on Windows uses `FileRenameInfoEx` with POSIX rename semantics (Windows 10 1607+ and a supporting filesystem). Existing readers retain the old snapshot while new opens see the complete replacement. Unsupported filesystems report persistence errors and retain the prior snapshot, with no unsafe replacement fallback.
+
+## Local development
+
+Run `npm run quality` in `js-xbbg` for formatting, linting, type checking, TypeScript/package-loader builds, offline tests, and the dead-code/import-graph checks. It does not rebuild the native addon.
+
+`npm run lint:deadcode` uses Knip. Its configuration includes executable scripts, benchmarks, tests, and dynamically built platform loaders; generated shared vocabulary exports are allowed. `npm run lint:imports` uses dependency-cruiser to reject circular imports, orphaned modules, unresolved imports, production imports of development dependencies, and imports from `src` into scripts, tests, or benchmarks.
+
+Subscription lifecycle tests import the native-independent subscription module and provide a `NativeSubscription` adapter. Root-entry wiring tests separately exercise `Engine` forwarding and recipe conversions.

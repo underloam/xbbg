@@ -139,50 +139,15 @@ jobs:
             echo "::notice::All crates already published at $VERSION; nothing to do."
           fi
 
-      - name: Detect latest downloadable Bloomberg C++ SDK version
-        if: steps.pending.outputs.has_work == 'true'
-        id: sdk-version
-        shell: bash
-        run: |
-          set -uo pipefail
-          # Bloomberg's index is an external dependency of the release; retry
-          # rather than failing the whole publish on one transient response.
-          VERSION=""
-          for attempt in 1 2 3 4 5; do
-            VERSION=$(curl -fsSL --max-time 30 \
-              https://blpapi.bloomberg.com/repository/releases/python/simple/blpapi/ \
-              | grep -oP 'blpapi-\K[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?' \
-              | sort -V | tail -1) || VERSION=""
-            [ -n "$VERSION" ] && break
-            echo "::warning::BLPAPI SDK index attempt $attempt returned nothing; retrying."
-            sleep $((attempt * 5))
-          done
-          [ -n "$VERSION" ] || { echo "::error::Could not detect BLPAPI SDK version after 5 attempts"; exit 1; }
-          echo "Detected BLPAPI SDK version: $VERSION"
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-
       # `cargo publish` verifies each package by building it, and xbbg-blpapi-sys
       # runs bindgen against the real SDK headers, so the SDK must be present even
       # for a dry run.
       - name: Setup Bloomberg SDK
         if: steps.pending.outputs.has_work == 'true'
-        id: sdk
         uses: ./.github/actions/setup-blpapi-sdk
         with:
-          version: ${{ steps.sdk-version.outputs.version }}
+          detection-attempts: "5"
           os: Linux
-
-      - name: Export Bloomberg SDK env
-        if: steps.pending.outputs.has_work == 'true'
-        shell: bash
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
 
       - name: Setup Rust
         if: steps.pending.outputs.has_work == 'true'

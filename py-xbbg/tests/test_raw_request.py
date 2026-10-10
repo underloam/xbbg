@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from xbbg import _engine
 from xbbg._core import ArrowRecordBatch, ArrowTable
 from xbbg.services import ExtractorHint, Operation, RequestParams, Service
 
@@ -57,7 +58,7 @@ async def test_arequest_passes_request_operation_to_engine(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = await blp.arequest(
         service=Service.REFDATA,
@@ -84,7 +85,7 @@ def test_request_sync_forwards_request_operation(monkeypatch):
             captured.update(params_dict)
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     result = blp.request(
         service=Service.REFDATA,

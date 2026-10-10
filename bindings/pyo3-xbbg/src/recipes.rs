@@ -5,8 +5,10 @@
 use std::collections::HashMap;
 
 use pyo3::prelude::*;
+use pyo3::types::PyDict;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
+use xbbg_async::engine::RequestParams;
 
 use xbbg_ext::transforms::fixed_income::YieldType;
 
@@ -21,6 +23,26 @@ fn recipe_err(e: xbbg_recipes::RecipeError) -> PyErr {
         }
         other => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(other.to_string()),
     }
+}
+
+fn recipe_request_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<RequestParams> {
+    let Some(options) = options else {
+        return Ok(RequestParams::default());
+    };
+    let params = options.copy()?;
+    params.set_item("service", "//blp/refdata")?;
+    params.set_item("operation", "ReferenceDataRequest")?;
+    crate::request::dict_to_request_params(&params)
+}
+
+fn recipe_arrow_batch(data: &Bound<'_, PyAny>) -> PyResult<arrow_array::RecordBatch> {
+    if data.hasattr("__arrow_c_array__")? {
+        return Ok(data.extract::<pyo3_arrow::PyRecordBatch>()?.into_inner());
+    }
+    let (batches, schema) = data.extract::<pyo3_arrow::PyTable>()?.into_inner();
+    data.py()
+        .detach(move || xbbg_arrow::TableData { batches, schema }.combined_batch())
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
 }
 
 macro_rules! recipe_wrapper {
@@ -75,9 +97,10 @@ recipe_wrapper!(
     ///     yield_val: Yield value override
     ///     price: Price override
     ///     benchmark: Benchmark security for spread calculation
+    ///     request_options: Normalized overrides, elements, options, types, format, timezones, EIDs, and validation controls
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, tickers, fields, settle_dt=None, yield_type=None, spread=None, yield_val=None, price=None, benchmark=None))]
+    #[pyo3(signature = (engine, tickers, fields, settle_dt=None, yield_type=None, spread=None, yield_val=None, price=None, benchmark=None, request_options=None))]
     #[allow(clippy::too_many_arguments)]
     |eng|
     fn recipe_yas(
@@ -89,9 +112,12 @@ recipe_wrapper!(
         yield_val: Option<f64>,
         price: Option<f64>,
         benchmark: Option<String>,
+        request_options: Option<&Bound<'_, PyDict>>,
     )
     prepare {
-        let yt = yield_type.and_then(|y| YieldType::try_from(y).ok());
+        let yt = yield_type.map(YieldType::try_from).transpose()
+            .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))?;
+        let options = recipe_request_options(request_options)?;
     }
     => xbbg_recipes::fixed_income::recipe_yas(
         &eng,
@@ -103,6 +129,7 @@ recipe_wrapper!(
         yield_val,
         price,
         benchmark,
+        options,
     )
 );
 
@@ -113,14 +140,18 @@ recipe_wrapper!(
     ///     engine: Bloomberg engine instance
     ///     ticker: Company equity ticker (e.g., "BAC US Equity")
     ///     fields: Additional fields to retrieve (default: id, name)
+    ///     request_options: Normalized request controls merged into the BQL request
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, ticker, fields=None))]
+    #[pyo3(signature = (engine, ticker, fields=None, request_options=None))]
     |eng|
     fn recipe_preferreds(
         ticker: String,
         fields: Option<Vec<String>>,
-    ) => xbbg_recipes::fixed_income::recipe_preferreds(&eng, ticker, fields)
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::fixed_income::recipe_preferreds(&eng, ticker, fields, options)
 );
 
 recipe_wrapper!(
@@ -131,22 +162,24 @@ recipe_wrapper!(
     ///     ticker: Company ticker prefix (e.g., "AAPL")
     ///     ccy: Currency filter (e.g., "USD"). None for all currencies.
     ///     fields: Additional fields to retrieve (default: id)
-    ///     active_only: If true, only return active bonds (default: true)
+    ///     request_options: Normalized request controls merged into the BQL request
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, ticker, ccy=None, fields=None, active_only=true))]
+    #[pyo3(signature = (engine, ticker, ccy=None, fields=None, request_options=None))]
     |eng|
     fn recipe_corporate_bonds(
         ticker: String,
         ccy: Option<String>,
         fields: Option<Vec<String>>,
-        active_only: bool,
-    ) => xbbg_recipes::fixed_income::recipe_corporate_bonds(
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::fixed_income::recipe_corporate_bonds(
         &eng,
         ticker,
         ccy,
         fields,
-        active_only,
+        options,
     )
 );
 
@@ -160,23 +193,29 @@ recipe_wrapper!(
     ///     end_datetime: End datetime (ISO format)
     ///     event_types: Event types to retrieve (default: ["BID", "ASK"])
     ///     include_broker_codes: Include broker/dealer codes (default: true)
+    ///     request_options: Normalized include flags, request controls, and input/output timezones
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, ticker, start_datetime, end_datetime, event_types=None, include_broker_codes=true))]
+    #[pyo3(signature = (engine, ticker, start_datetime=None, end_datetime=None, event_types=None, include_broker_codes=true, request_options=None))]
+    #[allow(clippy::too_many_arguments)]
     |eng|
     fn recipe_bqr(
         ticker: String,
-        start_datetime: String,
-        end_datetime: String,
+        start_datetime: Option<String>,
+        end_datetime: Option<String>,
         event_types: Option<Vec<String>>,
         include_broker_codes: bool,
-    ) => xbbg_recipes::fixed_income::recipe_bqr(
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::fixed_income::recipe_bqr(
         &eng,
         ticker,
         start_datetime,
         end_datetime,
         event_types,
         include_broker_codes,
+        options,
     )
 );
 
@@ -192,15 +231,19 @@ recipe_wrapper!(
     ///     gen_ticker: Generic futures ticker (e.g., "ES1 Index", "CL2 Comdty")
     ///     dt: Reference date (YYYYMMDD format)
     ///     freq: Roll frequency ("M" monthly, "Q"/"QE" quarterly)
+    ///     request_options: Normalized request controls; internal data retains the recipe's required shape
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, gen_ticker, dt, freq=None))]
+    #[pyo3(signature = (engine, gen_ticker, dt, freq=None, request_options=None))]
     |eng|
     fn recipe_fut_ticker(
         gen_ticker: String,
         dt: String,
         freq: Option<String>,
-    ) => xbbg_recipes::futures::recipe_fut_ticker(&eng, gen_ticker, dt, freq)
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::futures::recipe_fut_ticker(&eng, gen_ticker, dt, freq, options)
 );
 
 recipe_wrapper!(
@@ -211,15 +254,19 @@ recipe_wrapper!(
     ///     gen_ticker: Generic futures ticker (e.g., "ES1 Index")
     ///     dt: Reference date (YYYYMMDD format)
     ///     freq: Roll frequency ("M" monthly, "Q"/"QE" quarterly)
+    ///     request_options: Normalized request controls; internal data retains the recipe's required shape
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, gen_ticker, dt, freq=None))]
+    #[pyo3(signature = (engine, gen_ticker, dt, freq=None, request_options=None))]
     |eng|
     fn recipe_active_futures(
         gen_ticker: String,
         dt: String,
         freq: Option<String>,
-    ) => xbbg_recipes::futures::recipe_active_futures(&eng, gen_ticker, dt, freq)
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::futures::recipe_active_futures(&eng, gen_ticker, dt, freq, options)
 );
 
 recipe_wrapper!(
@@ -319,17 +366,22 @@ recipe_wrapper!(
     ///     tickers: Securities to query
     ///     start_date: Start date (YYYYMMDD format)
     ///     end_date: End date (YYYYMMDD format)
-    ///     dvd_type: Dividend type filter (e.g., "all", "regular")
+    ///     dvd_type: Dividend alias or raw Bloomberg bulk field
+    ///     request_options: Normalized request controls; raw is ignored and bulk format is fixed
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, tickers, start_date, end_date, dvd_type=None))]
+    #[pyo3(signature = (engine, tickers, start_date, end_date, dvd_type=None, request_options=None))]
+    #[allow(clippy::too_many_arguments)]
     |eng|
     fn recipe_dividend(
         tickers: Vec<String>,
         start_date: String,
         end_date: String,
         dvd_type: Option<String>,
-    ) => xbbg_recipes::historical::recipe_dividend(&eng, tickers, dvd_type, start_date, end_date)
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::historical::recipe_dividend(&eng, tickers, dvd_type, start_date, end_date, options)
 );
 
 recipe_wrapper!(
@@ -372,9 +424,11 @@ recipe_wrapper!(
     ///     end_date: End date (YYYYMMDD format)
     ///     ccy: Currency for conversion. None for local currency.
     ///     factor: Division factor (e.g., 1_000_000.0 for millions)
+    ///     request_options: Normalized request controls, adjustment shorthand, and supported output format
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, tickers, start_date, end_date, ccy=None, factor=None))]
+    #[pyo3(signature = (engine, tickers, start_date, end_date, ccy=None, factor=None, request_options=None))]
+    #[allow(clippy::too_many_arguments)]
     |eng|
     fn recipe_turnover(
         tickers: Vec<String>,
@@ -382,13 +436,17 @@ recipe_wrapper!(
         end_date: String,
         ccy: Option<String>,
         factor: Option<f64>,
-    ) => xbbg_recipes::historical::recipe_turnover(
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::historical::recipe_turnover(
         &eng,
         tickers,
         start_date,
         end_date,
         ccy,
         factor,
+        options,
     )
 );
 
@@ -399,14 +457,52 @@ recipe_wrapper!(
     ///     engine: Bloomberg engine instance
     ///     etf_ticker: ETF ticker (e.g., "SPY US Equity")
     ///     fields: Additional fields beyond defaults (id_isin, weights, id().position)
+    ///     request_options: Normalized request controls merged into the BQL request
     #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-    #[pyo3(signature = (engine, etf_ticker, fields=None))]
+    #[pyo3(signature = (engine, etf_ticker, fields=None, request_options=None))]
     |eng|
     fn recipe_etf_holdings(
         etf_ticker: String,
         fields: Option<Vec<String>>,
-    ) => xbbg_recipes::historical::recipe_etf_holdings(&eng, etf_ticker, fields)
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::historical::recipe_etf_holdings(&eng, etf_ticker, fields, options)
+);
+
+recipe_wrapper!(
+    /// Fetch statement or geography/product earnings and hierarchical percentages.
+    ///
+    /// Args:
+    ///     engine: Bloomberg engine instance
+    ///     tickers: Securities to query
+    ///     by: Geo/Product breakdown or Q/A period granularity
+    ///     typ: Statement type IS/BS/CF or a geography/product metric
+    ///     ccy: Currency override
+    ///     level: Optional hierarchy filter (1 or 2)
+    ///     year: Fiscal year override
+    ///     periods: Number of periods
+    ///     request_options: Normalized request controls; raw is ignored and bulk format is fixed
+    #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+    #[pyfunction]
+    #[pyo3(signature = (engine, tickers, by=None, typ="Revenue".to_string(), ccy=None, level=None, year=None, periods=None, request_options=None))]
+    #[allow(clippy::too_many_arguments)]
+    |eng|
+    fn recipe_earning(
+        tickers: Vec<String>,
+        by: Option<String>,
+        typ: String,
+        ccy: Option<String>,
+        level: Option<i32>,
+        year: Option<i32>,
+        periods: Option<i32>,
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare { let options = recipe_request_options(request_options)?; }
+    => xbbg_recipes::historical::recipe_earning(
+        &eng, tickers, by, typ, ccy, level, year, periods, options,
+    )
 );
 
 // =============================================================================
@@ -567,6 +663,36 @@ recipe_wrapper!(
 // =============================================================================
 
 recipe_wrapper!(
+    /// Convert long or wide Arrow historical values into a target currency.
+    ///
+    /// Args:
+    ///     engine: Bloomberg engine instance
+    ///     data: Arrow array/stream-compatible historical data
+    ///     target_ccy: Target currency; local preserves the input
+    ///     start_date: Fallback query start date
+    ///     end_date: Fallback query end date
+    ///     request_options: Normalized request controls, scoped to each internal request's securities
+    #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+    #[pyfunction]
+    #[pyo3(signature = (engine, data, target_ccy="USD".to_string(), start_date=String::new(), end_date=String::new(), request_options=None))]
+    |eng|
+    fn recipe_adjust_ccy(
+        data: &Bound<'_, PyAny>,
+        target_ccy: String,
+        start_date: String,
+        end_date: String,
+        request_options: Option<&Bound<'_, PyDict>>,
+    )
+    prepare {
+        let data = recipe_arrow_batch(data)?;
+        let options = recipe_request_options(request_options)?;
+    }
+    => xbbg_recipes::currency::recipe_adjust_ccy(
+        &eng, data, target_ccy, start_date, end_date, options,
+    )
+);
+
+recipe_wrapper!(
     /// Fetch historical prices with currency conversion.
     ///
     /// Args:
@@ -594,7 +720,7 @@ recipe_wrapper!(
 );
 
 /// Register all recipe functions with the Python module.
-pub fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
     register_pyfunctions!(
         m;
         recipe_yas,
@@ -610,6 +736,7 @@ pub fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         recipe_dividend_yield,
         recipe_turnover,
         recipe_etf_holdings,
+        recipe_earning,
         recipe_vol_surface,
         recipe_index_members,
         recipe_resolve_isins,
@@ -620,6 +747,7 @@ pub fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         recipe_resolve_venues,
         recipe_auction_snapshot,
         recipe_currency_conversion,
+        recipe_adjust_ccy,
     )
 }
 
@@ -656,17 +784,12 @@ mod tests {
     }
 
     #[test]
-    fn recipe_timeouts_preserve_the_typed_exception_for_each_engine_wrapper() {
+    fn recipe_core_timeout_preserves_the_typed_exception() {
         Python::initialize();
         Python::attach(|py| {
-            for timeout in [
-                BlpAsyncError::Timeout,
-                BlpAsyncError::Blp(BlpError::Timeout),
-                BlpAsyncError::BlpError(BlpError::Timeout),
-            ] {
-                let error = recipe_err(RecipeError::Engine(Box::new(timeout)));
-                assert!(error.is_instance_of::<BlpTimeoutError>(py));
-            }
+            let error = recipe_err(RecipeError::Engine(Box::new(BlpError::Timeout.into())));
+            assert!(error.is_instance_of::<BlpTimeoutError>(py));
+            assert_eq!(error.value(py).to_string(), "Request timed out");
         });
     }
 
@@ -705,29 +828,29 @@ mod tests {
     }
 
     #[test]
-    fn recipe_engine_failures_preserve_session_request_and_internal_types() {
+    fn recipe_engine_failures_preserve_session_and_internal_types() {
         Python::initialize();
         Python::attach(|py| {
-            for session in [
-                BlpAsyncError::SessionLost {
-                    worker_id: 2,
-                    in_flight_count: 1,
-                },
+            let session = recipe_err(RecipeError::Engine(Box::new(
                 BlpAsyncError::AllWorkersDown { pool_size: 2 },
-            ] {
-                let error = recipe_err(RecipeError::Engine(Box::new(session)));
-                assert!(error.is_instance_of::<BlpSessionError>(py));
-            }
-
-            let cancelled = recipe_err(RecipeError::Engine(Box::new(BlpAsyncError::Cancelled)));
-            assert!(cancelled.is_instance_of::<BlpRequestError>(py));
+            )));
+            assert!(session.is_instance_of::<BlpSessionError>(py));
+            assert_eq!(
+                session.value(py).to_string(),
+                "all 2 request workers are dead — no healthy worker available",
+            );
 
             for internal in [
                 BlpAsyncError::ChannelClosed,
                 BlpAsyncError::Internal("synthetic failure".into()),
+                BlpError::Internal {
+                    detail: "session connection dropped (worker=2)".into(),
+                }
+                .into(),
             ] {
                 let error = recipe_err(RecipeError::Engine(Box::new(internal)));
                 assert!(error.is_instance_of::<BlpInternalError>(py));
+                assert!(!error.is_instance_of::<BlpSessionError>(py));
             }
         });
     }

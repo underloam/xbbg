@@ -1,215 +1,30 @@
-import type { BloombergToolName } from "./options";
+import {
+  ERROR_SHAPE_KEYS,
+  MAX_ERROR_DIAGNOSTICS,
+  MAX_RESULT_DEPTH,
+  PRIORITY_KEYS,
+  TRUNCATION_REASON_ORDER,
+  type ResultTruncationReason,
+} from "./_defs_gen";
+import { buildEntitlementProperty } from "./result-entitlements";
+import {
+  addReason,
+  consumeVisit,
+  defineJsonProperty,
+  isPlainObject,
+  OMIT,
+  ownEnumerableDescriptor,
+  type BuiltValue,
+  type LimitResult,
+  type LimitState,
+  type ObjectAccumulator,
+  type ResultLimitOptions,
+  type ResultTruncationSummary,
+} from "./result-types";
 
-export interface ResultLimitOptions {
-  readonly maxResultBytes: number;
-  readonly maxResultNodes: number;
-  readonly maxRows: number;
-  readonly maxStringChars: number;
-}
+const ERROR_KEYS = new Set<string>(ERROR_SHAPE_KEYS);
+const ENTITLEMENT_TRAVERSAL = { buildValue, appendBuiltProperty };
 
-export interface ToolResultLimitOptions extends ResultLimitOptions {
-  readonly maxContentBytes: number;
-  readonly maxContentRows: number;
-}
-
-interface ToolResultWorkBudgetOptions {
-  readonly materializedNodes?: number;
-}
-
-type ToolResultBuildOptions = ToolResultLimitOptions & ToolResultWorkBudgetOptions;
-
-export type ResultTruncationReason =
-  | "accessor_omitted"
-  | "binary_data"
-  | "circular_reference"
-  | "entitlement_limit"
-  | "invalid_entitlement_data"
-  | "max_result_bytes"
-  | "max_result_depth"
-  | "max_result_nodes"
-  | "max_rows"
-  | "max_string_chars"
-  | "unsupported_value"
-  | "upstream_truncation";
-
-export interface ResultTruncationSummary {
-  readonly reasons: readonly ResultTruncationReason[];
-  readonly retainedNodes?: number;
-  readonly inspectedNodes?: number;
-  readonly omittedPropertiesAtLeast?: number;
-  readonly omittedRows?: number;
-}
-
-export interface LimitResult {
-  readonly byteLength: number;
-  readonly inspectedNodes: number;
-  readonly maximumArrayRows: number;
-  readonly retainedRows: number;
-  readonly errorDiagnostics: readonly Readonly<Record<string, unknown>>[];
-  readonly hasErrors: boolean;
-  readonly rowCount: number | null;
-  readonly truncated: boolean;
-  readonly truncation?: ResultTruncationSummary;
-  readonly value: unknown;
-}
-
-export interface ToolEnvelope {
-  readonly tool: BloombergToolName;
-  readonly rowCount: number | null;
-  readonly truncated: boolean;
-  readonly truncation?: ResultTruncationSummary;
-  readonly hasErrors?: true;
-  readonly data: unknown;
-}
-
-export type ToolContentAndArtifact = [string, ToolEnvelope];
-
-interface LimitState {
-  readonly ancestors: WeakSet<object>;
-  readonly diagnostics: Readonly<Record<string, unknown>>[];
-  readonly limits: ResultLimitOptions;
-  readonly reasons: Set<ResultTruncationReason>;
-  readonly rowsBeforeMetadata: boolean;
-  maximumArrayRows: number;
-  hasErrors: boolean;
-  omittedPropertiesAtLeast: number;
-  remainingRows: number;
-  omittedRows: number;
-  retainedNodes: number;
-  retainedRows: number;
-  visitedNodes: number;
-}
-
-interface BuiltValue {
-  readonly byteLength: number;
-  readonly value: unknown;
-}
-
-interface PreparedEidData {
-  readonly data: Record<string, unknown>;
-  readonly invalidSecurityCount: number;
-  readonly scannedSecurityCount: number;
-  readonly securityCounts: readonly { originalCount: number; retainedCount: number }[];
-  readonly totalEidCount: number | null;
-  readonly totalSecurityCount: number | null;
-  readonly truncation?: EidDataTruncation;
-}
-
-interface EidDataTruncation {
-  readonly totalSecurityCount: number | null;
-  readonly retainedSecurityCount: number;
-  readonly omittedSecurityCount: number | null;
-  readonly invalidSecurityCount: number;
-  readonly scannedSecurityCount: number;
-  readonly totalEidCount: number | null;
-  readonly retainedEidCount: number;
-  /** Counts align by index with Object.keys(eidData), avoiding duplicate security-name bytes. */
-  readonly securityCounts: readonly { originalCount: number | null; retainedCount: number }[];
-}
-
-interface ObjectAccumulator {
-  byteLength: number;
-  propertyCount: number;
-  readonly value: Record<string, unknown>;
-}
-
-const OMIT = Symbol("omit_result_value");
-const MAX_RESULT_DEPTH = 32;
-const MIN_TOOL_RESULT_NODES = 10;
-const MAX_ERROR_DIAGNOSTICS = 8;
-const RESULT_ENVELOPE_RESERVE_BYTES = 768;
-const CONTENT_ENVELOPE_RESERVE_BYTES = 768;
-const MIN_TOOL_RESULT_BYTES = 256;
-/** Maximum aggregate EIDs retained and accepted by entitlement checks. */
-export const MAX_ENTITLEMENT_EIDS = 10_000;
-export const MAX_BLOOMBERG_EID = 2_147_483_647;
-const MAX_EID_SECURITIES = 1_000;
-const MAX_EID_SECURITY_NAME_BYTES = 65_536;
-const UTF8_ENCODER = new TextEncoder();
-
-const TRUNCATION_REASON_ORDER: readonly ResultTruncationReason[] = [
-  "max_rows",
-  "max_string_chars",
-  "max_result_bytes",
-  "max_result_nodes",
-  "max_result_depth",
-  "circular_reference",
-  "binary_data",
-  "accessor_omitted",
-  "unsupported_value",
-  "invalid_entitlement_data",
-  "entitlement_limit",
-  "upstream_truncation",
-];
-
-const ERROR_SHAPE_KEYS: Readonly<Record<string, true>> = {
-  error: true,
-  errors: true,
-  fielderrors: true,
-  fieldexception: true,
-  fieldexceptions: true,
-  responseerror: true,
-  responseerrors: true,
-  securityerror: true,
-  securityerrors: true,
-  unsubscribeerror: true,
-};
-
-/**
- * Known diagnostic keys are probed before ordinary properties. This preserves
- * Bloomberg errors and entitlement metadata even when an earlier, very wide
- * object branch exhausts the aggregate budget. Remaining keys retain their
- * original enumeration order.
- */
-const PRIORITY_KEYS = [
-  "error",
-  "errors",
-  "responseError",
-  "responseErrors",
-  "securityError",
-  "securityErrors",
-  "fieldException",
-  "fieldExceptions",
-  "fieldErrors",
-  "unsubscribeError",
-  "truncated",
-  "truncatedInput",
-  "eidData",
-  "eidDataTruncation",
-  "diagnostics",
-  "metadata",
-] as const;
-
-function isPlainObject(value: object): value is Record<string, unknown> {
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function addReason(state: LimitState, reason: ResultTruncationReason): void {
-  state.reasons.add(reason);
-}
-
-function consumeVisit(state: LimitState): boolean {
-  if (state.visitedNodes >= state.limits.maxResultNodes) {
-    addReason(state, "max_result_nodes");
-    return false;
-  }
-  state.visitedNodes += 1;
-  return true;
-}
-
-function consumeVisitBefore(state: LimitState, limit: number): boolean {
-  if (state.visitedNodes >= limit) {
-    addReason(state, "max_result_nodes");
-    return false;
-  }
-  return consumeVisit(state);
-}
-
-function projectionBudget(totalBytes: number, preferredReserveBytes: number): number {
-  const reserve = Math.min(preferredReserveBytes, Math.floor(totalBytes / 2));
-  return Math.max(4, totalBytes - reserve);
-}
 function jsonStringUnit(
   value: string,
   index: number,
@@ -257,36 +72,6 @@ function jsonStringByteLength(value: string, stopAfter = Number.MAX_SAFE_INTEGER
       return stopAfter + 1;
     }
     index += unit.width;
-  }
-  return byteLength;
-}
-
-function utf8ByteLengthAtMost(value: string, maximum: number): number | null {
-  let byteLength = 0;
-  for (let index = 0; index < value.length;) {
-    const code = value.charCodeAt(index);
-    let width = 1;
-    let bytes: number;
-    if (code <= 0x7f) {
-      bytes = 1;
-    } else if (code <= 0x7ff) {
-      bytes = 2;
-    } else if (code >= 0xd800 && code <= 0xdbff) {
-      const next = value.charCodeAt(index + 1);
-      if (next >= 0xdc00 && next <= 0xdfff) {
-        bytes = 4;
-        width = 2;
-      } else {
-        bytes = 3;
-      }
-    } else {
-      bytes = 3;
-    }
-    byteLength += bytes;
-    if (byteLength > maximum) {
-      return null;
-    }
-    index += width;
   }
   return byteLength;
 }
@@ -359,24 +144,6 @@ function fitString(
   return { byteLength: fittedBytes, value: fitted };
 }
 
-function defineJsonProperty(target: Record<string, unknown>, key: string, value: unknown): void {
-  Object.defineProperty(target, key, {
-    configurable: true,
-    enumerable: true,
-    value,
-    writable: true,
-  });
-}
-
-function ownEnumerableDescriptor(value: object, key: string): PropertyDescriptor | undefined {
-  try {
-    const descriptor = Object.getOwnPropertyDescriptor(value, key);
-    return descriptor?.enumerable === true ? descriptor : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function rememberErrorDiagnostic(state: LimitState, key: string, value: unknown): void {
   state.hasErrors = true;
   if (state.diagnostics.length >= MAX_ERROR_DIAGNOSTICS) {
@@ -417,321 +184,6 @@ function buildUnsupported(
 ): BuiltValue | typeof OMIT {
   addReason(state, reason);
   return fitString(label, maximumJsonBytes, state);
-}
-
-function prepareEidData(value: unknown, state: LimitState): PreparedEidData {
-  const data = Object.create(null) as Record<string, unknown>;
-  const securityCounts: { originalCount: number; retainedCount: number }[] = [];
-  let validContainer = false;
-  if (typeof value === "object" && value !== null) {
-    try {
-      validContainer = isPlainObject(value);
-    } catch {
-      validContainer = false;
-    }
-  }
-  if (!validContainer) {
-    addReason(state, "invalid_entitlement_data");
-    return {
-      data,
-      invalidSecurityCount: 1,
-      scannedSecurityCount: 1,
-      securityCounts,
-      totalEidCount: 0,
-      totalSecurityCount: 1,
-      truncation: {
-        invalidSecurityCount: 1,
-        omittedSecurityCount: 0,
-        retainedEidCount: 0,
-        retainedSecurityCount: 0,
-        scannedSecurityCount: 1,
-        securityCounts,
-        totalEidCount: 0,
-        totalSecurityCount: 1,
-      },
-    };
-  }
-  const eidRecord = value as Record<string, unknown>;
-
-  let complete = true;
-  let invalidSecurityCount = 0;
-  let retainedEidCount = 0;
-  let retainedSecurityCount = 0;
-  let retainedSecurityNameBytes = 0;
-  let scannedSecurityCount = 0;
-  let totalEidCount = 0;
-  const remainingNodeBudget = state.limits.maxResultNodes - state.visitedNodes;
-  const reservedSummaryNodes = Math.min(16, Math.max(0, remainingNodeBudget - 1));
-  const eidVisitLimit =
-    state.visitedNodes + Math.max(1, Math.floor((remainingNodeBudget - reservedSummaryNodes) / 2));
-
-  securityLoop: for (const security in eidRecord) {
-    if (!Object.hasOwn(eidRecord, security)) {
-      continue;
-    }
-    if (!consumeVisitBefore(state, eidVisitLimit)) {
-      complete = false;
-      break;
-    }
-    scannedSecurityCount += 1;
-    const descriptor = ownEnumerableDescriptor(eidRecord, security);
-    if (descriptor === undefined) {
-      continue;
-    }
-    if (!("value" in descriptor) || !Array.isArray(descriptor.value)) {
-      invalidSecurityCount += 1;
-      addReason(state, "invalid_entitlement_data");
-      continue;
-    }
-    const eids = descriptor.value as readonly unknown[];
-    const remainingNameBytes = MAX_EID_SECURITY_NAME_BYTES - retainedSecurityNameBytes;
-    const securityNameBytes = utf8ByteLengthAtMost(security, remainingNameBytes);
-    const canRetainSecurity =
-      retainedSecurityCount < MAX_EID_SECURITIES && securityNameBytes !== null;
-    const remainingEidCapacity = Math.max(0, MAX_ENTITLEMENT_EIDS - retainedEidCount);
-    const retained: number[] = [];
-    let incomplete = false;
-    for (let index = 0; index < eids.length; index += 1) {
-      if (!consumeVisitBefore(state, eidVisitLimit)) {
-        complete = false;
-        incomplete = true;
-        break;
-      }
-      const eidDescriptor = Object.getOwnPropertyDescriptor(eids, String(index));
-      const eid: unknown =
-        eidDescriptor !== undefined && "value" in eidDescriptor ? eidDescriptor.value : undefined;
-      if (
-        eidDescriptor === undefined ||
-        !("value" in eidDescriptor) ||
-        typeof eid !== "number" ||
-        !Number.isInteger(eid) ||
-        eid <= 0 ||
-        eid > MAX_BLOOMBERG_EID
-      ) {
-        invalidSecurityCount += 1;
-        addReason(state, "invalid_entitlement_data");
-        continue securityLoop;
-      }
-      if (canRetainSecurity && retained.length < remainingEidCapacity) {
-        retained.push(eid);
-      }
-    }
-    totalEidCount = Math.min(Number.MAX_SAFE_INTEGER, totalEidCount + eids.length);
-
-    if (!canRetainSecurity) {
-      addReason(state, "entitlement_limit");
-      if (incomplete) {
-        break;
-      }
-      continue;
-    }
-
-    retainedEidCount += retained.length;
-    retainedSecurityCount += 1;
-    retainedSecurityNameBytes += securityNameBytes;
-    defineJsonProperty(data, security, retained);
-    securityCounts.push({ originalCount: eids.length, retainedCount: retained.length });
-    if (!incomplete && retained.length !== eids.length) {
-      addReason(state, "entitlement_limit");
-    }
-    if (incomplete) {
-      break;
-    }
-  }
-
-  const omittedSecurityCount = complete
-    ? scannedSecurityCount - retainedSecurityCount - invalidSecurityCount
-    : null;
-  const wasTruncated =
-    !complete ||
-    invalidSecurityCount > 0 ||
-    omittedSecurityCount !== 0 ||
-    retainedEidCount !== totalEidCount;
-  if (!wasTruncated) {
-    return {
-      data,
-      invalidSecurityCount,
-      scannedSecurityCount,
-      securityCounts,
-      totalEidCount,
-      totalSecurityCount: scannedSecurityCount,
-    };
-  }
-  return {
-    data,
-    invalidSecurityCount,
-    scannedSecurityCount,
-    securityCounts,
-    totalEidCount: complete ? totalEidCount : null,
-    totalSecurityCount: complete ? scannedSecurityCount : null,
-    truncation: {
-      invalidSecurityCount,
-      omittedSecurityCount,
-      retainedEidCount,
-      retainedSecurityCount,
-      scannedSecurityCount,
-      securityCounts,
-      totalEidCount: complete ? totalEidCount : null,
-      totalSecurityCount: complete ? scannedSecurityCount : null,
-    },
-  };
-}
-
-function eidSummaryRecord(source: object): Record<string, unknown> | undefined {
-  const descriptor = ownEnumerableDescriptor(source, "eidDataTruncation");
-  if (
-    descriptor === undefined ||
-    !("value" in descriptor) ||
-    typeof descriptor.value !== "object" ||
-    descriptor.value === null
-  ) {
-    return undefined;
-  }
-  return descriptor.value as Record<string, unknown>;
-}
-
-function eidSummaryCount(
-  summary: Record<string, unknown> | undefined,
-  key: string,
-): number | null | undefined {
-  if (summary === undefined) {
-    return undefined;
-  }
-  const descriptor = ownEnumerableDescriptor(summary, key);
-  if (descriptor === undefined || !("value" in descriptor)) {
-    return undefined;
-  }
-  const value: unknown = descriptor.value;
-  return value === null || (typeof value === "number" && Number.isSafeInteger(value) && value >= 0)
-    ? value
-    : undefined;
-}
-
-function eidSummarySecurityCounts(
-  summary: Record<string, unknown> | undefined,
-): readonly { originalCount: number | null; retainedCount: number }[] {
-  if (summary === undefined) {
-    return [];
-  }
-  const descriptor = ownEnumerableDescriptor(summary, "securityCounts");
-  if (descriptor === undefined || !("value" in descriptor) || !Array.isArray(descriptor.value)) {
-    return [];
-  }
-  const counts: { originalCount: number | null; retainedCount: number }[] = [];
-  for (let index = 0; index < descriptor.value.length; index += 1) {
-    const entryDescriptor = Object.getOwnPropertyDescriptor(descriptor.value, String(index));
-    if (
-      entryDescriptor === undefined ||
-      !("value" in entryDescriptor) ||
-      typeof entryDescriptor.value !== "object" ||
-      entryDescriptor.value === null
-    ) {
-      break;
-    }
-    const originalCount = eidSummaryCount(
-      entryDescriptor.value as Record<string, unknown>,
-      "originalCount",
-    );
-    const retainedCount = eidSummaryCount(
-      entryDescriptor.value as Record<string, unknown>,
-      "retainedCount",
-    );
-    if (
-      originalCount === undefined ||
-      (originalCount !== null && typeof originalCount !== "number") ||
-      typeof retainedCount !== "number"
-    ) {
-      break;
-    }
-    counts.push({ originalCount, retainedCount });
-  }
-  return counts;
-}
-
-function emittedEidTruncation(
-  source: object,
-  emittedValue: unknown,
-  prepared: PreparedEidData,
-): EidDataTruncation | undefined {
-  const emitted =
-    typeof emittedValue === "object" && emittedValue !== null
-      ? (emittedValue as Record<string, unknown>)
-      : (Object.create(null) as Record<string, unknown>);
-  const prior = eidSummaryRecord(source);
-  const priorSecurityCounts = eidSummarySecurityCounts(prior);
-  const securityCounts: { originalCount: number | null; retainedCount: number }[] = [];
-  let retainedEidCount = 0;
-  let retainedSecurityCount = 0;
-  for (const security in emitted) {
-    if (!Object.hasOwn(emitted, security)) {
-      continue;
-    }
-    const descriptor = ownEnumerableDescriptor(emitted, security);
-    if (descriptor === undefined || !("value" in descriptor) || !Array.isArray(descriptor.value)) {
-      continue;
-    }
-    const retainedCount = descriptor.value.length;
-    const preparedCount = prepared.securityCounts[retainedSecurityCount];
-    const priorCount = priorSecurityCounts[retainedSecurityCount];
-    securityCounts.push({
-      originalCount:
-        prior === undefined
-          ? (preparedCount?.originalCount ?? retainedCount)
-          : (priorCount?.originalCount ?? null),
-      retainedCount,
-    });
-    retainedEidCount = Math.min(Number.MAX_SAFE_INTEGER, retainedEidCount + retainedCount);
-    retainedSecurityCount += 1;
-  }
-
-  const priorTotalEidCount = eidSummaryCount(prior, "totalEidCount");
-  const priorTotalSecurityCount = eidSummaryCount(prior, "totalSecurityCount");
-  const totalEidCount =
-    prior === undefined
-      ? prepared.totalEidCount
-      : priorTotalEidCount === undefined
-        ? null
-        : priorTotalEidCount;
-  const totalSecurityCount =
-    prior === undefined
-      ? prepared.totalSecurityCount
-      : priorTotalSecurityCount === undefined
-        ? null
-        : priorTotalSecurityCount;
-  const priorInvalidSecurityCount = eidSummaryCount(prior, "invalidSecurityCount");
-  const invalidSecurityCount =
-    typeof priorInvalidSecurityCount === "number"
-      ? priorInvalidSecurityCount
-      : prepared.invalidSecurityCount;
-  const priorScannedSecurityCount = eidSummaryCount(prior, "scannedSecurityCount");
-  const scannedSecurityCount =
-    typeof priorScannedSecurityCount === "number"
-      ? priorScannedSecurityCount
-      : prepared.scannedSecurityCount;
-  const omittedSecurityCount =
-    totalSecurityCount === null
-      ? null
-      : Math.max(0, totalSecurityCount - retainedSecurityCount - invalidSecurityCount);
-  const truncated =
-    prior !== undefined ||
-    prepared.truncation !== undefined ||
-    totalEidCount === null ||
-    totalSecurityCount === null ||
-    retainedEidCount !== totalEidCount ||
-    retainedSecurityCount + invalidSecurityCount !== totalSecurityCount;
-  if (!truncated) {
-    return undefined;
-  }
-  return {
-    retainedEidCount,
-    totalEidCount,
-    retainedSecurityCount,
-    totalSecurityCount,
-    securityCounts,
-    invalidSecurityCount,
-    omittedSecurityCount,
-    scannedSecurityCount,
-  };
 }
 
 function appendBuiltProperty(
@@ -799,47 +251,23 @@ function buildProperty(
     addReason(state, "accessor_omitted");
     rawValue = "[Accessor omitted]";
   }
-  const errorKey = ERROR_SHAPE_KEYS[key.toLowerCase()] === true && hasReportedError(rawValue);
+  const errorKey = ERROR_KEYS.has(key.toLowerCase()) && hasReportedError(rawValue);
   if (errorKey) {
     state.hasErrors = true;
   }
   const useSharedRows = key === "rows" || (key === "data" && Array.isArray(rawValue));
 
   if (key === "eidData") {
-    const prepared = prepareEidData(rawValue, state);
-    const built = buildValue(
-      prepared.data,
-      Math.max(2, Math.floor(childBudget / 3)),
+    return buildEntitlementProperty(
+      source,
+      rawValue,
+      accumulator,
+      maximumJsonBytes,
+      childBudget,
       state,
-      depth + 1,
-      MAX_ENTITLEMENT_EIDS,
-      false,
+      depth,
+      ENTITLEMENT_TRAVERSAL,
     );
-    if (built === OMIT || !appendBuiltProperty(accumulator, key, built, maximumJsonBytes, state)) {
-      return false;
-    }
-    const emittedTruncation = emittedEidTruncation(source, built.value, prepared);
-    if (emittedTruncation !== undefined) {
-      const summaryCommaBytes = accumulator.propertyCount === 0 ? 0 : 1;
-      const summaryKeyBytes = jsonStringByteLength("eidDataTruncation");
-      const summaryBudget =
-        maximumJsonBytes - accumulator.byteLength - summaryCommaBytes - summaryKeyBytes - 1;
-      const summary = buildValue(
-        emittedTruncation,
-        summaryBudget,
-        state,
-        depth + 1,
-        MAX_EID_SECURITIES,
-        false,
-      );
-      if (
-        summary === OMIT ||
-        !appendBuiltProperty(accumulator, "eidDataTruncation", summary, maximumJsonBytes, state)
-      ) {
-        state.omittedPropertiesAtLeast += 1;
-      }
-    }
-    return true;
   }
 
   const built = buildValue(rawValue, childBudget, state, depth + 1, rowLimit, useSharedRows);
@@ -947,7 +375,7 @@ function buildArray(
       value: Object.create(null) as Record<string, unknown>,
     };
     for (const key of PRIORITY_KEYS) {
-      const isErrorMetadata = key === "diagnostics" || ERROR_SHAPE_KEYS[key.toLowerCase()] === true;
+      const isErrorMetadata = key === "diagnostics" || ERROR_KEYS.has(key.toLowerCase());
       if (state.rowsBeforeMetadata && !isErrorMetadata) {
         continue;
       }
@@ -972,7 +400,7 @@ function buildArray(
 
     if (state.rowsBeforeMetadata) {
       for (const key of PRIORITY_KEYS) {
-        if (key === "diagnostics" || ERROR_SHAPE_KEYS[key.toLowerCase()] === true) {
+        if (key === "diagnostics" || ERROR_KEYS.has(key.toLowerCase())) {
           continue;
         }
         if (!buildProperty(value, key, accumulator, maximumJsonBytes, state, depth, rowLimit)) {
@@ -1010,6 +438,8 @@ function buildObject(
       value: Object.create(null) as Record<string, unknown>,
     };
     const processed = new Set<string>();
+    // Preserve diagnostics and entitlement metadata before a wide ordinary
+    // branch can exhaust the shared budget; other keys keep enumeration order.
     for (const key of PRIORITY_KEYS) {
       processed.add(key);
       if (!buildProperty(value, key, accumulator, maximumJsonBytes, state, depth, rowLimit)) {
@@ -1189,7 +619,7 @@ function buildValue(
   }
 }
 
-function rowCountOf(value: unknown): number | null {
+export function rowCountOf(value: unknown): number | null {
   if (Array.isArray(value)) {
     return value.length;
   }
@@ -1227,7 +657,7 @@ function truncationSummary(state: LimitState): ResultTruncationSummary | undefin
   };
 }
 
-function validateResultLimits(limits: ResultLimitOptions): void {
+export function validateResultLimits(limits: ResultLimitOptions): void {
   for (const name of ["maxResultBytes", "maxResultNodes", "maxRows", "maxStringChars"] as const) {
     const value = limits[name];
     if (!Number.isSafeInteger(value) || value <= 0) {
@@ -1239,7 +669,7 @@ function validateResultLimits(limits: ResultLimitOptions): void {
   }
 }
 
-function limitResultWithRowPriority(
+export function limitResultWithRowPriority(
   value: unknown,
   limits: ResultLimitOptions,
   rowsBeforeMetadata: boolean,
@@ -1281,167 +711,6 @@ function limitResultWithRowPriority(
   };
 }
 
-export function limitResult(value: unknown, limits: ResultLimitOptions): LimitResult {
-  return limitResultWithRowPriority(value, limits, false);
-}
-
-function artifactEnvelope(
-  tool: BloombergToolName,
-  limited: LimitResult,
-  truncation: ResultTruncationSummary | undefined,
-): ToolEnvelope {
-  return {
-    tool,
-    rowCount: limited.rowCount,
-    truncated: limited.truncated,
-    ...(truncation === undefined ? {} : { truncation }),
-    ...(limited.hasErrors ? { hasErrors: true as const } : {}),
-    data: limited.value,
-  };
-}
-
-function boundedJsonByteLength(value: unknown): number {
-  return UTF8_ENCODER.encode(JSON.stringify(value)).byteLength;
-}
-
-function mergeLimited(first: LimitResult, second: LimitResult): LimitResult {
-  const reasons = new Set<ResultTruncationReason>(first.truncation?.reasons ?? []);
-  for (const reason of second.truncation?.reasons ?? []) {
-    reasons.add(reason);
-  }
-  const retainedNodes = second.truncation?.retainedNodes ?? first.truncation?.retainedNodes;
-  const omittedPropertiesAtLeast =
-    (first.truncation?.omittedPropertiesAtLeast ?? 0) +
-    (second.truncation?.omittedPropertiesAtLeast ?? 0);
-  const omittedRows = (first.truncation?.omittedRows ?? 0) + (second.truncation?.omittedRows ?? 0);
-  const truncation: ResultTruncationSummary | undefined =
-    reasons.size === 0
-      ? undefined
-      : {
-          reasons: TRUNCATION_REASON_ORDER.filter((reason) => reasons.has(reason)),
-          inspectedNodes: first.inspectedNodes + second.inspectedNodes,
-          ...(retainedNodes === undefined ? {} : { retainedNodes }),
-          ...(omittedPropertiesAtLeast === 0 ? {} : { omittedPropertiesAtLeast }),
-          ...(omittedRows === 0 ? {} : { omittedRows }),
-        };
-  return {
-    byteLength: second.byteLength,
-    maximumArrayRows: second.maximumArrayRows,
-    retainedRows: second.retainedRows,
-    errorDiagnostics:
-      second.errorDiagnostics.length === 0 ? first.errorDiagnostics : second.errorDiagnostics,
-    hasErrors: first.hasErrors || second.hasErrors,
-    inspectedNodes: first.inspectedNodes + second.inspectedNodes,
-    rowCount: first.rowCount,
-    truncated: truncation !== undefined,
-    ...(truncation === undefined ? {} : { truncation }),
-    value: second.value,
-  };
-}
-
-function fitArtifact(
-  tool: BloombergToolName,
-  limited: LimitResult,
-  maxResultBytes: number,
-): ToolEnvelope {
-  let envelope = artifactEnvelope(tool, limited, limited.truncation);
-  if (boundedJsonByteLength(envelope) <= maxResultBytes) {
-    return envelope;
-  }
-
-  const fitLimited = limited.truncated ? limited : { ...limited, truncated: true };
-  const reasons = limited.truncation?.reasons ?? ["max_result_bytes"];
-  envelope = artifactEnvelope(tool, fitLimited, { reasons });
-  if (boundedJsonByteLength(envelope) <= maxResultBytes) {
-    return envelope;
-  }
-
-  const primaryReason =
-    reasons.find((reason) => reason !== "max_result_bytes") ?? "max_result_bytes";
-  const compactReasons: ResultTruncationReason[] =
-    primaryReason === "max_result_bytes" ? [primaryReason] : [primaryReason, "max_result_bytes"];
-  envelope = artifactEnvelope(tool, fitLimited, { reasons: compactReasons });
-  if (boundedJsonByteLength(envelope) <= maxResultBytes) {
-    return envelope;
-  }
-
-  envelope = artifactEnvelope(tool, fitLimited, {
-    reasons: ["max_result_bytes"],
-  });
-  if (boundedJsonByteLength(envelope) <= maxResultBytes) {
-    return envelope;
-  }
-
-  return {
-    tool,
-    rowCount: limited.rowCount,
-    truncated: true,
-    truncation: { reasons: ["max_result_bytes"] },
-    ...(limited.hasErrors ? { hasErrors: true as const } : {}),
-    data: null,
-  };
-}
-
-function rowText(rowCount: number | null): string {
-  return rowCount === null
-    ? "row count unknown"
-    : `${String(rowCount)} row${rowCount === 1 ? "" : "s"}`;
-}
-
-function summarizeEnvelope(
-  envelope: ToolEnvelope,
-  contentTruncation: ResultTruncationSummary | undefined,
-): string {
-  const notes: string[] = [];
-  if (
-    envelope.rowCount === 0 ||
-    (!envelope.truncated && (envelope.data === null || envelope.data === undefined))
-  ) {
-    notes.push(
-      "empty result; verify identifiers, fields, and date range before concluding no data exists",
-    );
-  }
-  if (envelope.hasErrors === true) {
-    notes.push("Bloomberg error diagnostics included in preview");
-  }
-  const artifactReasons = envelope.truncation?.reasons.join(",") ?? "none";
-  const contentReasons = contentTruncation?.reasons.join(",") ?? "none";
-  const noteText = notes.length === 0 ? "" : `; ${notes.join("; ")}`;
-  return `${envelope.tool}: ${rowText(envelope.rowCount)}; artifactTruncated=${String(envelope.truncated)}; contentTruncated=${String(contentTruncation !== undefined)}; artifactReasons=${artifactReasons}; contentReasons=${contentReasons}${noteText}`;
-}
-
-function contentPayload(envelope: ToolEnvelope, limited: LimitResult): Record<string, unknown> {
-  const projected = limited.value as Record<string, unknown> | null;
-  return {
-    tool: envelope.tool,
-    rowCount: envelope.rowCount,
-    truncated: envelope.truncated,
-    contentTruncated: limited.truncated,
-    ...(projected ?? { data: null }),
-  };
-}
-
-function formatToolContent(
-  envelope: ToolEnvelope,
-  preview: LimitResult,
-  maxContentBytes: number,
-): string {
-  const firstPreviewValue = preview.value;
-  const summary = summarizeEnvelope(envelope, preview.truncation);
-  const payload = contentPayload(envelope, preview);
-  const content = `${summary}\n${JSON.stringify(payload)}`;
-  if (UTF8_ENCODER.encode(content).byteLength <= maxContentBytes) {
-    return content;
-  }
-
-  const compactSummary = `${envelope.tool}: ${rowText(envelope.rowCount)}; artifactTruncated=${String(envelope.truncated)}; contentTruncated=${String(preview.truncated)}; hasErrors=${String(envelope.hasErrors === true)}`;
-  const compactContent = `${compactSummary}\n${JSON.stringify(firstPreviewValue)}`;
-  if (UTF8_ENCODER.encode(compactContent).byteLength <= maxContentBytes) {
-    return compactContent;
-  }
-  return compactSummary;
-}
-
 function exhaustedProjection(rowCount: number | null): LimitResult {
   return {
     byteLength: 4,
@@ -1461,7 +730,7 @@ function exhaustedProjection(rowCount: number | null): LimitResult {
   };
 }
 
-function projectResult(
+export function projectResult(
   value: unknown,
   limits: ResultLimitOptions,
   rowsBeforeMetadata: boolean,
@@ -1469,188 +738,4 @@ function projectResult(
   return limits.maxResultNodes === 0
     ? exhaustedProjection(rowCountOf(value))
     : limitResultWithRowPriority(value, limits, rowsBeforeMetadata);
-}
-
-function withAggregateInspection(limited: LimitResult, inspectedNodes: number): LimitResult {
-  return {
-    ...limited,
-    inspectedNodes,
-    ...(limited.truncation === undefined
-      ? {}
-      : {
-          truncation: {
-            ...limited.truncation,
-            inspectedNodes,
-          },
-        }),
-  };
-}
-
-function reusedProjection(value: unknown, canonical: LimitResult): LimitResult {
-  return {
-    byteLength: boundedJsonByteLength(value),
-    errorDiagnostics: [],
-    hasErrors: false,
-    inspectedNodes: 0,
-    maximumArrayRows: canonical.maximumArrayRows,
-    retainedRows: canonical.retainedRows,
-    rowCount: rowCountOf(value),
-    truncated: false,
-    value,
-  };
-}
-
-function canReuseProjection(
-  canonical: LimitResult,
-  byteLength: number,
-  maxBytes: number,
-  maxRows: number,
-): boolean {
-  return byteLength <= maxBytes && canonical.maximumArrayRows <= maxRows;
-}
-
-export function createToolResult(
-  tool: BloombergToolName,
-  value: unknown,
-  limits: ToolResultBuildOptions,
-): ToolContentAndArtifact {
-  const initialInspectedNodes = limits.materializedNodes ?? 0;
-  if (limits.maxResultBytes < MIN_TOOL_RESULT_BYTES) {
-    throw new RangeError(
-      `maxResultBytes must be at least ${String(MIN_TOOL_RESULT_BYTES)}; got ${String(limits.maxResultBytes)}`,
-    );
-  }
-  if (limits.maxContentBytes < MIN_TOOL_RESULT_BYTES) {
-    throw new RangeError(
-      `maxContentBytes must be at least ${String(MIN_TOOL_RESULT_BYTES)}; got ${String(limits.maxContentBytes)}`,
-    );
-  }
-  if (limits.maxResultNodes < MIN_TOOL_RESULT_NODES) {
-    throw new RangeError(
-      `maxResultNodes must be at least ${String(MIN_TOOL_RESULT_NODES)}; got ${String(limits.maxResultNodes)}`,
-    );
-  }
-
-  validateResultLimits(limits);
-  if (
-    !Number.isSafeInteger(initialInspectedNodes) ||
-    initialInspectedNodes < 0 ||
-    initialInspectedNodes > limits.maxResultNodes
-  ) {
-    throw new RangeError(
-      `materializedNodes must be between 0 and maxResultNodes; got ${String(initialInspectedNodes)}`,
-    );
-  }
-  const availableNodeBudget = limits.maxResultNodes - initialInspectedNodes;
-  const hasEidMetadata =
-    typeof value === "object" &&
-    value !== null &&
-    ownEnumerableDescriptor(value, "eidData") !== undefined;
-  const canonicalNodeBudget =
-    availableNodeBudget === 0
-      ? 0
-      : Math.max(
-          1,
-          hasEidMetadata
-            ? availableNodeBudget - Math.ceil(availableNodeBudget / 5)
-            : Math.floor(availableNodeBudget / 3),
-        );
-  const canonical = projectResult(
-    value,
-    {
-      maxResultBytes: Math.max(limits.maxResultBytes, limits.maxContentBytes),
-      maxResultNodes: canonicalNodeBudget,
-      maxRows: Math.max(limits.maxRows, limits.maxContentRows),
-      maxStringChars: limits.maxStringChars,
-    },
-    false,
-  );
-
-  const artifactDataBudget = projectionBudget(limits.maxResultBytes, RESULT_ENVELOPE_RESERVE_BYTES);
-  const contentDataBudget = projectionBudget(
-    limits.maxContentBytes,
-    CONTENT_ENVELOPE_RESERVE_BYTES,
-  );
-  const contentSource = Object.create(null) as Record<string, unknown>;
-  if (canonical.errorDiagnostics.length > 0) {
-    contentSource.diagnostics = canonical.errorDiagnostics;
-  }
-  contentSource.data = canonical.value;
-  const contentSourceBytes = boundedJsonByteLength(contentSource);
-  const reuseArtifact = canReuseProjection(
-    canonical,
-    canonical.byteLength,
-    artifactDataBudget,
-    limits.maxRows,
-  );
-  const reuseContent = canReuseProjection(
-    canonical,
-    contentSourceBytes,
-    contentDataBudget,
-    limits.maxContentRows,
-  );
-  const remainingNodeBudget = Math.max(0, availableNodeBudget - canonical.inspectedNodes);
-  const artifactNeedsNodes = !reuseArtifact;
-  const contentNeedsNodes = !reuseContent;
-  const artifactNodeBudget = artifactNeedsNodes
-    ? contentNeedsNodes
-      ? Math.floor(remainingNodeBudget / 2)
-      : remainingNodeBudget
-    : 0;
-  const contentNodeBudget = contentNeedsNodes ? remainingNodeBudget - artifactNodeBudget : 0;
-  const artifactProjection = reuseArtifact
-    ? reusedProjection(canonical.value, canonical)
-    : projectResult(
-        canonical.value,
-        {
-          maxResultBytes: artifactDataBudget,
-          maxResultNodes: artifactNodeBudget,
-          maxRows: limits.maxRows,
-          maxStringChars: Number.MAX_SAFE_INTEGER,
-        },
-        false,
-      );
-  const contentProjection = reuseContent
-    ? reusedProjection(contentSource, canonical)
-    : projectResult(
-        contentSource,
-        {
-          maxResultBytes: contentDataBudget,
-          maxResultNodes: contentNodeBudget,
-          maxRows: limits.maxContentRows,
-          maxStringChars: Number.MAX_SAFE_INTEGER,
-        },
-        true,
-      );
-
-  const inspectedNodes =
-    initialInspectedNodes +
-    canonical.inspectedNodes +
-    artifactProjection.inspectedNodes +
-    contentProjection.inspectedNodes;
-  const artifactResult = withAggregateInspection(
-    mergeLimited(canonical, artifactProjection),
-    inspectedNodes,
-  );
-  const contentResult = withAggregateInspection(
-    mergeLimited(canonical, contentProjection),
-    inspectedNodes,
-  );
-  const envelope = fitArtifact(tool, artifactResult, limits.maxResultBytes);
-  return [formatToolContent(envelope, contentResult, limits.maxContentBytes), envelope];
-}
-
-export function throwWithToolContext(tool: BloombergToolName, error: unknown): never {
-  const prefix = `${tool} failed`;
-  if (error instanceof Error) {
-    if (error.message.startsWith(prefix)) {
-      throw error;
-    }
-    // Never mutate the original: a memoized connect rejection delivers the
-    // same Error instance to every concurrently pending tool call.
-    const wrapped = new Error(`${prefix}: ${error.message}`, { cause: error });
-    wrapped.name = error.name;
-    throw wrapped;
-  }
-  throw new Error(`${prefix}: ${String(error)}`);
 }

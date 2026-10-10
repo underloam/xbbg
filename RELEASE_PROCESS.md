@@ -147,14 +147,22 @@ an MCP Registry subscription.
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| CI | `ci-rust.yml` | Rust lint, clippy, build, test (Linux + Windows) |
-| Docker | `ci-docker.yml` | Build CI Docker image |
+| CI | `ci-rust.yml` | Rust/Python/JS quality and dependency-layer checks, offline tests, packaging, and dependency floors on Linux, Windows, and macOS |
+| Docker | `ci-docker.yml` | Build CI and manylinux images when either Dockerfile tree changes |
 
-### Called by the release workflow
+### Shared build and release workflows
 
 | Workflow | File | Purpose |
 |----------|------|---------|
 | Publish Rust Crates | `crates-publish.yml` | Reusable job invoked by `semantic_version.yml`; stamps the workspace version and publishes the six crates.io packages in dependency order |
+| Generate Bloomberg Bindings | `generate-bindings.yml` | Shared Linux bindings artifact consumed by CI, Python releases, and both JavaScript release workflows |
+
+SDK version discovery, archive availability probes, caching, and environment export
+are owned by `.github/actions/setup-blpapi-sdk`. The crates.io publisher requests
+five index-detection attempts; other callers use one.
+
+MCPB user configuration and MCP Registry environment metadata share the settings
+in `scripts/mcp_release_config.py`; their schema-specific JSON formats remain separate.
 
 ### On Release (dispatch on tag `vX.Y.Z`)
 

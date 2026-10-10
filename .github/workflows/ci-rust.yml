@@ -29,30 +29,12 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
       - name: Detect latest downloadable Bloomberg C++ SDK version
         id: detect
-        run: |
-          INDEX_URL="https://blpapi.bloomberg.com/repository/releases/python/simple/blpapi/"
-          versions=$(curl -fsSL "$INDEX_URL" \
-            | grep -oP 'blpapi-\K[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?' \
-            | sort -Vr \
-            | uniq)
-
-          for VERSION in $versions; do
-            linux_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-linux.tar.gz"
-            macos_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-macos-arm64.tar.gz"
-            windows_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-windows.zip"
-            if curl -fsIL "$linux_url" >/dev/null \
-              && curl -fsIL "$macos_url" >/dev/null \
-              && curl -fsIL "$windows_url" >/dev/null; then
-              echo "Detected Bloomberg C++ SDK version: $VERSION"
-              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          echo "No downloadable Bloomberg C++ SDK archives found" >&2
-          exit 1
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          detect-only: "true"
 
   # ════════════════════════════════════════════════════════════════════════════
   # Generate bindings once on Linux, consume artifact on Windows jobs
@@ -60,42 +42,9 @@ jobs:
   generate-bindings:
     name: Generate blpapi bindings artifact
     needs: sdk-version
-    runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xbbg-ci:latest
-    env:
-      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Bloomberg SDK
-        id: sdk
-        uses: ./.github/actions/setup-blpapi-sdk
-        with:
-          version: ${{ env.BLPAPI_VERSION }}
-          os: Linux
-
-      - name: Export Bloomberg SDK env
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
-      - name: Generate bindings artifact
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/ci-bindings"
-          BLPAPI_BINDINGS_EXPORT_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs" cargo build -p xbbg-blpapi-sys
-          test -s "$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
-
-      - name: Upload bindings artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: blpapi-bindings
-          path: ci-bindings/bindings.rs
-          retention-days: 7
+    uses: ./.github/workflows/generate-bindings.yml
+    with:
+      sdk-version: ${{ needs.sdk-version.outputs.version }}
 
   # ════════════════════════════════════════════════════════════════════════════
   # Rust Lint (fast, no SDK needed)
@@ -114,6 +63,10 @@ jobs:
 
       - name: Rust format check
         run: cargo fmt --all -- --check
+
+      - uses: cargo-bins/cargo-binstall@v1.21.1
+      - name: Check unused Rust dependencies
+        run: cargo binstall -y cargo-shear && cargo shear
 
   # ════════════════════════════════════════════════════════════════════════════
   # Codegen freshness (fast, no SDK needed)
@@ -143,11 +96,10 @@ jobs:
         with:
           version: ${{ env.UV_VERSION }}
 
-      - name: Test release version tooling
+      - name: Test release tooling
         run: >-
           uv run --no-project --with "pytest>=8.4" --with "pytest-asyncio>=0.24" --with "packaging>=23.2"
-          python -m pytest scripts/test_stamp_workspace_version.py
-          scripts/test_check_release_versions.py -q
+          python -m pytest scripts -q
 
   # ════════════════════════════════════════════════════════════════════════════
   # Python Lint (fast, no SDK needed)
@@ -170,6 +122,16 @@ jobs:
 
       - name: Python format check
         run: pixi run -e lint fmt-check
+
+      - name: Python dead code checks
+        run: |
+          pixi run -e lint deadcode
+          pixi run -e lint deadcode-langgraph
+
+      - name: Python import graph checks
+        run: |
+          pixi run -e lint imports
+          pixi run -e lint imports-langgraph
 
       - name: Type check (advisory)
         run: pixi run -e lint typecheck || true
@@ -196,6 +158,39 @@ jobs:
 
       - name: JS quality suite
         run: pixi run -e js js-quality
+
+  lint-js-langgraph:
+    name: Quality (JS LangGraph)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: |
+            js-xbbg/package-lock.json
+            js-xbbg-langgraph/package-lock.json
+
+      # The adapter type-checks against this checkout's @xbbg/core declarations
+      # (tsconfig paths -> js-xbbg/dist/index.d.ts). Without them TypeScript
+      # falls back to the published @xbbg/core in node_modules, which lags the
+      # source, so build them first as the release workflows do.
+      - name: Build @xbbg/core type declarations
+        working-directory: js-xbbg
+        run: |
+          npm ci
+          npm run build:ts
+
+      - name: Install js-xbbg-langgraph dependencies
+        working-directory: js-xbbg-langgraph
+        run: npm ci
+
+      - name: JS LangGraph quality suite
+        working-directory: js-xbbg-langgraph
+        run: npm run quality
 
   # ════════════════════════════════════════════════════════════════════════════
   # Security - cargo-audit (vulnerabilities)
@@ -239,16 +234,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -258,6 +243,9 @@ jobs:
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Offline Rust workspace tests
+        run: cargo test --workspace
 
   check-windows:
     name: Check (Windows)
@@ -297,14 +285,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Windows
 
-      - name: Export Bloomberg SDK env (Windows)
-        shell: pwsh
-        run: |
-          $sdkPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.sdk-rel-root }}'
-          $binPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.bin-rel-dir }}'
-          "BLPAPI_ROOT=$sdkPath" >> $env:GITHUB_ENV
-          "PATH=$binPath;$env:PATH" >> $env:GITHUB_ENV
-
       - name: Cargo clippy
         shell: bash
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -343,13 +323,6 @@ jobs:
         with:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
-
-      - name: Export Bloomberg SDK env (macOS)
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.lib-rel-dir }}"
-          echo "BLPAPI_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$LIB_DIR:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -428,77 +401,11 @@ jobs:
           test -s "$BINDINGS_PATH"
           echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
 
-      - name: Cache Bloomberg SDK (Linux)
-        if: runner.os == 'Linux'
-        id: cache-sdk-linux-core
-        uses: actions/cache@v6
+      - name: Setup Bloomberg SDK
+        uses: ./.github/actions/setup-blpapi-sdk
         with:
-          path: ~/blpapi
-          # Key is namespaced to the manylinux container layout: caches of
-          # ~/blpapi saved on VM runners (/home/runner) do not restore into
-          # the container home (/root).
-          key: blpapi-Linux-manylinux228-${{ env.BLPAPI_VERSION }}
-
-      - name: Download Bloomberg SDK (Linux)
-        if: runner.os == 'Linux' && steps.cache-sdk-linux-core.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$HOME/blpapi"
-          curl -sSL "https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${BLPAPI_VERSION}-linux.tar.gz" \
-            | tar -xz -C "$HOME/blpapi" --strip-components=1
-
-      - name: Setup Bloomberg SDK (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          ln -sf "$HOME/blpapi/Linux" "$HOME/blpapi/lib"
-          ln -sf "$HOME/blpapi/lib/libblpapi3_64.so" "$HOME/blpapi/lib/libblpapi3.so"
-          echo "BLPAPI_ROOT=$HOME/blpapi" >> "$GITHUB_ENV"
-          echo "LD_LIBRARY_PATH=$HOME/blpapi/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-
-      - name: Cache Bloomberg SDK (Windows)
-        if: runner.os == 'Windows'
-        id: cache-sdk-windows-core
-        uses: actions/cache@v6
-        with:
-          path: ~/blpapi
-          key: blpapi-Windows-${{ env.BLPAPI_VERSION }}
-
-      - name: Download Bloomberg SDK (Windows)
-        if: runner.os == 'Windows' && steps.cache-sdk-windows-core.outputs.cache-hit != 'true'
-        shell: pwsh
-        run: |
-          $sdkUrl = "https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${{ env.BLPAPI_VERSION }}-windows.zip"
-          Invoke-WebRequest -Uri $sdkUrl -OutFile blpapi.zip
-          Expand-Archive -Path blpapi.zip -DestinationPath $HOME/blpapi
-
-      - name: Setup Bloomberg SDK (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $sdkPath = (Get-ChildItem $HOME/blpapi -Directory)[0].FullName
-          "BLPAPI_ROOT=$sdkPath" >> $env:GITHUB_ENV
-
-      - name: Cache Bloomberg SDK (macOS)
-        if: runner.os == 'macOS'
-        id: cache-sdk-macos-core
-        uses: actions/cache@v6
-        with:
-          path: ~/blpapi
-          key: blpapi-macOS-${{ env.BLPAPI_VERSION }}
-
-      - name: Download Bloomberg SDK (macOS)
-        if: runner.os == 'macOS' && steps.cache-sdk-macos-core.outputs.cache-hit != 'true'
-        run: |
-          mkdir -p "$HOME/blpapi"
-          curl -sSL "https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${BLPAPI_VERSION}-macos-arm64.tar.gz" \
-            | tar -xz -C "$HOME/blpapi" --strip-components=1
-
-      - name: Setup Bloomberg SDK (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          ln -sf "$HOME/blpapi/Darwin" "$HOME/blpapi/lib"
-          ln -sf "$HOME/blpapi/lib/libblpapi3_64.so" "$HOME/blpapi/lib/libblpapi3.dylib"
-          echo "BLPAPI_ROOT=$HOME/blpapi" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$HOME/blpapi/lib:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
+          version: ${{ env.BLPAPI_VERSION }}
+          os: ${{ runner.os }}
 
       - name: Install js-xbbg dependencies
         run: npm --prefix js-xbbg ci
@@ -689,17 +596,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Bloomberg SDK (Windows)
         if: runner.os == 'Windows'
         id: sdk-windows
@@ -708,15 +604,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Windows
 
-      - name: Export Bloomberg SDK env (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $sdkPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.sdk-rel-root }}'
-          $binPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.bin-rel-dir }}'
-          "BLPAPI_ROOT=$sdkPath" >> $env:GITHUB_ENV
-          "PATH=$binPath;$env:PATH" >> $env:GITHUB_ENV
-
       - name: Setup Bloomberg SDK (macOS)
         if: runner.os == 'macOS'
         id: sdk-macos
@@ -724,14 +611,6 @@ jobs:
         with:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
-
-      - name: Export Bloomberg SDK env (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.lib-rel-dir }}"
-          echo "BLPAPI_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$LIB_DIR:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Setup Python ${{ matrix.python }}
         uses: actions/setup-python@v7
@@ -802,17 +681,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Bloomberg SDK (macOS)
         if: runner.os == 'macOS'
         id: sdk-macos
@@ -820,14 +688,6 @@ jobs:
         with:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
-
-      - name: Export Bloomberg SDK env (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.lib-rel-dir }}"
-          echo "BLPAPI_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$LIB_DIR:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Install blpapi from Bloomberg
         run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
@@ -908,16 +768,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Install blpapi from Bloomberg
         run: uv pip install --system --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
 
@@ -953,50 +803,6 @@ jobs:
         run: pytest py-xbbg-langgraph/tests -v
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Unused Dependencies (optional, non-blocking)
-  # ════════════════════════════════════════════════════════════════════════════
-  udeps:
-    name: Unused Deps
-    needs: [sdk-version, check-linux]
-    runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xbbg-ci:latest
-    continue-on-error: true
-    env:
-      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Bloomberg SDK (Linux)
-        id: sdk-linux
-        uses: ./.github/actions/setup-blpapi-sdk
-        with:
-          version: ${{ env.BLPAPI_VERSION }}
-          os: Linux
-
-      - name: Export Bloomberg SDK env (Linux)
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
-      - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
-        with:
-          toolchain: nightly
-          rustflags: ""
-
-      - name: Install cargo-binstall
-        run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-      - run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo binstall -y --force cargo-udeps
-          cargo +nightly udeps --workspace --all-targets --exclude pyo3-xbbg
-
-  # ════════════════════════════════════════════════════════════════════════════
   # Unsafe Code Audit (optional, non-blocking)
   # ════════════════════════════════════════════════════════════════════════════
   geiger:
@@ -1017,16 +823,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -1035,15 +831,25 @@ jobs:
 
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
-      - name: Run cargo-geiger
+      - name: Install cargo-geiger
+        run: cargo binstall -y --force cargo-geiger
+
+      - name: Validate audit manifest paths
         run: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          cargo binstall -y --force cargo-geiger
-          for crate in blpapi-sys xbbg-core xbbg-async pyo3-xbbg; do
-            echo "=== $crate ==="
-            # Allow warnings about unscanned files (generated bindings, C files)
-            cargo-geiger --manifest-path "$GITHUB_WORKSPACE/crates/$crate/Cargo.toml" || true
+          for manifest in crates/blpapi-sys/Cargo.toml crates/xbbg-core/Cargo.toml crates/xbbg-async/Cargo.toml bindings/pyo3-xbbg/Cargo.toml; do
+            test -f "$manifest"
           done
+
+      - name: Run cargo-geiger (advisory)
+        continue-on-error: true
+        run: |
+          status=0
+          for manifest in crates/blpapi-sys/Cargo.toml crates/xbbg-core/Cargo.toml crates/xbbg-async/Cargo.toml bindings/pyo3-xbbg/Cargo.toml; do
+            echo "=== $manifest ==="
+            # Generated bindings and C sources can leave files unscanned.
+            cargo-geiger --manifest-path "$GITHUB_WORKSPACE/$manifest" || status=1
+          done
+          exit "$status"
 
 
   # ════════════════════════════════════════════════════════════════════════════
@@ -1093,16 +899,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -1122,83 +918,25 @@ jobs:
           fi
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Kani Verification (disabled — no #[kani::proof] harnesses exist yet)
-  # Re-enable once proof harnesses are added to workspace crates.
-  # ════════════════════════════════════════════════════════════════════════════
-  # kani:
-  #   name: Kani
-  #   needs: [sdk-version, check-linux]
-  #   runs-on: ubuntu-latest
-  #   continue-on-error: true
-  #   env:
-  #     BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #
-  #     - name: Install libclang
-  #       run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libclang-dev
-  #
-  #     - name: Cache Bloomberg SDK
-  #       id: cache-sdk
-  #       uses: actions/cache@v6
-  #       with:
-  #         path: ~/blpapi
-  #         key: blpapi-Linux-${{ env.BLPAPI_VERSION }}
-  #
-  #     - name: Download Bloomberg SDK (Linux)
-  #       if: steps.cache-sdk.outputs.cache-hit != 'true'
-  #       run: |
-  #         mkdir -p "$HOME/blpapi"
-  #         curl -sSL "https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${BLPAPI_VERSION}-linux.tar.gz" \
-  #           | tar -xz -C "$HOME/blpapi" --strip-components=1
-  #
-  #     - name: Setup Bloomberg SDK (Linux)
-  #       run: |
-  #         ln -sf "$HOME/blpapi/Linux" "$HOME/blpapi/lib"
-  #         ln -sf "$HOME/blpapi/lib/libblpapi3_64.so" "$HOME/blpapi/lib/libblpapi3.so"
-  #         echo "BLPAPI_ROOT=$HOME/blpapi" >> "$GITHUB_ENV"
-  #         echo "LD_LIBRARY_PATH=$HOME/blpapi/lib:$LD_LIBRARY_PATH" >> "$GITHUB_ENV"
-  #
-  #     - name: Run Kani
-  #       uses: model-checking/kani-github-action@v1
-  #       with:
-  #         args: --workspace --exclude blpapi-sys --exclude pyo3-xbbg
-
-  # ════════════════════════════════════════════════════════════════════════════
   # CI Status (required gate for merging)
   # ════════════════════════════════════════════════════════════════════════════
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    needs: [codegen, lint-rust, lint-python, audit, deny, check-linux, check-windows, check-macos, build, test]
+    # geiger, abi-compat, and semver are intentionally advisory.
+    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, core-packages, pack-offline-bundles, build, test, floors]
     if: always()
     steps:
       - name: Check required jobs
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
         run: |
-          if [[ "${{ needs.codegen.result }}" != "success" ]] || \
-             [[ "${{ needs.lint-rust.result }}" != "success" ]] || \
-             [[ "${{ needs.lint-python.result }}" != "success" ]] || \
-             [[ "${{ needs.audit.result }}" != "success" ]] || \
-             [[ "${{ needs.deny.result }}" != "success" ]] || \
-             [[ "${{ needs.check-linux.result }}" != "success" ]] || \
-             [[ "${{ needs.check-windows.result }}" != "success" ]] || \
-             [[ "${{ needs.check-macos.result }}" != "success" ]] || \
-             [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs.test.result }}" != "success" ]]; then
-            echo "❌ One or more required jobs failed"
-            echo "  codegen: ${{ needs.codegen.result }}"
-            echo "  lint-rust: ${{ needs.lint-rust.result }}"
-            echo "  lint-python: ${{ needs.lint-python.result }}"
-            echo "  audit: ${{ needs.audit.result }}"
-            echo "  deny: ${{ needs.deny.result }}"
-            echo "  check-linux: ${{ needs.check-linux.result }}"
-            echo "  check-windows: ${{ needs.check-windows.result }}"
-            echo "  check-macos: ${{ needs.check-macos.result }}"
-            echo "  build: ${{ needs.build.result }}"
-            echo "  test: ${{ needs.test.result }}"
+          echo "$NEEDS_JSON" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          if ! echo "$NEEDS_JSON" | jq -e 'all(.[]; .result == "success")' >/dev/null; then
+            echo "::error::One or more required jobs did not succeed"
             exit 1
           fi
-          echo "✅ All CI checks passed!"
+          echo "All required CI checks passed"
 
   # ════════════════════════════════════════════════════════════════════════════
   # Auto-generate type stubs (runs LAST, only after all CI passes)
@@ -1234,16 +972,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Rust
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
@@ -1252,8 +980,13 @@ jobs:
       - name: Build stub generator
         run: cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
 
+      - name: Test stub postprocessor
+        run: cargo test -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
+
       - name: Regenerate stubs
-        run: CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/bindings/pyo3-xbbg" ./target/debug/stub_gen
+        run: |
+          CARGO_MANIFEST_DIR="$GITHUB_WORKSPACE/bindings/pyo3-xbbg" ./target/debug/stub_gen
+          python3 scripts/generate_package_stub.py
 
       - name: Commit stubs if changed
         run: |

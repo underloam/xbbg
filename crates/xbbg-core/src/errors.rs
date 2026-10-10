@@ -113,23 +113,3 @@ impl fmt::Display for ValidationError {
         write!(f, "{}: {}", self.path, self.message)
     }
 }
-
-impl BlpError {
-    pub fn with_request_ctx(
-        service: impl Into<String>,
-        operation: Option<impl Into<String>>,
-        cid: Option<CorrelationContext>,
-        label: Option<impl Into<String>>,
-        request_id: Option<impl Into<String>>,
-        source: Option<Box<dyn std::error::Error + Send + Sync>>,
-    ) -> Self {
-        BlpError::RequestFailure {
-            service: service.into(),
-            operation: operation.map(Into::into),
-            cid,
-            label: label.map(Into::into),
-            request_id: request_id.map(Into::into),
-            source,
-        }
-    }
-}

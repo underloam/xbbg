@@ -9,6 +9,15 @@ import threading
 
 import pytest
 
+from xbbg import (
+    _engine,
+    _streaming,
+    _sync,
+    backend as backend_module,
+    blp as blp_module,
+    exceptions as exception_module,
+)
+
 
 class _QuietSubscription:
     delivers_rows = True
@@ -21,7 +30,6 @@ class TestSyncStreamLifecycle:
     """Exercise the bounded sync bridge through the public generator."""
 
     def test_capacity_backpressures_and_close_unsubscribes(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         produced: list[int] = []
         reached_full_bridge = threading.Event()
@@ -39,7 +47,7 @@ class TestSyncStreamLifecycle:
             finally:
                 unsubscribed.set()
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         capacity = 4
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE", stream_capacity=capacity)
 
@@ -54,7 +62,6 @@ class TestSyncStreamLifecycle:
         assert unsubscribed.wait(timeout=1)
 
     def test_streams_share_one_managed_producer_thread_and_capture_context(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         unsubscribed: list[threading.Event] = []
 
@@ -62,7 +69,7 @@ class TestSyncStreamLifecycle:
             closed = threading.Event()
             unsubscribed.append(closed)
             try:
-                yield threading.current_thread().ident, blp_module._get_engine()
+                yield threading.current_thread().ident, _engine._get_engine()
                 await asyncio.Event().wait()
             finally:
                 closed.set()
@@ -73,21 +80,21 @@ class TestSyncStreamLifecycle:
 
         first_scope = ScopedEngine()
         second_scope = ScopedEngine()
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         first = blp_module.stream("IBM US Equity", "LAST_PRICE")
         second = blp_module.stream("MSFT US Equity", "LAST_PRICE")
 
-        first_token = blp_module._active_engine.set(first_scope)
+        first_token = _engine._active_engine.set(first_scope)
         try:
             first_thread, first_engine = next(first)
         finally:
-            blp_module._active_engine.reset(first_token)
+            _engine._active_engine.reset(first_token)
 
-        second_token = blp_module._active_engine.set(second_scope)
+        second_token = _engine._active_engine.set(second_scope)
         try:
             second_thread, second_engine = next(second)
         finally:
-            blp_module._active_engine.reset(second_token)
+            _engine._active_engine.reset(second_token)
 
         try:
             assert first_thread == second_thread
@@ -101,7 +108,6 @@ class TestSyncStreamLifecycle:
         assert all(closed.is_set() for closed in unsubscribed)
 
     def test_consumer_exception_cancels_producer_waiting_for_tick(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         waiting_for_tick = threading.Event()
         unsubscribed = threading.Event()
@@ -114,7 +120,7 @@ class TestSyncStreamLifecycle:
             finally:
                 unsubscribed.set()
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE")
 
         assert next(batches) == "first"
@@ -128,7 +134,6 @@ class TestSyncStreamLifecycle:
         assert unsubscribed.wait(timeout=1)
 
     def test_cleanup_error_is_reported_without_masking_consumer_error(self, monkeypatch, caplog):
-        from xbbg import blp as blp_module
 
         reached_full_bridge = threading.Event()
         cleanup_started = threading.Event()
@@ -148,14 +153,14 @@ class TestSyncStreamLifecycle:
                 cleanup_started.set()
                 raise cleanup_error
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE", stream_capacity=4)
 
         assert next(batches) == 0
         assert reached_full_bridge.wait(timeout=1)
 
         consumer_error = RuntimeError("consumer failed")
-        with caplog.at_level(logging.ERROR, logger="xbbg.blp"), pytest.raises(RuntimeError) as raised:
+        with caplog.at_level(logging.ERROR, logger="xbbg._streaming"), pytest.raises(RuntimeError) as raised:
             batches.throw(consumer_error)
 
         assert raised.value is consumer_error
@@ -163,7 +168,6 @@ class TestSyncStreamLifecycle:
         assert any(record.exc_info and record.exc_info[1] is cleanup_error for record in caplog.records)
 
     def test_close_timeout_fails_and_keeps_cleanup_tracked(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         cleanup_started = threading.Event()
         cleanup_finished = threading.Event()
@@ -171,7 +175,7 @@ class TestSyncStreamLifecycle:
         cleanup_gate: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         producer_calls = []
 
-        original_start = blp_module._notebook_sync_bridge.start
+        original_start = _sync._notebook_sync_bridge.start
 
         def capture_start(*args, **kwargs):
             call = original_start(*args, **kwargs)
@@ -190,10 +194,10 @@ class TestSyncStreamLifecycle:
                 await gate
                 cleanup_finished.set()
 
-        monkeypatch.setattr(blp_module, "astream", cancellation_resistant_stream)
-        monkeypatch.setattr(blp_module._notebook_sync_bridge, "start", capture_start)
-        monkeypatch.setattr(blp_module, "_SYNC_STREAM_CLOSE_TIMEOUT_SECONDS", 0.01)
-        monkeypatch.setattr(blp_module, "_config", None)
+        monkeypatch.setattr(_streaming, "astream", cancellation_resistant_stream)
+        monkeypatch.setattr(_sync._notebook_sync_bridge, "start", capture_start)
+        monkeypatch.setattr(_streaming, "_SYNC_STREAM_CLOSE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(_engine, "_config", None)
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE")
 
         assert next(batches) == "first"
@@ -218,22 +222,20 @@ class TestSyncStreamLifecycle:
         async def completed_stream(*_args, **_kwargs):
             yield "accepted"
 
-        monkeypatch.setattr(blp_module, "astream", completed_stream)
+        monkeypatch.setattr(_streaming, "astream", completed_stream)
         assert list(blp_module.stream("MSFT US Equity", "LAST_PRICE")) == ["accepted"]
 
     def test_completion_drains_all_buffered_data(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         async def autonomous_stream(*_args, **_kwargs):
             for item in range(20):
                 yield item
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
 
         assert list(blp_module.stream("IBM US Equity", "LAST_PRICE", stream_capacity=4)) == list(range(20))
 
     def test_sync_callback_runs_on_consuming_thread(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         callback_threads = []
 
@@ -244,21 +246,20 @@ class TestSyncStreamLifecycle:
         def callback(_batch):
             callback_threads.append(threading.current_thread().ident)
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         consuming_thread = threading.current_thread().ident
 
         assert list(blp_module.stream("IBM US Equity", "LAST_PRICE", callback=callback)) == [0, 1, 2]
         assert callback_threads == [consuming_thread, consuming_thread, consuming_thread]
 
     def test_completion_race_rechecks_queue_after_producer_stops(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         source_waiting = threading.Event()
         source_finished = threading.Event()
         source_gate: list[tuple[asyncio.AbstractEventLoop, asyncio.Future[None]]] = []
         producer_calls = []
 
-        original_start = blp_module._notebook_sync_bridge.start
+        original_start = _sync._notebook_sync_bridge.start
 
         def capture_start(*args, **kwargs):
             call = original_start(*args, **kwargs)
@@ -295,14 +296,13 @@ class TestSyncStreamLifecycle:
                     assert completion_acknowledged.wait(timeout=1)
                     raise
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
-        monkeypatch.setattr(blp_module._notebook_sync_bridge, "start", capture_start)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
+        monkeypatch.setattr(_sync._notebook_sync_bridge, "start", capture_start)
         monkeypatch.setattr(queue, "Queue", CompletionBoundaryQueue)
 
         assert list(blp_module.stream("IBM US Equity", "LAST_PRICE", stream_capacity=4)) == ["last"]
 
     def test_producer_error_follows_all_buffered_data(self, monkeypatch):
-        from xbbg import blp as blp_module
 
         class ProducerError(RuntimeError):
             pass
@@ -314,7 +314,7 @@ class TestSyncStreamLifecycle:
                 yield item
             raise error
 
-        monkeypatch.setattr(blp_module, "astream", autonomous_stream)
+        monkeypatch.setattr(_streaming, "astream", autonomous_stream)
         batches = blp_module.stream("IBM US Equity", "LAST_PRICE", stream_capacity=4)
         received = []
 
@@ -330,7 +330,6 @@ class TestVwapContract:
     """Verify Market VWAP helpers use Bloomberg's required subscription shape."""
 
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
-        import xbbg.blp as blp_module
 
         class FakePySubscription(_QuietSubscription):
             tickers = ["//blp/mktvwap/ticker/IBM US Equity"]
@@ -391,7 +390,7 @@ class TestVwapContract:
                 )
                 return fake_sub
 
-        monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
+        monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
         return blp_module, fake_sub
 
     def test_avwap_builds_explicit_market_vwap_subscription(self, monkeypatch):
@@ -466,7 +465,6 @@ class TestMktbarContract:
     """Verify market-bar helpers use Bloomberg's required subscription shape."""
 
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
-        import xbbg.blp as blp_module
 
         class FakePySubscription(_QuietSubscription):
             tickers = ["//blp/mktbar/ticker/ES1 Index"]
@@ -529,7 +527,7 @@ class TestMktbarContract:
                 )
                 return fake_sub
 
-        monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
+        monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
         return blp_module, fake_sub
 
     def test_amktbar_builds_explicit_market_bar_subscription(self, monkeypatch):
@@ -626,7 +624,6 @@ class TestConflatedMarketDataContract:
     """Verify mktdata conflation is exposed as a typed subscription option."""
 
     def _install_fake_engine(self, monkeypatch, captured: dict[str, object]):
-        import xbbg.blp as blp_module
 
         class FakePySubscription(_QuietSubscription):
             tickers = ["ES1 Index"]
@@ -677,7 +674,7 @@ class TestConflatedMarketDataContract:
                 )
                 return FakePySubscription()
 
-        monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
+        monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
         return blp_module
 
     def test_asubscribe_conflate_adds_mktdata_option(self, monkeypatch):
@@ -823,10 +820,8 @@ class TestTickModeWarning:
                 )
                 return FakePySubscription()
 
-        import xbbg.blp as blp_module
-
-        original_get_engine = blp_module._get_engine
-        blp_module._get_engine = lambda: FakeEngine()
+        original_get_engine = _engine._get_engine
+        _engine._get_engine = lambda: FakeEngine()
 
         try:
             with pytest.warns(UserWarning, match="tick_mode"):
@@ -839,7 +834,7 @@ class TestTickModeWarning:
                     )
                 )
         finally:
-            blp_module._get_engine = original_get_engine
+            _engine._get_engine = original_get_engine
 
         assert sub._tick_mode is True
         assert captured["flush_threshold"] == 1
@@ -857,7 +852,6 @@ class TestExplicitOutputSelector:
         live_tick,
         drained_ticks,
     ):
-        from xbbg import blp as blp_module
 
         class FakePySubscription(_QuietSubscription):
             def __init__(self):
@@ -883,7 +877,7 @@ class TestExplicitOutputSelector:
                 assert all_fields is False
                 return native_sub
 
-        monkeypatch.setattr(blp_module, "_get_engine", lambda: FakeEngine())
+        monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
         return blp_module, native_sub
 
     def test_record_batch_overrides_legacy_tick_mode_for_iteration_and_drain(self, monkeypatch):
@@ -940,7 +934,7 @@ class TestExplicitOutputSelector:
             drained_ticks=[{"representation": "drained tick"}],
         )
         monkeypatch.setattr(
-            blp_module,
+            backend_module,
             "convert_backend_frame",
             lambda table, backend: ("backend", table, backend),
         )
@@ -977,7 +971,7 @@ class TestExplicitOutputSelector:
             drained_ticks=[drained_tick],
         )
         monkeypatch.setattr(
-            blp_module,
+            backend_module,
             "convert_backend_frame",
             lambda *_args: (_ for _ in ()).throw(AssertionError("dict output must not use batch conversion")),
         )
@@ -1008,7 +1002,6 @@ class TestPublicStreamingTyping:
         from pathlib import Path
 
         import xbbg
-        from xbbg import blp as blp_module, exceptions as exception_module
         from xbbg._exports import EXCEPTION_EXPORTS, PACKAGE_STREAMING_EXPORTS
 
         stub = Path(xbbg.__file__).with_name("__init__.pyi").read_text()
@@ -1034,7 +1027,7 @@ class TestSubscriptionConversion:
     """Subscription iteration converts batches through the constructor-bound path."""
 
     def test_backend_none_yields_native_table_from_batch(self, monkeypatch):
-        from xbbg import blp as blp_module
+
         from xbbg._core import ArrowTable
         from xbbg.blp import Subscription
 
@@ -1056,7 +1049,7 @@ class TestSubscriptionConversion:
             raise AssertionError("Subscription.__anext__ must not call facade backend conversion")
 
         batch = FakeBatch()
-        monkeypatch.setattr(blp_module, "_convert_result_backend", fail_facade_conversion)
+        monkeypatch.setattr(backend_module, "_convert_result_backend", fail_facade_conversion)
         sub = Subscription(FakePySubscription(), raw=False, backend=None)
 
         result = asyncio.run(sub.__anext__())
@@ -1065,7 +1058,7 @@ class TestSubscriptionConversion:
         assert batch.to_table_calls == 1
 
     def test_explicit_backend_uses_bound_converter_without_facade_conversion(self, monkeypatch):
-        from xbbg import blp as blp_module
+
         from xbbg._core import ArrowTable
         from xbbg.blp import Backend, Subscription
 
@@ -1089,8 +1082,8 @@ class TestSubscriptionConversion:
         def fail_facade_conversion(_frame, _backend):
             raise AssertionError("Subscription.__anext__ must not call facade backend conversion")
 
-        monkeypatch.setattr(blp_module, "convert_backend_frame", bound_converter)
-        monkeypatch.setattr(blp_module, "_convert_result_backend", fail_facade_conversion)
+        monkeypatch.setattr(backend_module, "convert_backend_frame", bound_converter)
+        monkeypatch.setattr(backend_module, "_convert_result_backend", fail_facade_conversion)
         sub = Subscription(FakePySubscription(), raw=False, backend=Backend.NATIVE)
 
         result = asyncio.run(sub.__anext__())
@@ -1143,7 +1136,7 @@ class TestSubscriptionConversion:
         assert calls == tables
 
     def test_backend_drain_uses_the_bound_iteration_converter(self, monkeypatch):
-        from xbbg import blp as blp_module
+
         from xbbg.blp import Backend, Subscription
 
         table = object()
@@ -1164,7 +1157,7 @@ class TestSubscriptionConversion:
             calls.append((frame, backend))
             return converted
 
-        monkeypatch.setattr(blp_module, "convert_backend_frame", bound_converter)
+        monkeypatch.setattr(backend_module, "convert_backend_frame", bound_converter)
         sub = Subscription(FakePySubscription(), raw=False, backend=Backend.NATIVE)
 
         result = asyncio.run(sub.unsubscribe(drain=True))
@@ -1297,3 +1290,36 @@ class TestSubscriptionFailureMetadata:
         assert sub.service_status["//blp/mktdata"]["up"] is True
         assert sub.events[1]["message_type"] == "SubscriptionFailure"
         assert sub.status["session"]["reconnect_count"] == 1
+
+
+def test_astream_uses_the_subscription_owner_patch_seam(monkeypatch):
+    calls = []
+    closed = []
+
+    class Subscription:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            closed.append(True)
+
+        def __aiter__(self):
+            return self.rows()
+
+        async def rows(self):
+            yield {"BID": 7.0}
+
+    async def subscribe(tickers, fields, **kwargs):
+        calls.append((tickers, fields, kwargs))
+        return Subscription()
+
+    monkeypatch.setattr(_streaming, "asubscribe", subscribe)
+
+    async def consume():
+        return [row async for row in blp_module.astream("SYNTHETIC Equity", "BID", raw=True, conflate=True)]
+
+    assert asyncio.run(consume()) == [{"BID": 7.0}]
+    assert calls[0][:2] == ("SYNTHETIC Equity", "BID")
+    assert calls[0][2]["raw"] is True
+    assert calls[0][2]["conflate"] is True
+    assert closed == [True]

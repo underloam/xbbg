@@ -8,7 +8,7 @@ from typing import cast
 import pytest
 
 import xbbg
-from xbbg import blp
+from xbbg import _engine, blp
 from xbbg._core import ArrowRecordBatch, ArrowTable
 from xbbg.services import Operation, Service
 
@@ -47,19 +47,19 @@ class DummyConfig:
 
 @pytest.fixture(autouse=True)
 def reset_blp_state():
-    old_config = blp._config
-    old_engine = blp._engine
+    old_config = _engine._config
+    old_engine = _engine._engine
     old_middleware = blp.get_middleware()
     blp.clear_middleware()
-    blp._config = None
-    blp._engine = None
+    _engine._config = None
+    _engine._engine = None
     try:
         yield
     finally:
         blp.clear_middleware()
         blp.set_middleware(old_middleware)
-        blp._config = old_config
-        blp._engine = old_engine
+        _engine._config = old_config
+        _engine._engine = old_engine
 
 
 def _sample_batch() -> ArrowRecordBatch:
@@ -91,7 +91,7 @@ def test_arequest_runs_sync_and_async_middleware_in_order(monkeypatch):
         events.append(("inner_pre", context.metadata["trace"]))
         return call_next(context)
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     blp.add_middleware(outer)
     blp.add_middleware(inner)
 
@@ -127,7 +127,7 @@ def test_request_middleware_mutates_canonical_params_before_dispatch(monkeypatch
         context.params.fields = ["PX_OPEN"]
         return await call_next(context)
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     blp.add_middleware(rewrite_fields)
 
     asyncio.run(
@@ -170,7 +170,7 @@ def test_request_context_exposes_environment_snapshot(monkeypatch):
         )
         return await call_next(context)
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     blp.add_middleware(recorder)
 
     asyncio.run(
@@ -208,7 +208,7 @@ def test_arequest_middleware_can_short_circuit(monkeypatch):
         context.frame = cached_result
         return cached_result
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     blp.add_middleware(cache_middleware)
 
     result = asyncio.run(
@@ -236,7 +236,7 @@ def test_middleware_record_batch_result_receives_backend_conversion(monkeypatch)
     async def record_batch_middleware(context: blp.RequestContext, _call_next):
         return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     blp.add_middleware(record_batch_middleware)
 
     result = asyncio.run(
@@ -269,17 +269,17 @@ def test_configure_applies_auth_kwargs():
         ip_address="10.0.0.1",
     )
 
-    assert blp._config is config
-    assert isinstance(blp._config, DummyConfig)
-    assert blp._config.host == "bpipe-host"
-    assert blp._config.port == 8195
-    assert blp._config.auth_method == "manual"
-    assert blp._config.app_name == "my-app"
-    assert blp._config.user_id == "123456"
-    assert blp._config.ip_address == "10.0.0.1"
-    assert blp._config.num_start_attempts == 5
-    assert blp._config.auto_restart_on_disconnection is False
-    assert blp._engine is None
+    assert _engine._config is config
+    assert isinstance(_engine._config, DummyConfig)
+    assert _engine._config.host == "bpipe-host"
+    assert _engine._config.port == 8195
+    assert _engine._config.auth_method == "manual"
+    assert _engine._config.app_name == "my-app"
+    assert _engine._config.user_id == "123456"
+    assert _engine._config.ip_address == "10.0.0.1"
+    assert _engine._config.num_start_attempts == 5
+    assert _engine._config.auto_restart_on_disconnection is False
+    assert _engine._engine is None
 
 
 def test_configure_accepts_sharding_kwargs():
@@ -293,12 +293,12 @@ def test_configure_accepts_sharding_kwargs():
         shard_max_concurrent=2,
     )
 
-    assert blp._config is config
-    assert isinstance(blp._config, DummyConfig)
-    assert blp._config.shard_requests is True
-    assert blp._config.shard_threshold == 3
-    assert blp._config.shard_chunk_size == 2
-    assert blp._config.shard_max_concurrent == 2
+    assert _engine._config is config
+    assert isinstance(_engine._config, DummyConfig)
+    assert _engine._config.shard_requests is True
+    assert _engine._config.shard_threshold == 3
+    assert _engine._config.shard_chunk_size == 2
+    assert _engine._config.shard_max_concurrent == 2
 
 
 def test_configure_accepts_runtime_resource_limits():
@@ -310,9 +310,9 @@ def test_configure_accepts_runtime_resource_limits():
         max_subscription_sessions=48,
     )
 
-    assert blp._config is config
-    assert blp._config.runtime_worker_threads == 6
-    assert blp._config.max_subscription_sessions == 48
+    assert _engine._config is config
+    assert _engine._config.runtime_worker_threads == 6
+    assert _engine._config.max_subscription_sessions == 48
 
 
 def test_configure_rejects_unknown_kwargs():
@@ -336,14 +336,14 @@ def test_configure_warns_and_restarts_after_engine_start():
             self.shutdown_called = True
 
     mock = MockEngine()
-    blp._engine = mock
+    _engine._engine = mock
 
     with pytest.warns(RuntimeWarning, match="already started"):
         blp.configure(host="bpipe-host")
 
     assert mock.shutdown_called, "signal_shutdown should have been called"
-    assert blp._engine is None, "engine should be cleared for recreation"
-    assert blp._config is not None, "new config should be stored"
+    assert _engine._engine is None, "engine should be cleared for recreation"
+    assert _engine._config is not None, "new config should be stored"
 
 
 def test_configure_atomically_replaces_engine_created_during_config_build(monkeypatch):
@@ -386,15 +386,15 @@ def test_configure_atomically_replaces_engine_created_during_config_build(monkey
     worker = threading.Thread(target=configure_engine)
     worker.start()
     assert config_started.wait(timeout=1)
-    concurrent_engine = blp._get_engine()
+    concurrent_engine = _engine._get_engine()
     release_config.set()
     worker.join(timeout=1)
 
     assert not worker.is_alive()
     assert errors == []
     assert configured
-    assert blp._config is configured[0]
-    assert blp._engine is None
+    assert _engine._config is configured[0]
+    assert _engine._engine is None
     assert engine_stopped.is_set()
     assert concurrent_engine is not None
 
@@ -440,11 +440,11 @@ def test_global_lifecycle_waits_for_inflight_engine_construction(monkeypatch, op
         def with_config(_config):
             return construct_engine()
 
-    monkeypatch.setattr(blp, "_engine_lock", ObservedLock())
+    monkeypatch.setattr(_engine, "_engine_lock", ObservedLock())
     monkeypatch.setattr(_core, "PyEngine", BlockingPyEngine)
-    blp._config = object()
+    _engine._config = object()
 
-    getter = threading.Thread(target=blp._get_engine)
+    getter = threading.Thread(target=_engine._get_engine)
     getter.start()
     assert construction_started.wait(timeout=1)
 
@@ -469,10 +469,10 @@ def test_global_lifecycle_waits_for_inflight_engine_construction(monkeypatch, op
     assert not getter.is_alive()
     assert not lifecycle.is_alive()
     assert lifecycle_errors == []
-    assert blp._engine is None
+    assert _engine._engine is None
     assert engine_stopped.is_set()
     if operation == "reset":
-        assert blp._config is None
+        assert _engine._config is None
 
 
 def test_engine_shutdown_runs_outside_global_state_lock():
@@ -481,11 +481,11 @@ def test_engine_shutdown_runs_outside_global_state_lock():
     class ReentrantEngine:
         def signal_shutdown(self):
             nonlocal lock_was_available
-            lock_was_available = blp._engine_lock.acquire(blocking=False)
+            lock_was_available = _engine._engine_lock.acquire(blocking=False)
             if lock_was_available:
-                blp._engine_lock.release()
+                _engine._engine_lock.release()
 
-    blp._engine = ReentrantEngine()
+    _engine._engine = ReentrantEngine()
 
     blp.shutdown()
 
@@ -501,12 +501,12 @@ def test_request_environment_getters_run_outside_global_state_lock():
         @property
         def host(self):
             nonlocal lock_was_available
-            lock_was_available = blp._engine_lock.acquire(blocking=False)
+            lock_was_available = _engine._engine_lock.acquire(blocking=False)
             if lock_was_available:
-                blp._engine_lock.release()
+                _engine._engine_lock.release()
             return "localhost"
 
-    blp._config = ReentrantConfig()
+    _engine._config = ReentrantConfig()
 
     environment = blp._snapshot_request_environment()
 
@@ -532,7 +532,7 @@ def test_arequest_preserves_centralized_request_logging(monkeypatch, caplog):
         async def request(self, params_dict):
             return _sample_batch()
 
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
     with caplog.at_level(logging.INFO, logger="xbbg.blp"):
         asyncio.run(

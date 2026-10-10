@@ -17,9 +17,12 @@ include = ["src/**/*.rs", "Cargo.toml", "README.md"]
 xbbg-async = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-log = { workspace = true }
-arrow-array = { workspace = true }
+arrow-array = { workspace = true, features = ["chrono-tz"] }
 arrow-arith = { workspace = true }
 arrow-schema = { workspace = true }
+arrow-cast = { workspace = true }
+arrow-ord = { workspace = true }
+arrow-select = { workspace = true }
 chrono = { workspace = true, features = ["std"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
@@ -31,3 +34,6 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 [features]
 default = ["live"]
 live = ["xbbg-async/live"]
+
+[lints]
+workspace = true

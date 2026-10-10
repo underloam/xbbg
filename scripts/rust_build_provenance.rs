@@ -6,7 +6,7 @@ use std::{
     process::Command,
 };
 
-pub fn emit() -> Result<(), Box<dyn std::error::Error>> {
+pub(crate) fn emit() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rerun-if-changed=build.rs");
     let workspace = PathBuf::from(env::var("CARGO_MANIFEST_DIR")?)
         .join("../..")

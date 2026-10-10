@@ -6,41 +6,22 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictBool, field_validator
 
-BLOOMBERG_TOOL_NAMES = (
-    "xbbg_bdp",
-    "xbbg_bdh",
-    "xbbg_bds",
-    "xbbg_bdib",
-    "xbbg_bdtick",
-    "xbbg_check_entitlements",
-    "xbbg_bql",
-    "xbbg_bsrch",
-    "xbbg_bqr",
-    "xbbg_bflds",
-    "xbbg_beqs",
-    "xbbg_yas",
-    "xbbg_preferreds",
-    "xbbg_corporate_bonds",
-    "xbbg_index_members",
-    "xbbg_resolve_isins",
-    "xbbg_issuer_isins",
-    "xbbg_resolve_venues",
-    "xbbg_auction_snapshot",
-    "xbbg_etf_holdings",
-    "xbbg_stream_snapshot",
-    "xbbg_mktbar_snapshot",
-    "xbbg_depth_snapshot",
-    "xbbg_ext_ticker",
-    "xbbg_ext_futures",
-    "xbbg_ext_cdx",
-    "xbbg_ext_currency",
-    "xbbg_ext_bql_builder",
-    "xbbg_ext_chart_spec",
-    "xbbg_ext_market_session",
-    "xbbg_ext_yas_overrides",
-    "xbbg_ext_constants",
-    "xbbg_ext_columns",
-    "xbbg_ext_calculate",
+from ._defs_gen import (
+    BLOOMBERG_TOOL_NAMES,
+    DEFAULT_MAX_BQL_QUERY_CHARS,
+    DEFAULT_MAX_CONTENT_BYTES,
+    DEFAULT_MAX_CONTENT_ROWS,
+    DEFAULT_MAX_FIELDS,
+    DEFAULT_MAX_RESULT_BYTES,
+    DEFAULT_MAX_RESULT_NODES,
+    DEFAULT_MAX_ROWS,
+    DEFAULT_MAX_SEARCH_SPEC_CHARS,
+    DEFAULT_MAX_SECURITIES,
+    DEFAULT_MAX_STREAM_UPDATES,
+    DEFAULT_MAX_STREAM_WAIT_MS,
+    DEFAULT_MAX_STRING_CHARS,
+    MIN_TOOL_RESULT_BYTES,
+    MIN_TOOL_RESULT_NODES,
 )
 
 
@@ -55,32 +36,32 @@ class BloombergToolsOptions(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     engine: Any = Field(default=None, exclude=True, repr=False)
-    max_securities: int = Field(default=25, gt=0, strict=True)
-    max_fields: int = Field(default=25, gt=0, strict=True)
-    max_rows: int = Field(default=500, gt=0, strict=True)
-    max_string_chars: int = Field(default=2000, gt=0, strict=True)
-    max_result_bytes: int = Field(default=1_048_576, ge=256, strict=True)
-    max_result_nodes: int = Field(default=50_000, ge=10, strict=True)
-    max_content_bytes: int = Field(default=65_536, ge=256, strict=True)
-    max_content_rows: int = Field(default=50, gt=0, strict=True)
-    max_bql_query_chars: int = Field(default=4000, gt=0, strict=True)
-    max_search_spec_chars: int = Field(default=1000, gt=0, strict=True)
-    max_stream_updates: int = Field(default=10, gt=0, strict=True)
-    max_stream_wait_ms: int = Field(default=15_000, gt=0, strict=True)
+    max_securities: int = Field(default=DEFAULT_MAX_SECURITIES, gt=0, strict=True)
+    max_fields: int = Field(default=DEFAULT_MAX_FIELDS, gt=0, strict=True)
+    max_rows: int = Field(default=DEFAULT_MAX_ROWS, gt=0, strict=True)
+    max_string_chars: int = Field(default=DEFAULT_MAX_STRING_CHARS, gt=0, strict=True)
+    max_result_bytes: int = Field(default=DEFAULT_MAX_RESULT_BYTES, ge=MIN_TOOL_RESULT_BYTES, strict=True)
+    max_result_nodes: int = Field(default=DEFAULT_MAX_RESULT_NODES, ge=MIN_TOOL_RESULT_NODES, strict=True)
+    max_content_bytes: int = Field(default=DEFAULT_MAX_CONTENT_BYTES, ge=MIN_TOOL_RESULT_BYTES, strict=True)
+    max_content_rows: int = Field(default=DEFAULT_MAX_CONTENT_ROWS, gt=0, strict=True)
+    max_bql_query_chars: int = Field(default=DEFAULT_MAX_BQL_QUERY_CHARS, gt=0, strict=True)
+    max_search_spec_chars: int = Field(default=DEFAULT_MAX_SEARCH_SPEC_CHARS, gt=0, strict=True)
+    max_stream_updates: int = Field(default=DEFAULT_MAX_STREAM_UPDATES, gt=0, strict=True)
+    max_stream_wait_ms: int = Field(default=DEFAULT_MAX_STREAM_WAIT_MS, gt=0, strict=True)
     request_timeout: float = Field(default=60.0, gt=0, allow_inf_nan=False, strict=True)
     validate_fields: StrictBool | None = None
     disabled_tools: frozenset[str] = frozenset()
 
     @field_validator("engine")
     @classmethod
-    def _engine_context(cls, value: Any) -> Any:
+    def _engine_context(_cls, value: Any) -> Any:
         if value is not None and not (hasattr(value, "__enter__") and hasattr(value, "__exit__")):
             raise ValueError("engine must be an xbbg.blp.Engine context manager")
         return value
 
     @field_validator("disabled_tools")
     @classmethod
-    def _known_tools(cls, names: frozenset[str]) -> frozenset[str]:
+    def _known_tools(_cls, names: frozenset[str]) -> frozenset[str]:
         unknown = names.difference(BLOOMBERG_TOOL_NAMES)
         if unknown:
             raise ValueError(f"Unknown disabled tools: {', '.join(sorted(unknown))}")

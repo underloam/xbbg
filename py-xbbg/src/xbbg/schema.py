@@ -26,6 +26,9 @@ import json
 from pathlib import Path
 from typing import Any
 
+from . import _engine
+from ._sync import _run_sync
+
 
 @dataclass
 class ElementInfo:
@@ -125,9 +128,7 @@ async def aget_schema(service: str) -> ServiceSchema:
     Returns:
         ServiceSchema object with operations and element definitions.
     """
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     json_str = await engine.get_schema(service)
     return ServiceSchema.from_json(json_str)
 
@@ -142,9 +143,7 @@ async def aget_operation(service: str, operation: str) -> OperationSchema:
     Returns:
         OperationSchema object with request/response definitions.
     """
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     json_str = await engine.get_operation(service, operation)
     return OperationSchema.from_dict(json.loads(json_str))
 
@@ -158,9 +157,7 @@ async def alist_operations(service: str) -> list[str]:
     Returns:
         List of operation names.
     """
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     return await engine.list_operations(service)
 
 
@@ -175,9 +172,7 @@ async def aget_enum_values(service: str, operation: str, element: str) -> list[s
     Returns:
         List of valid enum values, or None if not an enum.
     """
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     return await engine.get_enum_values(service, operation, element)
 
 
@@ -191,75 +186,57 @@ async def alist_valid_elements(service: str, operation: str) -> list[str] | None
     Returns:
         List of valid element names.
     """
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     return await engine.list_valid_elements(service, operation)
 
 
 # Sync API wrappers
 def get_schema(service: str) -> ServiceSchema:
     """Get schema for a service (sync wrapper)."""
-    from .blp import _run_sync
-
     return _run_sync("get_schema", aget_schema, (service,), {})
 
 
 def get_operation(service: str, operation: str) -> OperationSchema:
     """Get schema for a specific operation (sync wrapper)."""
-    from .blp import _run_sync
-
     return _run_sync("get_operation", aget_operation, (service, operation), {})
 
 
 def list_operations(service: str) -> list[str]:
     """List all operations for a service (sync wrapper)."""
-    from .blp import _run_sync
-
     return _run_sync("list_operations", alist_operations, (service,), {})
 
 
 def get_enum_values(service: str, operation: str, element: str) -> list[str] | None:
     """Get valid enum values for an element (sync wrapper)."""
-    from .blp import _run_sync
-
     return _run_sync("get_enum_values", aget_enum_values, (service, operation, element), {})
 
 
 def list_valid_elements(service: str, operation: str) -> list[str] | None:
     """List all valid element names for an operation (sync wrapper)."""
-    from .blp import _run_sync
-
     return _run_sync("list_valid_elements", alist_valid_elements, (service, operation), {})
 
 
 # Cache management
 def list_cached_schemas() -> list[str]:
     """List all cached service URIs."""
-    from .blp import _get_engine
-
-    engine = _get_engine()
+    engine = _engine._get_engine()
     return engine.list_cached_schemas()
 
 
 def invalidate_schema(service: str) -> None:
     """Invalidate a cached schema."""
-    from . import blp
-
-    engine = blp._get_engine()
+    engine = _engine._get_engine()
     engine.invalidate_schema(service)
     _parse_service_schema_json.cache_clear()
-    blp._clear_field_type_resolution_cache()
+    _engine._clear_field_type_resolution_cache()
 
 
 def clear_schema_cache() -> None:
     """Clear all cached schemas."""
-    from . import blp
-
-    engine = blp._get_engine()
+    engine = _engine._get_engine()
     engine.clear_schema_cache()
     _parse_service_schema_json.cache_clear()
-    blp._clear_field_type_resolution_cache()
+    _engine._clear_field_type_resolution_cache()
 
 
 # IDE configuration

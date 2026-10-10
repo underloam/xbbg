@@ -1,40 +1,28 @@
 //! BQL (Bloomberg Query Language) state with Arrow builders.
 //!
-//! BQL responses contain structured result data that we extract directly
-//! from Bloomberg Elements without JSON intermediate serialization.
+//! JSON payloads use a borrowing typed parser through 32 KiB and
+//! `serde_json::Value` above that threshold. Both feed one borrowed-view Arrow
+//! materializer; native Bloomberg Elements retain the fallback path.
 //!
-//! Note: BQL can return complex nested structures. We flatten them into
-//! a tabular format with id column + value columns per field.
+//! Results become a table with a ticker column, secondary dimensions, and one
+//! value column per requested field.
 
-use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_array::RecordBatch;
-use arrow_array::{ArrayRef, StringArray};
-use arrow_schema::{DataType, Field, Schema};
 use serde::{
     de::{self, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
 };
 use serde_json::Value as JsonValue;
-use std::{
-    borrow::Cow,
-    collections::{BTreeMap, HashSet},
-    marker::PhantomData,
-    sync::Arc,
-};
+use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
 use tokio::sync::oneshot;
 
 use super::typed_builder::ColumnSet;
 use super::value_utils::top_level_response_error;
 use xbbg_core::{BlpError, Message};
 
-const BQL_TYPED_JSON_MAX_BYTES: usize = 32 * 1024;
+mod materialize;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum BqlColumnKind {
-    Numeric,
-    String,
-    Infer,
-}
+const BQL_TYPED_JSON_MAX_BYTES: usize = 32 * 1024;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -91,40 +79,6 @@ enum BqlNumber {
     Signed(i64),
     Unsigned(u64),
     Float(f64),
-}
-
-impl BqlNumber {
-    fn from_json(value: &serde_json::Number) -> Self {
-        if let Some(value) = value.as_i64() {
-            Self::Signed(value)
-        } else if let Some(value) = value.as_u64() {
-            Self::Unsigned(value)
-        } else {
-            Self::Float(value.as_f64().unwrap_or(f64::NAN))
-        }
-    }
-
-    fn as_f64(self) -> f64 {
-        match self {
-            Self::Signed(value) => value as f64,
-            Self::Unsigned(value) => value as f64,
-            Self::Float(value) => value,
-        }
-    }
-
-    fn append_as_string(self, builder: &mut StringBuilder) {
-        match self {
-            Self::Signed(value) => {
-                let mut buffer = itoa::Buffer::new();
-                builder.append_value(buffer.format(value));
-            }
-            Self::Unsigned(value) => {
-                let mut buffer = itoa::Buffer::new();
-                builder.append_value(buffer.format(value));
-            }
-            Self::Float(value) => builder.append_value(value.to_string()),
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -212,25 +166,6 @@ where
         D: Deserializer<'de>,
     {
         deserializer.deserialize_any(BqlCellVisitor(PhantomData))
-    }
-}
-
-impl BqlCell<'_> {
-    fn append_as_string(&self, builder: &mut StringBuilder) {
-        match self {
-            Self::String(s) => builder.append_value(s.as_ref()),
-            Self::Null => builder.append_null(),
-            Self::Number(number) => number.append_as_string(builder),
-            Self::Bool(value) => builder.append_value(if *value { "true" } else { "false" }),
-            Self::Other(value) => builder.append_value(value.to_string()),
-        }
-    }
-
-    fn append_as_id(&self, builder: &mut StringBuilder) {
-        match self {
-            Self::Null => builder.append_value(""),
-            other => other.append_as_string(builder),
-        }
     }
 }
 
@@ -377,249 +312,15 @@ impl BqlState {
             serde_json::from_str(json_str).map_err(|e| BlpError::Internal {
                 detail: format!("Failed to parse BQL JSON: {}", e),
             })?;
-
-        let request_id = response
-            .client_context
-            .as_ref()
-            .and_then(|c| c.client_request_id.as_deref())
-            .map(str::to_string);
-
-        // Collect top-level responseExceptions (syntax errors, invalid fields, etc.)
-        let top_exceptions =
-            Self::extract_exception_messages(response.response_exceptions.as_deref());
-
-        // Route on results: object → parse fields, null/missing/empty → empty or error.
-        let Some(results_obj) = response.results.as_ref().filter(|obj| !obj.is_empty()) else {
-            if !top_exceptions.is_empty() {
-                return Err(BlpError::RequestFailure {
-                    service: "//blp/bqlsvc".into(),
-                    operation: Some("sendQuery".into()),
-                    cid: None,
-                    label: None,
-                    request_id,
-                    source: Some(top_exceptions.join("; ").into()),
-                });
-            }
-            return Self::empty_batch();
-        };
-
-        // Results present — log any partial exceptions as warnings but continue.
-        if !top_exceptions.is_empty() {
-            xbbg_log::warn!(
-                exceptions = top_exceptions.join("; ").as_str(),
-                "BQL response has partial exceptions but results are present"
-            );
-        }
-
-        // Collect field names and determine row count from the first field.
-        // Keep slices into the typed parsed JSON instead of materializing cloned
-        // cell vectors; the parsed tree lives until Arrow arrays have been built.
-        let mut id_values: &[BqlCell<'_>] = &[];
-        type FieldCol<'a> = (String, &'a [BqlCell<'a>], Option<&'a str>);
-        let mut field_columns: Vec<FieldCol<'_>> = Vec::new();
-        let mut field_column_names: HashSet<String> = HashSet::new();
-        for (field_name, field_data) in results_obj {
-            // Extract idColumn values (only need to do this once).
-            if id_values.is_empty() {
-                if let Some(id_col) = &field_data.id_column {
-                    id_values = id_col.values.as_slice();
-                }
-            }
-
-            // Extract secondaryColumns (e.g. DATE, CURRENCY) — time-series and
-            // multi-axis BQL queries return per-field auxiliary dimensions here.
-            // Emit each distinct column once, placed before the primary value
-            // column so the natural column order is ticker, DATE, <field>.
-            for sec_col in &field_data.secondary_columns {
-                let Some(col_name) = sec_col.name.as_deref() else {
-                    continue;
-                };
-                let col_name_lower = col_name.to_lowercase();
-                if !field_column_names.insert(col_name_lower.clone()) {
-                    continue;
-                }
-                field_columns.push((
-                    col_name_lower,
-                    sec_col.values.as_slice(),
-                    sec_col.data_type.as_deref(),
-                ));
-            }
-
-            // Extract valuesColumn values and type hint.
-            let (values, val_type) = field_data
-                .values_column
-                .as_ref()
-                .map(|col| (col.values.as_slice(), col.data_type.as_deref()))
-                .unwrap_or((&[][..], None));
-
-            // Warn about per-field partial errors.
-            let field_exceptions =
-                Self::extract_exception_messages(field_data.response_exceptions.as_deref());
-            if !field_exceptions.is_empty() {
-                xbbg_log::warn!(
-                    field = field_name.as_str(),
-                    exceptions = field_exceptions.join("; ").as_str(),
-                    "BQL field has partial errors"
-                );
-            }
-
-            field_columns.push((field_name.to_string(), values, val_type));
-            field_column_names.insert(field_name.to_string());
-        }
-
-        // Build Arrow arrays.
-        // Use "ticker" for the id column to avoid conflicts with user-requested "id" field.
-        let row_count = id_values.len();
-        let mut id_builder = Self::string_builder(row_count);
-        for value in id_values {
-            value.append_as_id(&mut id_builder);
-        }
-
-        let mut fields = vec![Field::new("ticker", DataType::Utf8, true)];
-        let mut arrays: Vec<ArrayRef> = vec![Arc::new(id_builder.finish())];
-
-        for (name, values, type_hint) in &field_columns {
-            Self::append_bql_cell_column(
-                name.as_str(),
-                values,
-                *type_hint,
-                row_count,
-                &mut fields,
-                &mut arrays,
-            );
-        }
-
-        let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays).map_err(|e| BlpError::Internal {
-            detail: format!("Failed to create RecordBatch: {}", e),
-        })
+        materialize::from_typed(&response)
     }
 
     fn parse_bql_json_value(&self, json_str: &str) -> Result<RecordBatch, BlpError> {
-        let json: JsonValue = serde_json::from_str(json_str).map_err(|e| BlpError::Internal {
-            detail: format!("Failed to parse BQL JSON: {}", e),
-        })?;
-
-        let request_id = json
-            .get("clientContext")
-            .and_then(|c| c.get("clientRequestId"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string());
-
-        let top_exceptions = Self::extract_exception_messages_value(&json);
-
-        let results_obj = match json.get("results") {
-            Some(JsonValue::Object(obj)) if !obj.is_empty() => obj,
-            Some(JsonValue::Object(_)) | Some(JsonValue::Null) | None => {
-                if !top_exceptions.is_empty() {
-                    return Err(BlpError::RequestFailure {
-                        service: "//blp/bqlsvc".into(),
-                        operation: Some("sendQuery".into()),
-                        cid: None,
-                        label: None,
-                        request_id,
-                        source: Some(top_exceptions.join("; ").into()),
-                    });
-                }
-                return Self::empty_batch();
-            }
-            Some(other) => {
-                return Err(BlpError::Internal {
-                    detail: format!("BQL 'results' has unexpected type: {other}"),
-                });
-            }
-        };
-
-        if !top_exceptions.is_empty() {
-            xbbg_log::warn!(
-                exceptions = top_exceptions.join("; ").as_str(),
-                "BQL response has partial exceptions but results are present"
-            );
-        }
-
-        let field_names: Vec<&String> = results_obj.keys().collect();
-        let mut id_values: &[JsonValue] = &[];
-        type FieldCol<'a> = (String, &'a [JsonValue], Option<&'a str>);
-        let mut field_columns: Vec<FieldCol<'_>> = Vec::new();
-        let mut field_column_names: HashSet<String> = HashSet::new();
-        for field_name in &field_names {
-            let field_data = &results_obj[*field_name];
-
-            if id_values.is_empty() {
-                if let Some(id_col) = field_data.get("idColumn") {
-                    if let Some(values) = id_col.get("values") {
-                        if let Some(arr) = values.as_array() {
-                            id_values = arr.as_slice();
-                        }
-                    }
-                }
-            }
-
-            if let Some(JsonValue::Array(sec_cols)) = field_data.get("secondaryColumns") {
-                for sec_col in sec_cols {
-                    let Some(col_name) = sec_col.get("name").and_then(|n| n.as_str()) else {
-                        continue;
-                    };
-                    let Some(JsonValue::Array(col_vals)) = sec_col.get("values") else {
-                        continue;
-                    };
-                    let col_name_lower = col_name.to_lowercase();
-                    if !field_column_names.insert(col_name_lower.clone()) {
-                        continue;
-                    }
-                    let sec_type = sec_col.get("type").and_then(|t| t.as_str());
-                    field_columns.push((col_name_lower, col_vals.as_slice(), sec_type));
-                }
-            }
-
-            let mut values: &[JsonValue] = &[];
-            let mut val_type: Option<&str> = None;
-            if let Some(val_col) = field_data.get("valuesColumn") {
-                val_type = val_col.get("type").and_then(|t| t.as_str());
-                if let Some(vals) = val_col.get("values") {
-                    if let Some(arr) = vals.as_array() {
-                        values = arr.as_slice();
-                    }
-                }
-            }
-
-            let field_exceptions = Self::extract_exception_messages_value(field_data);
-            if !field_exceptions.is_empty() {
-                xbbg_log::warn!(
-                    field = field_name.as_str(),
-                    exceptions = field_exceptions.join("; ").as_str(),
-                    "BQL field has partial errors"
-                );
-            }
-
-            field_columns.push((field_name.to_string(), values, val_type));
-            field_column_names.insert(field_name.to_string());
-        }
-
-        let row_count = id_values.len();
-        let mut id_builder = Self::string_builder(row_count);
-        for value in id_values {
-            Self::append_json_as_id(value, &mut id_builder);
-        }
-
-        let mut fields = vec![Field::new("ticker", DataType::Utf8, true)];
-        let mut arrays: Vec<ArrayRef> = vec![Arc::new(id_builder.finish())];
-
-        for (name, values, type_hint) in &field_columns {
-            Self::append_json_value_column(
-                name.as_str(),
-                values,
-                *type_hint,
-                row_count,
-                &mut fields,
-                &mut arrays,
-            );
-        }
-
-        let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays).map_err(|e| BlpError::Internal {
-            detail: format!("Failed to create RecordBatch: {}", e),
-        })
+        let response: JsonValue =
+            serde_json::from_str(json_str).map_err(|e| BlpError::Internal {
+                detail: format!("Failed to parse BQL JSON: {}", e),
+            })?;
+        materialize::from_value(&response)
     }
 
     /// Parse a cached/generated BQL JSON payload for benchmark-only replay.
@@ -629,311 +330,6 @@ impl BqlState {
     #[cfg(feature = "bench-internals")]
     pub fn parse_bql_json_for_bench(&self, json_str: &str) -> Result<RecordBatch, BlpError> {
         self.parse_bql_json(json_str)
-    }
-
-    fn column_kind(type_hint: Option<&str>) -> BqlColumnKind {
-        match type_hint {
-            Some(t)
-                if t.eq_ignore_ascii_case("DOUBLE")
-                    || t.eq_ignore_ascii_case("FLOAT")
-                    || t.eq_ignore_ascii_case("INT32")
-                    || t.eq_ignore_ascii_case("INT64")
-                    || t.eq_ignore_ascii_case("INTEGER") =>
-            {
-                BqlColumnKind::Numeric
-            }
-            Some(t)
-                if t.eq_ignore_ascii_case("STRING")
-                    || t.eq_ignore_ascii_case("DATE")
-                    || t.eq_ignore_ascii_case("DATETIME") =>
-            {
-                BqlColumnKind::String
-            }
-            _ => BqlColumnKind::Infer,
-        }
-    }
-
-    fn append_bql_cell_column(
-        name: &str,
-        values: &[BqlCell<'_>],
-        type_hint: Option<&str>,
-        row_count: usize,
-        fields: &mut Vec<Field>,
-        arrays: &mut Vec<ArrayRef>,
-    ) {
-        match Self::column_kind(type_hint) {
-            BqlColumnKind::Numeric => {
-                let mut builder = Self::float_builder(row_count);
-                for row_idx in 0..row_count {
-                    match values.get(row_idx) {
-                        Some(BqlCell::Number(number)) => {
-                            builder.append_value(number.as_f64());
-                        }
-                        Some(BqlCell::String(s)) => {
-                            if let Ok(f) = s.parse::<f64>() {
-                                builder.append_value(f);
-                            } else {
-                                builder.append_null();
-                            }
-                        }
-                        _ => builder.append_null(),
-                    }
-                }
-                fields.push(Field::new(name, DataType::Float64, true));
-                arrays.push(Arc::new(builder.finish()));
-            }
-            BqlColumnKind::String => {
-                let mut builder = Self::string_builder(row_count);
-                for row_idx in 0..row_count {
-                    match values.get(row_idx) {
-                        Some(value) => value.append_as_string(&mut builder),
-                        None => builder.append_null(),
-                    }
-                }
-                fields.push(Field::new(name, DataType::Utf8, true));
-                arrays.push(Arc::new(builder.finish()));
-            }
-            BqlColumnKind::Infer => {
-                Self::append_inferred_bql_cell_column(name, values, row_count, fields, arrays);
-            }
-        }
-    }
-
-    fn append_inferred_bql_cell_column(
-        name: &str,
-        values: &[BqlCell<'_>],
-        row_count: usize,
-        fields: &mut Vec<Field>,
-        arrays: &mut Vec<ArrayRef>,
-    ) {
-        let mut numeric_values: Vec<Option<BqlNumber>> = Vec::with_capacity(row_count);
-        let mut string_builder: Option<StringBuilder> = None;
-
-        for row_idx in 0..row_count {
-            if let Some(builder) = string_builder.as_mut() {
-                match values.get(row_idx) {
-                    Some(value) => value.append_as_string(builder),
-                    None => builder.append_null(),
-                }
-                continue;
-            }
-
-            match values.get(row_idx) {
-                Some(BqlCell::Number(number)) => numeric_values.push(Some(*number)),
-                Some(BqlCell::Null) | None => numeric_values.push(None),
-                Some(value) => {
-                    let mut builder = Self::string_builder(row_count);
-                    for numeric in &numeric_values {
-                        match numeric {
-                            Some(number) => number.append_as_string(&mut builder),
-                            None => builder.append_null(),
-                        }
-                    }
-                    value.append_as_string(&mut builder);
-                    string_builder = Some(builder);
-                }
-            }
-        }
-
-        if let Some(mut builder) = string_builder {
-            fields.push(Field::new(name, DataType::Utf8, true));
-            arrays.push(Arc::new(builder.finish()));
-            return;
-        }
-
-        let mut builder = Self::float_builder(row_count);
-        for numeric in numeric_values {
-            match numeric {
-                Some(number) => builder.append_value(number.as_f64()),
-                None => builder.append_null(),
-            }
-        }
-        fields.push(Field::new(name, DataType::Float64, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    fn append_json_value_column(
-        name: &str,
-        values: &[JsonValue],
-        type_hint: Option<&str>,
-        row_count: usize,
-        fields: &mut Vec<Field>,
-        arrays: &mut Vec<ArrayRef>,
-    ) {
-        match Self::column_kind(type_hint) {
-            BqlColumnKind::Numeric => {
-                let mut builder = Self::float_builder(row_count);
-                for row_idx in 0..row_count {
-                    match values.get(row_idx) {
-                        Some(JsonValue::Number(number)) => {
-                            builder.append_value(BqlNumber::from_json(number).as_f64());
-                        }
-                        Some(JsonValue::String(s)) => {
-                            if let Ok(f) = s.parse::<f64>() {
-                                builder.append_value(f);
-                            } else {
-                                builder.append_null();
-                            }
-                        }
-                        _ => builder.append_null(),
-                    }
-                }
-                fields.push(Field::new(name, DataType::Float64, true));
-                arrays.push(Arc::new(builder.finish()));
-            }
-            BqlColumnKind::String => {
-                let mut builder = Self::string_builder(row_count);
-                for row_idx in 0..row_count {
-                    match values.get(row_idx) {
-                        Some(value) => Self::append_json_as_string(value, &mut builder),
-                        None => builder.append_null(),
-                    }
-                }
-                fields.push(Field::new(name, DataType::Utf8, true));
-                arrays.push(Arc::new(builder.finish()));
-            }
-            BqlColumnKind::Infer => {
-                Self::append_inferred_json_value_column(name, values, row_count, fields, arrays);
-            }
-        }
-    }
-
-    fn append_inferred_json_value_column(
-        name: &str,
-        values: &[JsonValue],
-        row_count: usize,
-        fields: &mut Vec<Field>,
-        arrays: &mut Vec<ArrayRef>,
-    ) {
-        let mut numeric_values: Vec<Option<BqlNumber>> = Vec::with_capacity(row_count);
-        let mut string_builder: Option<StringBuilder> = None;
-
-        for row_idx in 0..row_count {
-            if let Some(builder) = string_builder.as_mut() {
-                match values.get(row_idx) {
-                    Some(value) => Self::append_json_as_string(value, builder),
-                    None => builder.append_null(),
-                }
-                continue;
-            }
-
-            match values.get(row_idx) {
-                Some(JsonValue::Number(number)) => {
-                    numeric_values.push(Some(BqlNumber::from_json(number)));
-                }
-                Some(JsonValue::Null) | None => numeric_values.push(None),
-                Some(value) => {
-                    let mut builder = Self::string_builder(row_count);
-                    for numeric in &numeric_values {
-                        match numeric {
-                            Some(number) => number.append_as_string(&mut builder),
-                            None => builder.append_null(),
-                        }
-                    }
-                    Self::append_json_as_string(value, &mut builder);
-                    string_builder = Some(builder);
-                }
-            }
-        }
-
-        if let Some(mut builder) = string_builder {
-            fields.push(Field::new(name, DataType::Utf8, true));
-            arrays.push(Arc::new(builder.finish()));
-            return;
-        }
-
-        let mut builder = Self::float_builder(row_count);
-        for numeric in numeric_values {
-            match numeric {
-                Some(number) => builder.append_value(number.as_f64()),
-                None => builder.append_null(),
-            }
-        }
-        fields.push(Field::new(name, DataType::Float64, true));
-        arrays.push(Arc::new(builder.finish()));
-    }
-
-    fn append_json_as_string(value: &JsonValue, builder: &mut StringBuilder) {
-        match value {
-            JsonValue::String(value) => builder.append_value(value),
-            JsonValue::Number(number) => BqlNumber::from_json(number).append_as_string(builder),
-            JsonValue::Bool(value) => {
-                builder.append_value(if *value { "true" } else { "false" });
-            }
-            JsonValue::Null => builder.append_null(),
-            other => builder.append_value(other.to_string()),
-        }
-    }
-
-    fn append_json_as_id(value: &JsonValue, builder: &mut StringBuilder) {
-        match value {
-            JsonValue::Null => builder.append_value(""),
-            other => Self::append_json_as_string(other, builder),
-        }
-    }
-
-    fn string_builder(row_count: usize) -> StringBuilder {
-        if row_count <= 1 {
-            StringBuilder::new()
-        } else {
-            StringBuilder::with_capacity(row_count, row_count.saturating_mul(16).max(1))
-        }
-    }
-
-    fn float_builder(row_count: usize) -> Float64Builder {
-        if row_count <= 1 {
-            Float64Builder::new()
-        } else {
-            Float64Builder::with_capacity(row_count)
-        }
-    }
-
-    /// Extract human-readable messages from a `responseExceptions` array.
-    /// Works for both the top-level response and per-field exception arrays.
-    fn extract_exception_messages(exceptions: Option<&[BqlException<'_>]>) -> Vec<String> {
-        exceptions
-            .unwrap_or_default()
-            .iter()
-            .filter_map(|exception| {
-                exception.message.as_ref().map(|msg| {
-                    if let Some(node) = exception.node_name.as_deref() {
-                        format!("{msg} (in {node})")
-                    } else {
-                        msg.to_string()
-                    }
-                })
-            })
-            .collect()
-    }
-
-    fn extract_exception_messages_value(json: &JsonValue) -> Vec<String> {
-        let Some(JsonValue::Array(exceptions)) = json.get("responseExceptions") else {
-            return Vec::new();
-        };
-        exceptions
-            .iter()
-            .filter_map(|e| {
-                e.get("message").and_then(|m| m.as_str()).map(|msg| {
-                    if let Some(node) = e.get("nodeName").and_then(|n| n.as_str()) {
-                        format!("{msg} (in {node})")
-                    } else {
-                        msg.to_string()
-                    }
-                })
-            })
-            .collect()
-    }
-
-    /// Return an empty single-column batch (no results).
-    fn empty_batch() -> Result<RecordBatch, BlpError> {
-        let schema = Schema::new(vec![Field::new("ticker", DataType::Utf8, true)]);
-        RecordBatch::try_new(
-            Arc::new(schema),
-            vec![Arc::new(StringArray::from(Vec::<&str>::new()))],
-        )
-        .map_err(|e| BlpError::Internal {
-            detail: format!("Failed to create empty batch: {}", e),
-        })
     }
 
     /// Extract results from a BQL results element (legacy Element-API fallback).
@@ -1023,10 +419,282 @@ impl BqlState {
 mod tests {
     use super::*;
     use arrow_array::{Array, Float64Array, StringArray};
+    use arrow_schema::DataType;
 
     fn make_state() -> BqlState {
         let (tx, _rx) = oneshot::channel();
         BqlState::new(tx)
+    }
+
+    fn parse_both_json_routes(json: &str) -> [Result<RecordBatch, BlpError>; 2] {
+        assert!(json.len() <= BQL_TYPED_JSON_MAX_BYTES);
+        let large_json = format!("{json}{}", " ".repeat(BQL_TYPED_JSON_MAX_BYTES));
+        let state = make_state();
+        [
+            state.parse_bql_json(json),
+            state.parse_bql_json(&large_json),
+        ]
+    }
+
+    fn matching_json_routes(json: &str) -> RecordBatch {
+        let [typed, value] = parse_both_json_routes(json);
+        let typed = typed.expect("typed route parses");
+        let value = value.expect("value route parses");
+        assert_eq!(typed.schema(), value.schema());
+        assert_eq!(typed.num_rows(), value.num_rows());
+        for (typed_column, value_column) in typed.columns().iter().zip(value.columns()) {
+            assert_eq!(typed_column.to_data(), value_column.to_data());
+        }
+        typed
+    }
+
+    #[test]
+    fn parse_bql_json_structure_matches_across_routes() {
+        let batch = matching_json_routes(
+            r#"{
+                "responseExceptions": [{"message": "partial response"}],
+                "results": {
+                    "z_last": {
+                        "idColumn": {"values": ["not selected"]},
+                        "valuesColumn": {"type": "INT32", "values": [3, 4, 5, 6]}
+                    },
+                    "b_price": {
+                        "idColumn": {"values": ["X", null, 123]},
+                        "valuesColumn": {"type": "double", "values": ["2.5", null]},
+                        "secondaryColumns": [
+                            {"name": "date", "values": ["not selected"]},
+                            {"name": "A_EMPTY", "values": ["not selected"]},
+                            {"values": ["unnamed"]}
+                        ],
+                        "responseExceptions": [{"message": "partial field", "nodeName": "price"}]
+                    },
+                    "a_empty": {
+                        "idColumn": {"values": []},
+                        "valuesColumn": {"values": [1]},
+                        "secondaryColumns": [
+                            {"name": "DATE", "type": "dAtE", "values": ["first"]}
+                        ]
+                    }
+                }
+            }"#,
+        );
+        let schema = batch.schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, ["ticker", "date", "a_empty", "b_price", "z_last"]);
+        assert_eq!(batch.num_rows(), 3);
+
+        let tickers = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            tickers.iter().collect::<Vec<_>>(),
+            [Some("X"), Some(""), Some("123")]
+        );
+        let dates = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            dates.iter().collect::<Vec<_>>(),
+            [Some("first"), None, None]
+        );
+        for (index, expected) in [
+            (2, [Some(1.0), None, None]),
+            (3, [Some(2.5), None, None]),
+            (4, [Some(3.0), Some(4.0), Some(5.0)]),
+        ] {
+            let values = batch
+                .column(index)
+                .as_any()
+                .downcast_ref::<Float64Array>()
+                .unwrap();
+            assert_eq!(values.iter().collect::<Vec<_>>(), expected);
+        }
+    }
+
+    #[test]
+    fn parse_bql_json_missing_secondary_values_match_across_routes() {
+        let batch = matching_json_routes(
+            r#"{
+                "results": {
+                    "field_a": {
+                        "idColumn": {"values": ["X", "Y"]},
+                        "valuesColumn": {"values": [1, 2]},
+                        "secondaryColumns": [{"name": "DATE", "type": "DATE"}]
+                    },
+                    "field_b": {
+                        "secondaryColumns": [
+                            {"name": "date", "values": ["not selected", "not selected"]}
+                        ]
+                    }
+                }
+            }"#,
+        );
+        let schema = batch.schema();
+        let names: Vec<&str> = schema
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, ["ticker", "date", "field_a", "field_b"]);
+        // A declared dimension with omitted values follows the typed default:
+        // emit nulls, and do not replace it with a later field's dimension.
+        assert_eq!(schema.field(1).data_type(), &DataType::Utf8);
+        assert_eq!(batch.column(1).null_count(), 2);
+        assert_eq!(schema.field(3).data_type(), &DataType::Float64);
+        assert_eq!(batch.column(3).null_count(), 2);
+    }
+
+    #[test]
+    fn parse_bql_json_inference_and_padding_match_across_routes() {
+        let batch = matching_json_routes(
+            r#"{
+                "results": {
+                    "all_null": {
+                        "idColumn": {"values": ["A", "B", "C", "D", "E"]},
+                        "valuesColumn": {"values": [null, null]}
+                    },
+                    "hinted_numeric": {
+                        "valuesColumn": {"type": "iNtEgEr", "values": ["3.5", false, null, "bad"]}
+                    },
+                    "numeric": {
+                        "valuesColumn": {
+                            "values": [1, null, 2.5, 18446744073709551615, -0.0, "outside row count"]
+                        }
+                    },
+                    "promoted": {
+                        "valuesColumn": {
+                            "values": [9007199254740993, 18446744073709551615, null, true, {"kind": "object"}]
+                        }
+                    },
+                    "unknown": {
+                        "valuesColumn": {"type": "BOOLEAN", "values": [false, null, "6"]}
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(batch.num_rows(), 5);
+        assert_eq!(batch.num_columns(), 6);
+        assert_eq!(batch.schema().field(1).data_type(), &DataType::Float64);
+        assert_eq!(batch.column(1).null_count(), 5);
+
+        let hinted = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(
+            hinted.iter().collect::<Vec<_>>(),
+            [Some(3.5), None, None, None, None]
+        );
+        let numeric = batch
+            .column(3)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(
+            numeric.iter().collect::<Vec<_>>(),
+            [
+                Some(1.0),
+                None,
+                Some(2.5),
+                Some(u64::MAX as f64),
+                Some(-0.0)
+            ]
+        );
+        assert!(numeric.value(4).is_sign_negative());
+        let promoted = batch
+            .column(4)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            promoted.iter().collect::<Vec<_>>(),
+            [
+                Some("9007199254740993"),
+                Some("18446744073709551615"),
+                None,
+                Some("true"),
+                Some(r#"{"kind":"object"}"#),
+            ]
+        );
+        let unknown = batch
+            .column(5)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            unknown.iter().collect::<Vec<_>>(),
+            [Some("false"), None, Some("6"), None, None]
+        );
+    }
+
+    #[test]
+    fn parse_bql_json_empty_results_and_ids_match_across_routes() {
+        for json in [
+            "{}",
+            r#"{"results": null}"#,
+            r#"{"results": {}, "responseExceptions": [{"nodeName": "no message"}]}"#,
+        ] {
+            let batch = matching_json_routes(json);
+            assert_eq!(batch.num_rows(), 0);
+            assert_eq!(batch.num_columns(), 1);
+            assert_eq!(batch.schema().field(0).name(), "ticker");
+            assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8);
+        }
+
+        let batch = matching_json_routes(
+            r#"{
+                "results": {
+                    "field": {
+                        "valuesColumn": {"values": ["outside row count"]},
+                        "secondaryColumns": [{"name": "DATE", "type": "DATE", "values": ["ignored"]}]
+                    }
+                }
+            }"#,
+        );
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.num_columns(), 3);
+        assert_eq!(batch.schema().field(1).data_type(), &DataType::Utf8);
+        assert_eq!(batch.schema().field(2).data_type(), &DataType::Float64);
+    }
+
+    #[test]
+    fn parse_bql_json_exception_joining_matches_across_routes() {
+        for results in ["", r#", "results": null"#, r#", "results": {}"#] {
+            for (exceptions, expected) in [
+                (r#"[{"nodeName": "ignored"}, {"message": ""}]"#, ""),
+                (
+                    r#"[{"message": ""}, {"message": "bad query", "nodeName": "get(px)"}, {"message": "invalid field"}]"#,
+                    "; bad query (in get(px)); invalid field",
+                ),
+            ] {
+                let json = format!(
+                    r#"{{"clientContext": {{"clientRequestId": "multiple-errors"}}, "responseExceptions": {exceptions}{results}}}"#
+                );
+                for result in parse_both_json_routes(&json) {
+                    match result.expect_err("response exceptions must fail") {
+                        BlpError::RequestFailure {
+                            request_id, source, ..
+                        } => {
+                            assert_eq!(request_id.as_deref(), Some("multiple-errors"));
+                            assert_eq!(
+                                source.as_ref().map(ToString::to_string).as_deref(),
+                                Some(expected)
+                            );
+                        }
+                        other => panic!("unexpected error: {other:?}"),
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@ import pytest
 
 from xbbg import blp
 from xbbg._core import ArrowTable
-from xbbg.backend import _attach_xbbg_metadata_attrs, check_backend, convert_backend_frame
+from xbbg.backend import _attach_xbbg_metadata_attrs, _convert_result_backend, check_backend, convert_backend_frame
 from xbbg.blp import Backend
 
 
@@ -47,7 +47,7 @@ class TestConvertBackendNative:
         assert result is arrow_table
 
     def test_facade_conversion_defaults_to_narwhals(self, arrow_table: Any):
-        result = blp._convert_result_backend(arrow_table, None)
+        result = _convert_result_backend(arrow_table, None)
         assert isinstance(result, nw.DataFrame)
 
         native = result.to_native()
@@ -70,7 +70,7 @@ class TestConvertBackendNative:
         original = blp.get_backend()
         try:
             blp.set_backend(Backend.NATIVE)
-            assert blp._convert_result_backend(arrow_table, None) is arrow_table
+            assert _convert_result_backend(arrow_table, None) is arrow_table
         finally:
             blp.set_backend(original)
 

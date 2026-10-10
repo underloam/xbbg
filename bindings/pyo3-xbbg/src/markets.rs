@@ -226,7 +226,7 @@ fn to_exchange_info_dict(info: ExchangeInfo) -> ExchangeInfoDict {
 }
 
 /// Register all markets functions on the module.
-pub fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(ext_derive_sessions, m)?)?;
     m.add_function(wrap_pyfunction!(ext_get_market_rule, m)?)?;
     m.add_function(wrap_pyfunction!(ext_infer_timezone, m)?)?;

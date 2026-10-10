@@ -13,7 +13,7 @@ use crate::cache_io::{read_json_array_bounded, AtomicJsonPublisher, PublicationO
 /// Days an exchange cache entry stays valid. Exchange metadata (timezones,
 /// session hours) drifts rarely; a month bounds staleness without forcing
 /// per-run Bloomberg lookups.
-pub const EXCHANGE_CACHE_TTL_DAYS: i64 = 30;
+pub(crate) const EXCHANGE_CACHE_TTL_DAYS: i64 = 30;
 
 fn is_fresh(info: &ExchangeInfo) -> bool {
     info.cached_at.is_some_and(|cached_at| {
@@ -39,7 +39,7 @@ const MAX_EXCHANGE_CACHE_FILE_BYTES: u64 = 32 * 1024 * 1024;
 /// (and legacy entries without a `cached_at` stamp) are served as misses and
 /// replaced by the caller's next resolution `put`; expired disk entries are
 /// skipped at load. Use [`ExchangeCache::invalidate`] for manual eviction.
-pub struct ExchangeCache {
+pub(crate) struct ExchangeCache {
     cache: ArcSwap<HashMap<String, ExchangeInfo>>,
     write_cache: Mutex<HashMap<String, ExchangeInfo>>,
     cache_path: PathBuf,
@@ -49,15 +49,15 @@ pub struct ExchangeCache {
 }
 
 impl ExchangeCache {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::with_cache_path(Self::default_cache_path())
     }
 
-    pub fn with_cache_path(path: PathBuf) -> Self {
+    pub(crate) fn with_cache_path(path: PathBuf) -> Self {
         Self::with_cache_path_and_max_entries(path, DEFAULT_MAX_EXCHANGE_CACHE_ENTRIES)
     }
 
-    pub fn with_cache_path_and_max_entries(path: PathBuf, max_entries: usize) -> Self {
+    pub(crate) fn with_cache_path_and_max_entries(path: PathBuf, max_entries: usize) -> Self {
         Self {
             cache: ArcSwap::from_pointee(HashMap::new()),
             write_cache: Mutex::new(HashMap::new()),
@@ -68,7 +68,7 @@ impl ExchangeCache {
         }
     }
 
-    pub fn get(&self, ticker: &str) -> Option<ExchangeInfo> {
+    pub(crate) fn get(&self, ticker: &str) -> Option<ExchangeInfo> {
         let _ = self.ensure_loaded();
         let key = ticker.trim();
         if key.is_empty() {
@@ -82,11 +82,11 @@ impl ExchangeCache {
             .map(ExchangeInfo::as_cache_hit)
     }
 
-    pub fn put(&self, ticker: &str, info: ExchangeInfo) {
+    pub(crate) fn put(&self, ticker: &str, info: ExchangeInfo) {
         self.put_many(std::iter::once((ticker, info)));
     }
 
-    pub fn put_many<I, S>(&self, entries: I)
+    pub(crate) fn put_many<I, S>(&self, entries: I)
     where
         I: IntoIterator<Item = (S, ExchangeInfo)>,
         S: AsRef<str>,
@@ -126,7 +126,7 @@ impl ExchangeCache {
         drop(replaced);
     }
 
-    pub fn invalidate(&self, ticker: Option<&str>) -> Result<(), String> {
+    pub(crate) fn invalidate(&self, ticker: Option<&str>) -> Result<(), String> {
         let load_result = self.ensure_loaded();
         if ticker.is_some_and(|ticker| !ticker.trim().is_empty()) {
             load_result?;
@@ -167,7 +167,7 @@ impl ExchangeCache {
         Ok(())
     }
 
-    pub fn save_to_disk(&self) -> Result<(), String> {
+    pub(crate) fn save_to_disk(&self) -> Result<(), String> {
         let _ = self.ensure_loaded();
 
         let (publication, snapshot) = {
@@ -185,7 +185,7 @@ impl ExchangeCache {
     }
 
     /// Eagerly load the on-disk cache (idempotent).
-    pub fn preload(&self) -> Result<(), String> {
+    pub(crate) fn preload(&self) -> Result<(), String> {
         self.ensure_loaded()
     }
 

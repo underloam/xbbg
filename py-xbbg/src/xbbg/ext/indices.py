@@ -4,12 +4,12 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from xbbg.ext._utils import DateLike, _call_native_recipe, _fmt_date, _syncify
+from xbbg._dates import DateLike, _fmt_date
+from xbbg._services_gen import INDEX_MEMBER_FIELDS
+from xbbg.ext._utils import _call_native_recipe, _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame
-
-_SUPPORTED_INDEX_FIELDS = frozenset({"INDX_MWEIGHT", "INDX_MEMBERS", "INDX_MEMBERS3"})
 
 
 async def aindex_members(
@@ -22,8 +22,8 @@ async def aindex_members(
 ) -> IntoDataFrame:
     """Async normalized index members for INDX_MWEIGHT/INDX_MEMBERS/INDX_MEMBERS3."""
     normalized_field = field.upper()
-    if normalized_field not in _SUPPORTED_INDEX_FIELDS:
-        raise ValueError(f"field must be one of {sorted(_SUPPORTED_INDEX_FIELDS)}, got {field!r}")
+    if normalized_field not in INDEX_MEMBER_FIELDS:
+        raise ValueError(f"field must be one of {sorted(INDEX_MEMBER_FIELDS)}, got {field!r}")
     return await _call_native_recipe(
         "recipe_index_members",
         index,

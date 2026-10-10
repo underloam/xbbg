@@ -4,8 +4,7 @@ from typing import Any
 
 import pytest
 
-import xbbg
-from xbbg import blp
+from xbbg import _endpoints, _engine, _request_options, backend as backend_module, blp
 from xbbg._core import ArrowTable
 from xbbg.ext import fixed_income
 from xbbg.services import Operation, Service
@@ -25,8 +24,8 @@ class FakeEngine:
 
 @pytest.fixture
 def stub_engine(monkeypatch):
-    blp._VALID_ELEMENTS_CACHE.clear()
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    _request_options._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
 
 def _raw_bqr_table(*, broker: bool = True, condition_codes: bool = False) -> ArrowTable:
@@ -70,7 +69,7 @@ async def test_abqr_generated_routes_intraday_tick_defaults(monkeypatch, stub_en
         return _raw_bqr_table()
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abqr("/isin/US037833FB15@MSG1 Corp", date_offset="-1d")
 
@@ -94,7 +93,7 @@ async def test_abqr_generated_warns_for_non_isin_msg1_source(monkeypatch, stub_e
         return _raw_bqr_table()
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     with pytest.warns(UserWarning, match="@MSG1 Corp"):
         await blp.abqr("US037833FB15@MSG1 Corp", date_offset="-1d")
@@ -112,7 +111,7 @@ async def test_abqr_generated_reshapes_generic_path_output(monkeypatch, stub_eng
         return _generic_bqr_table()
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abqr(
         "/isin/US037833FB15@MSG1 Corp",
@@ -157,8 +156,8 @@ async def test_abqr_generated_keeps_typed_include_output(monkeypatch, stub_engin
         raise AssertionError("typed bqr output must not use generic reshaper")
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "_reshape_bqr_generic", fail_reshape)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(_endpoints, "_reshape_bqr_generic", fail_reshape)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abqr(
         "/isin/US037833FB15@MSG1 Corp",
@@ -186,7 +185,7 @@ async def test_abqr_generated_uses_explicit_datetime_range_and_event_types(monke
         return _raw_bqr_table(broker=False)
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abqr(
         "XYZ 4.5 01/15/30 Corp",
@@ -211,7 +210,7 @@ async def test_abqr_generated_uses_explicit_datetime_range_and_event_types(monke
 
 def test_bqr_postprocess_requires_broker_codes_for_attributed_quotes():
     with pytest.raises(RuntimeError, match="without broker attribution"):
-        blp._postprocess_bqr_result(
+        _endpoints._postprocess_bqr_result(
             _raw_bqr_table(broker=False),
             ticker="/isin/US037833FB15",
             backend="pyarrow",
@@ -220,7 +219,7 @@ def test_bqr_postprocess_requires_broker_codes_for_attributed_quotes():
 
 
 def test_reshape_bqr_generic_uses_arrow_table_without_pandas():
-    result = blp._reshape_bqr_generic(_generic_bqr_table(), "AAPL US Equity")
+    result = _endpoints._reshape_bqr_generic(_generic_bqr_table(), "AAPL US Equity")
     rows = result.to_pylist()
 
     assert len(rows) == 1
@@ -233,39 +232,54 @@ def test_reshape_bqr_generic_uses_arrow_table_without_pandas():
 
 
 @pytest.mark.asyncio
-async def test_ext_abqr_defaults_to_bid_ask_and_broker_codes(monkeypatch):
+async def test_ext_abqr_delegates_defaults_and_request_options(monkeypatch):
     captured: dict[str, Any] = {}
+    native_result = object()
 
-    async def fake_abdtick(**kwargs):
-        captured.update(kwargs)
-        return _raw_bqr_table()
+    async def fake_recipe(name, ticker, **kwargs):
+        captured.update(recipe=name, ticker=ticker, **kwargs)
+        return native_result
 
-    monkeypatch.setattr(xbbg, "abdtick", fake_abdtick)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(fixed_income, "_call_native_recipe", fake_recipe)
 
     result = await fixed_income.abqr(
         "/isin/US037833FB15@MSG1 Corp",
-        start_datetime="2026-04-24T00:00:00",
-        end_datetime="2026-04-24T23:59:59",
         maxDataPoints=5,
+        include_condition_codes=True,
+        includeSpreadPrice=True,
+        request_tz="America/New_York",
+        output_tz="Asia/Tokyo",
+        backend="native",
     )
 
-    assert captured["ticker"] == "/isin/US037833FB15@MSG1 Corp"
-    assert captured["event_types"] == ["BID", "ASK"]
-    assert captured["includeBrokerCodes"] is True
-    assert captured["maxDataPoints"] == 5
-    assert captured["backend"] == "native"
-    assert result.column_names == ["ticker", "time", "event_type", "price", "size", "broker_sell"]
-    assert result.to_pylist()[0]["broker_sell"] == "CTSD"
+    assert captured == {
+        "recipe": "recipe_bqr",
+        "ticker": "/isin/US037833FB15@MSG1 Corp",
+        "start_datetime": None,
+        "end_datetime": None,
+        "event_types": None,
+        "include_broker_codes": True,
+        "backend": "native",
+        "request_options": {
+            "maxDataPoints": 5,
+            "include_condition_codes": True,
+            "includeSpreadPrice": True,
+            "request_tz": "America/New_York",
+            "output_tz": "Asia/Tokyo",
+        },
+    }
+    assert result is native_result
 
 
 @pytest.mark.asyncio
 async def test_ext_abqr_warns_for_non_isin_msg1_source(monkeypatch):
-    async def fake_abdtick(**_kwargs):
+    async def fake_recipe(name, ticker, **kwargs):
+        assert name == "recipe_bqr"
+        assert ticker == "US037833FB15@MSG1 Corp"
+        assert kwargs["include_broker_codes"] is True
         return _raw_bqr_table()
 
-    monkeypatch.setattr(xbbg, "abdtick", fake_abdtick)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(fixed_income, "_call_native_recipe", fake_recipe)
 
     with pytest.warns(UserWarning, match="/isin/US037833FB15@MSG1 Corp"):
         await fixed_income.abqr(
@@ -279,23 +293,28 @@ async def test_ext_abqr_warns_for_non_isin_msg1_source(monkeypatch):
 @pytest.mark.asyncio
 async def test_ext_abqr_preserves_explicit_event_types(monkeypatch):
     captured: dict[str, Any] = {}
+    native_result = object()
 
-    async def fake_abdtick(**kwargs):
-        captured.update(kwargs)
-        return _raw_bqr_table(broker=False)
+    async def fake_recipe(name, ticker, **kwargs):
+        captured.update(recipe=name, ticker=ticker, **kwargs)
+        return native_result
 
-    monkeypatch.setattr(xbbg, "abdtick", fake_abdtick)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(fixed_income, "_call_native_recipe", fake_recipe)
 
     result = await fixed_income.abqr(
-        "IBM US Equity",
-        start_datetime="2026-04-24T00:00:00",
-        end_datetime="2026-04-24T23:59:59",
+        "TEST US Equity",
+        start_datetime="2026-04-24 09:00",
+        end_datetime="2026-04-24 10:00",
         event_types=["TRADE"],
         include_broker_codes=False,
+        backend="pyarrow",
     )
 
+    assert captured["recipe"] == "recipe_bqr"
+    assert captured["start_datetime"] == "2026-04-24T09:00:00"
+    assert captured["end_datetime"] == "2026-04-24T10:00:00"
     assert captured["event_types"] == ["TRADE"]
-    assert captured["backend"] == "native"
-    assert "includeBrokerCodes" not in captured
-    assert result.column_names == ["ticker", "time", "event_type", "price", "size"]
+    assert captured["include_broker_codes"] is False
+    assert captured["backend"] == "pyarrow"
+    assert captured["request_options"] == {}
+    assert result is native_result

@@ -244,3 +244,33 @@ def test_pyarrow_helpers_are_lazy_optional_conversions(arrow_table: Any) -> None
     pyarrow_column = arrow_table.column("ticker").to_pyarrow()
     assert isinstance(pyarrow_column, pa.ChunkedArray)
     assert pyarrow_column.to_pylist() == ["AAPL US Equity", "MSFT US Equity", "IBM US Equity"]
+
+
+@pytest.mark.parametrize("native_only", [False, True])
+def test_shared_arrow_coercion_preserves_native_carriers(arrow_table, native_only):
+    from xbbg._arrow import ensure_arrow_table, is_arrow_record_batch, is_arrow_table
+
+    assert is_arrow_table(arrow_table)
+    assert ensure_arrow_table(arrow_table, native_only=native_only) is arrow_table
+    batch = arrow_table.to_batches()[0]
+    assert is_arrow_record_batch(batch)
+    assert ensure_arrow_table(batch, native_only=native_only).to_pylist() == arrow_table.to_pylist()
+    with pytest.raises(TypeError, match="Expected xbbg ArrowTable"):
+        ensure_arrow_table(object(), native_only=native_only)
+
+
+@pytest.mark.parametrize("batch", [False, True])
+def test_pyarrow_coercion_does_not_widen_native_plugin_contract(batch):
+    from narwhals._utils import Version
+
+    from xbbg._arrow import ensure_arrow_table
+    from xbbg._narwhals_impl import XbbgDataFrame
+
+    pa = pytest.importorskip("pyarrow")
+    table = pa.table({"value": [1, 2]})
+    carrier = table.to_batches()[0] if batch else table
+    assert ensure_arrow_table(carrier).to_pylist() == [{"value": 1}, {"value": 2}]
+    with pytest.raises(TypeError, match="Expected xbbg ArrowTable"):
+        ensure_arrow_table(carrier, native_only=True)
+    with pytest.raises(TypeError, match="Expected xbbg ArrowTable"):
+        XbbgDataFrame(carrier, version=Version.V1)

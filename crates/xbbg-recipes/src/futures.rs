@@ -7,8 +7,8 @@
 //!
 //! - [`recipe_fut_ticker`]: Resolve generic ticker to specific contract
 //! - [`recipe_active_futures`]: Find most active futures contract
-//! - [`recipe_cdx_ticker`]: Resolve CDX series
-//! - [`recipe_active_cdx`]: Find most active CDX series
+//! - [`recipe_cdx_ticker_with_options`]: Resolve CDX series
+//! - [`recipe_active_cdx_with_options`]: Find most active CDX series
 
 use std::sync::Arc;
 
@@ -30,36 +30,46 @@ use xbbg_ext::{fmt_date, parse_date, parse_ticker_parts};
 use crate::error::{RecipeError, Result};
 use crate::utils::{
     array_value_as_date, array_value_as_f64, array_value_as_string, as_string_col, canonical_name,
-    date32_to_naive, naive_to_date32, parse_any_date,
+    date32_to_naive, find_column, naive_to_date32, parse_any_date,
 };
 
 /// Resolve a generic futures ticker to a specific contract ticker for a date.
 ///
-/// Workflow:
-/// 1. Parse `dt` and resolve contract index from generic ticker.
-/// 2. Generate contract candidates via `xbbg-ext` futures resolver.
-/// 3. Query Bloomberg `LAST_TRADEABLE_DT` for all candidates.
-/// 4. Keep contracts maturing after `dt`, sort by maturity, and select by index.
-/// 5. Return the selected ticker as a single-row `RecordBatch`.
+/// Generated candidates are resolved using `LAST_TRADEABLE_DT`. If that window
+/// cannot supply the requested contract, use Bloomberg's historical
+/// `FUT_CHAIN_LAST_TRADE_DATES` chain with `CHAIN_DATE=dt`. Contracts expiring on
+/// or before `dt` are excluded, and the remainder are ordered by maturity.
+///
+/// Returns exactly one non-null UTF-8 `ticker` column and one row. Invalid inputs
+/// or an insufficient chain return an error, never an empty ticker.
 ///
 /// # Arguments
 ///
 /// * `engine` - Bloomberg engine reference
 /// * `gen_ticker` - Generic futures ticker (e.g. `ES1 Index`, `CL2 Comdty`)
-/// * `dt` - Reference date (`YYYYMMDD`)
-/// * `freq` - Optional roll frequency (`M` monthly, `Q`/`QE` quarterly)
+/// * `dt` - Reference date accepted by [`parse_date`]
+/// * `freq` - Candidate frequency (`Q`/`QE` quarterly; otherwise monthly)
+/// * `options` - Request overrides and options applied to every Bloomberg request.
+///   Internal reference/history responses use long format; bulk chains keep their native shape.
 pub async fn recipe_fut_ticker(
     engine: &Engine,
     gen_ticker: String,
     dt: String,
     freq: Option<String>,
+    mut options: RequestParams,
 ) -> Result<RecordBatch> {
     let dt_parsed = parse_date(&dt)?;
     let idx = contract_index(&gen_ticker)?;
     let freq = parse_roll_frequency(freq.as_deref());
     let candidate_tickers = futures_candidate_tickers(&gen_ticker, dt_parsed, freq, idx)?;
-    let maturities = request_futures_maturities(engine, candidate_tickers).await?;
-    let valid_contracts = valid_futures_contracts(maturities, dt_parsed);
+    options.format = None;
+    let maturities = request_futures_maturities(engine, candidate_tickers, &options).await?;
+    let mut valid_contracts = valid_futures_contracts(maturities, dt_parsed);
+    if valid_contracts.len() <= idx {
+        valid_contracts =
+            request_futures_chain_maturities(engine, &gen_ticker, dt_parsed, freq, &options)
+                .await?;
+    }
     let (selected, _) = select_futures_contract(&valid_contracts, &gen_ticker, &dt, idx)?;
 
     build_single_ticker_batch(selected)
@@ -72,28 +82,33 @@ pub async fn recipe_fut_ticker(
 /// 2. Query historical `FUT_CUR_GEN_TICKER` up to `dt` and return Bloomberg's
 ///    own generic mapping when available.
 /// 3. Otherwise resolve front and second contracts from one shared candidate
-///    maturity request.
-/// 4. Compare the resolved front maturity month vs `dt`.
-/// 5. If near roll, query 10-day historical `VOLUME` and compare contracts.
+///    maturity request, falling back to the historical futures chain if needed.
+/// 4. Keep the front contract before its maturity month, including across years.
+/// 5. Within the maturity month, compare each contract's latest non-null `VOLUME`
+///    in a 10-calendar-day window. Ties or no observations keep the front.
 /// 6. Return the selected active ticker as a single-row `RecordBatch`.
 ///
 /// # Arguments
 ///
 /// * `engine` - Bloomberg engine reference
 /// * `gen_ticker` - Generic futures ticker (e.g. `ES1 Index`)
-/// * `dt` - Reference date (`YYYYMMDD`)
-/// * `freq` - Optional roll frequency (`M` monthly, `Q`/`QE` quarterly)
+/// * `dt` - Reference date accepted by [`parse_date`]
+/// * `freq` - Candidate frequency (`Q`/`QE` quarterly; otherwise monthly)
+/// * `options` - Request overrides and options applied to every Bloomberg request.
+///   Internal reference/history responses use long format; bulk chains keep their native shape.
 pub async fn recipe_active_futures(
     engine: &Engine,
     gen_ticker: String,
     dt: String,
     freq: Option<String>,
+    mut options: RequestParams,
 ) -> Result<RecordBatch> {
     validate_generic_ticker(&gen_ticker)?;
     let dt_parsed = parse_date(&dt)?;
+    options.format = None;
 
     if let Ok(Some(mapped_ticker)) =
-        bloomberg_current_generic_ticker(engine, &gen_ticker, dt_parsed).await
+        bloomberg_current_generic_ticker(engine, &gen_ticker, dt_parsed, &options).await
     {
         return build_single_ticker_batch(mapped_ticker);
     }
@@ -109,52 +124,52 @@ pub async fn recipe_active_futures(
         .take(front_candidate_count)
         .cloned()
         .collect::<Vec<_>>();
-    let maturities = request_futures_maturities(engine, candidate_tickers).await?;
+    let maturities = request_futures_maturities(engine, candidate_tickers, &options).await?;
     let front_contracts =
         valid_futures_contracts_for_candidates(&maturities, &front_candidate_tickers, dt_parsed);
     let second_contracts = valid_futures_contracts(maturities, dt_parsed);
-    let ((front_ticker, front_maturity), second_contract) = select_active_futures_pair(
+    let mut pair = select_active_futures_pair(
         &front_contracts,
         &second_contracts,
         &front_gen,
         &second_gen,
         &dt,
         second_idx,
-    )?;
+    );
+    if pair.as_ref().map_or(true, |(_, second)| second.is_none()) {
+        if let Ok(chain) =
+            request_futures_chain_maturities(engine, &front_gen, dt_parsed, freq, &options).await
+        {
+            // A missing bulk field must not discard an otherwise usable front.
+            if chain.len() > second_idx || pair.is_err() {
+                pair = select_active_futures_pair(
+                    &chain,
+                    &chain,
+                    &front_gen,
+                    &second_gen,
+                    &dt,
+                    second_idx,
+                );
+            }
+        }
+    }
+    let ((front_ticker, front_maturity), second_contract) = pair?;
     let Some((second_ticker, _)) = second_contract else {
         return build_single_ticker_batch(front_ticker);
     };
 
-    let dt_month = (dt_parsed.year(), dt_parsed.month());
-    let maturity_month = (front_maturity.year(), front_maturity.month());
-    if dt_month < maturity_month {
+    if before_futures_roll_month(dt_parsed, front_maturity) {
         return build_single_ticker_batch(front_ticker);
     }
 
-    let start_date = dt_parsed - Duration::days(10);
-    let volume_params = RequestParams {
-        service: Service::RefData.to_string(),
-        operation: Operation::HistoricalData.to_string(),
-        securities: Some(vec![front_ticker.clone(), second_ticker.clone()]),
-        fields: Some(vec!["VOLUME".to_string()]),
-        start_date: Some(fmt_date(start_date, None)),
-        end_date: Some(fmt_date(dt_parsed, None)),
-        ..Default::default()
-    };
-
+    let volume_params = futures_history_request(
+        vec![front_ticker.clone(), second_ticker.clone()],
+        "VOLUME",
+        dt_parsed,
+        &options,
+    );
     let volume_batch = engine.request(volume_params).await?;
-    let front_volume = latest_history_numeric_point(&volume_batch, &front_ticker, "VOLUME")?;
-    let second_volume = latest_history_numeric_point(&volume_batch, &second_ticker, "VOLUME")?;
-
-    let selected = match (front_volume, second_volume) {
-        (Some((_, f)), Some((_, s))) if s > f => second_ticker,
-        (Some(_), Some(_)) => front_ticker,
-        (Some(_), None) => front_ticker,
-        (None, Some(_)) => second_ticker,
-        (None, None) => front_ticker,
-    };
-
-    build_single_ticker_batch(selected)
+    active_futures_volume_batch(&volume_batch, front_ticker, second_ticker)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,17 +286,7 @@ const CDX_ACCRUAL_FIELD: &str = "CDS_FIRST_ACCRUAL_START_DATE";
 
 /// Resolve a generic CDX ticker (`GEN`) to the series that applies on a date.
 ///
-/// The result always includes an explicit `Vn`, including V1.
-pub async fn recipe_cdx_ticker(
-    engine: &Engine,
-    gen_ticker: String,
-    dt: String,
-) -> Result<RecordBatch> {
-    recipe_cdx_ticker_with_options(engine, gen_ticker, dt, false).await
-}
-
-/// Resolve a generic CDX ticker with presentation options.
-///
+/// Pass `versionless=false` to include the explicit version, including V1.
 /// `versionless` affects only the returned ticker; resolution still requires
 /// Bloomberg `VERSION` metadata.
 pub async fn recipe_cdx_ticker_with_options(
@@ -299,21 +304,12 @@ pub async fn recipe_cdx_ticker_with_options(
 
 /// Resolve the latest CDX series that had started *and* traded by a date.
 ///
-/// Identical to [`recipe_cdx_ticker`] except between a roll and the new
-/// series' first print, when the preceding series is still the traded one.
+/// Identical to [`recipe_cdx_ticker_with_options`] except between a roll and the
+/// new series' first print, when the preceding series is still the traded one.
 /// CDX.NA.HY.46 started 2026-03-20 but first printed 2026-03-27, so those five
 /// business days resolve to S45.
-pub async fn recipe_active_cdx(
-    engine: &Engine,
-    gen_ticker: String,
-    dt: String,
-    lookback_days: Option<i32>,
-) -> Result<RecordBatch> {
-    recipe_active_cdx_with_options(engine, gen_ticker, dt, lookback_days, false).await
-}
-
-/// Resolve the most active CDX series with presentation options.
 ///
+/// Pass `versionless=false` to include the explicit version.
 /// `versionless` affects only the selected output ticker.
 pub async fn recipe_active_cdx_with_options(
     engine: &Engine,
@@ -584,19 +580,164 @@ fn futures_candidate_tickers(
         .collect())
 }
 
-async fn request_futures_maturities(
-    engine: &Engine,
+fn futures_maturity_request(
     candidate_tickers: Vec<String>,
-) -> Result<Vec<(String, NaiveDate)>> {
-    let params = RequestParams {
+    options: &RequestParams,
+) -> RequestParams {
+    let mut params = RequestParams {
         service: Service::RefData.to_string(),
         operation: Operation::ReferenceData.to_string(),
         securities: Some(candidate_tickers),
         fields: Some(vec!["LAST_TRADEABLE_DT".to_string()]),
+        format: Some("long".to_string()),
         ..Default::default()
     };
-    let maturity_batch = engine.request(params).await?;
+    crate::utils::apply_request_options(&mut params, options);
+    params
+}
+
+async fn request_futures_maturities(
+    engine: &Engine,
+    candidate_tickers: Vec<String>,
+    options: &RequestParams,
+) -> Result<Vec<(String, NaiveDate)>> {
+    let maturity_batch = engine
+        .request(futures_maturity_request(candidate_tickers, options))
+        .await?;
     extract_refdata_date_values(&maturity_batch, "LAST_TRADEABLE_DT")
+}
+
+fn futures_chain_request(
+    gen_ticker: &str,
+    dt: NaiveDate,
+    options: &RequestParams,
+) -> RequestParams {
+    let mut params = RequestParams {
+        service: Service::RefData.to_string(),
+        operation: Operation::ReferenceData.to_string(),
+        extractor: ExtractorType::BulkData,
+        extractor_set: true,
+        securities: Some(vec![gen_ticker.to_string()]),
+        fields: Some(vec!["FUT_CHAIN_LAST_TRADE_DATES".to_string()]),
+        overrides: Some(vec![("CHAIN_DATE".to_string(), fmt_date(dt, None))]),
+        ..Default::default()
+    };
+    crate::utils::apply_request_options(&mut params, options);
+    params.format = None;
+    params
+}
+
+async fn request_futures_chain_maturities(
+    engine: &Engine,
+    gen_ticker: &str,
+    dt: NaiveDate,
+    freq: RollFrequency,
+    options: &RequestParams,
+) -> Result<Vec<(String, NaiveDate)>> {
+    let batch = engine
+        .request(futures_chain_request(gen_ticker, dt, options))
+        .await?;
+    extract_futures_chain_maturities(&batch, dt, freq)
+}
+
+fn extract_futures_chain_maturities(
+    batch: &RecordBatch,
+    dt: NaiveDate,
+    freq: RollFrequency,
+) -> Result<Vec<(String, NaiveDate)>> {
+    if batch.num_rows() == 0 {
+        return Ok(Vec::new());
+    }
+    let ticker_name = find_column(
+        batch,
+        &[
+            "future's ticker",
+            "futures ticker",
+            "future ticker",
+            "security description",
+            "contract ticker",
+        ],
+    )
+    .or_else(|| find_column(batch, &["ticker"]))
+    .ok_or_else(|| RecipeError::Other("futures chain is missing contract tickers".to_string()))?;
+    let expiry_name = find_chain_expiry_column(batch)
+        .or_else(|| find_column(batch, &["date"]))
+        .ok_or_else(|| RecipeError::Other("futures chain is missing expiry dates".to_string()))?;
+    let ticker_col = batch.column_by_name(&ticker_name).expect("matched column");
+    let expiry_col = batch.column_by_name(&expiry_name).expect("matched column");
+    let contracts = (0..batch.num_rows())
+        .filter_map(|row| {
+            let ticker = array_value_as_string(ticker_col, row)?;
+            let trimmed = ticker.trim();
+            if trimmed.is_empty() {
+                return None;
+            }
+            if freq == RollFrequency::Quarterly {
+                let contract = trimmed.split_whitespace().next()?;
+                let root_month = contract.trim_end_matches(|c: char| c.is_ascii_digit());
+                if root_month.len() == contract.len()
+                    || !matches!(
+                        root_month.as_bytes().last(),
+                        Some(b'H' | b'M' | b'U' | b'Z')
+                    )
+                {
+                    return None;
+                }
+            }
+            let expiry = array_value_as_date(expiry_col, row)?;
+            let ticker = if trimmed.len() == ticker.len() {
+                ticker
+            } else {
+                trimmed.to_string()
+            };
+            Some((ticker, expiry))
+        })
+        .collect();
+    Ok(valid_futures_contracts(contracts, dt))
+}
+
+fn futures_history_request(
+    securities: Vec<String>,
+    field: &str,
+    dt: NaiveDate,
+    options: &RequestParams,
+) -> RequestParams {
+    let mut params = RequestParams {
+        service: Service::RefData.to_string(),
+        operation: Operation::HistoricalData.to_string(),
+        securities: Some(securities),
+        fields: Some(vec![field.to_string()]),
+        start_date: Some(fmt_date(dt - Duration::days(10), None)),
+        end_date: Some(fmt_date(dt, None)),
+        format: Some("long".to_string()),
+        ..Default::default()
+    };
+    crate::utils::apply_request_options(&mut params, options);
+    params
+}
+
+fn before_futures_roll_month(dt: NaiveDate, maturity: NaiveDate) -> bool {
+    (dt.year(), dt.month()) < (maturity.year(), maturity.month())
+}
+
+fn active_futures_volume_batch(
+    batch: &RecordBatch,
+    front_ticker: String,
+    second_ticker: String,
+) -> Result<RecordBatch> {
+    if batch.num_rows() == 0 {
+        return build_single_ticker_batch(front_ticker);
+    }
+    let front_volume = latest_history_numeric_point(batch, &front_ticker, "VOLUME")?;
+    let second_volume = latest_history_numeric_point(batch, &second_ticker, "VOLUME")?;
+    let selected = match (front_volume, second_volume) {
+        (Some((_, f)), Some((_, s))) if s > f => second_ticker,
+        (Some(_), Some(_)) => front_ticker,
+        (Some(_), None) => front_ticker,
+        (None, Some(_)) => second_ticker,
+        (None, None) => front_ticker,
+    };
+    build_single_ticker_batch(selected)
 }
 
 fn valid_futures_contracts(
@@ -661,17 +802,14 @@ async fn bloomberg_current_generic_ticker(
     engine: &Engine,
     gen_ticker: &str,
     dt: NaiveDate,
+    options: &RequestParams,
 ) -> Result<Option<String>> {
-    let start_date = dt - Duration::days(10);
-    let params = RequestParams {
-        service: Service::RefData.to_string(),
-        operation: Operation::HistoricalData.to_string(),
-        securities: Some(vec![gen_ticker.to_string()]),
-        fields: Some(vec!["FUT_CUR_GEN_TICKER".to_string()]),
-        start_date: Some(fmt_date(start_date, None)),
-        end_date: Some(fmt_date(dt, None)),
-        ..Default::default()
-    };
+    let params = futures_history_request(
+        vec![gen_ticker.to_string()],
+        "FUT_CUR_GEN_TICKER",
+        dt,
+        options,
+    );
 
     let batch = engine.request(params).await?;
     let Some((_, mapped_root)) =
@@ -818,24 +956,16 @@ fn find_contract_column(batch: &RecordBatch) -> Option<String> {
 }
 
 fn find_chain_expiry_column(batch: &RecordBatch) -> Option<String> {
-    let candidates = [
-        "last trade date",
-        "last tradeable dt",
-        "last_tradeable_dt",
-        "expiry",
-        "expiration date",
-    ];
-    let wanted = candidates
-        .iter()
-        .map(|candidate| canonical_name(candidate))
-        .collect::<Vec<_>>();
-    batch.schema().fields().iter().find_map(|field| {
-        let key = canonical_name(field.name());
-        wanted
-            .iter()
-            .any(|candidate| candidate == &key)
-            .then(|| field.name().to_string())
-    })
+    find_column(
+        batch,
+        &[
+            "last trade date",
+            "last tradeable dt",
+            "last_tradeable_dt",
+            "expiry",
+            "expiration date",
+        ],
+    )
 }
 
 fn extract_refdata_values(
@@ -935,27 +1065,6 @@ fn build_futures_curve_rows(
     rows
 }
 
-fn append_f64(builder: &mut Float64Builder, value: Option<f64>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
-fn append_date(builder: &mut arrow_array::builder::Date32Builder, value: Option<NaiveDate>) {
-    match value {
-        Some(value) => builder.append_value(naive_to_date32(value)),
-        None => builder.append_null(),
-    }
-}
-
-fn append_string(builder: &mut StringBuilder, value: Option<&String>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
 fn build_futures_curve_batch(
     rows: &[FuturesCurveRow],
     extra_fields: &[String],
@@ -977,13 +1086,13 @@ fn build_futures_curve_batch(
         source.append_value(&row.source_ticker);
         contract.append_value(&row.contract_ticker);
         generic.append_value(row.generic_number);
-        append_f64(&mut bid, row.px_bid);
-        append_f64(&mut ask, row.px_ask);
-        append_date(&mut expiry, row.last_tradeable_dt);
-        append_f64(&mut mid, row.mid);
-        append_f64(&mut carry, row.annualized_carry);
+        bid.append_option(row.px_bid);
+        ask.append_option(row.px_ask);
+        expiry.append_option(row.last_tradeable_dt.map(naive_to_date32));
+        mid.append_option(row.mid);
+        carry.append_option(row.annualized_carry);
         for (builder, value) in extra_builders.iter_mut().zip(row.extra_values.iter()) {
-            append_string(builder, value.as_ref());
+            builder.append_option(value.as_deref());
         }
     }
 
@@ -1099,8 +1208,28 @@ fn extract_refdata_date_for_ticker(
     ticker: &str,
     field: &str,
 ) -> Result<Option<NaiveDate>> {
-    let raw = extract_refdata_string_for_ticker(batch, ticker, field)?;
-    Ok(raw.and_then(|v| parse_any_date(&v)))
+    let ticker_col = as_string_col(batch, "ticker")?;
+    let field_col = as_string_col(batch, "field")?;
+    let value_col = batch
+        .column_by_name("value")
+        .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+
+    for row in 0..batch.num_rows() {
+        if ticker_col.is_null(row) || field_col.is_null(row) {
+            continue;
+        }
+        if ticker_col.value(row) == ticker && field_col.value(row).eq_ignore_ascii_case(field) {
+            if let Some(date) = array_value_as_date(value_col, row) {
+                return Ok(Some(date));
+            }
+            // Preserve the metadata rule: the first nonblank value is
+            // authoritative even when it is not a parseable date.
+            if array_value_as_string(value_col, row).is_some_and(|raw| !raw.trim().is_empty()) {
+                return Ok(None);
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn latest_history_numeric_point(
@@ -1248,6 +1377,454 @@ fn parse_series_number(value: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_single_ticker(batch: &RecordBatch, ticker: &str) {
+        assert_eq!(batch.num_rows(), 1);
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(batch.schema().field(0).name(), "ticker");
+        assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8);
+        assert!(!batch.schema().field(0).is_nullable());
+        assert_eq!(as_string_col(batch, "ticker").unwrap().value(0), ticker);
+    }
+
+    #[test]
+    fn test_futures_requests_keep_recipe_identity_and_forward_options() {
+        let dt = NaiveDate::from_ymd_opt(2024, 3, 12).unwrap();
+        let options = RequestParams {
+            service: "ignored service".to_string(),
+            operation: "ignored operation".to_string(),
+            securities: Some(vec!["ignored security".to_string()]),
+            fields: Some(vec!["ignored field".to_string()]),
+            overrides: Some(vec![("PRICING_SOURCE".to_string(), "BGN".to_string())]),
+            security_overrides: Some(vec![(
+                "ESH24 Index".to_string(),
+                vec![("CRNCY".to_string(), "USD".to_string())],
+            )]),
+            elements: Some(vec![(
+                "periodicitySelection".to_string(),
+                "DAILY".to_string(),
+            )]),
+            options: Some(vec![(
+                "nonTradingDayFillOption".to_string(),
+                "ACTIVE_DAYS_ONLY".to_string(),
+            )]),
+            kwargs: Some(std::collections::HashMap::from([(
+                "Currency".to_string(),
+                "USD".to_string(),
+            )])),
+            field_types: Some(std::collections::HashMap::from([(
+                "VOLUME".to_string(),
+                "float64".to_string(),
+            )])),
+            return_eids: true,
+            validate_fields: Some(false),
+            request_tz: Some("UTC".to_string()),
+            output_tz: Some("Europe/London".to_string()),
+            ..Default::default()
+        };
+        let candidates = vec!["ESH24 Index".to_string(), "ESM24 Index".to_string()];
+        let maturity = futures_maturity_request(candidates.clone(), &options);
+        let chain = futures_chain_request("ES1 Index", dt, &options);
+        let mapping = futures_history_request(
+            vec!["ES1 Index".to_string()],
+            "FUT_CUR_GEN_TICKER",
+            dt,
+            &options,
+        );
+        let volume = futures_history_request(candidates.clone(), "VOLUME", dt, &options);
+
+        for params in [&maturity, &chain, &mapping, &volume] {
+            assert_eq!(params.service, Service::RefData.to_string());
+            assert_eq!(params.elements, options.elements);
+            assert_eq!(params.options, options.options);
+            assert_eq!(params.kwargs, options.kwargs);
+            assert_eq!(params.field_types, options.field_types);
+            assert_eq!(params.validate_fields, Some(false));
+            assert!(params.return_eids);
+            assert_eq!(params.request_tz, options.request_tz);
+            assert_eq!(params.output_tz, options.output_tz);
+            assert_eq!(
+                params.format.as_deref(),
+                if params.extractor == ExtractorType::BulkData {
+                    None
+                } else {
+                    Some("long")
+                }
+            );
+            assert!(params
+                .overrides
+                .as_ref()
+                .unwrap()
+                .contains(&("PRICING_SOURCE".to_string(), "BGN".to_string())));
+        }
+        assert_eq!(maturity.security_overrides, options.security_overrides);
+        assert_eq!(volume.security_overrides, options.security_overrides);
+        assert!(chain.security_overrides.is_none());
+        assert!(mapping.security_overrides.is_none());
+        assert_eq!(maturity.operation, Operation::ReferenceData.to_string());
+        assert_eq!(maturity.securities.as_ref().unwrap(), &candidates);
+        assert_eq!(maturity.fields.as_ref().unwrap(), &["LAST_TRADEABLE_DT"]);
+        assert_eq!(chain.operation, Operation::ReferenceData.to_string());
+        assert_eq!(chain.securities.as_ref().unwrap(), &["ES1 Index"]);
+        assert_eq!(
+            chain.fields.as_ref().unwrap(),
+            &["FUT_CHAIN_LAST_TRADE_DATES"]
+        );
+        assert_eq!(chain.extractor, ExtractorType::BulkData);
+        assert!(chain.extractor_set);
+        assert!(chain
+            .overrides
+            .as_ref()
+            .unwrap()
+            .contains(&("CHAIN_DATE".to_string(), "20240312".to_string())));
+        assert_eq!(mapping.fields.as_ref().unwrap(), &["FUT_CUR_GEN_TICKER"]);
+        assert_eq!(mapping.securities.as_ref().unwrap(), &["ES1 Index"]);
+        assert_eq!(volume.fields.as_ref().unwrap(), &["VOLUME"]);
+        assert_eq!(volume.securities.as_ref().unwrap(), &candidates);
+        for history in [&mapping, &volume] {
+            assert_eq!(history.operation, Operation::HistoricalData.to_string());
+            assert_eq!(history.start_date.as_deref(), Some("20240302"));
+            assert_eq!(history.end_date.as_deref(), Some("20240312"));
+        }
+    }
+
+    #[test]
+    fn test_futures_chain_request_allows_caller_override_of_chain_date() {
+        let options = RequestParams {
+            overrides: Some(vec![("CHAIN_DATE".to_string(), "20240112".to_string())]),
+            format: Some("wide".to_string()),
+            ..Default::default()
+        };
+        let params = futures_chain_request(
+            "ES1 Index",
+            NaiveDate::from_ymd_opt(2024, 1, 15).unwrap(),
+            &options,
+        );
+        assert_eq!(params.overrides, options.overrides);
+        assert!(
+            params.format.is_none(),
+            "BulkData requests cannot specify an output format"
+        );
+    }
+
+    #[test]
+    fn test_futures_chain_labels_dates_and_index_shape_native_result() {
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        for (ticker_label, expiry_label) in [
+            ("Future's Ticker", "Last Trade Date"),
+            ("future's_ticker", "last_trade_date"),
+            ("Futures Ticker", "LAST_TRADEABLE_DT"),
+            ("Security Description", "date"),
+        ] {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("ticker", DataType::Utf8, false),
+                Field::new("field", DataType::Utf8, false),
+                Field::new(ticker_label, DataType::Utf8, true),
+                Field::new(expiry_label, DataType::Utf8, true),
+            ]));
+            let batch = RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["ES1 Index"; 7])),
+                    Arc::new(StringArray::from(vec!["FUT_CHAIN_LAST_TRADE_DATES"; 7])),
+                    Arc::new(StringArray::from(vec![
+                        Some(" ESM24 Index "),
+                        Some("ESF24 Index"),
+                        Some("ESH24 Index"),
+                        None,
+                        Some(""),
+                        Some("invalid expiry"),
+                        Some("null expiry"),
+                    ])),
+                    Arc::new(StringArray::from(vec![
+                        Some("2024-06-21T16:30:00"),
+                        Some("2024-01-15"),
+                        Some("20240315"),
+                        Some("2024-02-01"),
+                        Some("2024-02-01"),
+                        Some("N/A"),
+                        None,
+                    ])),
+                ],
+            )
+            .unwrap();
+            let contracts =
+                extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap();
+            assert_eq!(
+                contracts,
+                vec![
+                    (
+                        "ESH24 Index".to_string(),
+                        NaiveDate::from_ymd_opt(2024, 3, 15).unwrap(),
+                    ),
+                    (
+                        "ESM24 Index".to_string(),
+                        NaiveDate::from_ymd_opt(2024, 6, 21).unwrap(),
+                    ),
+                ]
+            );
+            let (selected, _) =
+                select_futures_contract(&contracts, "ES2 Index", "20240115", 1).unwrap();
+            assert_single_ticker(&build_single_ticker_batch(selected).unwrap(), "ESM24 Index");
+            assert!(select_futures_contract(&contracts, "ES3 Index", "20240115", 2).is_err());
+        }
+    }
+
+    #[test]
+    fn test_futures_chain_accepts_date32_and_empty_response() {
+        let expiry = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, true),
+            Field::new("Last Trade Date", DataType::Date32, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![Some("ESH24 Index"), None])),
+                Arc::new(Date32Array::from(vec![Some(naive_to_date32(expiry)), None])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap(),
+            vec![("ESH24 Index".to_string(), expiry)]
+        );
+        let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert!(
+            extract_futures_chain_maturities(&empty, dt, RollFrequency::Monthly)
+                .unwrap()
+                .is_empty()
+        );
+        let missing_expiry = batch.project(&[0]).unwrap();
+        assert!(
+            extract_futures_chain_maturities(&missing_expiry, dt, RollFrequency::Monthly).is_err()
+        );
+    }
+
+    #[test]
+    fn test_quarterly_chain_uses_contract_code_not_expiry_month() {
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let batch = RecordBatch::try_new(
+            Arc::new(Schema::new(vec![
+                Field::new("Future's Ticker", DataType::Utf8, false),
+                Field::new("Last Trade Date", DataType::Utf8, false),
+            ])),
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "ABCG24 Index",
+                    "ABCH24 Index",
+                    "ABCJ24 Index",
+                    "ABCM24 Index",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "2024-01-29",
+                    "2024-02-27",
+                    "2024-03-28",
+                    "2024-05-29",
+                ])),
+            ],
+        )
+        .unwrap();
+        let monthly = extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap();
+        assert_eq!(monthly.len(), 4);
+        let quarterly =
+            extract_futures_chain_maturities(&batch, dt, RollFrequency::Quarterly).unwrap();
+        assert_eq!(
+            quarterly
+                .iter()
+                .map(|(ticker, _)| ticker.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ABCH24 Index", "ABCM24 Index"]
+        );
+        let pair = select_active_futures_pair(
+            &quarterly,
+            &quarterly,
+            "ABC1 Index",
+            "ABC2 Index",
+            "20240115",
+            1,
+        )
+        .unwrap();
+        assert_eq!(pair.0 .0, "ABCH24 Index");
+        assert_eq!(pair.1.unwrap().0, "ABCM24 Index");
+    }
+
+    #[test]
+    fn test_native_futures_frequency_defaults_and_validation() {
+        assert_eq!(parse_roll_frequency(None), RollFrequency::Monthly);
+        assert_eq!(
+            parse_roll_frequency(Some("unexpected")),
+            RollFrequency::Monthly
+        );
+        assert_eq!(parse_roll_frequency(Some(" qE ")), RollFrequency::Quarterly);
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        for ticker in [
+            "UXZ5 Index",
+            "UXZ24 Index",
+            "ESH24 Index",
+            "SPYH24 US Equity",
+        ] {
+            assert!(validate_generic_ticker(ticker).is_err());
+            assert!(futures_candidate_tickers(ticker, dt, RollFrequency::Monthly, 0).is_err());
+        }
+        assert!(contract_index("invalid").is_err());
+        assert_eq!(contract_index("ES2 Index").unwrap(), 1);
+        let candidates =
+            futures_candidate_tickers("ES1 Index", dt, RollFrequency::Quarterly, 0).unwrap();
+        assert_eq!(candidates, ["ESH24 Index", "ESM24 Index", "ESU24 Index"]);
+        assert!(parse_date("not-a-date").is_err());
+    }
+
+    #[test]
+    fn test_active_futures_roll_month_comparison_crosses_year_end() {
+        let january = NaiveDate::from_ymd_opt(2025, 1, 15).unwrap();
+        assert!(before_futures_roll_month(
+            NaiveDate::from_ymd_opt(2024, 12, 30).unwrap(),
+            january,
+        ));
+        assert!(!before_futures_roll_month(
+            NaiveDate::from_ymd_opt(2025, 1, 2).unwrap(),
+            january,
+        ));
+    }
+
+    #[test]
+    fn test_active_futures_volume_shapes_latest_valid_observation_as_one_ticker() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("date", DataType::Utf8, true),
+            Field::new("value", DataType::Float64, true),
+        ]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "ESH24 Index",
+                    "ESH24 Index",
+                    "ESH24 Index",
+                    "ESM24 Index",
+                    "ESM24 Index",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "VOLUME", "VOLUME", "VOLUME", "volume", "PX_LAST",
+                ])),
+                Arc::new(StringArray::from(vec![
+                    "20240308", "20240312", "20240311", "20240311", "20240312",
+                ])),
+                Arc::new(arrow_array::Float64Array::from(vec![
+                    Some(500.0),
+                    None,
+                    Some(100.0),
+                    Some(200.0),
+                    Some(1.0),
+                ])),
+            ],
+        )
+        .unwrap();
+        let result = active_futures_volume_batch(
+            &batch,
+            "ESH24 Index".to_string(),
+            "ESM24 Index".to_string(),
+        )
+        .unwrap();
+        assert_single_ticker(&result, "ESM24 Index");
+    }
+
+    #[test]
+    fn test_active_futures_volume_ties_and_missing_observations() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("date", DataType::Date32, false),
+            Field::new("value", DataType::Utf8, true),
+        ]));
+        let dt = naive_to_date32(NaiveDate::from_ymd_opt(2024, 3, 12).unwrap());
+        for (front, second, expected) in [
+            (Some("100"), Some("100"), "ESH24 Index"),
+            (Some("100"), None, "ESH24 Index"),
+            (None, Some("100"), "ESM24 Index"),
+            (None, None, "ESH24 Index"),
+        ] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec!["ESH24 Index", "ESM24 Index"])),
+                    Arc::new(StringArray::from(vec!["VOLUME"; 2])),
+                    Arc::new(Date32Array::from(vec![dt; 2])),
+                    Arc::new(StringArray::from(vec![front, second])),
+                ],
+            )
+            .unwrap();
+            let result = active_futures_volume_batch(
+                &batch,
+                "ESH24 Index".to_string(),
+                "ESM24 Index".to_string(),
+            )
+            .unwrap();
+            assert_single_ticker(&result, expected);
+        }
+        let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        assert_single_ticker(
+            &active_futures_volume_batch(
+                &empty,
+                "ESH24 Index".to_string(),
+                "ESM24 Index".to_string(),
+            )
+            .unwrap(),
+            "ESH24 Index",
+        );
+    }
+
+    #[test]
+    fn test_required_cdx_date_reads_date32_without_string_conversion() {
+        let dt = NaiveDate::from_ymd_opt(2025, 9, 22).unwrap();
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("value", DataType::Date32, false),
+        ]));
+        let ticker = "CDX IG CDSI S45 5Y Corp";
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![ticker])),
+                Arc::new(StringArray::from(vec![CDX_ACCRUAL_FIELD])),
+                Arc::new(Date32Array::from(vec![naive_to_date32(dt)])),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            required_cdx_date(&batch, ticker, CDX_ACCRUAL_FIELD).unwrap(),
+            dt
+        );
+    }
+
+    #[test]
+    fn test_cdx_date_keeps_first_nonblank_metadata_value_authoritative() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ]));
+        let ticker = "CDX IG CDSI S45 5Y Corp";
+        for (first, expected) in [("N/A", None), ("", NaiveDate::from_ymd_opt(2025, 9, 22))] {
+            let batch = RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(vec![ticker; 2])),
+                    Arc::new(StringArray::from(vec![CDX_ACCRUAL_FIELD; 2])),
+                    Arc::new(StringArray::from(vec![first, "2025-09-22"])),
+                ],
+            )
+            .unwrap();
+            assert_eq!(
+                extract_refdata_date_for_ticker(&batch, ticker, CDX_ACCRUAL_FIELD).unwrap(),
+                expected,
+            );
+        }
+    }
 
     #[test]
     fn test_futures_candidate_count_rules() {

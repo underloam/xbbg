@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xbbg import blp
+from xbbg import _engine, _request_options, backend as backend_module, blp
 from xbbg.services import Operation, Service
 
 
@@ -13,8 +13,8 @@ class FakeEngine:
 
 @pytest.fixture(autouse=True)
 def stub_engine(monkeypatch):
-    blp._VALID_ELEMENTS_CACHE.clear()
-    monkeypatch.setattr(blp, "_get_engine", lambda: FakeEngine())
+    _request_options._VALID_ELEMENTS_CACHE.clear()
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
 
 @pytest.mark.asyncio
@@ -28,7 +28,7 @@ async def test_abdtick_forwards_overrides(monkeypatch):
         return []
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     await blp.abdtick(
         "ESM6 Index",
@@ -55,7 +55,7 @@ async def test_abdib_forwards_overrides(monkeypatch):
         return []
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     await blp.abdib(
         "ESM6 Index",

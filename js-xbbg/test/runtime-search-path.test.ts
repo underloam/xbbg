@@ -5,6 +5,7 @@ import path from 'node:path';
 import {
   collectWindowsDapiRootCandidates,
   configureRuntimeSearchPath,
+  resolveVendorSdkRoot,
 } from '../src/runtime-search-path';
 
 function withTempDir(fn: (root: string) => void): void {
@@ -29,7 +30,7 @@ const PROGRAM_FILES_X86 = String.raw`C:\Program Files (x86)`;
 describe('bloomberg runtime search path discovery', () => {
   it('includes standard Windows Bloomberg DAPI roots', () => {
     const roots = collectWindowsDapiRootCandidates({
-      LOCALAPPDATA: String.raw`C:\Users\analyst\AppData\Local`,
+      LOCALAPPDATA: String.raw`C:\profile\local`,
       ProgramFiles: PROGRAM_FILES,
       'ProgramFiles(x86)': PROGRAM_FILES_X86,
       SystemDrive: 'C:',
@@ -95,6 +96,30 @@ describe('bloomberg runtime search path discovery', () => {
 
       expect(selected).toBe(binDir);
       expect(env.PATH?.split(';')[0]).toBe(binDir);
+    });
+  });
+
+  it('selects the latest numeric SDK version and skips empty runtime directories', () => {
+    withTempDir((root) => {
+      const vendorDir = path.join(root, 'vendor', 'blpapi-sdk');
+      for (const version of ['3.25.9', '3.25.10', '3.26.0']) {
+        fs.mkdirSync(path.join(vendorDir, version, 'bin'), { recursive: true });
+      }
+      for (const version of ['3.25.9', '3.25.10']) {
+        fs.writeFileSync(path.join(vendorDir, version, 'bin', 'blpapi3_64.dll'), 'fixture');
+      }
+
+      expect(resolveVendorSdkRoot(root)).toBe(path.join(vendorDir, '3.25.10'));
+    });
+  });
+
+  it('rejects empty vendor bin and lib directories', () => {
+    withTempDir((root) => {
+      const vendorDir = path.join(root, 'vendor', 'blpapi-sdk');
+      fs.mkdirSync(path.join(vendorDir, '3.25.10', 'bin'), { recursive: true });
+      fs.mkdirSync(path.join(vendorDir, '3.25.10', 'lib'));
+
+      expect(resolveVendorSdkRoot(root)).toBeNull();
     });
   });
 });

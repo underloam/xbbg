@@ -33,3 +33,6 @@ serde = { workspace = true }
 toml = { workspace = true }
 
 # Benchmarks have been consolidated into crates/xbbg-bench.
+
+[lints]
+workspace = true

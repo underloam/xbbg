@@ -1,10 +1,8 @@
 //! Live shared-subscription lifecycle checks against the configured Bloomberg endpoint.
 //!
-//! Like engine_integration.rs, these require the `live` feature and a working
-//! connection. They do not silently skip connection or entitlement failures.
-//! Compile without running: cargo test -p xbbg-async --test shared_subscriptions_live --no-run
-
-#![cfg(feature = "live")]
+//! These tests require a working connection and are ignored by default.
+//! They do not silently skip connection or entitlement failures.
+//! Run: cargo test -p xbbg-async --test shared_subscriptions_live -- --ignored
 
 use std::time::Duration;
 
@@ -122,6 +120,7 @@ fn started_count(stream: &SubscriptionStream) -> usize {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn shared_feed_live_image_growth_warnings_isolation_and_detach() {
     let engine = create_engine();
     let mut first = engine
@@ -306,6 +305,7 @@ async fn shared_feed_live_image_growth_warnings_isolation_and_detach() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn image_only_live_latest_field_rejection_and_zero_materialization() {
     let engine = create_engine();
     let mut plain_request = request(&["LAST_PRICE", "THEO_PRICE"]);
@@ -390,6 +390,7 @@ async fn image_only_live_latest_field_rejection_and_zero_materialization() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "live: needs a Bloomberg session; run with `cargo test -- --ignored`"]
 async fn live_repaint_rows_resynchronize_existing_values_when_changes_are_observable() {
     let engine = create_engine();
     let mut rows = engine

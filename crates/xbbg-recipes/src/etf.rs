@@ -942,20 +942,6 @@ fn history_schema() -> Arc<Schema> {
     ]))
 }
 
-fn append_string_opt(builder: &mut StringBuilder, value: Option<&str>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
-fn append_f64_opt(builder: &mut Float64Builder, value: Option<f64>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
 fn append_target(
     ticker: &mut StringBuilder,
     sector: &mut StringBuilder,
@@ -966,9 +952,9 @@ fn append_target(
     match target {
         Some(target) => {
             ticker.append_value(&target.ticker);
-            append_string_opt(sector, target.market_sector_des.as_deref());
-            append_string_opt(name, target.name.as_deref());
-            append_string_opt(error, target.validation_error.as_deref());
+            sector.append_option(target.market_sector_des.as_deref());
+            name.append_option(target.name.as_deref());
+            error.append_option(target.validation_error.as_deref());
         }
         None => {
             ticker.append_null();
@@ -1046,16 +1032,13 @@ fn build_snapshot_batch(
         match resolution.nav.as_ref() {
             Some(nav) => {
                 nav_ticker.append_value(&nav.ticker);
-                append_f64_opt(&mut nav_value, nav.px_last);
+                nav_value.append_option(nav.px_last);
                 nav_source_ticker.append_value(&nav.ticker);
                 nav_source_field.append_value(FIELD_PX_LAST);
             }
             None => {
                 nav_ticker.append_null();
-                append_f64_opt(
-                    &mut nav_value,
-                    fallback_values.get(&resolution.etf_ticker).copied(),
-                );
+                nav_value.append_option(fallback_values.get(&resolution.etf_ticker).copied());
                 nav_source_ticker.append_value(&resolution.etf_ticker);
                 nav_source_field.append_value(FIELD_FUND_NET_ASSET_VAL);
             }
@@ -1063,7 +1046,7 @@ fn build_snapshot_batch(
         match resolution.inav.as_ref() {
             Some(inav) => {
                 inav_ticker.append_value(&inav.ticker);
-                append_f64_opt(&mut inav_value, inav.px_last);
+                inav_value.append_option(inav.px_last);
             }
             None => {
                 inav_ticker.append_null();
@@ -1102,12 +1085,12 @@ fn build_history_batch(rows: &[HistoryRow]) -> Result<RecordBatch> {
         input_order.append_value(row.input_order);
         etf_ticker.append_value(&row.etf_ticker);
         date.append_value(naive_to_date32(row.date));
-        append_string_opt(&mut nav_ticker, row.nav_ticker.as_deref());
-        append_f64_opt(&mut nav_value, row.nav_value);
+        nav_ticker.append_option(row.nav_ticker.as_deref());
+        nav_value.append_option(row.nav_value);
         nav_source_ticker.append_value(&row.nav_source_ticker);
         nav_source_field.append_value(row.nav_source_field);
-        append_string_opt(&mut inav_ticker, row.inav_ticker.as_deref());
-        append_f64_opt(&mut inav_value, row.inav_value);
+        inav_ticker.append_option(row.inav_ticker.as_deref());
+        inav_value.append_option(row.inav_value);
     }
 
     Ok(RecordBatch::try_new(

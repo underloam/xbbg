@@ -1,29 +1,9 @@
-"""Runtime exchange override registry."""
+"""Adapters for the native process-wide exchange override registry."""
 
 from __future__ import annotations
 
-from datetime import datetime
-import logging
-import threading
-from typing import TYPE_CHECKING, TypedDict
-
-if TYPE_CHECKING:
-    from xbbg.markets.bloomberg import ExchangeInfo
-
-logger = logging.getLogger(__name__)
-
-
-class OverrideData(TypedDict, total=False):
-    """Type definition for override data stored in registry."""
-
-    timezone: str
-    mic: str
-    exch_code: str
-    sessions: dict[str, tuple[str, str]]
-
-
-_override_registry: dict[str, OverrideData] = {}
-_registry_lock = threading.Lock()
+from xbbg import _core
+from xbbg.markets.bloomberg import _SESSION_NAMES, ExchangeInfo, _exchange_info_from_native
 
 
 def set_exchange_override(
@@ -34,110 +14,64 @@ def set_exchange_override(
     exch_code: str | None = None,
     sessions: dict[str, tuple[str, str]] | None = None,
 ) -> None:
-    """Set runtime override for exchange metadata."""
-    if not ticker or not ticker.strip():
-        raise ValueError("ticker must be a non-empty string")
+    """Set or merge metadata in the registry used by the native engine.
 
-    ticker = ticker.strip()
-    if timezone is None and mic is None and exch_code is None and sessions is None:
-        raise ValueError("At least one override field must be specified (timezone, mic, exch_code, or sessions)")
-
-    override_data: OverrideData = {}
-    if timezone is not None:
-        override_data["timezone"] = timezone
-    if mic is not None:
-        override_data["mic"] = mic
-    if exch_code is not None:
-        override_data["exch_code"] = exch_code
+    Session keys are ``day``, ``allday``, ``pre``, ``post``, ``am`` and ``pm``;
+    use ``day`` for regular or futures trading hours. A supplied nonempty
+    session dictionary replaces the entire previous session set, while an
+    omitted dictionary preserves it. Other omitted fields are also preserved.
+    Empty session dictionaries are rejected because the native binding cannot
+    represent an explicit empty session patch. Clear and re-register the
+    override to remove all of its sessions.
+    """
     if sessions is not None:
-        override_data["sessions"] = sessions
+        if not sessions:
+            raise ValueError("sessions must contain at least one native session window")
+        unknown = sessions.keys() - _SESSION_NAMES
+        if unknown:
+            raise ValueError(f"Unknown session keys: {', '.join(sorted(unknown))}; use day for regular/futures hours")
 
-    with _registry_lock:
-        if ticker in _override_registry:
-            _override_registry[ticker].update(override_data)
-            logger.info("Updated exchange override for %s: %s", ticker, list(override_data.keys()))
-        else:
-            _override_registry[ticker] = override_data
-            logger.info("Set exchange override for %s: %s", ticker, list(override_data.keys()))
+    windows = sessions if sessions is not None else {}
+    _core.ext_set_exchange_override(
+        ticker,
+        timezone=timezone,
+        mic=mic,
+        exch_code=exch_code,
+        day=windows.get("day"),
+        allday=windows.get("allday"),
+        pre=windows.get("pre"),
+        post=windows.get("post"),
+        am=windows.get("am"),
+        pm=windows.get("pm"),
+    )
 
 
 def get_exchange_override(ticker: str) -> ExchangeInfo | None:
-    """Get override for ticker if exists."""
-    from xbbg.markets.bloomberg import ExchangeInfo
-
-    if not ticker:
-        return None
-
-    ticker = ticker.strip()
-    with _registry_lock:
-        override_data = _override_registry.get(ticker)
-        if override_data is None:
-            return None
-        return ExchangeInfo(
-            ticker=ticker,
-            mic=override_data.get("mic"),
-            exch_code=override_data.get("exch_code"),
-            timezone=override_data.get("timezone", "UTC"),
-            utc_offset=None,
-            sessions=override_data.get("sessions", {}),
-            source="override",
-            cached_at=datetime.now(),
-        )
+    """Materialize a native override, or return ``None`` for an unknown ticker."""
+    values = _core.ext_get_exchange_override(ticker.strip())
+    return None if values is None else _exchange_info_from_native(values)
 
 
 def clear_exchange_override(ticker: str | None = None) -> None:
-    """Clear override for ticker, or all overrides if ticker is None."""
-    with _registry_lock:
-        if ticker is None:
-            count = len(_override_registry)
-            _override_registry.clear()
-            logger.info("Cleared all %d exchange overrides", count)
-        else:
-            ticker = ticker.strip()
-            if ticker in _override_registry:
-                del _override_registry[ticker]
-                logger.info("Cleared exchange override for %s", ticker)
-            else:
-                logger.debug("No override to clear for %s", ticker)
+    """Clear one override, or all overrides only when ``ticker is None``.
+
+    An empty or whitespace-only ticker is a no-op, not the native binding's
+    clear-all operation.
+    """
+    if ticker is not None:
+        ticker = ticker.strip()
+        if not ticker:
+            return
+    _core.ext_clear_exchange_override(ticker)
 
 
 def list_exchange_overrides() -> dict[str, ExchangeInfo]:
-    """List all current overrides."""
-    from xbbg.markets.bloomberg import ExchangeInfo
-
-    with _registry_lock:
-        result: dict[str, ExchangeInfo] = {}
-        for ticker, override_data in _override_registry.items():
-            result[ticker] = ExchangeInfo(
-                ticker=ticker,
-                mic=override_data.get("mic"),
-                exch_code=override_data.get("exch_code"),
-                timezone=override_data.get("timezone", "UTC"),
-                utc_offset=None,
-                sessions=override_data.get("sessions", {}),
-                source="override",
-                cached_at=datetime.now(),
-            )
-        return result
+    """Materialize every override in the native registry."""
+    return {
+        ticker: _exchange_info_from_native(values) for ticker, values in _core.ext_list_exchange_overrides().items()
+    }
 
 
 def has_override(ticker: str) -> bool:
-    """Check if an override exists for the given ticker."""
-    if not ticker:
-        return False
-    ticker = ticker.strip()
-    with _registry_lock:
-        return ticker in _override_registry
-
-
-def get_override_fields(ticker: str) -> OverrideData | None:
-    """Get raw override fields for a ticker without creating ExchangeInfo."""
-    if not ticker:
-        return None
-
-    ticker = ticker.strip()
-    with _registry_lock:
-        override_data = _override_registry.get(ticker)
-        if override_data is None:
-            return None
-        return OverrideData(**override_data)
+    """Check the native registry without maintaining a Python-side copy."""
+    return _core.ext_get_exchange_override(ticker.strip()) is not None

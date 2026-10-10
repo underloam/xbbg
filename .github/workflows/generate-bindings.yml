@@ -1,0 +1,42 @@
+name: Generate Bloomberg bindings
+
+on:
+  workflow_call:
+    inputs:
+      sdk-version:
+        description: Bloomberg C++ SDK version
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  packages: read
+
+jobs:
+  generate-bindings:
+    name: Generate blpapi bindings artifact
+    runs-on: ubuntu-latest
+    container: ghcr.io/${{ github.repository_owner }}/xbbg-ci:latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Bloomberg SDK
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ inputs.sdk-version }}
+          os: Linux
+
+      - name: Generate bindings artifact
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/ci-bindings"
+          BLPAPI_BINDINGS_EXPORT_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs" cargo build -p xbbg-blpapi-sys
+          test -s "$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+
+      - name: Upload bindings artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: blpapi-bindings
+          path: ci-bindings/bindings.rs
+          retention-days: 7

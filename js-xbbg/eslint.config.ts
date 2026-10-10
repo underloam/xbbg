@@ -143,7 +143,7 @@ export default [
   },
 
   {
-    files: ['src/index.ts'],
+    files: ['src/subscriptions.ts'],
     rules: {
       // Iterator methods forward existing tasks without per-tick async wrappers.
       '@typescript-eslint/promise-function-async': ['error', { checkMethodDeclarations: false }],

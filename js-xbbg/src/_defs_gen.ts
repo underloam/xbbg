@@ -125,3 +125,148 @@ export const SDK_LOG_LEVEL_BY_NAME = {
   TRACE: 'trace',
   WARN: 'warn',
 } as const;
+
+export const CDX_INFO_FIELDS = [
+  'ROLLING_SERIES',
+  'VERSION',
+  'ON_THE_RUN_CURRENT_BD_INDICATOR',
+  'CDS_FIRST_ACCRUAL_START_DATE',
+  'NAME',
+  'NUM_CURRENT_COMPANIES_CCY_TKR',
+  'NUM_ORIG_COMPANIES_CRNCY_TKR',
+  'PX_LAST',
+] as const;
+
+export const CDX_PRICING_FIELDS = [
+  'PX_LAST',
+  'PX_BID',
+  'PX_ASK',
+  'UPFRONT_LAST',
+  'UPFRONT_BID',
+  'UPFRONT_ASK',
+  'CDS_FLAT_SPREAD',
+  'UPFRONT_FEE',
+  'PV_CDS_PREMIUM_LEG',
+  'PV_CDS_DEFAULT_LEG',
+] as const;
+
+export const CDX_RISK_FIELDS = [
+  'SW_CNV_BPV',
+  'SW_EQV_BPV',
+  'CDS_SPREAD_MID_MODIFIED_DURATION',
+  'CDS_SPREAD_MID_CONVEXITY',
+  'RECOVERY_RATE_SEN',
+  'CDS_RECOVERY_RT',
+] as const;
+
+export const TA_STUDIES: Readonly<Record<string, string>> = Object.freeze({
+  ado: 'adoStudyAttributes',
+  adx: 'dmiStudyAttributes',
+  al: 'alStudyAttributes',
+  atr: 'atrStudyAttributes',
+  bb: 'bollStudyAttributes',
+  boll: 'bollStudyAttributes',
+  bs: 'bsStudyAttributes',
+  chko: 'chkoStudyAttributes',
+  cmci: 'cmciStudyAttributes',
+  dmi: 'dmiStudyAttributes',
+  ema: 'emavgStudyAttributes',
+  emavg: 'emavgStudyAttributes',
+  etd: 'etdStudyAttributes',
+  fear_greed: 'fgStudyAttributes',
+  fg: 'fgStudyAttributes',
+  goc: 'gocStudyAttributes',
+  hurst: 'hurstStudyAttributes',
+  ichimoku: 'gocStudyAttributes',
+  ipmavg: 'ipmavgStudyAttributes',
+  keltner: 'kltnStudyAttributes',
+  kltn: 'kltnStudyAttributes',
+  macd: 'macdStudyAttributes',
+  mae: 'maeStudyAttributes',
+  mao: 'maoStudyAttributes',
+  maxmin: 'maxminStudyAttributes',
+  mom: 'momentumStudyAttributes',
+  momentum: 'momentumStudyAttributes',
+  or: 'orStudyAttributes',
+  parabolic: 'ptpsStudyAttributes',
+  pcr: 'pcrStudyAttributes',
+  pd: 'pdStudyAttributes',
+  pivot: 'pivotStudyAttributes',
+  ptps: 'ptpsStudyAttributes',
+  rex: 'rexStudyAttributes',
+  roc: 'rocStudyAttributes',
+  rsi: 'rsiStudyAttributes',
+  rv: 'rvStudyAttributes',
+  sar: 'ptpsStudyAttributes',
+  sma: 'smavgStudyAttributes',
+  smavg: 'smavgStudyAttributes',
+  stoch: 'tasStudyAttributes',
+  tas: 'tasStudyAttributes',
+  te: 'teStudyAttributes',
+  tma: 'tmavgStudyAttributes',
+  tmavg: 'tmavgStudyAttributes',
+  trender: 'trenderStudyAttributes',
+  tvat: 'tvatStudyAttributes',
+  vat: 'vatStudyAttributes',
+  vma: 'vmavgStudyAttributes',
+  vmavg: 'vmavgStudyAttributes',
+  williams: 'wlprStudyAttributes',
+  wlpr: 'wlprStudyAttributes',
+  wma: 'wmavgStudyAttributes',
+  wmavg: 'wmavgStudyAttributes',
+});
+
+type StudyDefaults = Readonly<Record<string, string | number>>;
+
+export const TA_DEFAULTS: Readonly<Record<string, StudyDefaults>> = Object.freeze({
+  atrStudyAttributes: Object.freeze({
+    maType: 'Simple',
+    period: 14,
+    priceSourceHigh: 'PX_HIGH',
+    priceSourceLow: 'PX_LOW',
+    priceSourceClose: 'PX_LAST',
+  }),
+  bollStudyAttributes: Object.freeze({
+    period: 20,
+    upperBand: 2.0,
+    lowerBand: 2.0,
+    priceSourceClose: 'PX_LAST',
+  }),
+  dmiStudyAttributes: Object.freeze({
+    period: 14,
+    priceSourceHigh: 'PX_HIGH',
+    priceSourceLow: 'PX_LOW',
+    priceSourceClose: 'PX_LAST',
+  }),
+  emavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
+  macdStudyAttributes: Object.freeze({
+    maPeriod1: 12,
+    maPeriod2: 26,
+    sigPeriod: 9,
+    priceSourceClose: 'PX_LAST',
+  }),
+  rsiStudyAttributes: Object.freeze({ period: 14, priceSourceClose: 'PX_LAST' }),
+  smavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
+  tasStudyAttributes: Object.freeze({
+    periodK: 14,
+    periodD: 3,
+    periodDS: 3,
+    periodDSS: 3,
+    priceSourceHigh: 'PX_HIGH',
+    priceSourceLow: 'PX_LOW',
+    priceSourceClose: 'PX_LAST',
+  }),
+  tmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
+  vmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
+  wmavgStudyAttributes: Object.freeze({ period: 20, priceSourceClose: 'PX_LAST' }),
+});
+
+export type VolSurfacePreset =
+  | 'DELTA_1M_2M'
+  | 'MONEYNESS_30D'
+  | 'MONEYNESS_60D'
+  | 'MONEYNESS_3M'
+  | 'MONEYNESS_6M'
+  | 'MONEYNESS_12M';
+
+export type IndexMemberField = 'INDX_MWEIGHT' | 'INDX_MEMBERS' | 'INDX_MEMBERS3';

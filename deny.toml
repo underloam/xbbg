@@ -8,6 +8,8 @@ targets = [
     "x86_64-pc-windows-msvc",
     "i686-pc-windows-msvc",
 ]
+# Include the optional stub generator so its binding dependencies are checked too.
+features = ["pyo3-xbbg/stub-gen"]
 
 # ════════════════════════════════════════════════════════════════════════════
 # Advisories - check for known security vulnerabilities
@@ -51,11 +53,6 @@ allow = [
 ]
 confidence-threshold = 0.8
 
-[[licenses.clarify]]
-name = "ring"
-expression = "MIT AND ISC AND OpenSSL"
-license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
-
 # ════════════════════════════════════════════════════════════════════════════
 # Bans - deny specific crates or versions
 # ════════════════════════════════════════════════════════════════════════════
@@ -65,8 +62,34 @@ wildcards = "allow"
 highlight = "all"
 
 deny = [
-    # Use parking_lot instead
-    # { name = "spin" },
+    # Only the core owns the Bloomberg SDK seam, including test fixtures.
+    { name = "xbbg-blpapi-sys", wrappers = ["xbbg_core"] },
+    # Internal engine layers may only be imported by their intended dependents.
+    { name = "xbbg_core", wrappers = ["xbbg-async", "xbbg-bench", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-async", wrappers = ["xbbg-recipes", "xbbg-bench", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-ext", wrappers = ["xbbg-async", "xbbg-recipes", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-log", wrappers = ["xbbg-async", "xbbg-recipes", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-arrow", wrappers = ["pyo3-xbbg"] },
+    { name = "xbbg-recipes", wrappers = ["pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    # Python frameworks stay in the Python binding or their own ecosystem.
+    { name = "pyo3", wrappers = ["pyo3-xbbg", "numpy", "pyo3-arrow", "pyo3-async-runtimes", "pyo3-stub-gen"] },
+    { name = "numpy", wrappers = ["pyo3-arrow"] },
+    { name = "pyo3-arrow", wrappers = ["pyo3-xbbg"] },
+    { name = "pyo3-async-runtimes", wrappers = ["pyo3-xbbg"] },
+    { name = "pyo3-stub-gen", wrappers = ["pyo3-xbbg"] },
+    { name = "pyo3-stub-gen-derive", wrappers = ["pyo3-stub-gen"] },
+    { name = "pyo3-build-config", wrappers = ["pyo3", "pyo3-ffi", "numpy"] },
+    { name = "pyo3-ffi", wrappers = ["pyo3"] },
+    { name = "pyo3-macros", wrappers = ["pyo3"] },
+    { name = "pyo3-macros-backend", wrappers = ["pyo3-macros"] },
+    # Node.js and MCP frameworks never belong in shared engine crates.
+    { name = "napi", wrappers = ["napi-xbbg"] },
+    { name = "napi-build", wrappers = ["napi-xbbg", "napi"] },
+    { name = "napi-derive", wrappers = ["napi-xbbg"] },
+    { name = "napi-derive-backend", wrappers = ["napi-derive"] },
+    { name = "napi-sys", wrappers = ["napi"] },
+    { name = "rmcp", wrappers = ["xbbg-mcp"] },
+    { name = "rmcp-macros", wrappers = ["rmcp"] },
 ]
 
 skip = []

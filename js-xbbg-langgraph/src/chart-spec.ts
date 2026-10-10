@@ -1,3 +1,17 @@
+import {
+  CHART_DEFAULTS,
+  CLOSE_FIELD_CANDIDATES,
+  HIGH_FIELD_CANDIDATES,
+  LABEL_FIELD_CANDIDATES,
+  LOW_FIELD_CANDIDATES,
+  OPEN_FIELD_CANDIDATES,
+  PRICE_FIELD_CANDIDATES,
+  SERIES_FIELD_CANDIDATES,
+  SIDE_FIELD_CANDIDATES,
+  SIZE_FIELD_CANDIDATES,
+  VALUE_FIELD_CANDIDATES,
+  X_FIELD_CANDIDATES,
+} from "./_defs_gen";
 import type { BloombergChartSource, ChartKind, ChartRow, ChartSpecInput } from "./ext-schemas";
 
 type GenericChartKind = Exclude<ChartKind, "bar" | "candlestick" | "depth">;
@@ -49,40 +63,6 @@ interface BuiltChartSpec {
 
 const VEGA_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json" as const;
 const COMPONENT_NAME = "xbbg_chart" as const;
-
-const X_FIELD_CANDIDATES = ["date", "time", "datetime", "timestamp"] as const;
-const LABEL_FIELD_CANDIDATES = ["ticker", "security", "member", "name", "label"] as const;
-const SERIES_FIELD_CANDIDATES = ["ticker", "security", "field", "side", "category"] as const;
-const VALUE_FIELD_CANDIDATES = [
-  "value",
-  "PX_LAST",
-  "close",
-  "price",
-  "weight",
-  "marketValue",
-  "market_value",
-] as const;
-const OPEN_FIELD_CANDIDATES = ["open", "OPEN", "PX_OPEN"] as const;
-const HIGH_FIELD_CANDIDATES = ["high", "HIGH", "PX_HIGH"] as const;
-const LOW_FIELD_CANDIDATES = ["low", "LOW", "PX_LOW"] as const;
-const CLOSE_FIELD_CANDIDATES = ["close", "CLOSE", "PX_LAST", "last", "value"] as const;
-const SIDE_FIELD_CANDIDATES = ["side", "SIDE", "type"] as const;
-const PRICE_FIELD_CANDIDATES = ["price", "PRICE", "px", "PX"] as const;
-const SIZE_FIELD_CANDIDATES = ["size", "SIZE", "quantity", "qty", "volume"] as const;
-
-function defaultChartForSource(source: BloombergChartSource): ChartKind {
-  switch (source) {
-    case "bdib":
-      return "candlestick";
-    case "depth":
-      return "depth";
-    case "holdings":
-      return "bar";
-    case "bdh":
-    case "rows":
-      return "line";
-  }
-}
 
 function fieldExists(rows: readonly ChartRow[], field: string): boolean {
   for (const row of rows) {
@@ -448,7 +428,7 @@ export function createChartSpec(input: ChartSpecInput): ChartSpecOutput {
     throw new Error("rows must contain at least one chart data row");
   }
 
-  const chart = input.chart ?? defaultChartForSource(input.source);
+  const chart = input.chart ?? CHART_DEFAULTS[input.source];
   const title = input.title ?? `${input.source} ${chart}`;
   const warnings: string[] = [];
   if (rows.length !== input.rows.length) {

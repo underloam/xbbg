@@ -40,10 +40,16 @@ Build requires SDK **headers** and the **import library**. The runtime DLL/so/dy
 
 ## Binding generation controls
 
-By default, bindings are generated with bindgen at build time.
+By default, Cargo generates bindings with bindgen when the build inputs change.
+There is no SDK-local bindings cache: header replacements and resolved bindgen
+dependency changes must not reuse stale generated declarations.
 
 - `BLPAPI_PREGENERATED_BINDINGS`: path to an existing `bindings.rs` file. When set, `build.rs` copies this file to `OUT_DIR` and skips bindgen.
 - `BLPAPI_BINDINGS_EXPORT_PATH`: path where `build.rs` should also copy the effective bindings file (useful for CI artifact generation).
+
+For cross-build reuse, export bindings once and pass that artifact explicitly
+with `BLPAPI_PREGENERATED_BINDINGS`. The artifact must match the target, SDK
+headers, and binding-generator configuration of the consuming build.
 
 ## Dev / CI usage
 

@@ -1,4 +1,10 @@
-import type { OverflowPolicy, SdkLogLevel, ValidationMode } from './_defs_gen';
+import type {
+  IndexMemberField,
+  OverflowPolicy,
+  SdkLogLevel,
+  ValidationMode,
+  VolSurfacePreset,
+} from './_defs_gen';
 
 /**
  * Date-like input accepted by xbbg JS surfaces (issue #317).
@@ -272,7 +278,9 @@ export interface BdtickOptions {
 }
 
 export interface CdxOptions extends BdpOptions {
+  /** Recovery rate in percent (40 means 40%). */
   recoveryRate?: number;
+  /** Recovery rate in percent (40 means 40%). */
   recovery_rate?: number;
 }
 
@@ -465,7 +473,6 @@ export interface PreferredsOptions {
 export interface CorporateBondsOptions {
   ccy?: string;
   fields?: readonly string[];
-  activeOnly?: boolean;
   backend?: BackendKind;
 }
 
@@ -512,14 +519,6 @@ export interface EtfHoldingsOptions {
   backend?: BackendKind;
 }
 
-export type VolSurfacePreset =
-  | 'DELTA_1M_2M'
-  | 'MONEYNESS_30D'
-  | 'MONEYNESS_60D'
-  | 'MONEYNESS_3M'
-  | 'MONEYNESS_6M'
-  | 'MONEYNESS_12M';
-
 export interface VolFieldSpec {
   metric?: string;
   tenor?: string;
@@ -538,7 +537,7 @@ export interface VolSurfaceOptions {
 }
 
 export interface IndexMembersOptions {
-  field?: 'INDX_MWEIGHT' | 'INDX_MEMBERS' | 'INDX_MEMBERS3';
+  field?: IndexMemberField;
   asof?: DateLike;
   backend?: BackendKind;
 }
@@ -628,9 +627,14 @@ export interface ExchangeOverrideInput {
 
 export type BackendKind = 'arrow' | 'json' | 'polars';
 
-// Closed string sets live in defs/bloomberg.toml and are generated into
-// _defs_gen.ts, so these can never drift from what the Rust engine accepts.
-export type { FormatKind, OverflowPolicy, SdkLogLevel, ValidationMode } from './_defs_gen';
+// Shared Python/JS vocabulary is generated from defs/bloomberg.toml.
+export type {
+  FormatKind,
+  OverflowPolicy,
+  SdkLogLevel,
+  ValidationMode,
+  VolSurfacePreset,
+} from './_defs_gen';
 
 /**
  * Output format for a request.

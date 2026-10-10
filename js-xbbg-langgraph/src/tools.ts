@@ -1,5 +1,5 @@
 import type { StructuredToolInterface } from "@langchain/core/tools";
-import type { OverflowPolicy } from "./_defs_gen";
+import { MAX_ENTITLEMENT_EIDS, type BloombergToolName, type OverflowPolicy } from "./_defs_gen";
 
 import { createCoreResolver, type CoreResolver } from "./core-loader";
 import {
@@ -27,15 +27,13 @@ import {
   STREAM_SNAPSHOT_DESCRIPTION,
   YAS_DESCRIPTION,
 } from "./descriptions";
-import { createBloombergStructuredTool, type ToolInvocationConfig } from "./langchain-tool";
-import type { BloombergToolsOptions, BloombergToolName } from "./options";
-import { isToolDisabled } from "./options";
 import {
-  createToolResult,
-  MAX_ENTITLEMENT_EIDS,
-  throwWithToolContext,
-  type ToolContentAndArtifact,
-} from "./result-limits";
+  createBloombergStructuredTool,
+  type BloombergToolResult,
+  type ToolInvocationConfig,
+} from "./langchain-tool";
+import type { BloombergToolsOptions } from "./options";
+import { isToolDisabled } from "./options";
 import {
   createAuctionSnapshotSchema,
   createBeqsSchema,
@@ -88,14 +86,6 @@ import {
 export type BloombergTool = StructuredToolInterface;
 
 type ToolCreator = (resolver: CoreResolver) => BloombergTool;
-
-function resultString(
-  resolver: CoreResolver,
-  name: BloombergToolName,
-  value: unknown,
-): ToolContentAndArtifact {
-  return createToolResult(name, value, resolver.options);
-}
 
 type SnapshotReason = "max_updates" | "timeout" | "done";
 
@@ -349,28 +339,24 @@ function validationSetting(
 function bdpWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bdp" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BdpInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const options = {
-          backend: "json" as const,
-          format: input.format,
-          includeSecurityErrors: input.includeSecurityErrors,
-          kwargs: input.kwargs,
-          overrides: input.overrides as never,
-          validateFields: validationSetting(resolver, input.validateFields),
-          returnEids: input.returnEids,
-        };
-        const result = await engine.bdp(input.securities, input.fields, options);
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BdpInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const options = {
+        backend: "json" as const,
+        format: input.format,
+        includeSecurityErrors: input.includeSecurityErrors,
+        kwargs: input.kwargs,
+        overrides: input.overrides as never,
+        validateFields: validationSetting(resolver, input.validateFields),
+        returnEids: input.returnEids,
+      };
+      const result = await engine.bdp(input.securities, input.fields, options);
+      return { value: result };
     },
     {
       description: BDP_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBdpSchema(resolver.options),
     },
   );
@@ -379,29 +365,25 @@ function bdpWithResolver(resolver: CoreResolver): BloombergTool {
 function bdhWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bdh" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BdhInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const options = {
-          backend: "json" as const,
-          end: input.end,
-          format: input.format,
-          kwargs: input.kwargs,
-          overrides: input.overrides as never,
-          start: input.start,
-          returnEids: input.returnEids,
-          validateFields: validationSetting(resolver, input.validateFields),
-        };
-        const result = await engine.bdh(input.securities, input.fields, options);
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BdhInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const options = {
+        backend: "json" as const,
+        end: input.end,
+        format: input.format,
+        kwargs: input.kwargs,
+        overrides: input.overrides as never,
+        start: input.start,
+        returnEids: input.returnEids,
+        validateFields: validationSetting(resolver, input.validateFields),
+      };
+      const result = await engine.bdh(input.securities, input.fields, options);
+      return { value: result };
     },
     {
       description: BDH_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBdhSchema(resolver.options),
     },
   );
@@ -410,26 +392,22 @@ function bdhWithResolver(resolver: CoreResolver): BloombergTool {
 function bdsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bds" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BdsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const options = {
-          backend: "json" as const,
-          kwargs: input.kwargs,
-          overrides: input.overrides as never,
-          returnEids: input.returnEids,
-          validateFields: validationSetting(resolver, input.validateFields),
-        };
-        const result = await engine.bds(input.securities, [input.field], options);
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BdsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const options = {
+        backend: "json" as const,
+        kwargs: input.kwargs,
+        overrides: input.overrides as never,
+        returnEids: input.returnEids,
+        validateFields: validationSetting(resolver, input.validateFields),
+      };
+      const result = await engine.bds(input.securities, [input.field], options);
+      return { value: result };
     },
     {
       description: BDS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBdsSchema(resolver.options),
     },
   );
@@ -438,29 +416,25 @@ function bdsWithResolver(resolver: CoreResolver): BloombergTool {
 function bdibWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bdib" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BdibInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bdib(input.ticker, {
-          backend: "json",
-          end: input.end,
-          eventType: input.eventType,
-          interval: input.interval,
-          kwargs: input.kwargs,
-          outputTz: input.outputTz,
-          requestTz: input.requestTz,
-          returnEids: input.returnEids,
-          start: input.start,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BdibInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bdib(input.ticker, {
+        backend: "json",
+        end: input.end,
+        eventType: input.eventType,
+        interval: input.interval,
+        kwargs: input.kwargs,
+        outputTz: input.outputTz,
+        requestTz: input.requestTz,
+        returnEids: input.returnEids,
+        start: input.start,
+      });
+      return { value: result };
     },
     {
       description: BDIB_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBdibSchema(resolver.options),
     },
   );
@@ -469,35 +443,31 @@ function bdibWithResolver(resolver: CoreResolver): BloombergTool {
 function bdtickWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bdtick" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BdtickInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bdtick(input.ticker, {
-          backend: "json",
-          end: input.end,
-          eventTypes: input.eventTypes,
-          includeBicMicCodes: input.includeBicMicCodes,
-          includeBloombergStandardConditionCodes: input.includeBloombergStandardConditionCodes,
-          includeBrokerCodes: input.includeBrokerCodes,
-          includeConditionCodes: input.includeConditionCodes,
-          includeExchangeCodes: input.includeExchangeCodes,
-          includeNonPlottableEvents: input.includeNonPlottableEvents,
-          includeRpsCodes: input.includeRpsCodes,
-          kwargs: input.kwargs,
-          outputTz: input.outputTz,
-          requestTz: input.requestTz,
-          returnEids: input.returnEids,
-          start: input.start,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BdtickInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bdtick(input.ticker, {
+        backend: "json",
+        end: input.end,
+        eventTypes: input.eventTypes,
+        includeBicMicCodes: input.includeBicMicCodes,
+        includeBloombergStandardConditionCodes: input.includeBloombergStandardConditionCodes,
+        includeBrokerCodes: input.includeBrokerCodes,
+        includeConditionCodes: input.includeConditionCodes,
+        includeExchangeCodes: input.includeExchangeCodes,
+        includeNonPlottableEvents: input.includeNonPlottableEvents,
+        includeRpsCodes: input.includeRpsCodes,
+        kwargs: input.kwargs,
+        outputTz: input.outputTz,
+        requestTz: input.requestTz,
+        returnEids: input.returnEids,
+        start: input.start,
+      });
+      return { value: result };
     },
     {
       description: BDTICK_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBdtickSchema(resolver.options),
     },
   );
@@ -506,22 +476,15 @@ function bdtickWithResolver(resolver: CoreResolver): BloombergTool {
 function checkEntitlementsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_check_entitlements" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: CheckEntitlementsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.checkEntitlements(input.service ?? "//blp/refdata", input.eids);
-        return createToolResult(name, result, {
-          ...resolver.options,
-          maxRows: MAX_ENTITLEMENT_EIDS,
-        });
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: CheckEntitlementsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.checkEntitlements(input.service ?? "//blp/refdata", input.eids);
+      return { value: result };
     },
     {
       description: CHECK_ENTITLEMENTS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: { ...resolver.options, maxRows: MAX_ENTITLEMENT_EIDS },
       schema: createCheckEntitlementsSchema(resolver.options),
     },
   );
@@ -530,22 +493,18 @@ function checkEntitlementsWithResolver(resolver: CoreResolver): BloombergTool {
 function bqlWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bql" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BqlInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bql(input.query, {
-          backend: "json",
-          kwargs: input.kwargs,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BqlInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bql(input.query, {
+        backend: "json",
+        kwargs: input.kwargs,
+      });
+      return { value: result };
     },
     {
       description: BQL_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBqlSchema(resolver.options),
     },
   );
@@ -554,23 +513,19 @@ function bqlWithResolver(resolver: CoreResolver): BloombergTool {
 function bsrchWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bsrch" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BsrchInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bsrch(input.searchSpec, {
-          backend: "json",
-          kwargs: input.kwargs,
-          overrides: input.overrides,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BsrchInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bsrch(input.searchSpec, {
+        backend: "json",
+        kwargs: input.kwargs,
+        overrides: input.overrides,
+      });
+      return { value: result };
     },
     {
       description: BSRCH_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBsrchSchema(resolver.options),
     },
   );
@@ -579,25 +534,21 @@ function bsrchWithResolver(resolver: CoreResolver): BloombergTool {
 function bqrWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bqr" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BqrInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bqr(input.ticker, {
-          backend: "json",
-          endDatetime: input.end,
-          eventTypes: input.eventTypes,
-          includeBrokerCodes: input.includeBrokerCodes,
-          startDatetime: input.start,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BqrInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bqr(input.ticker, {
+        backend: "json",
+        endDatetime: input.end,
+        eventTypes: input.eventTypes,
+        includeBrokerCodes: input.includeBrokerCodes,
+        startDatetime: input.start,
+      });
+      return { value: result };
     },
     {
       description: BQR_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBqrSchema(resolver.options),
     },
   );
@@ -606,24 +557,20 @@ function bqrWithResolver(resolver: CoreResolver): BloombergTool {
 function bfldsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_bflds" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BfldsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.bflds({
-          backend: "json",
-          fields: input.fields,
-          kwargs: input.kwargs,
-          searchSpec: input.searchSpec,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BfldsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.bflds({
+        backend: "json",
+        fields: input.fields,
+        kwargs: input.kwargs,
+        searchSpec: input.searchSpec,
+      });
+      return { value: result };
     },
     {
       description: BFLDS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBfldsSchema(resolver.options),
     },
   );
@@ -632,26 +579,22 @@ function bfldsWithResolver(resolver: CoreResolver): BloombergTool {
 function beqsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_beqs" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: BeqsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.beqs(input.screen, {
-          asof: input.asof,
-          backend: "json",
-          group: input.group,
-          kwargs: input.kwargs,
-          overrides: input.overrides,
-          screenType: input.screenType,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: BeqsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.beqs(input.screen, {
+        asof: input.asof,
+        backend: "json",
+        group: input.group,
+        kwargs: input.kwargs,
+        overrides: input.overrides,
+        screenType: input.screenType,
+      });
+      return { value: result };
     },
     {
       description: BEQS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createBeqsSchema(resolver.options),
     },
   );
@@ -660,27 +603,23 @@ function beqsWithResolver(resolver: CoreResolver): BloombergTool {
 function yasWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_yas" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: YasInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.yas(input.tickers, input.fields, {
-          backend: "json",
-          benchmark: input.benchmark,
-          price: input.price,
-          settleDt: input.settleDt,
-          spread: input.spread,
-          yieldType: input.yieldType,
-          yieldVal: input.yieldVal,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: YasInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.yas(input.tickers, input.fields, {
+        backend: "json",
+        benchmark: input.benchmark,
+        price: input.price,
+        settleDt: input.settleDt,
+        spread: input.spread,
+        yieldType: input.yieldType,
+        yieldVal: input.yieldVal,
+      });
+      return { value: result };
     },
     {
       description: YAS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createYasSchema(resolver.options),
     },
   );
@@ -689,22 +628,18 @@ function yasWithResolver(resolver: CoreResolver): BloombergTool {
 function preferredsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_preferreds" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: PreferredsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.preferreds(input.equityTicker, {
-          backend: "json",
-          fields: input.fields,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: PreferredsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.preferreds(input.equityTicker, {
+        backend: "json",
+        fields: input.fields,
+      });
+      return { value: result };
     },
     {
       description: PREFERREDS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createPreferredsSchema(resolver.options),
     },
   );
@@ -713,24 +648,19 @@ function preferredsWithResolver(resolver: CoreResolver): BloombergTool {
 function corporateBondsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_corporate_bonds" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: CorporateBondsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.corporateBonds(input.ticker, {
-          activeOnly: input.activeOnly,
-          backend: "json",
-          ccy: input.ccy,
-          fields: input.fields,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: CorporateBondsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.corporateBonds(input.ticker, {
+        backend: "json",
+        ccy: input.ccy,
+        fields: input.fields,
+      });
+      return { value: result };
     },
     {
       description: CORPORATE_BONDS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createCorporateBondsSchema(resolver.options),
     },
   );
@@ -739,23 +669,19 @@ function corporateBondsWithResolver(resolver: CoreResolver): BloombergTool {
 function indexMembersWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_index_members" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: IndexMembersInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.indexMembers(input.index, {
-          asof: input.asof,
-          backend: "json",
-          field: input.field,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: IndexMembersInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.indexMembers(input.index, {
+        asof: input.asof,
+        backend: "json",
+        field: input.field,
+      });
+      return { value: result };
     },
     {
       description: INDEX_MEMBERS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createIndexMembersSchema(resolver.options),
     },
   );
@@ -764,19 +690,15 @@ function indexMembersWithResolver(resolver: CoreResolver): BloombergTool {
 function resolveIsinsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_resolve_isins" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: ResolveIsinsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.resolveIsins(input.isins, { backend: "json" });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: ResolveIsinsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.resolveIsins(input.isins, { backend: "json" });
+      return { value: result };
     },
     {
       description: RESOLVE_ISINS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createResolveIsinsSchema(resolver.options),
     },
   );
@@ -785,22 +707,18 @@ function resolveIsinsWithResolver(resolver: CoreResolver): BloombergTool {
 function resolveVenuesWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_resolve_venues" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: ResolveVenuesInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.resolveVenues(input.securities, {
-          backend: "json",
-          pcsOverrides: input.pcsOverrides,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: ResolveVenuesInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.resolveVenues(input.securities, {
+        backend: "json",
+        pcsOverrides: input.pcsOverrides,
+      });
+      return { value: result };
     },
     {
       description: RESOLVE_VENUES_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createResolveVenuesSchema(resolver.options),
     },
   );
@@ -809,23 +727,19 @@ function resolveVenuesWithResolver(resolver: CoreResolver): BloombergTool {
 function auctionSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_auction_snapshot" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: AuctionSnapshotInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.auctionSnapshot(input.securities, {
-          backend: "json",
-          fields: input.fields,
-          pcsOverrides: input.pcsOverrides,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: AuctionSnapshotInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.auctionSnapshot(input.securities, {
+        backend: "json",
+        fields: input.fields,
+        pcsOverrides: input.pcsOverrides,
+      });
+      return { value: result };
     },
     {
       description: AUCTION_SNAPSHOT_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createAuctionSnapshotSchema(resolver.options),
     },
   );
@@ -834,19 +748,15 @@ function auctionSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
 function issuerIsinsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_issuer_isins" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: IssuerIsinsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.issuerIsins(input.bondIsins, { backend: "json" });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: IssuerIsinsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.issuerIsins(input.bondIsins, { backend: "json" });
+      return { value: result };
     },
     {
       description: ISSUER_ISINS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createIssuerIsinsSchema(resolver.options),
     },
   );
@@ -855,22 +765,18 @@ function issuerIsinsWithResolver(resolver: CoreResolver): BloombergTool {
 function etfHoldingsWithResolver(resolver: CoreResolver): BloombergTool {
   const name = "xbbg_etf_holdings" satisfies BloombergToolName;
   return createBloombergStructuredTool(
-    async (input: EtfHoldingsInput): Promise<ToolContentAndArtifact> => {
-      try {
-        const engine = await resolver.getEngine();
-        const result = await engine.etfHoldings(input.etfTicker, {
-          backend: "json",
-          fields: input.fields,
-        });
-        return resultString(resolver, name, result);
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+    async (input: EtfHoldingsInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.etfHoldings(input.etfTicker, {
+        backend: "json",
+        fields: input.fields,
+      });
+      return { value: result };
     },
     {
       description: ETF_HOLDINGS_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createEtfHoldingsSchema(resolver.options),
     },
   );
@@ -882,32 +788,28 @@ function streamSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
     async (
       input: StreamSnapshotInput,
       config?: ToolInvocationConfig,
-    ): Promise<ToolContentAndArtifact> => {
+    ): Promise<BloombergToolResult> => {
       const signal = config?.signal;
-      try {
-        const engine = await resolver.getEngine();
-        // Connecting may have outlived the caller; never open a doomed subscription.
-        signal?.throwIfAborted();
-        const subscription = await engine.stream(input.tickers, input.fields, streamOptions(input));
-        const snapshot = await collectSnapshot(
-          subscription,
-          input,
-          signal,
-          Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
-          resolver.options.maxResultNodes,
-        );
-        return createToolResult(name, snapshot.result, {
-          ...resolver.options,
-          materializedNodes: snapshot.materializedRows,
-        });
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+      const engine = await resolver.getEngine();
+      // Connecting may have outlived the caller; never open a doomed subscription.
+      signal?.throwIfAborted();
+      const subscription = await engine.stream(input.tickers, input.fields, streamOptions(input));
+      const snapshot = await collectSnapshot(
+        subscription,
+        input,
+        signal,
+        Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
+        resolver.options.maxResultNodes,
+      );
+      return {
+        value: snapshot.result,
+        materializedNodes: snapshot.materializedRows,
+      };
     },
     {
       description: STREAM_SNAPSHOT_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createStreamSnapshotSchema(resolver.options),
     },
   );
@@ -919,31 +821,27 @@ function mktbarSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
     async (
       input: MktbarSnapshotInput,
       config?: ToolInvocationConfig,
-    ): Promise<ToolContentAndArtifact> => {
+    ): Promise<BloombergToolResult> => {
       const signal = config?.signal;
-      try {
-        const engine = await resolver.getEngine();
-        signal?.throwIfAborted();
-        const subscription = await engine.mktbar(input.ticker, singleTickerStreamOptions(input));
-        const snapshot = await collectSnapshot(
-          subscription,
-          input,
-          signal,
-          Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
-          resolver.options.maxResultNodes,
-        );
-        return createToolResult(name, snapshot.result, {
-          ...resolver.options,
-          materializedNodes: snapshot.materializedRows,
-        });
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+      const engine = await resolver.getEngine();
+      signal?.throwIfAborted();
+      const subscription = await engine.mktbar(input.ticker, singleTickerStreamOptions(input));
+      const snapshot = await collectSnapshot(
+        subscription,
+        input,
+        signal,
+        Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
+        resolver.options.maxResultNodes,
+      );
+      return {
+        value: snapshot.result,
+        materializedNodes: snapshot.materializedRows,
+      };
     },
     {
       description: MKTBAR_SNAPSHOT_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createMktbarSnapshotSchema(resolver.options),
     },
   );
@@ -955,31 +853,27 @@ function depthSnapshotWithResolver(resolver: CoreResolver): BloombergTool {
     async (
       input: DepthSnapshotInput,
       config?: ToolInvocationConfig,
-    ): Promise<ToolContentAndArtifact> => {
+    ): Promise<BloombergToolResult> => {
       const signal = config?.signal;
-      try {
-        const engine = await resolver.getEngine();
-        signal?.throwIfAborted();
-        const subscription = await engine.depth(input.ticker, singleTickerStreamOptions(input));
-        const snapshot = await collectSnapshot(
-          subscription,
-          input,
-          signal,
-          Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
-          resolver.options.maxResultNodes,
-        );
-        return createToolResult(name, snapshot.result, {
-          ...resolver.options,
-          materializedNodes: snapshot.materializedRows,
-        });
-      } catch (error) {
-        throwWithToolContext(name, error);
-      }
+      const engine = await resolver.getEngine();
+      signal?.throwIfAborted();
+      const subscription = await engine.depth(input.ticker, singleTickerStreamOptions(input));
+      const snapshot = await collectSnapshot(
+        subscription,
+        input,
+        signal,
+        Math.max(resolver.options.maxRows, resolver.options.maxContentRows),
+        resolver.options.maxResultNodes,
+      );
+      return {
+        value: snapshot.result,
+        materializedNodes: snapshot.materializedRows,
+      };
     },
     {
       description: DEPTH_SNAPSHOT_DESCRIPTION,
       name,
-      responseFormat: "content_and_artifact",
+      limits: resolver.options,
       schema: createDepthSnapshotSchema(resolver.options),
     },
   );

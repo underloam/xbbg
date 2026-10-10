@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xbbg import blp
+from xbbg import backend as backend_module, blp
 from xbbg.services import ExtractorHint, Operation, Service
 
 
@@ -18,7 +18,7 @@ async def test_abflds_routes_field_info_for_fields(monkeypatch):
         return [{"field": "PX_LAST"}]
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abflds(fields="PX_LAST")
 
@@ -41,7 +41,7 @@ async def test_abflds_routes_field_search_for_search_spec(monkeypatch):
         return [{"field": "VWAP"}]
 
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(blp, "convert_backend_frame", lambda df, _backend: df)
+    monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abflds(search_spec="vwap")
 

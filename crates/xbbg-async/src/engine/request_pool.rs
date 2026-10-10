@@ -291,7 +291,7 @@ impl RequestWorkerPool {
         let mut workers = Vec::with_capacity(size);
         for id in 0..size {
             let worker = AsyncRequestWorker::new(id, config.clone()).map_err(|e| {
-                BlpAsyncError::BlpError(BlpError::Internal {
+                BlpAsyncError::Blp(BlpError::Internal {
                     detail: format!("failed to spawn worker {}: {}", id, e),
                 })
             })?;
@@ -417,10 +417,10 @@ impl RequestWorkerPool {
             match reply_result {
                 Ok(Ok(batch)) => return Ok(batch),
                 Ok(Err(error)) if self.is_retryable(&error) && attempt + 1 < max_attempts => {
-                    last_error = Some(BlpAsyncError::BlpError(error));
+                    last_error = Some(BlpAsyncError::Blp(error));
                     continue;
                 }
-                Ok(Err(error)) => return Err(BlpAsyncError::BlpError(error)),
+                Ok(Err(error)) => return Err(BlpAsyncError::Blp(error)),
                 Err(_) if attempt + 1 < max_attempts => {
                     last_error = Some(BlpAsyncError::ChannelClosed);
                     continue;
@@ -478,7 +478,7 @@ impl RequestWorkerPool {
         worker
             .introspect_schema(&service)
             .await
-            .map_err(BlpAsyncError::BlpError)
+            .map_err(BlpAsyncError::Blp)
     }
 
     /// Signal shutdown to all workers (non-blocking).

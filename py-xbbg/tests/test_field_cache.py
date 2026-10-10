@@ -6,7 +6,7 @@ import warnings
 
 import pytest
 
-import xbbg.field_cache as field_cache_module
+import xbbg._engine as engine_module
 
 _CASE = TestCase()
 
@@ -34,7 +34,7 @@ def test_get_field_cache_stats_export(monkeypatch):
     """The package root should export field cache stats with cache_path."""
     from xbbg import get_field_cache_stats
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(engine_module, "_get_engine", lambda: FakeEngine())
 
     _CASE.assertEqual(
         get_field_cache_stats(),
@@ -49,7 +49,7 @@ def test_field_type_cache_exposes_cache_path(monkeypatch):
     """FieldTypeCache should surface the resolved cache path."""
     from xbbg import FieldTypeCache
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(engine_module, "_get_engine", lambda: FakeEngine())
 
     cache = FieldTypeCache()
 
@@ -66,7 +66,7 @@ def test_field_type_cache_exposes_cache_path(monkeypatch):
 def test_default_field_cache_calls_do_not_warn(monkeypatch):
     from xbbg import FieldTypeCache, resolve_field_types
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
+    monkeypatch.setattr(engine_module, "_get_engine", lambda: FakeEngine())
 
     with warnings.catch_warnings(record=True) as recorded:
         warnings.simplefilter("always")
@@ -77,71 +77,43 @@ def test_default_field_cache_calls_do_not_warn(monkeypatch):
     _CASE.assertEqual(recorded, [])
 
 
-def test_query_api_false_warns_but_resolves(monkeypatch):
+def test_query_api_argument_is_rejected():
     from xbbg import FieldTypeCache
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
-
-    cache = FieldTypeCache()
-    with pytest.warns(UserWarning, match="query_api=False") as warnings:
-        result = cache.resolve_types(["PX_LAST"], {"PX_LAST": "float64"}, query_api=False)
-
-    _CASE.assertEqual(result, {"PX_LAST": "float64"})
-    _CASE.assertEqual(len(warnings), 1)
+    with pytest.raises(TypeError, match="query_api"):
+        FieldTypeCache().resolve_types(["PX_LAST"], query_api=False)
 
 
-def test_async_query_api_false_warns_but_resolves(monkeypatch):
+def test_async_query_api_argument_is_rejected():
     from xbbg import FieldTypeCache
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
-
-    cache = FieldTypeCache()
-    with pytest.warns(UserWarning, match="query_api=False") as warnings:
-        result = asyncio.run(cache.aresolve_types(["NAME"], query_api=False))
-
-    _CASE.assertEqual(result, {"NAME": "string"})
-    _CASE.assertEqual(len(warnings), 1)
+    with pytest.raises(TypeError, match="query_api"):
+        FieldTypeCache().aresolve_types(["NAME"], query_api=False)
 
 
-def test_module_async_query_api_false_warns_but_resolves(monkeypatch):
+def test_module_async_query_api_argument_is_rejected():
     from xbbg import aresolve_field_types
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
-
-    with pytest.warns(UserWarning, match="query_api=False") as warnings:
-        result = asyncio.run(aresolve_field_types(["NAME"], query_api=False))
-
-    _CASE.assertEqual(result, {"NAME": "string"})
-    _CASE.assertEqual(len(warnings), 1)
+    with pytest.raises(TypeError, match="query_api"):
+        aresolve_field_types(["NAME"], query_api=False)
 
 
-def test_unknown_field_cache_kwargs_stay_quiet(monkeypatch):
+def test_unknown_field_cache_kwargs_are_rejected():
     from xbbg import FieldTypeCache
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
-
-    with warnings.catch_warnings(record=True) as recorded:
-        warnings.simplefilter("always")
-        result = FieldTypeCache().resolve_types(["PX_LAST"], ignored="compat")
-
-    _CASE.assertEqual(result, {"PX_LAST": "string"})
-    _CASE.assertEqual(recorded, [])
+    with pytest.raises(TypeError, match="ignored"):
+        FieldTypeCache().resolve_types(["PX_LAST"], ignored="compat")
 
 
-def test_cache_path_warns_but_stats_still_resolve(monkeypatch):
+def test_constructor_cache_path_is_rejected():
     from xbbg import FieldTypeCache
 
-    monkeypatch.setattr(field_cache_module, "_get_engine", lambda: FakeEngine())
-
-    with pytest.warns(UserWarning, match="cache_path") as warnings:
-        cache = FieldTypeCache(cache_path="ignored.json")
-
-    _CASE.assertEqual(len(warnings), 1)
-    _CASE.assertEqual(cache.cache_path, "C:/tmp/xbbg/field_cache.json")
+    with pytest.raises(TypeError):
+        FieldTypeCache(cache_path="ignored.json")
 
 
 def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monkeypatch):
-    from xbbg import blp
+    from xbbg import _engine
     import xbbg.schema as schema_module
 
     class FakeEngine:
@@ -162,19 +134,19 @@ def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monke
 
     fake_engine = FakeEngine()
     json_schema = '{"service":"//blp/refdata","description":"refdata","operations":[],"cached_at":"1"}'
-    monkeypatch.setattr(blp, "_get_engine", lambda: fake_engine)
+    monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
     schema_module._parse_service_schema_json.cache_clear()
-    blp._clear_field_type_resolution_cache()
+    _engine._clear_field_type_resolution_cache()
 
     try:
         parsed_before = schema_module.ServiceSchema.from_json(json_schema)
         _CASE.assertIs(schema_module.ServiceSchema.from_json(json_schema), parsed_before)
         _CASE.assertEqual(
-            asyncio.run(blp._resolve_field_types_cached(["PX_LAST"], None, "string")),
+            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
             {"PX_LAST": "string"},
         )
         _CASE.assertEqual(
-            asyncio.run(blp._resolve_field_types_cached(["PX_LAST"], None, "string")),
+            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
             {"PX_LAST": "string"},
         )
         _CASE.assertEqual(len(fake_engine.resolve_calls), 1)
@@ -184,7 +156,7 @@ def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monke
         parsed_after_invalidate = schema_module.ServiceSchema.from_json(json_schema)
         _CASE.assertIsNot(parsed_after_invalidate, parsed_before)
         _CASE.assertEqual(
-            asyncio.run(blp._resolve_field_types_cached(["PX_LAST"], None, "string")),
+            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
             {"PX_LAST": "string"},
         )
         _CASE.assertEqual(len(fake_engine.resolve_calls), 2)
@@ -194,13 +166,13 @@ def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monke
         parsed_after_clear = schema_module.ServiceSchema.from_json(json_schema)
         _CASE.assertIsNot(parsed_after_clear, parsed_after_invalidate)
         _CASE.assertEqual(
-            asyncio.run(blp._resolve_field_types_cached(["PX_LAST"], None, "string")),
+            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
             {"PX_LAST": "string"},
         )
         _CASE.assertEqual(len(fake_engine.resolve_calls), 3)
     finally:
         schema_module._parse_service_schema_json.cache_clear()
-        blp._clear_field_type_resolution_cache()
+        _engine._clear_field_type_resolution_cache()
 
     _CASE.assertEqual(fake_engine.invalidated, ["//blp/refdata"])
     _CASE.assertEqual(fake_engine.clear_calls, 1)

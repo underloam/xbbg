@@ -64,17 +64,6 @@ def run_xbbg_rust(ticker, event_type, date, start_time, end_time, interval):
     )
 
 
-def run_xbbg_legacy(ticker, event_type, date, start_time, end_time, interval):
-    """Benchmark legacy xbbg Python version."""
-    try:
-        import xbbg_legacy
-
-        return xbbg_legacy.bdib(ticker, event_type, date, start_time, end_time, interval)
-    except ImportError:
-        logger.warning("xbbg legacy not installed")
-        return None
-
-
 def run_pdblp(ticker, event_type, date, start_time, end_time, interval):
     try:
         con = reused_pdblp_connection()
@@ -128,27 +117,6 @@ def main():
             except Exception as e:
                 logger.error(f"  ✗ Error: {e}")
 
-        if True:  # xbbg Legacy
-            logger.info("Running xbbg (legacy)...")
-            try:
-                result = benchmark_bdib(
-                    "xbbg-legacy",
-                    run_xbbg_legacy,
-                    TICKERS_SINGLE[0],
-                    event_type,
-                    BDIB_DATE,
-                    BDIB_START_TIME,
-                    BDIB_END_TIME,
-                    BDIB_INTERVAL,
-                )
-                if result:
-                    results.append(result)
-                    logger.info(
-                        f"  ✓ {result.warm_mean_ms:.2f}ms (mean), {result.python_tracemalloc_peak_mb:.2f}MB, shape={result.data_shape}"
-                    )
-            except Exception as e:
-                logger.error(f"  ✗ Error: {e}")
-
         if True:  # pdblp
             logger.info("Running pdblp...")
             try:
@@ -185,19 +153,6 @@ def main():
         logger.info(f"  Warm max:   {result.warm_max_ms:.2f}ms ({result.warm_sample_count} samples)")
         logger.info(f"  CPython tracemalloc peak (untimed call): {result.python_tracemalloc_peak_mb:.2f}MB")
         logger.info(f"  Shape:      {result.data_shape}")
-
-    # Calculate speedups
-    xbbg_rust_results = [r for r in results if r.package == "xbbg-rust"]
-    legacy_results = [r for r in results if r.package == "xbbg-legacy"]
-
-    if xbbg_rust_results and legacy_results:
-        rust_time = sum(r.warm_mean_ms for r in xbbg_rust_results)
-        legacy_time = sum(r.warm_mean_ms for r in legacy_results)
-        speedup = legacy_time / rust_time if rust_time > 0 else 0
-
-        logger.info(f"\n\n{'=' * 70}")
-        logger.info(f"xbbg Rust vs Legacy Speedup: {speedup:.2f}x faster")
-        logger.info(f"{'=' * 70}")
 
     return results
 

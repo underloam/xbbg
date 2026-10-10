@@ -45,9 +45,6 @@ fn core_err_to_py(err: ArrowCoreError) -> PyErr {
         }
         ArrowCoreError::ColumnIndexOutOfRange => PyIndexError::new_err("column index out of range"),
         ArrowCoreError::RowIndexOutOfRange => PyIndexError::new_err("row index out of range"),
-        ArrowCoreError::InvalidSortDirection { column, direction } => PyValueError::new_err(
-            format!("unsupported sort direction for {column}: {direction}"),
-        ),
         other => PyValueError::new_err(other.to_string()),
     }
 }
@@ -737,7 +734,7 @@ fn parse_bqr_path(path: &str) -> Option<(usize, String)> {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass(module = "xbbg._core", frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub struct ArrowField {
+pub(crate) struct ArrowField {
     field: FieldRef,
 }
 
@@ -772,7 +769,7 @@ impl ArrowField {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass(module = "xbbg._core", frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub struct ArrowSchema {
+pub(crate) struct ArrowSchema {
     schema: SchemaRef,
 }
 
@@ -813,7 +810,7 @@ impl ArrowSchema {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass(module = "xbbg._core", frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub struct ArrowColumn {
+pub(crate) struct ArrowColumn {
     data: ColumnData,
 }
 
@@ -925,12 +922,12 @@ impl ArrowColumn {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass(module = "xbbg._core", frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub struct ArrowRecordBatch {
+pub(crate) struct ArrowRecordBatch {
     batch: RecordBatch,
 }
 
 impl ArrowRecordBatch {
-    pub fn new(batch: RecordBatch) -> Self {
+    fn new(batch: RecordBatch) -> Self {
         Self { batch }
     }
 
@@ -1107,12 +1104,12 @@ impl ArrowRecordBatch {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
 #[pyclass(module = "xbbg._core", frozen, skip_from_py_object)]
 #[derive(Clone)]
-pub struct ArrowTable {
+pub(crate) struct ArrowTable {
     data: TableData,
 }
 
 impl ArrowTable {
-    pub fn try_new(batches: Vec<RecordBatch>) -> PyResult<Self> {
+    fn try_new(batches: Vec<RecordBatch>) -> PyResult<Self> {
         map_core(TableData::try_new(batches)).map(Self::from_data)
     }
 

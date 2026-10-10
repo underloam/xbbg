@@ -1,148 +1,228 @@
-"""Tests for active_futures ticker validation.
+"""Futures adapters marshal inputs and propagate native recipe results and errors.
 
-Ported from main branch xbbg/tests/test_resolvers.py.
-Tests the Rust-backed validation that ensures active_futures() receives
-a generic ticker (e.g., 'ES1 Index') rather than a specific contract
-(e.g., 'ESH24 Index').
-
-NOTE: The actual active_futures() function requires a Bloomberg connection,
-so we only test the synchronous validation layer that raises ValueError
-before any Bloomberg call is made. The validation is done by the Rust
-function ext_validate_generic_ticker which calls is_specific_contract.
+Contract validation, chain parsing, and volume selection are tested in the Rust
+recipe module. These tests mock only the native recipe seam; no Bloomberg session
+or Python copy of the resolver is needed.
 """
 
 from __future__ import annotations
 
+from datetime import date, datetime, timezone
+import inspect
+from typing import Any
+
+import narwhals.stable.v1 as nw
+import pyarrow as pa
 import pytest
 
-from xbbg._core import ext_validate_generic_ticker
+from xbbg._core import ArrowTable
+from xbbg.ext import futures
 
 
-class TestFuturesChainColumnMatching:
-    """Futures chain parsing accepts raw Bloomberg BDS labels."""
+class RecipeRecorder:
+    """Record adapter calls without implementing contract selection."""
 
-    def test_find_col_matches_raw_bloomberg_labels(self):
-        from xbbg.ext.futures import _find_col
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[Any, ...], Any, dict[str, Any]]] = []
+        self.outcome: Any = pa.table({"ticker": ["ESH24 Index"]})
 
-        columns = ["ticker", "field", "Future's Ticker", "Last Trade Date"]
-
-        assert _find_col(columns, ["future's_ticker", "futures_ticker"]) == "Future's Ticker"
-        assert _find_col(columns, ["last_trade_date", "last_tradeable_dt"]) == "Last Trade Date"
-
-    def test_find_col_still_matches_normalized_aliases(self):
-        from xbbg.ext.futures import _find_col
-
-        columns = ["ticker", "field", "future's_ticker", "last_trade_date"]
-
-        assert _find_col(columns, ["future's_ticker", "futures_ticker"]) == "future's_ticker"
-        assert _find_col(columns, ["last_trade_date", "last_tradeable_dt"]) == "last_trade_date"
+    async def __call__(self, recipe: str, *args: Any, backend=None, **kwargs: Any) -> Any:
+        self.calls.append((recipe, args, backend, kwargs))
+        if isinstance(self.outcome, Exception):
+            raise self.outcome
+        return self.outcome
 
 
-class TestValidateGenericTicker:
-    """Test the Rust-backed generic ticker validation."""
-
-    # -------------------------------------------------------------------------
-    # Specific contracts that SHOULD be rejected
-    # -------------------------------------------------------------------------
-
-    def test_specific_contract_single_digit_year_raises(self):
-        """Specific contracts with single digit year should raise ValueError.
-
-        Example: UXZ5 = VIX futures December 2025 (specific contract).
-        """
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            ext_validate_generic_ticker("UXZ5 Index")
-
-    def test_specific_contract_two_digit_year_raises(self):
-        """Specific contracts with two digit year should raise ValueError.
-
-        Example: UXZ24 = VIX futures December 2024 (specific contract).
-        """
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            ext_validate_generic_ticker("UXZ24 Index")
-
-    def test_specific_contract_esam24_raises(self):
-        """Multi-letter month codes (e.g., ESAM24) should raise ValueError.
-
-        ESAM24 = E-mini S&P500 June 2024 with 'A' prefix (specific contract).
-        """
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            ext_validate_generic_ticker("ESAM24 Index")
-
-    def test_specific_contract_esh24_raises(self):
-        """ESH24 (March 2024 E-mini) should raise ValueError."""
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            ext_validate_generic_ticker("ESH24 Index")
-
-    def test_specific_contract_clz24_raises(self):
-        """CLZ24 (December 2024 Crude Oil) should raise ValueError."""
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            ext_validate_generic_ticker("CLZ24 Comdty")
-
-    # -------------------------------------------------------------------------
-    # Generic tickers that SHOULD pass
-    # -------------------------------------------------------------------------
-
-    def test_generic_ticker_es1_passes(self):
-        """ES1 Index (generic 1st E-mini) should pass validation."""
-        # Should not raise
-        ext_validate_generic_ticker("ES1 Index")
-
-    def test_generic_ticker_ux1_passes(self):
-        """UX1 Index (generic 1st VIX futures) should pass validation."""
-        ext_validate_generic_ticker("UX1 Index")
-
-    def test_generic_ticker_cl1_passes(self):
-        """CL1 Comdty (generic 1st Crude Oil) should pass validation."""
-        ext_validate_generic_ticker("CL1 Comdty")
-
-    def test_generic_ticker_esa1_passes(self):
-        """ESA1 Index (generic 1st E-mini with 'A' prefix) should pass validation."""
-        ext_validate_generic_ticker("ESA1 Index")
-
-    def test_generic_ticker_es2_passes(self):
-        """ES2 Index (generic 2nd E-mini) should pass validation."""
-        ext_validate_generic_ticker("ES2 Index")
-
-    # -------------------------------------------------------------------------
-    # Error message quality
-    # -------------------------------------------------------------------------
-
-    def test_error_message_includes_ticker(self):
-        """Error message should include the offending ticker."""
-        with pytest.raises(ValueError) as exc_info:
-            ext_validate_generic_ticker("UXZ5 Index")
-
-        error_msg = str(exc_info.value)
-        assert "UXZ5 Index" in error_msg
-
-    def test_error_message_mentions_generic(self):
-        """Error message should mention using a generic ticker."""
-        with pytest.raises(ValueError) as exc_info:
-            ext_validate_generic_ticker("ESH24 Index")
-
-        error_msg = str(exc_info.value)
-        assert "generic" in error_msg.lower()
+@pytest.fixture
+def recipes(monkeypatch: pytest.MonkeyPatch) -> RecipeRecorder:
+    recorder = RecipeRecorder()
+    monkeypatch.setattr(futures, "_call_native_recipe", recorder)
+    return recorder
 
 
-class TestActiveFuturesValidation:
-    """Test that active_futures() properly validates before making Bloomberg calls.
+RESOLVERS = [
+    (futures.afut_ticker, "recipe_fut_ticker"),
+    (futures.aactive_futures, "recipe_active_futures"),
+]
 
-    These tests verify the validation layer works end-to-end through
-    the Python active_futures() function. They will raise ValueError
-    from the Rust validation before any Bloomberg call is attempted.
-    """
 
-    def test_active_futures_rejects_specific_contract(self):
-        """active_futures() should reject specific contracts."""
-        from xbbg.ext.futures import active_futures
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize(
+    "reference_date",
+    [
+        "2024-01-15",
+        "20240115",
+        "2024/01/15",
+        "15/01/2024",
+        date(2024, 1, 15),
+        datetime(2024, 1, 15, 16, 30),
+        datetime(2024, 1, 15, 16, 30, tzinfo=timezone.utc),
+    ],
+)
+async def test_futures_normalizes_dates_and_preserves_string_result(recipes, resolver, recipe, reference_date):
+    result = await resolver("ES1 Index", reference_date)
 
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            active_futures("UXZ5 Index", "2024-01-15")
+    assert result == "ESH24 Index"
+    assert isinstance(result, str)
+    assert recipes.calls == [
+        (recipe, ("ES1 Index", "20240115", None), None, {"request_options": {}}),
+    ]
 
-    def test_active_futures_rejects_two_digit_year(self):
-        """active_futures() should reject contracts with two digit year."""
-        from xbbg.ext.futures import active_futures
 
-        with pytest.raises(ValueError, match="appears to be a specific contract"):
-            active_futures("UXZ24 Index", "2024-01-15")
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+async def test_futures_forwards_frequency_backend_and_all_request_options(recipes, resolver, recipe):
+    options = {
+        "overrides": {"CHAIN_DATE": "20240112", "FUT_CHAIN_OPTION": "ALL"},
+        "elements": {"periodicitySelection": "DAILY"},
+        "options": {"nonTradingDayFillOption": "ACTIVE_DAYS_ONLY"},
+        "security_overrides": {"ES1 Index": {"PRICING_SOURCE": "BGN"}},
+        "field_types": {"VOLUME": "float64"},
+        "validate_fields": False,
+        "return_eids": True,
+        "request_tz": "UTC",
+        "output_tz": "Europe/London",
+        "format": "wide",
+        "Currency": "USD",
+    }
+
+    result = await resolver("ES1 Index", "2024-01-15", freq="QE", backend="pyarrow", **options)
+
+    assert result == "ESH24 Index"
+    assert recipes.calls == [
+        (recipe, ("ES1 Index", "20240115", "QE"), "pyarrow", {"request_options": options}),
+    ]
+    assert "backend" not in options
+    assert "freq" not in options
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize("ticker", ["UXZ5 Index", "UXZ24 Index", "ESH24 Index", "SPYH24 US Equity", "invalid"])
+async def test_futures_propagates_native_validation_without_python_ticker_parsing(recipes, resolver, recipe, ticker):
+    error = ValueError(f"invalid generic ticker: {ticker}")
+    recipes.outcome = error
+
+    with pytest.raises(ValueError) as raised:
+        await resolver(ticker, "2024-01-15")
+
+    assert raised.value is error
+    assert recipes.calls == [
+        (recipe, (ticker, "20240115", None), None, {"request_options": {}}),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+async def test_futures_does_not_replace_native_resolution_errors_with_empty_strings(recipes, resolver, recipe):
+    error = RuntimeError("unable to resolve futures contract")
+    recipes.outcome = error
+
+    with pytest.raises(RuntimeError) as raised:
+        await resolver("ES2 Index", "2024-01-15")
+
+    assert raised.value is error
+    assert recipes.calls[0][0] == recipe
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize("reference_date", [None, "not-a-date"])
+async def test_futures_rejects_invalid_dates_before_native_dispatch(recipes, resolver, recipe, reference_date):
+    with pytest.raises(ValueError):
+        await resolver("ES1 Index", reference_date)
+
+    assert recipes.calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize("tickers", [[], ["ESH24 Index", "ESM24 Index"]])
+async def test_futures_rejects_non_single_row_results(recipes, resolver, recipe, tickers):
+    recipes.outcome = pa.table({"ticker": pa.array(tickers, type=pa.string())})
+
+    with pytest.raises(ValueError, match=f"{recipe} returned .* expected exactly 1"):
+        await resolver("ES1 Index", "2024-01-15")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize("ticker", [None, ""])
+async def test_futures_rejects_missing_ticker_values(recipes, resolver, recipe, ticker):
+    recipes.outcome = pa.table({"ticker": pa.array([ticker], type=pa.string())})
+
+    with pytest.raises(ValueError, match=f"{recipe} returned a row without a ticker"):
+        await resolver("ES1 Index", "2024-01-15")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+async def test_futures_rejects_missing_ticker_column(recipes, resolver, recipe):
+    recipes.outcome = pa.table({"other": ["ESH24 Index"]})
+
+    with pytest.raises(ValueError, match=f"{recipe} returned a row without a ticker"):
+        await resolver("ES1 Index", "2024-01-15")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+@pytest.mark.parametrize(
+    "backend", ["native", "pyarrow", "narwhals", "pandas", "polars", "polars_lazy", "narwhals_lazy"]
+)
+async def test_futures_unwraps_supported_backends(recipes, resolver, recipe, backend):
+    table = pa.table({"ticker": ["ESH24 Index"]})
+    if backend == "native":
+        recipes.outcome = ArrowTable.from_pylist([{"ticker": "ESH24 Index"}])
+    elif backend == "pyarrow":
+        recipes.outcome = table
+    elif backend == "narwhals":
+        recipes.outcome = nw.from_native(table)
+    elif backend == "pandas":
+        pd = pytest.importorskip("pandas")
+        recipes.outcome = pd.DataFrame({"ticker": ["ESH24 Index"]})
+    else:
+        pl = pytest.importorskip("polars")
+        frame = pl.DataFrame({"ticker": ["ESH24 Index"]})
+        recipes.outcome = frame if backend == "polars" else frame.lazy()
+        if backend == "narwhals_lazy":
+            recipes.outcome = nw.from_native(recipes.outcome)
+
+    assert await resolver("ES1 Index", "2024-01-15", backend=backend) == "ESH24 Index"
+    assert recipes.calls[0][2] == backend
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
+async def test_futures_unwraps_duckdb_backend(recipes, resolver, recipe):
+    duckdb = pytest.importorskip("duckdb")
+    with duckdb.connect() as connection:
+        recipes.outcome = connection.sql("SELECT 'ESH24 Index' AS ticker")
+        assert await resolver("ES1 Index", "2024-01-15", backend="duckdb") == "ESH24 Index"
+    assert recipes.calls[0][2] == "duckdb"
+
+
+@pytest.mark.parametrize(
+    ("resolver", "recipe"),
+    [(futures.fut_ticker, "recipe_fut_ticker"), (futures.active_futures, "recipe_active_futures")],
+)
+def test_sync_futures_dispatches_to_same_native_recipe(recipes, resolver, recipe):
+    assert resolver("ES1 Index", "2024-01-15", backend="native") == "ESH24 Index"
+    assert recipes.calls == [
+        (recipe, ("ES1 Index", "20240115", None), "native", {"request_options": {}}),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("resolver", "ticker_parameter"),
+    [
+        (futures.afut_ticker, "gen_ticker"),
+        (futures.fut_ticker, "gen_ticker"),
+        (futures.aactive_futures, "ticker"),
+        (futures.active_futures, "ticker"),
+    ],
+)
+def test_public_futures_signatures_remain_unchanged(resolver, ticker_parameter):
+    parameters = inspect.signature(resolver).parameters
+    assert list(parameters) == [ticker_parameter, "dt", "kwargs"]
+    assert parameters["kwargs"].kind is inspect.Parameter.VAR_KEYWORD

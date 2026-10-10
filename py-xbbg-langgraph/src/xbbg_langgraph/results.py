@@ -16,62 +16,17 @@ import json
 import math
 from typing import TYPE_CHECKING, Any
 
+from ._defs_gen import (
+    ARROW_METADATA_KEYS as _METADATA_KEYS,
+    ERROR_KEYS as _ERROR_KEYS,
+    MAX_RESULT_DEPTH as _MAX_DEPTH,
+    PRIORITY_KEYS as _PRIORITY_KEYS,
+    TRUNCATION_REASON_ORDER as _REASON_ORDER,
+)
+
 if TYPE_CHECKING:
     from .options import BloombergToolsOptions
 
-_MAX_DEPTH = 32
-_ERROR_KEYS = (
-    "error",
-    "errors",
-    "responseError",
-    "responseErrors",
-    "securityError",
-    "securityErrors",
-    "fieldException",
-    "fieldExceptions",
-    "fieldErrors",
-    "unsubscribeError",
-    "response_error",
-    "response_errors",
-    "security_error",
-    "security_errors",
-    "field_exception",
-    "field_exceptions",
-    "field_errors",
-    "unsubscribe_error",
-)
-_PRIORITY_KEYS = (
-    *_ERROR_KEYS,
-    "hasErrors",
-    "truncated",
-    "truncatedInput",
-    "eidData",
-    "eidDataTruncation",
-    "entitled",
-    "failedEids",
-    "diagnostics",
-    "metadata",
-    "rowCount",
-    "updateCount",
-    "renderable",
-    "spec",
-)
-_METADATA_KEYS = {
-    "xbbg.security_errors": "securityErrors",
-    "xbbg.field_exceptions": "fieldExceptions",
-    "xbbg.eid_data": "eidData",
-}
-_REASON_ORDER = (
-    "max_rows",
-    "max_string_chars",
-    "max_result_bytes",
-    "max_result_nodes",
-    "max_result_depth",
-    "circular_reference",
-    "binary_data",
-    "unsupported_value",
-    "upstream_truncation",
-)
 _NATIVE_SCALARS = (
     "Null",
     "Boolean",

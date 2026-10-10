@@ -105,70 +105,19 @@ jobs:
     outputs:
       version: ${{ steps.detect.outputs.version }}
     steps:
+      - uses: actions/checkout@v7
       - name: Detect latest downloadable Bloomberg C++ SDK version
         id: detect
-        run: |
-          INDEX_URL="https://blpapi.bloomberg.com/repository/releases/python/simple/blpapi/"
-          versions=$(curl -fsSL "$INDEX_URL" \
-            | grep -oP 'blpapi-\K[0-9]+\.[0-9]+\.[0-9]+(?:\.[0-9]+)?' \
-            | sort -Vr \
-            | uniq)
-
-          for VERSION in $versions; do
-            linux_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-linux.tar.gz"
-            macos_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-macos-arm64.tar.gz"
-            windows_url="https://blpapi.bloomberg.com/download/releases/raw/files/blpapi_cpp_${VERSION}-windows.zip"
-            if curl -fsIL "$linux_url" >/dev/null \
-              && curl -fsIL "$macos_url" >/dev/null \
-              && curl -fsIL "$windows_url" >/dev/null; then
-              echo "Detected Bloomberg C++ SDK version: $VERSION"
-              echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
-          done
-
-          echo "No downloadable Bloomberg C++ SDK archives found" >&2
-          exit 1
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          detect-only: "true"
 
   generate-bindings:
     name: Generate blpapi bindings artifact
     needs: sdk-version
-    runs-on: ubuntu-latest
-    container: ghcr.io/${{ github.repository_owner }}/xbbg-ci:latest
-    env:
-      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Bloomberg SDK
-        id: sdk
-        uses: ./.github/actions/setup-blpapi-sdk
-        with:
-          version: ${{ env.BLPAPI_VERSION }}
-          os: Linux
-
-      - name: Export Bloomberg SDK env
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
-      - name: Generate bindings artifact
-        run: |
-          mkdir -p "$GITHUB_WORKSPACE/ci-bindings"
-          BLPAPI_BINDINGS_EXPORT_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs" cargo build -p xbbg-blpapi-sys
-          test -s "$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
-
-      - name: Upload bindings artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: blpapi-bindings
-          path: ci-bindings/bindings.rs
-          retention-days: 7
+    uses: ./.github/workflows/generate-bindings.yml
+    with:
+      sdk-version: ${{ needs.sdk-version.outputs.version }}
 
   build-core-native:
     name: Build @xbbg/core native package (${{ matrix.label }})
@@ -246,17 +195,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Linux
 
-      - name: Export Bloomberg SDK env (Linux)
-        if: runner.os == 'Linux'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
-
       - name: Setup Bloomberg SDK (Windows)
         if: runner.os == 'Windows'
         id: sdk-windows
@@ -265,15 +203,6 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: Windows
 
-      - name: Export Bloomberg SDK env (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          $sdkPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.sdk-rel-root }}'
-          $binPath = Join-Path $env:GITHUB_WORKSPACE '${{ steps.sdk-windows.outputs.bin-rel-dir }}'
-          "BLPAPI_ROOT=$sdkPath" >> $env:GITHUB_ENV
-          "PATH=$binPath;$env:PATH" >> $env:GITHUB_ENV
-
       - name: Setup Bloomberg SDK (macOS)
         if: runner.os == 'macOS'
         id: sdk-macos
@@ -281,14 +210,6 @@ jobs:
         with:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
-
-      - name: Export Bloomberg SDK env (macOS)
-        if: runner.os == 'macOS'
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-macos.outputs.lib-rel-dir }}"
-          echo "BLPAPI_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "DYLD_LIBRARY_PATH=$LIB_DIR:$DYLD_LIBRARY_PATH" >> "$GITHUB_ENV"
 
       - name: Install JS package dependencies
         run: npm ci --prefix js-xbbg
@@ -417,16 +338,6 @@ jobs:
         with:
           version: ${{ needs.sdk-version.outputs.version }}
           os: Linux
-
-      - name: Export Bloomberg SDK env for packed-install smoke tests
-        run: |
-          SDK_ROOT="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.sdk-rel-root }}"
-          LIB_DIR="$GITHUB_WORKSPACE/${{ steps.sdk-linux.outputs.lib-rel-dir }}"
-          {
-            echo "BLPAPI_ROOT=$SDK_ROOT"
-            echo "LIBRARY_PATH=$LIB_DIR:$LIBRARY_PATH"
-            echo "LD_LIBRARY_PATH=$LIB_DIR:$LD_LIBRARY_PATH"
-          } >> "$GITHUB_ENV"
 
       - name: Smoke test packed @xbbg/core install
         shell: bash

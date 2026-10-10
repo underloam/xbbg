@@ -1,163 +1,133 @@
 # xbbg Benchmarks
 
-Comprehensive benchmark suite comparing xbbg (Rust) against competing Bloomberg API packages.
+Benchmark the installed Rust-backed xbbg build and real Bloomberg client packages.
+The standard runner and the separate competitor-equivalence script cover different
+comparisons; installing a package does not add it to every benchmark.
 
-## ⚠️ Bloomberg Data Usage
+## Bloomberg Data Usage
 
-**These benchmarks use live Bloomberg data.** Each full benchmark run queries:
-- **BDP**: ~10-20 data points
-- **BDH**: ~15-30 historical points
-- **BDIB**: ~50-100 intraday bars
-- **BDTICK**: ~100-200 tick data points
+All request benchmarks require an authorized Bloomberg Terminal or B-PIPE
+connection and the relevant entitlements. Only `bench_handoff_offline.py` is
+offline.
 
-**Total per run: ~200-350 data points**
+With the defaults in `config.py`, each successful package/scenario pair makes one
+fresh-process call, one discarded warmup call, five measured warm calls, and one
+untimed allocation-measurement call. Helpers may make additional metadata requests.
+Returned tick counts vary with market activity; the configured time windows are
+not a fixed data-point allowance.
 
-Run benchmarks locally, keep request volume bounded, and follow your Bloomberg entitlements, usage terms, and internal policies.
+Run locally, keep request volume bounded, and follow Bloomberg usage terms and
+your internal policies.
 
----
+## Comparison Setup
 
-## Competing Packages
+| Entry point | Packages and coverage |
+|-------------|-----------------------|
+| `run_all.py` | Current xbbg and installed `pdblp` for BDP, BDH, and BDIB. BDTICK tries `pdblp` only if its installed version exposes that method. BQL measures current xbbg only. Includes offline handoff measurements by default. |
+| `bench_latest_competitors_equivalence.py` | Current xbbg against installed `pdblp`, `bbg-fetch`, and `polars-bloomberg`, for the operations each adapter supports. Normalizes results and records equivalence or mismatch. |
+| `harness.py` | Separate BDP, BDH, and BQL comparison with `polars-bloomberg`; reports same-process first calls and warm timings. |
+| `bench_raw_blpapi.py` | Standalone SDK BDP phase timing; not a lane in `run_all.py`. |
+| `bench_handoff_offline.py` | Native Arrow handoff into supported Python consumers using synthetic fixture data; no live requests. |
 
-| Package | Version | Status | Notes |
-|---------|---------|--------|-------|
-| **xbbg (Rust)** | 1.0.0+ | Current | This version (Rust rewrite) |
-| **xbbg (legacy)** | 0.10.3 | Baseline | Pure Python version |
-| **blpapi** | 3.25.11 | Bloomberg SDK | Low-level SDK API baseline |
-| **bbg-fetch** | 1.1.2 | Active | Modern alternative |
-| **pdblp** | 0.1.8 | Legacy | Historical comparison |
+The standard runner labels the current installation `xbbg-rust`; the equivalence
+script labels it `xbbg-latest`. Both import the real `xbbg` package. There is no
+renamed second installation of xbbg in either comparison.
 
-See the table above for full package details.
-
----
+Missing competitor packages and unsupported or empty responses do not produce
+successful measurement rows. The standard runner checks result availability and
+shape, not value equivalence; use the equivalence script before interpreting a
+cross-package timing difference.
 
 ## Quick Start
 
-### 1. Install Dependencies
+Use the Python environment containing the current xbbg build you want to measure.
+Install optional consumers and competitors into that same environment without
+replacing xbbg:
 
 ```bash
-# Install benchmark dependencies (from project root)
-uv sync --group benchmark
-
-# Install competing packages for comparison
-uv pip install xbbg==0.10.3  # Legacy version
+uv pip install "pandas>=2.2.2,<4" "pyarrow>=22.0.0" "polars[timezone]>=0.20.4"
 uv pip install --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/ blpapi
-uv pip install bbg-fetch
-uv pip install pdblp
+uv pip install pdblp bbg-fetch polars-bloomberg
 ```
 
-### 2. Run Benchmarks
+From the repository root:
 
 ```bash
-# Run all benchmarks
+# Standard live suite plus offline handoff
 python py-xbbg/benchmarks/run_all.py
 
-# Run all benchmarks without the offline handoff lane
+# Standard live suite only
 python py-xbbg/benchmarks/run_all.py --no-offline
 
-# Run specific benchmark
+# Individual request benchmark
 python py-xbbg/benchmarks/bench_bdp.py
 python py-xbbg/benchmarks/bench_bdh.py
 python py-xbbg/benchmarks/bench_bdib.py
+python py-xbbg/benchmarks/bench_bdtick.py
+python py-xbbg/benchmarks/bench_bql.py
+
+# Separate comparisons
+python py-xbbg/benchmarks/bench_latest_competitors_equivalence.py
+python py-xbbg/benchmarks/harness.py
+python py-xbbg/benchmarks/bench_raw_blpapi.py
+
+# No Bloomberg connection needed
 python py-xbbg/benchmarks/bench_handoff_offline.py --quick
 ```
 
----
+## Configuration
 
-## Benchmark Scripts
-
-| Script | Operations | Data Points |
-|--------|-----------|-------------|
-| `bench_bdp.py` | Reference data (bdp) | ~10-20 live |
-| `bench_bdh.py` | Historical data (bdh) | ~15-30 live |
-| `bench_bdib.py` | Intraday bars (bdib) | ~50-100 live |
-| `bench_bdtick.py` | Tick data (bdtick) | ~100-200 live |
-| `bench_bql.py` | BQL queries | ~10-20 live |
-| `bench_handoff_offline.py` | Native Arrow handoff conversions | 0 live; fixture data |
-| `run_all.py` | All benchmarks, including offline handoff by default | ~200-350 live |
-
----
-
-## Benchmark Configuration
-
-Edit `config.py` to customize:
+Edit `config.py` for the standard runner's request inputs and sample counts:
 
 ```python
-# Test data configuration
-TICKERS = ["IBM US Equity", "AAPL US Equity"]
-FIELDS = ["PX_LAST", "VOLUME"]
-DATE_RANGE = ("2025-01-02", "2025-01-06")
-
-# Benchmark settings
-ITERATIONS = 5  # Repetitions per test
-WARMUP_ITERATIONS = 2  # Warm-up runs
-
-# Packages to compare
-PACKAGES = ["xbbg-rust", "xbbg-legacy", "blpapi", "bbg-fetch", "pdblp"]
+TICKERS_SINGLE = ["IBM US Equity"]
+TICKERS_MULTI = ["IBM US Equity", "AAPL US Equity", "MSFT US Equity"]
+FIELDS_SINGLE = ["PX_LAST"]
+FIELDS_MULTI = ["PX_LAST", "VOLUME", "TRADING_DT_REALTIME"]
+BDH_START = "2025-01-02"
+BDH_END = "2025-01-06"
+ITERATIONS = 5
+WARMUP_ITERATIONS = 1
 ```
 
----
+Intraday dates default to the previous weekday, not an exchange-holiday calendar.
+Intraday request windows are New York wall times, converted to UTC for clients
+that expect UTC. Adjust the date if the selected market was closed.
 
-## Output Format
+`PACKAGES` documents the standard runner's current-xbbg and `pdblp` imports.
+Entry points select their own lanes; its `enabled` values are not runtime filters.
+The separate equivalence script has its own iteration settings.
 
-Results are saved to `results/`:
+## Reports and Measurement Boundaries
 
-```
-results/
-├── benchmark_YYYYMMDD_HHMMSS.json       # Raw data
-├── benchmark_YYYYMMDD_HHMMSS.md         # Markdown report
-├── handoff_offline_YYYYMMDD_HHMMSS.json # Offline handoff results
-├── handoff_offline_latest.json          # Latest offline handoff run
-└── latest.json                          # Symlink to latest run
-```
+The standard runner writes to `py-xbbg/benchmarks/results/`:
 
-### Example Output
-
-```
-┌─────────────────┬──────────┬─────────────┬──────────────┬──────────┐
-│ Package         │ BDP (ms) │ BDH (ms)    │ Memory (MB)  │ Winner   │
-├─────────────────┼──────────┼─────────────┼──────────────┼──────────┤
-│ xbbg (Rust)     │  12 ✅   │  145 ✅     │  8.2 ✅      │ 🏆       │
-│ xbbg (legacy)   │ 120      │ 1200        │ 45.1         │          │
-│ blpapi          │  35      │  380        │ 22.3         │          │
-│ bbg-fetch       │  95      │  920        │ 38.7         │          │
-│ pdblp           │  85      │  890        │ 32.4         │          │
-└─────────────────┴──────────┴─────────────┴──────────────┴──────────┘
-
-Speedup vs legacy xbbg: 10.0x faster, 5.5x less memory
-Speedup vs pdblp:       7.1x faster, 3.9x less memory
+```text
+benchmark_v{version}.json
+benchmark_v{version}.md
+benchmark_v{version}_{YYYYMMDD_HHMMSS}.json
+benchmark_v{version}_{YYYYMMDD_HHMMSS}.md
+latest.json
+latest.md
 ```
 
----
+Version files are overwritten on another run of the same version; timestamped
+files preserve each run. `latest.*` are local symlinks or copies. Offline handoff
+and competitor-equivalence scripts also write their own timestamped reports.
 
-## Metrics Tracked
+| Standard-runner metric | Meaning |
+|------------------------|---------|
+| Fresh-process first result | One parent-observed process spawn, imports, session setup, request, result construction, and result marker; excludes teardown and child exit. |
+| Warm-session timing | Uninstrumented calls after discarded warmup, using reused sessions. Reports mean, median, standard deviation, maximum, and sample count. |
+| Warm p95 / p99 | Omitted as `null` below 20 / 100 warm samples respectively. Five samples cannot support these tails. |
+| CPython tracemalloc peak | Separate untimed call; excludes Rust allocations, Arrow native pools, allocator arenas, and process RSS. |
+| Shape | Result dimensions, not proof of equivalent values or work. |
 
-| Metric | Description |
-|--------|-------------|
-| **Latency** | Time to complete request (p50, p95, p99) |
-| **Throughput** | Requests per second |
-| **Memory** | Peak memory usage |
-| **Cold Start** | First request (includes setup) |
-| **Warm** | Subsequent requests (cached) |
-| **Data Shape** | Result size validation |
+No sample timings or speedup claims are supplied here. Compare actual reports
+only when request inputs, package versions, measurement boundaries, and returned
+values are comparable. Historical reports may predate the current measurement
+schema; see [results/README.md](results/README.md).
 
----
-
-## CI Integration (Planned)
-
-`.github/workflows/benchmark.yml` will:
-- Run benchmarks on PR
-- Compare against main branch
-- Post results as PR comment
-- Store historical data in GitHub Pages
-- Fail if performance regresses >10%
-
----
-
-## Notes
-
-- **Bloomberg connection required**: Tests need active Bloomberg terminal or BPIPE
-- **Offline handoff benchmark**: `bench_handoff_offline.py` uses in-process fixture data only; no Bloomberg connection is required.
-- **Data limits**: Be mindful of Bloomberg data limits when running frequently
-- **Timing variability**: Network latency affects results; run multiple iterations
-- **Package versions**: Results are version-specific; document versions used
-- **Historical tracking**: Save results to track performance over time
+Live benchmarks are local-only; they are not an offline CI performance gate.
+Review generated provenance before sharing reports and remove local paths or
+other identifying environment details.

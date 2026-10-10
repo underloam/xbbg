@@ -8,10 +8,6 @@ pub enum BlpAsyncError {
     #[error(transparent)]
     Blp(#[from] BlpError),
 
-    /// Bloomberg error (explicit, not From trait)
-    #[error("bloomberg error: {0}")]
-    BlpError(BlpError),
-
     #[error("internal error: {0}")]
     Internal(String),
 
@@ -20,26 +16,6 @@ pub enum BlpAsyncError {
 
     #[error("channel closed")]
     ChannelClosed,
-
-    #[error("stream full")]
-    StreamFull,
-
-    #[error("cancelled")]
-    Cancelled,
-
-    #[error("timeout")]
-    Timeout,
-
-    /// Bloomberg session lost — transport dropped or session terminated.
-    ///
-    /// In-flight requests on the affected worker have been failed immediately.
-    /// Callers should retry with a different worker or wait for the pool to
-    /// recover.
-    #[error("session lost on worker {worker_id} ({in_flight_count} in-flight requests failed)")]
-    SessionLost {
-        worker_id: usize,
-        in_flight_count: usize,
-    },
 
     /// All request workers in the pool are dead.
     ///

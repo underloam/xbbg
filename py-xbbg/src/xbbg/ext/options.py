@@ -26,7 +26,8 @@ from __future__ import annotations
 import sys
 from typing import TYPE_CHECKING, Any
 
-from xbbg.ext._utils import DateLike, _abdp_fields, _abds_field, _fmt_date, _syncify
+from xbbg._dates import DateLike, _fmt_date
+from xbbg.ext._utils import _abdp_fields, _abds_field, _syncify
 
 if TYPE_CHECKING:
     from narwhals.typing import IntoDataFrame

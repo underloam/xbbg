@@ -17,3 +17,6 @@ arrow-schema = { workspace = true }
 arrow-select = { workspace = true }
 chrono = { workspace = true, features = ["std"] }
 thiserror = { workspace = true }
+
+[lints]
+workspace = true

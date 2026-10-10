@@ -300,13 +300,6 @@ pub(crate) fn refdata_value_map(
     Ok(values)
 }
 
-fn append_opt(builder: &mut StringBuilder, value: Option<&String>) {
-    match value {
-        Some(value) => builder.append_value(value),
-        None => builder.append_null(),
-    }
-}
-
 fn build_resolve_isins_batch(rows: &[IsinResolution]) -> Result<RecordBatch> {
     let mut order = Int32Builder::new();
     let mut input = StringBuilder::new();
@@ -321,11 +314,11 @@ fn build_resolve_isins_batch(rows: &[IsinResolution]) -> Result<RecordBatch> {
         order.append_value(row.input_order);
         input.append_value(&row.input_isin);
         lookup.append_value(&row.lookup_ticker);
-        append_opt(&mut parsed, row.parsekyable_des.as_ref());
-        append_opt(&mut exchange, row.primary_exchange.as_ref());
-        append_opt(&mut resolved, row.resolved_ticker.as_ref());
+        parsed.append_option(row.parsekyable_des.as_ref());
+        exchange.append_option(row.primary_exchange.as_ref());
+        resolved.append_option(row.resolved_ticker.as_ref());
         status.append_value(&row.status);
-        append_opt(&mut error, row.error.as_ref());
+        error.append_option(row.error.as_ref());
     }
 
     let schema = Arc::new(Schema::new(vec![
@@ -368,11 +361,11 @@ fn build_issuer_isins_batch(rows: &[IssuerIsinResolution]) -> Result<RecordBatch
         order.append_value(row.input_order);
         input.append_value(&row.input_isin);
         lookup.append_value(&row.lookup_ticker);
-        append_opt(&mut bond, row.bond_ticker.as_ref());
-        append_opt(&mut parent, row.parent_ticker.as_ref());
-        append_opt(&mut issuer_isin, row.issuer_equity_isin.as_ref());
+        bond.append_option(row.bond_ticker.as_ref());
+        parent.append_option(row.parent_ticker.as_ref());
+        issuer_isin.append_option(row.issuer_equity_isin.as_ref());
         status.append_value(&row.status);
-        append_opt(&mut error, row.error.as_ref());
+        error.append_option(row.error.as_ref());
     }
 
     let schema = Arc::new(Schema::new(vec![

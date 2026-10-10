@@ -10,12 +10,23 @@ from typing import Any
 
 from pydantic import BaseModel
 
+from ._defs_gen import (
+    CHART_DEFAULTS,
+    CLOSE_FIELD_CANDIDATES,
+    HIGH_FIELD_CANDIDATES,
+    LABEL_FIELD_CANDIDATES as _LABEL_FIELDS,
+    LOW_FIELD_CANDIDATES,
+    OPEN_FIELD_CANDIDATES,
+    PRICE_FIELD_CANDIDATES,
+    SERIES_FIELD_CANDIDATES as _SERIES_FIELDS,
+    SIDE_FIELD_CANDIDATES,
+    SIZE_FIELD_CANDIDATES,
+    VALUE_FIELD_CANDIDATES as _VALUE_FIELDS,
+    X_FIELD_CANDIDATES as _X_FIELDS,
+)
+
 Row = dict[str, str | int | float | bool | None]
 _SPEC_SCHEMA = "https://vega.github.io/schema/vega-lite/v5.json"
-_X_FIELDS = ("date", "time", "datetime", "timestamp")
-_LABEL_FIELDS = ("ticker", "security", "member", "name", "label")
-_SERIES_FIELDS = ("ticker", "security", "field", "side", "category")
-_VALUE_FIELDS = ("value", "PX_LAST", "close", "price", "weight", "marketValue", "market_value")
 _COMPACT_DATE = re.compile(r"^\d{8}$")
 _ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}(?:$|[T\s])")
 
@@ -173,10 +184,10 @@ def _candlestick(
     input: BaseModel, rows: list[Row], fields: dict[str, None]
 ) -> tuple[dict[str, Any], list[Row], str, list[str], str | None]:
     x = _require_field(fields, input.x_field, "x_field", _X_FIELDS)
-    opening = _require_field(fields, input.open_field, "open_field", ("open", "OPEN", "PX_OPEN"))
-    high = _require_field(fields, input.high_field, "high_field", ("high", "HIGH", "PX_HIGH"))
-    low = _require_field(fields, input.low_field, "low_field", ("low", "LOW", "PX_LOW"))
-    close = _require_field(fields, input.close_field, "close_field", ("close", "CLOSE", "PX_LAST", "last", "value"))
+    opening = _require_field(fields, input.open_field, "open_field", OPEN_FIELD_CANDIDATES)
+    high = _require_field(fields, input.high_field, "high_field", HIGH_FIELD_CANDIDATES)
+    low = _require_field(fields, input.low_field, "low_field", LOW_FIELD_CANDIDATES)
+    close = _require_field(fields, input.close_field, "close_field", CLOSE_FIELD_CANDIDATES)
     y_fields = [opening, high, low, close]
     for field in y_fields:
         _require_numeric(rows, field)
@@ -221,14 +232,14 @@ def _candlestick(
 def _depth(
     input: BaseModel, rows: list[Row], fields: dict[str, None]
 ) -> tuple[dict[str, Any], list[Row], str, list[str], str | None]:
-    price = _require_field(fields, input.price_field or input.x_field, "price_field", ("price", "PRICE", "px", "PX"))
+    price = _require_field(fields, input.price_field or input.x_field, "price_field", PRICE_FIELD_CANDIDATES)
     size = _require_field(
         fields,
         input.size_field or input.value_field or (input.y_fields[0] if input.y_fields else None),
         "size_field",
-        ("size", "SIZE", "quantity", "qty", "volume"),
+        SIZE_FIELD_CANDIDATES,
     )
-    side = _require_field(fields, input.side_field or input.series_field, "side_field", ("side", "SIDE", "type"))
+    side = _require_field(fields, input.side_field or input.series_field, "side_field", SIDE_FIELD_CANDIDATES)
     _require_numeric(rows, price)
     _require_numeric(rows, size)
     body = {
@@ -271,8 +282,7 @@ def create_chart_spec(input: BaseModel) -> dict[str, Any]:
     for field in input.y_fields or ():
         if field not in fields:
             raise ValueError(f"Missing y field: {field}")
-    defaults = {"bdh": "line", "bdib": "candlestick", "holdings": "bar", "depth": "depth", "rows": "line"}
-    chart = input.chart or defaults[input.source]
+    chart = input.chart or CHART_DEFAULTS[input.source]
     title = input.title or f"{input.source} {chart}"
     if chart == "candlestick":
         body, rows, x, ys, series = _candlestick(input, rows, fields)

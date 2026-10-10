@@ -1,0 +1,10 @@
+{
+  "$schema": "https://unpkg.com/knip@6/schema-jsonc.json",
+  // tsup and package scripts supply entry points; published root exports are API.
+  "project": ["src/**/*.ts", "test/**/*.ts", "scripts/**/*.mjs", "*.config.ts"],
+  "includeEntryExports": false,
+  "ignoreIssues": {
+    // Shared generated vocabulary is intentionally larger than this adapter's use.
+    "src/_defs_gen.ts": ["exports", "types"],
+  },
+}

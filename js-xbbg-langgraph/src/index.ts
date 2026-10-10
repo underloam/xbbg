@@ -4,6 +4,12 @@ import type { BloombergToolsOptions } from "./options";
 import { createBloombergToolsForResolver, type BloombergTool } from "./tools";
 
 export {
+  BLOOMBERG_TOOL_NAMES,
+  type BloombergToolName,
+  type ResultTruncationReason,
+} from "./_defs_gen";
+
+export {
   BLOOMBERG_TOOL_INSTRUCTIONS,
   getBloombergToolInstructions,
   type BloombergToolInstructionsOptions,
@@ -26,17 +32,12 @@ export {
 export type { ToolInvocationConfig } from "./langchain-tool";
 export { toolParameterJsonSchema } from "./langchain-tool";
 export {
-  BLOOMBERG_TOOL_NAMES,
   DEFAULT_ENGINE_REQUEST_TIMEOUT_MS,
-  type BloombergToolName,
   type BloombergToolsOptions,
   type NormalizedBloombergToolsOptions,
 } from "./options";
-export type {
-  ResultTruncationReason,
-  ResultTruncationSummary,
-  ToolEnvelope,
-} from "./result-limits";
+export type { ToolEnvelope } from "./result-envelope";
+export type { ResultTruncationSummary } from "./result-types";
 export type { ChartSpecOutput, ChartSpecSummary, VegaLiteSpec } from "./chart-spec";
 export type {
   BloombergChartSource,

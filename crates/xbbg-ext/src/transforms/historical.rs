@@ -4,8 +4,8 @@
 
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, Float64Array, RecordBatch, StringArray};
-use arrow_schema::{DataType, Field, Schema};
+use arrow_array::{ArrayRef, RecordBatch};
+use arrow_schema::{Field, Schema};
 
 use crate::constants::{DVD_COLS, ETF_COLS};
 use crate::error::{ExtError, Result};
@@ -236,94 +236,6 @@ pub fn calculate_level_percentages(
     flush_group(&level_2_group, values, &mut percentages);
 
     percentages
-}
-
-/// Add a percentage column to a RecordBatch.
-///
-/// Creates a new RecordBatch with an additional column containing percentages.
-pub fn add_percentage_column(
-    batch: &RecordBatch,
-    value_col_name: &str,
-    level_col_name: &str,
-    pct_col_name: &str,
-) -> Result<RecordBatch> {
-    let schema = batch.schema();
-
-    // Get value column
-    let value_idx = schema
-        .index_of(value_col_name)
-        .map_err(|_| ExtError::MissingColumn(value_col_name.into()))?;
-    let value_col = batch.column(value_idx);
-
-    // Get level column
-    let level_idx = schema
-        .index_of(level_col_name)
-        .map_err(|_| ExtError::MissingColumn(level_col_name.into()))?;
-    let level_col = batch.column(level_idx);
-
-    // Extract values as f64
-    let values: Vec<Option<f64>> =
-        if let Some(arr) = value_col.as_any().downcast_ref::<Float64Array>() {
-            (0..arr.len())
-                .map(|i| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        Some(arr.value(i))
-                    }
-                })
-                .collect()
-        } else if let Some(arr) = value_col.as_any().downcast_ref::<StringArray>() {
-            (0..arr.len())
-                .map(|i| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        arr.value(i).parse::<f64>().ok()
-                    }
-                })
-                .collect()
-        } else {
-            return Err(ExtError::MissingColumn(format!(
-                "{} must be numeric or string",
-                value_col_name
-            )));
-        };
-
-    // Extract levels as i64
-    let levels: Vec<Option<i64>> =
-        if let Some(arr) = level_col.as_any().downcast_ref::<StringArray>() {
-            (0..arr.len())
-                .map(|i| {
-                    if arr.is_null(i) {
-                        None
-                    } else {
-                        arr.value(i).parse::<i64>().ok()
-                    }
-                })
-                .collect()
-        } else {
-            return Err(ExtError::MissingColumn(format!(
-                "{} must be string",
-                level_col_name
-            )));
-        };
-
-    // Calculate percentages
-    let percentages = calculate_level_percentages(&values, &levels);
-
-    // Build new schema with percentage column
-    let mut new_fields: Vec<Field> = schema.fields().iter().map(|f| f.as_ref().clone()).collect();
-    new_fields.push(Field::new(pct_col_name, DataType::Float64, true));
-    let new_schema = Arc::new(Schema::new(new_fields));
-
-    // Build columns
-    let mut columns: Vec<ArrayRef> = (0..batch.num_columns())
-        .map(|i| batch.column(i).clone())
-        .collect();
-    columns.push(Arc::new(Float64Array::from(percentages)));
-
-    RecordBatch::try_new(new_schema, columns).map_err(ExtError::Arrow)
 }
 
 #[cfg(test)]

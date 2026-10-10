@@ -22,7 +22,6 @@ mimalloc = { workspace = true, optional = true }
 pyo3 = { workspace = true }
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pyo3-stub-gen = { workspace = true, features = ["infer_signature"], optional = true }
-pyo3-stub-gen-derive = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["sync"] }
 xbbg-log = { workspace = true }
 arrow-array = { workspace = true, features = ["ffi", "chrono-tz"] }
@@ -31,15 +30,16 @@ chrono = { workspace = true, features = ["std"] }
 chrono-tz = { workspace = true }
 pyo3-arrow = { workspace = true }
 xbbg-arrow = { workspace = true }
-anyhow = { workspace = true }
 serde_json = { workspace = true }
 xbbg_core = { workspace = true }
 xbbg-async = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-recipes = { workspace = true }
 [features]
-default = ["live", "extension-module"]
-extension-module = ["pyo3/extension-module"]
+default = ["live"]
 mimalloc = ["dep:mimalloc"]
-stub-gen = ["dep:pyo3-stub-gen", "dep:pyo3-stub-gen-derive"]
+stub-gen = ["dep:pyo3-stub-gen"]
 live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
+
+[lints]
+workspace = true

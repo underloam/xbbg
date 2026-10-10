@@ -20,21 +20,6 @@
         "iterations": 5
       },
       {
-        "package": "xbbg-legacy",
-        "operation": "bdp(1t, 1f)",
-        "cold_start_ms": 0.5406999998740503,
-        "warm_mean_ms": 0.584350000053746,
-        "warm_median_ms": 0.5680000001575536,
-        "warm_p95_ms": 0.8118999999169318,
-        "warm_p99_ms": 0.8118999999169318,
-        "warm_std_ms": 0.1834551624553895,
-        "memory_peak_mb": 0.0024404525756835938,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
         "package": "pdblp",
         "operation": "bdp(1t, 1f)",
         "cold_start_ms": 0.4463000000214379,
@@ -62,21 +47,6 @@
         "data_shape": [
           9,
           3
-        ],
-        "iterations": 5
-      },
-      {
-        "package": "xbbg-legacy",
-        "operation": "bdp(3t, 3f)",
-        "cold_start_ms": 0.48649999962435686,
-        "warm_mean_ms": 0.36752499988779164,
-        "warm_median_ms": 0.36654999985330505,
-        "warm_p95_ms": 0.3982999996878789,
-        "warm_p99_ms": 0.3982999996878789,
-        "warm_std_ms": 0.024920456605958735,
-        "memory_peak_mb": 0.0024404525756835938,
-        "data_shape": [
-          1
         ],
         "iterations": 5
       },
@@ -114,21 +84,6 @@
         "iterations": 5
       },
       {
-        "package": "xbbg-legacy",
-        "operation": "bdh(1t, 1f, 2025-01-02 to 2025-01-06)",
-        "cold_start_ms": 0.4863999997724022,
-        "warm_mean_ms": 0.36147499997696286,
-        "warm_median_ms": 0.35724999997910345,
-        "warm_p95_ms": 0.3855999998449988,
-        "warm_p99_ms": 0.3855999998449988,
-        "warm_std_ms": 0.01902653850233729,
-        "memory_peak_mb": 0.0024709701538085938,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
         "package": "pdblp",
         "operation": "bdh(1t, 1f, 2025-01-02 to 2025-01-06)",
         "cold_start_ms": 0.35189999971407815,
@@ -160,21 +115,6 @@
         "iterations": 5
       },
       {
-        "package": "xbbg-legacy",
-        "operation": "bdh(3t, 3f, 2025-01-02 to 2025-01-06)",
-        "cold_start_ms": 0.4411999998410465,
-        "warm_mean_ms": 0.4195750000235421,
-        "warm_median_ms": 0.3945000000840082,
-        "warm_p95_ms": 0.5046000001129869,
-        "warm_p99_ms": 0.5046000001129869,
-        "warm_std_ms": 0.05687133877988943,
-        "memory_peak_mb": 0.0024709701538085938,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
         "package": "pdblp",
         "operation": "bdh(3t, 3f, 2025-01-02 to 2025-01-06)",
         "cold_start_ms": 0.3553999999894586,
@@ -191,21 +131,6 @@
       }
     ],
     "BDIB - Intraday Bars": [
-      {
-        "package": "xbbg-legacy",
-        "operation": "bdib(IBM US Equity, TRADE, 5m bars)",
-        "cold_start_ms": 0.48909999986790353,
-        "warm_mean_ms": 0.3940999998803818,
-        "warm_median_ms": 0.3861000000142667,
-        "warm_p95_ms": 0.4343999999036896,
-        "warm_p99_ms": 0.4343999999036896,
-        "warm_std_ms": 0.02860699218755609,
-        "memory_peak_mb": 0.0034551620483398438,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
       {
         "package": "pdblp",
         "operation": "bdib(IBM US Equity, TRADE, 5m bars)",
@@ -224,21 +149,6 @@
     ],
     "BDTICK - Tick Data": [
       {
-        "package": "xbbg-legacy",
-        "operation": "bdtick(IBM US Equity, [TRADE])",
-        "cold_start_ms": 0.3854999999930442,
-        "warm_mean_ms": 0.3721249998989151,
-        "warm_median_ms": 0.36654999985330505,
-        "warm_p95_ms": 0.40470000021741726,
-        "warm_p99_ms": 0.40470000021741726,
-        "warm_std_ms": 0.02330498897492585,
-        "memory_peak_mb": 0.0034208297729492188,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
         "package": "pdblp",
         "operation": "bdtick(IBM US Equity, [TRADE])",
         "cold_start_ms": 0.39000000015221303,
@@ -254,21 +164,6 @@
         "iterations": 5
       },
       {
-        "package": "xbbg-legacy",
-        "operation": "bdtick(IBM US Equity, [BID,ASK])",
-        "cold_start_ms": 0.3708000003825873,
-        "warm_mean_ms": 0.3518999999414518,
-        "warm_median_ms": 0.3492999999252788,
-        "warm_p95_ms": 0.3712000002451532,
-        "warm_p99_ms": 0.3712000002451532,
-        "warm_std_ms": 0.015816025899299476,
-        "memory_peak_mb": 0.0034208297729492188,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
         "package": "pdblp",
         "operation": "bdtick(IBM US Equity, [BID,ASK])",
         "cold_start_ms": 0.3566000000319036,
@@ -278,21 +173,6 @@
         "warm_p99_ms": 0.3566000000319036,
         "warm_std_ms": 0.009405450635533698,
         "memory_peak_mb": 0.0026006698608398438,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
-        "package": "xbbg-legacy",
-        "operation": "bdtick(IBM US Equity, [TRADE,BID,ASK])",
-        "cold_start_ms": 0.3455999999459891,
-        "warm_mean_ms": 0.34184999992703524,
-        "warm_median_ms": 0.3402499999083375,
-        "warm_p95_ms": 0.35200000002078013,
-        "warm_p99_ms": 0.35200000002078013,
-        "warm_std_ms": 0.007247298413559079,
-        "memory_peak_mb": 0.0034208297729492188,
         "data_shape": [
           1
         ],
@@ -328,36 +208,6 @@
         "data_shape": [
           1,
           4
-        ],
-        "iterations": 5
-      },
-      {
-        "package": "xbbg-legacy",
-        "operation": "bql(get(px_last) for(['IBM US Equity']))",
-        "cold_start_ms": 0.5114999999022984,
-        "warm_mean_ms": 0.41639999994913524,
-        "warm_median_ms": 0.397949999978664,
-        "warm_p95_ms": 0.4971999996996601,
-        "warm_p99_ms": 0.4971999996996601,
-        "warm_std_ms": 0.05594574734576881,
-        "memory_peak_mb": 0.0024328231811523438,
-        "data_shape": [
-          1
-        ],
-        "iterations": 5
-      },
-      {
-        "package": "xbbg-legacy",
-        "operation": "bql(get(px_last, volume) for(['IBM US Equ...)",
-        "cold_start_ms": 0.419899999997142,
-        "warm_mean_ms": 0.41159999989304197,
-        "warm_median_ms": 0.383549999924071,
-        "warm_p95_ms": 0.5136999998285319,
-        "warm_p99_ms": 0.5136999998285319,
-        "warm_std_ms": 0.06924704560260438,
-        "memory_peak_mb": 0.5307531356811523,
-        "data_shape": [
-          1
         ],
         "iterations": 5
       }

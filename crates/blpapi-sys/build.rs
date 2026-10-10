@@ -100,18 +100,9 @@ fn main() {
         return;
     }
 
-    // SDK-local bindings cache: bindgen over 40+ headers costs seconds on every
-    // clean build (wheels, napi, CI matrices) even though the pinned SDK never
-    // changes. Cache the generated file next to the SDK version it came from
-    // (gitignored with the rest of vendor/) keyed by target + a hash of this
-    // build script and Cargo.toml (so allowlist or bindgen-dependency changes
-    // invalidate it). Delete the `.bindgen-cache` directory to force regeneration.
-    let cache_path = bindings_cache_path(&include_dir);
-    if let Some(cache) = cache_path.as_deref().filter(|path| path.is_file()) {
-        copy_bindings(cache, &bindings_out).unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
-        export_bindings_if_requested(&bindings_out);
-        return;
-    }
+    // Cargo tracks generation inputs; cross-build reuse is explicit through
+    // BLPAPI_PREGENERATED_BINDINGS rather than an SDK-local cache that can
+    // outlive changes to headers or the resolved bindgen dependency.
     libclang::prepare_windows_libclang_alias(&out_dir)
         .unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
 
@@ -141,17 +132,6 @@ fn main() {
         .write_to_file(&bindings_out)
         .unwrap_or_else(|e| panic!("Failed to write bindings: {}", e));
 
-    // Populate the SDK-local cache; failure to cache is not a build failure
-    // (read-only checkouts, sandboxed builds).
-    if let Some(cache) = cache_path.as_deref() {
-        if copy_bindings(&bindings_out, cache).is_err() {
-            println!(
-                "cargo:warning=blpapi-sys: could not write bindings cache at {}",
-                cache.display()
-            );
-        }
-    }
-
     export_bindings_if_requested(&bindings_out);
 }
 
@@ -162,32 +142,6 @@ fn export_bindings_if_requested(bindings: &Path) {
     }
 }
 
-/// Cache file for generated bindings, next to the SDK the headers came from:
-/// `<sdk-version-dir>/.bindgen-cache/bindings-<target>-<hash>.rs`.
-///
-/// The hash covers this build script and Cargo.toml, so allowlist edits or a
-/// bindgen dependency bump invalidate the cache. The SDK version is implied by
-/// the directory the cache lives in.
-fn bindings_cache_path(include_dir: &Path) -> Option<PathBuf> {
-    let sdk_dir = include_dir.parent()?;
-    let target = env::var("TARGET").ok()?;
-    let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").ok()?);
-
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
-    for source in ["build.rs", "libclang.rs", "Cargo.toml"] {
-        let contents = fs::read(manifest_dir.join(source)).ok()?;
-        for byte in contents {
-            hash ^= byte as u64;
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3); // FNV-1a prime
-        }
-    }
-
-    Some(
-        sdk_dir
-            .join(".bindgen-cache")
-            .join(format!("bindings-{}-{:016x}.rs", target, hash)),
-    )
-}
 fn copy_bindings(src: &Path, dst: &Path) -> Result<(), String> {
     if let Some(parent) = dst.parent() {
         fs::create_dir_all(parent).map_err(|e| {

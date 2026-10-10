@@ -26,6 +26,12 @@ import warnings
 
 import narwhals.stable.v1 as nw
 
+from xbbg._arrow import (
+    ensure_arrow_table as ensure_arrow_table,
+    is_arrow_table as is_arrow_table,
+    is_pyarrow_table,
+    native_schema,
+)
 from xbbg.services import Format
 
 logger = logging.getLogger(__name__)
@@ -123,10 +129,6 @@ class BackendDescriptor:
     min_version: tuple[int, ...] | None
     supported_formats: frozenset[Format]
     conversion: BackendConversion
-
-    @property
-    def implemented(self) -> bool:
-        return self.conversion is not BackendConversion.PLANNED
 
 
 _ALL_FORMATS = frozenset(
@@ -492,34 +494,6 @@ def _import_backend_module(backend: Backend | str, *, feature: str | None = None
     return __import__(module_name)
 
 
-def is_arrow_table(value: Any) -> bool:
-    return value.__class__.__name__ == "ArrowTable" and hasattr(value, "__arrow_c_stream__")
-
-
-def _is_arrow_record_batch(value: Any) -> bool:
-    return value.__class__.__name__ == "ArrowRecordBatch" and hasattr(value, "__arrow_c_array__")
-
-
-def _is_pyarrow_table(value: Any) -> bool:
-    return value.__class__.__module__.startswith("pyarrow.") and value.__class__.__name__ == "Table"
-
-
-def _is_pyarrow_record_batch(value: Any) -> bool:
-    return value.__class__.__module__.startswith("pyarrow.") and value.__class__.__name__ == "RecordBatch"
-
-
-def ensure_arrow_table(frame: Any) -> Any:
-    if is_arrow_table(frame) or _is_pyarrow_table(frame):
-        return frame
-    if _is_arrow_record_batch(frame):
-        return frame.to_table()
-    if _is_pyarrow_record_batch(frame):
-        import pyarrow as pa
-
-        return pa.Table.from_batches([frame])
-    raise TypeError(f"Expected xbbg ArrowTable or ArrowRecordBatch, got {type(frame).__name__}")
-
-
 _XBBG_METADATA_ATTRS = {
     "xbbg.eid_data": ("eid_data", "xbbg_eid_data"),
     "xbbg.security_errors": ("security_errors", "xbbg_security_errors"),
@@ -571,9 +545,7 @@ _POLARS_CAPSULE_CONSTRUCTOR_MIN_VERSION = (1, 3)
 
 def _to_polars_frame_from_native_batches(table: Any, pl: Any) -> Any:
     """Materialize legacy Polars input one native batch at a time with its schema."""
-    from xbbg._narwhals_impl import _native_schema
-
-    schema = nw.Schema(_native_schema(table)).to_polars()
+    schema = nw.Schema(native_schema(table)).to_polars()
     unknown = getattr(pl, "Unknown", None)
     unsupported = [name for name, dtype in schema.items() if unknown is not None and dtype == unknown]
     if unsupported:
@@ -593,7 +565,7 @@ def _to_polars_frame(table: Any, *, feature: str | None = None) -> Any:
     """Convert to Polars without coalescing the native Arrow chunks."""
     pl = _import_backend_module(Backend.POLARS, feature=feature)
 
-    if _is_pyarrow_table(table):
+    if is_pyarrow_table(table):
         return pl.from_arrow(table, rechunk=False)
 
     version = _get_module_version(pl)
@@ -747,6 +719,50 @@ def _best_narwhals_native(table: Any) -> Any:
     return table
 
 
+_default_backend: Backend | None = None
+
+
+def set_backend(backend: Backend | str | None) -> None:
+    """Set the default output backend, or ``None`` for automatic selection.
+
+    Optional backends are checked before changing the session default. The
+    setting applies to both request endpoints and extension recipes.
+    """
+    global _default_backend
+    if backend is None:
+        _default_backend = None
+        return
+    if isinstance(backend, Backend):
+        resolved = backend
+    elif isinstance(backend, str):
+        try:
+            resolved = Backend(backend)
+        except ValueError:
+            valid = [b.value for b in Backend]
+            raise ValueError(f"Invalid backend: {backend}. Must be one of {valid}") from None
+    else:
+        raise TypeError(f"backend must be Backend, str, or None, not {type(backend).__name__}")
+    check_backend(resolved)
+    _default_backend = resolved
+
+
+def get_backend() -> Backend | None:
+    """Get the configured session default, or ``None`` for automatic selection."""
+    return _default_backend
+
+
+def _resolve_backend(backend: Backend | str | None) -> Backend | None:
+    return resolve_backend(backend, _default_backend)
+
+
+def _effective_backend(backend: Backend | str | None) -> Backend:
+    return effective_backend(backend, _default_backend)
+
+
+def _convert_result_backend(frame: Any, backend: Backend | str | None) -> DataFrameResult:
+    return convert_backend_frame(frame, _effective_backend(backend))
+
+
 def resolve_backend(
     backend: Backend | str | None,
     default_backend: Backend | str | None = None,
@@ -764,15 +780,6 @@ def effective_backend(
 ) -> Backend:
     """Resolve a backend selection, falling back to the package default if unset."""
     return resolve_backend(backend, default_backend) or get_default_backend()
-
-
-def convert_backend_frame_with_default(
-    frame: Any,
-    backend: Backend | str | None,
-    default_backend: Backend | str | None = None,
-) -> DataFrameResult:
-    """Convert an Arrow-like result using a per-call backend and configured default."""
-    return convert_backend_frame(frame, effective_backend(backend, default_backend))
 
 
 def convert_backend_frame(frame: Any, backend: Backend | str) -> DataFrameResult:
@@ -979,12 +986,9 @@ def validate_backend_format(
         ImportError: Backend package missing.
         ValueError: Version too old or format unsupported.
     """
-    # Lazy import to avoid circular dependency (blp → backend → blp).
-    from xbbg.blp import get_backend as _get_backend
-
     # Normalise backend.
     if backend is None:
-        backend = _get_backend() or get_default_backend()
+        backend = get_backend() or get_default_backend()
     elif isinstance(backend, str):
         backend = Backend(backend)
 
