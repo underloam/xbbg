@@ -101,7 +101,7 @@ the wheel is just the easiest discovery path for many users:
 pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/
 ```
 
-Supported Python versions: **3.10 through 3.14**.
+Supported Python versions: **3.10 through 3.15**.
 
 Requirements and notes:
 

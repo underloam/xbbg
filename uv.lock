@@ -1,6 +1,6 @@
 version = 1
 revision = 3
-requires-python = ">=3.10, <3.15"
+requires-python = ">=3.10, <3.16"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
@@ -581,6 +581,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/be/6a/edd939cc6fa04b6415aaa9bf19720fc74ead81234b3d38542e0005816d4d/polars-1.42.1-py3-none-any.whl", hash = "sha256:3c0c65cdfa21a621650c4bdcbbccf93964d052fd766c3e70e84a55d961c259fd", size = 837622, upload-time = "2026-06-30T04:56:34.686Z" },
 ]
 
+[package.optional-dependencies]
+timezone = [
+    { name = "tzdata", marker = "sys_platform == 'win32'" },
+]
+
 [[package]]
 name = "polars-runtime-32"
 version = "1.42.1"
@@ -852,16 +857,16 @@ pandas = [
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
 polars = [
-    { name = "polars" },
+    { name = "polars", extra = ["timezone"] },
 ]
 pyarrow = [
     { name = "pyarrow" },
 ]
 test = [
-    { name = "duckdb" },
+    { name = "duckdb", marker = "python_full_version < '3.15'" },
     { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "pandas", version = "3.0.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "polars" },
+    { name = "polars", extra = ["timezone"] },
     { name = "pyarrow" },
     { name = "pytest" },
     { name = "pytest-asyncio" },
@@ -875,13 +880,13 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.1.0" },
-    { name = "duckdb", marker = "extra == 'test'", specifier = ">=1.1.0" },
-    { name = "narwhals", specifier = ">=2.0" },
+    { name = "duckdb", marker = "python_full_version < '3.15' and extra == 'test'", specifier = ">=1.5.0" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.0" },
+    { name = "narwhals", specifier = ">=2.10.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2.2,<4" },
     { name = "pandas", marker = "extra == 'test'", specifier = ">=2.2.2,<4" },
-    { name = "polars", marker = "extra == 'polars'", specifier = ">=0.20" },
-    { name = "polars", marker = "extra == 'test'", specifier = ">=0.20" },
+    { name = "polars", extras = ["timezone"], marker = "extra == 'polars'", specifier = ">=0.20.4" },
+    { name = "polars", extras = ["timezone"], marker = "extra == 'test'", specifier = ">=0.20.4" },
     { name = "pyarrow", marker = "extra == 'pyarrow'", specifier = ">=22.0.0" },
     { name = "pyarrow", marker = "extra == 'test'", specifier = ">=22.0.0" },
     { name = "pytest", marker = "extra == 'test'", specifier = ">=8.4" },

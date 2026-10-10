@@ -11,7 +11,7 @@ platforms = [
 requires-pixi = ">=0.71"
 
 [dependencies]
-python = ">=3.10,<3.15"
+python = ">=3.10,<3.16"
 # Must track `rust-version` in the root Cargo.toml `[workspace.package]`. The
 # published sdist compiles the Rust extension on the user's machine, so this is
 # a real compatibility contract, not just a dev-env convenience.

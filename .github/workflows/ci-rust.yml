@@ -527,7 +527,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
         exclude:
@@ -644,7 +644,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python: ["3.10", "3.11", "3.12", "3.13", "3.14", "3.15"]
 
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
@@ -733,7 +733,11 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
+      # xbbg-langgraph stays below 3.15 until LangGraph's dependency chain
+      # builds there: ormsgpack 1.12.2 (via langgraph-checkpoint) ships no 3.15
+      # wheels and its PyO3 0.27 refuses to compile for 3.15.
       - name: Install Python LangGraph adapter
+        if: matrix.python != '3.15'
         shell: bash
         # This run's wheel carries an untagged CI version below the adapter's
         # `xbbg>=1.5.0` floor. Without the override uv swaps it for the newest
@@ -743,6 +747,7 @@ jobs:
           uv pip install --system --override "${{ runner.temp }}/xbbg-override.txt" "./py-xbbg-langgraph[test]"
 
       - name: Test Python LangGraph adapter
+        if: matrix.python != '3.15'
         run: pytest py-xbbg-langgraph/tests -v
 
   # ════════════════════════════════════════════════════════════════════════════
