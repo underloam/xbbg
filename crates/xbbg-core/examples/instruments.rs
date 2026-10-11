@@ -2,7 +2,7 @@
 //!
 //! Run with: cargo run -p xbbg_core --example instruments --no-default-features --features live
 
-use xbbg_core::{session::Session, DataType, Element, EventType, SessionOptions};
+use xbbg_core::{DataType, Element, EventType, SessionOptions, session::Session};
 
 fn dump_element(elem: &Element, indent: usize) {
     let pad = " ".repeat(indent);

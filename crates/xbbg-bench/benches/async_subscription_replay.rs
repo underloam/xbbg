@@ -16,7 +16,7 @@ use xbbg_bench::write_json;
 
 #[path = "support/subscription_replay.rs"]
 mod subscription_replay;
-use subscription_replay::{replay, LATE_FIELDS, REQUESTED_FIELDS};
+use subscription_replay::{LATE_FIELDS, REQUESTED_FIELDS, replay};
 
 const DEFAULT_ROWS: usize = 100_000;
 const DEFAULT_FLUSH: usize = 1_024;

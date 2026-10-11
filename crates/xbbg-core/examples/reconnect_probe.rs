@@ -37,7 +37,7 @@
 
 use std::time::{Duration, Instant};
 
-use xbbg_core::{session::Session, CorrelationId, EventType, SessionOptions, SubscriptionList};
+use xbbg_core::{CorrelationId, EventType, SessionOptions, SubscriptionList, session::Session};
 
 const FIELDS: &[&str] = &["LAST_PRICE", "BID", "ASK"];
 
@@ -109,20 +109,19 @@ fn main() -> xbbg_core::Result<()> {
             eprintln!("[{}] session did not start in 10s, bailing out", ts(start));
             return Ok(());
         }
-        if let Ok(ev) = sess.next_event(Some(500)) {
-            if ev.event_type() == EventType::SessionStatus {
-                let mut messages = ev.messages();
-                while let Some(msg) = messages.next() {
-                    let mt = msg.message_type();
-                    eprintln!("[{}] session :: {}", ts(start), mt.as_str());
-                    if mt.as_str() == "SessionStarted" {
-                        break 'wait_started;
-                    }
-                    if mt.as_str() == "SessionStartupFailure" || mt.as_str() == "SessionTerminated"
-                    {
-                        eprintln!("[{}] session could not start, bailing out", ts(start));
-                        return Ok(());
-                    }
+        if let Ok(ev) = sess.next_event(Some(500))
+            && ev.event_type() == EventType::SessionStatus
+        {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
+                let mt = msg.message_type();
+                eprintln!("[{}] session :: {}", ts(start), mt.as_str());
+                if mt.as_str() == "SessionStarted" {
+                    break 'wait_started;
+                }
+                if mt.as_str() == "SessionStartupFailure" || mt.as_str() == "SessionTerminated" {
+                    eprintln!("[{}] session could not start, bailing out", ts(start));
+                    return Ok(());
                 }
             }
         }
@@ -136,14 +135,14 @@ fn main() -> xbbg_core::Result<()> {
             eprintln!("[{}] service did not open in 10s, bailing out", ts(start));
             return Ok(());
         }
-        if let Ok(ev) = sess.next_event(Some(500)) {
-            if ev.event_type() == EventType::ServiceStatus {
-                let mut messages = ev.messages();
-                while let Some(msg) = messages.next() {
-                    eprintln!("[{}] service :: {}", ts(start), msg.message_type().as_str());
-                    if msg.message_type().as_str() == "ServiceOpened" {
-                        break 'wait_svc;
-                    }
+        if let Ok(ev) = sess.next_event(Some(500))
+            && ev.event_type() == EventType::ServiceStatus
+        {
+            let mut messages = ev.messages();
+            while let Some(msg) = messages.next() {
+                eprintln!("[{}] service :: {}", ts(start), msg.message_type().as_str());
+                if msg.message_type().as_str() == "ServiceOpened" {
+                    break 'wait_svc;
                 }
             }
         }

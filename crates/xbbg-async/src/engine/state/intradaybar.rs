@@ -13,7 +13,7 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use tokio::sync::oneshot;
 use xbbg_log::trace;
 
-use super::value_utils::{top_level_response_error, ResponseMetadata};
+use super::value_utils::{ResponseMetadata, top_level_response_error};
 use xbbg_core::{BlpError, Element, Message, Name, Value};
 
 struct IntradayBarNames {

@@ -3,9 +3,9 @@
 //! Session owners retain their lifecycle and threading contracts. This borrowed
 //! handle cannot outlive its owner, including any service views it creates.
 
-use std::ffi::{c_char, CString};
+use std::ffi::{CString, c_char};
 
-use crate::{ffi, BlpError, CorrelationId, Identity, Request, Result, Service, SubscriptionList};
+use crate::{BlpError, CorrelationId, Identity, Request, Result, Service, SubscriptionList, ffi};
 
 pub(crate) struct SessionOperations<'session> {
     ptr: &'session *mut ffi::blpapi_Session_t,

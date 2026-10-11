@@ -53,7 +53,7 @@ pub mod test_support;
 // Re-exports for convenience
 pub use async_session::AsyncSession;
 pub use auth::{
-    apply_session_identity_options, AuthApplication, AuthConfig, AuthOptions, AuthToken, AuthUser,
+    AuthApplication, AuthConfig, AuthOptions, AuthToken, AuthUser, apply_session_identity_options,
 };
 pub use correlation::CorrelationId;
 pub use datatype::DataType;
@@ -63,7 +63,7 @@ pub use errors::{BlpError, Result};
 pub use event::{Event, EventType};
 pub use identity::{EntitlementCheck, Identity, SeatType};
 pub use message::Message;
-pub use name::{clear_name_cache, name_cache_size, Name};
+pub use name::{Name, clear_name_cache, name_cache_size};
 pub use request::Request;
 pub use service::Service;
 pub use session::{Session, SessionOptions};

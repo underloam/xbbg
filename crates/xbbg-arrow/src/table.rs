@@ -5,16 +5,16 @@ use std::str::FromStr;
 use std::sync::Arc;
 
 use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, StringArray};
-use arrow_ord::sort::{lexsort_to_indices, SortColumn, SortOptions};
+use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow_select::concat::{concat, concat_batches};
 use arrow_select::filter::filter_record_batch;
 use arrow_select::interleave::interleave;
 use arrow_select::take::take_record_batch;
 
-use crate::column::{compact_array, ColumnData};
+use crate::column::{ColumnData, compact_array};
 use crate::error::{ArrowCoreError, Result};
-use crate::scalar::{build_array_for_kind, cell_matches, infer_kind, CellValue, InferredKind};
+use crate::scalar::{CellValue, InferredKind, build_array_for_kind, cell_matches, infer_kind};
 
 /// Sort direction for Arrow table sorting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -943,8 +943,10 @@ mod tests {
     #[test]
     fn compact_copies_slices_and_preserves_schema_and_nulls() {
         let schema = Arc::new(Schema::new_with_metadata(
-            vec![Field::new("payload", DataType::Utf8, true)
-                .with_metadata(HashMap::from([("kind".to_string(), "text".to_string())]))],
+            vec![
+                Field::new("payload", DataType::Utf8, true)
+                    .with_metadata(HashMap::from([("kind".to_string(), "text".to_string())])),
+            ],
             HashMap::from([("source".to_string(), "test".to_string())]),
         ));
         let mut values = (0..256)

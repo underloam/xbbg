@@ -4,7 +4,7 @@
 # LLVM 22 from apt.llvm.org (aligned with pixi.toml libclang >= 22). Local Pixi
 # still uses conda-forge libclang; bindgen supports both.
 
-FROM rust:1.89-bookworm
+FROM rust:1.99-trixie
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -17,7 +17,7 @@ RUN apt-get update \
         pkg-config \
     && curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key \
         | gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg \
-    && echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/bookworm/ llvm-toolchain-bookworm-22 main" \
+    && echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] https://apt.llvm.org/trixie/ llvm-toolchain-trixie-22 main" \
         > /etc/apt/sources.list.d/llvm-toolchain-22.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \

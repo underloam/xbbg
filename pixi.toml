@@ -11,7 +11,11 @@ platforms = [
 requires-pixi = ">=0.71"
 
 [dependencies]
-python = ">=3.10,<3.16"
+python = ">=3.11,<3.16"
+# conda-forge also publishes free-threaded CPython builds (`cp314t`), and the
+# solver picked them on Linux and Windows. xbbg wheels target the regular GIL
+# build, so pin that ABI for every environment.
+python-gil = "*"
 # Must track `rust-version` in the root Cargo.toml `[workspace.package]`. The
 # published sdist compiles the Rust extension on the user's machine, so this is
 # a real compatibility contract, not just a dev-env convenience.
@@ -78,7 +82,10 @@ polars = ">=0.20.26,<3"
 duckdb = ">=1.5.0"
 
 [feature.lint.dependencies]
-python = ">=3.10"
+# grimp (import-linter) publishes no macOS wheel for 3.15 yet, and pre-commit
+# runs this environment on every commit.
+python = ">=3.11,<3.15"
+python-gil = "*"
 
 [feature.lint.pypi-dependencies]
 ruff = ">=0.16.3"
@@ -130,9 +137,6 @@ js-typecheck = { cmd = "npm run typecheck", cwd = "js-xbbg" }
 js-quality = { cmd = "npm run quality", cwd = "js-xbbg" }
 js-test-live = { cmd = "npm run test:live", cwd = "js-xbbg" }
 
-[feature.py310.dependencies]
-python = "3.10.*"
-
 [feature.py311.dependencies]
 python = "3.11.*"
 
@@ -148,14 +152,15 @@ python = "3.14.*"
 # ── Environments ──────────────────────────────────────────────────────────────
 
 [environments]
-default = { features = ["test", "lint", "dev"], solve-group = "main" }
-test = { features = ["test"], solve-group = "main" }
+# The shared environments pin one Python so every platform resolves the same
+# interpreter; unpinned, the Linux solve settled on 3.13 while the others got 3.14.
+default = { features = ["test", "lint", "dev", "py314"], solve-group = "main" }
+test = { features = ["test", "py314"], solve-group = "main" }
 lint = { features = ["lint"], no-default-feature = true }
-benchmark = { features = ["test", "benchmark"], solve-group = "main" }
-py310 = { features = ["test", "py310"] }
+benchmark = { features = ["test", "benchmark", "py314"], solve-group = "main" }
 py311 = { features = ["test", "py311"] }
 py312 = { features = ["test", "py312"] }
 py313 = { features = ["test", "py313"] }
 py314 = { features = ["test", "py314"] }
 
-js = { features = ["js"], solve-group = "main" }
+js = { features = ["js", "py314"], solve-group = "main" }

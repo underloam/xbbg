@@ -12,8 +12,8 @@ use xbbg_log::trace;
 use super::refdata::{LongMode, OutputFormat};
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
-    append_long_value_row, common_value_type, get_value_cached_datatype, top_level_response_error,
-    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns,
+    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns, append_long_value_row,
+    common_value_type, get_value_cached_datatype, top_level_response_error,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Message, Name, Value};
 
@@ -304,10 +304,11 @@ impl HistDataResponse {
             trace!(ticker = ticker, "No fieldData for security");
             return None;
         };
-        if self.format == OutputFormat::Long && self.long_mode == LongMode::Typed {
-            if let Some(columns) = self.typed_long_columns.as_mut() {
-                columns.reserve_if_empty(field_data.len().saturating_mul(self.field_names.len()));
-            }
+        if self.format == OutputFormat::Long
+            && self.long_mode == LongMode::Typed
+            && let Some(columns) = self.typed_long_columns.as_mut()
+        {
+            columns.reserve_if_empty(field_data.len().saturating_mul(self.field_names.len()));
         }
 
         // Iterate through each row (each date)

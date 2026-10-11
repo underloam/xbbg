@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import builtins
 from concurrent.futures import ThreadPoolExecutor
-from datetime import date, datetime, time, timezone
+from datetime import UTC, date, datetime, time
 import importlib.util
 import os
 from typing import Any
@@ -262,7 +262,7 @@ class TestConvertBackendPolars:
         pl = pytest.importorskip("polars")
         import xbbg.backend as backend_module
 
-        timestamp = datetime(2024, 1, 1, 12, 30, 1, 123456, tzinfo=timezone.utc)
+        timestamp = datetime(2024, 1, 1, 12, 30, 1, 123456, tzinfo=UTC)
         source = ArrowTable.from_pylist(
             [
                 {"value": 1, "when": date(2024, 1, 1), "timestamp": timestamp},

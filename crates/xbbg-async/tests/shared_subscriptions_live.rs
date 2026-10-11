@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, TimeUnit};
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{Instant, sleep, timeout};
 use xbbg_async::engine::state::{SubscriptionUpdate, UpdateValue};
 use xbbg_async::engine::{Engine, EngineConfig, ServerAddr, SubscriptionStream, Transport};
 use xbbg_async::{BlpAsyncError, FieldErrorPolicy, SubscribeRequest};
@@ -219,9 +219,11 @@ async fn shared_feed_live_image_growth_warnings_isolation_and_detach() {
     assert_eq!(latest.schema().field(2).data_type(), &DataType::Boolean);
     assert_eq!(latest.schema().field(3).data_type(), &DataType::Boolean);
     assert!(known(&latest, "last_update"));
-    assert!(second.status().load().topic_statuses()[TOPIC]
-        .delayed
-        .is_some());
+    assert!(
+        second.status().load().topic_statuses()[TOPIC]
+            .delayed
+            .is_some()
+    );
 
     second
         .add_fields(vec!["PX_BID".into()])
@@ -339,20 +341,21 @@ async fn image_only_live_latest_field_rejection_and_zero_materialization() {
     let masked_latest = masked.latest().expect("zero-filtered image");
     let same_image = raw.column_by_name("last_update").unwrap()
         == masked_latest.column_by_name("last_update").unwrap();
-    if same_image {
-        if let Some(values) = raw
+    if same_image
+        && let Some(values) = raw
             .column_by_name("THEO_PRICE")
             .unwrap()
             .as_any()
             .downcast_ref::<arrow_array::Float64Array>()
-        {
-            if values.is_valid(0) && values.value(0) == 0.0 {
-                assert!(masked_latest
-                    .column_by_name("THEO_PRICE")
-                    .unwrap()
-                    .is_null(0));
-            }
-        }
+        && values.is_valid(0)
+        && values.value(0) == 0.0
+    {
+        assert!(
+            masked_latest
+                .column_by_name("THEO_PRICE")
+                .unwrap()
+                .is_null(0)
+        );
     }
 
     let mut invalid = request(&["PX_BID"]);
@@ -368,12 +371,14 @@ async fn image_only_live_latest_field_rejection_and_zero_materialization() {
             .expect("field rejection timeout"),
         Some(Err(xbbg_core::BlpError::SubscriptionFailure { .. }))
     ));
-    assert!(rejected
-        .status()
-        .load()
-        .field_errors()
-        .get(TOPIC)
-        .is_some_and(|fields| fields.contains_key("PX_BID")));
+    assert!(
+        rejected
+            .status()
+            .load()
+            .field_errors()
+            .get(TOPIC)
+            .is_some_and(|fields| fields.contains_key("PX_BID"))
+    );
     assert!(matches!(
         rejected.latest(),
         Err(BlpAsyncError::ChannelClosed)

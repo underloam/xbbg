@@ -2,7 +2,7 @@
 //!
 //! Exposes high-performance Rust implementations to Python.
 
-use crate::native_arrow::{record_batch_to_arrow_record_batch, ArrowRecordBatch};
+use crate::native_arrow::{ArrowRecordBatch, record_batch_to_arrow_record_batch};
 use chrono::Datelike;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -10,20 +10,20 @@ use pyo3::types::{PyDict, PyList};
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
 
-use xbbg_ext::auction::{field_group, field_group_names, imbalance_side, ZERO_PRICE_FIELDS};
+use xbbg_ext::auction::{ZERO_PRICE_FIELDS, field_group, field_group_names, imbalance_side};
 use xbbg_ext::constants::{DVD_TYPES, FUTURES_MONTHS, MONTH_CODES};
 use xbbg_ext::resolvers::cdx::{
     cdx_series_from_ticker, gen_to_specific, parse_cdx_ticker, previous_series_ticker,
 };
 use xbbg_ext::resolvers::futures::{
-    contract_index, filter_candidates_by_cycle, filter_valid_contracts,
-    generate_futures_candidates, validate_generic_ticker, RollFrequency,
+    RollFrequency, contract_index, filter_candidates_by_cycle, filter_valid_contracts,
+    generate_futures_candidates, validate_generic_ticker,
 };
 use xbbg_ext::transforms::bql::{
     build_corporate_bonds_query, build_etf_holdings_query, build_preferreds_query,
 };
 use xbbg_ext::transforms::currency::{build_fx_pair, currencies_needing_conversion, same_currency};
-use xbbg_ext::transforms::fixed_income::{build_yas_overrides, YieldType};
+use xbbg_ext::transforms::fixed_income::{YieldType, build_yas_overrides};
 use xbbg_ext::transforms::historical::{
     build_earning_header_rename, calculate_level_percentages, rename_dividend_columns,
     rename_etf_columns,

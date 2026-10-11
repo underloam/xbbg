@@ -6,7 +6,7 @@ Thank you for your interest in contributing to xbbg!
 
 ### Prerequisites
 
-- Python 3.10+
+- Python 3.11+
 - Rust 1.88+
 - [pixi](https://pixi.sh/) (recommended) or pip
 - Bloomberg C++ SDK (for building the Rust backend)

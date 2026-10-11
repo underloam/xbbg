@@ -13,6 +13,6 @@ pub mod table;
 pub use column::ColumnData;
 pub use error::{ArrowCoreError, Result};
 pub use scalar::{
-    build_array, cell_from_array, cell_has_value, cell_matches, cell_to_string, CellValue,
+    CellValue, build_array, cell_from_array, cell_has_value, cell_matches, cell_to_string,
 };
 pub use table::{SortDirection, TableData};

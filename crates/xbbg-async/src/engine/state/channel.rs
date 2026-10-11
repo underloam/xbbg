@@ -228,11 +228,11 @@ impl SubscriptionSender {
 
     /// Return true when the engine attributed a decode error to consumers.
     pub(crate) fn report_field_error(&self, error: &BlpError, scalar: bool) -> bool {
-        if let SenderShared::Callback(shared) = &self.shared {
-            if let Some(callback) = shared.field_error.get() {
-                callback(error, scalar);
-                return true;
-            }
+        if let SenderShared::Callback(shared) = &self.shared
+            && let Some(callback) = shared.field_error.get()
+        {
+            callback(error, scalar);
+            return true;
         }
         false
     }
@@ -767,9 +767,11 @@ mod tests {
     #[tokio::test]
     async fn cancelled_receive_does_not_consume_the_next_value() {
         let (tx, mut rx) = subscription_channel(1);
-        assert!(tokio::time::timeout(Duration::from_millis(1), rx.recv())
-            .await
-            .is_err());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), rx.recv())
+                .await
+                .is_err()
+        );
 
         tx.send(Ok(update(7)))
             .await

@@ -8,7 +8,7 @@
 //! Requires Bloomberg Terminal or BPIPE connection.
 
 use std::time::Instant;
-use xbbg_core::{session::Session, CorrelationId, EventType, SessionOptions, SubscriptionList};
+use xbbg_core::{CorrelationId, EventType, SessionOptions, SubscriptionList, session::Session};
 
 /// Fields that mix types: float, int, string, datetime
 const FIELDS: &[&str] = &[
@@ -124,7 +124,8 @@ fn main() -> xbbg_core::Result<()> {
                             let dt_val = child.get_datetime(0);
                             let dyn_val = child.get_value(0);
 
-                            println!("  [{:2}] {:30} | type={:12?} | null={} | nvals={} | \
+                            println!(
+                                "  [{:2}] {:30} | type={:12?} | null={} | nvals={} | \
                                 f64={:?} | i64={:?} | i32={:?} | str={:?} | bool={:?} | dt={:?} | value={:?}",
                                 i,
                                 name.as_str(),

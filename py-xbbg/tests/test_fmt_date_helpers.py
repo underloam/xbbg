@@ -9,7 +9,7 @@ ambiguous month/day orderings.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 
 import pytest
 
@@ -67,7 +67,7 @@ class TestFmtDateNative:
         assert _fmt_date(datetime(2023, 1, 17, 10, 30)) == "20230117"
 
     def test_datetime_aware(self) -> None:
-        dt = datetime(2023, 1, 17, 10, 30, tzinfo=timezone.utc)
+        dt = datetime(2023, 1, 17, 10, 30, tzinfo=UTC)
         assert _fmt_date(dt) == "20230117"
 
     def test_duck_typed_timestamp(self) -> None:
@@ -175,7 +175,7 @@ class TestFmtDatetimeNative:
         assert _fmt_datetime(date(2023, 1, 17)) == "2023-01-17T00:00:00+00:00"
 
     def test_duck_typed_timestamp(self) -> None:
-        ts = _DuckTimestamp(datetime(2023, 1, 17, 10, 30, tzinfo=timezone.utc))
+        ts = _DuckTimestamp(datetime(2023, 1, 17, 10, 30, tzinfo=UTC))
         assert _fmt_datetime(ts) == "2023-01-17T10:30:00+00:00"
 
 

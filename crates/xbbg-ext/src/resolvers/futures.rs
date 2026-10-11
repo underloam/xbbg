@@ -7,7 +7,7 @@ use chrono::{Datelike, Months, NaiveDate};
 
 use crate::constants::{MONTH_NUM_TO_CODE, QUARTERLY_MONTHS};
 use crate::error::{ExtError, Result};
-use crate::utils::ticker::{is_specific_contract, parse_ticker_parts, TickerParts};
+use crate::utils::ticker::{TickerParts, is_specific_contract, parse_ticker_parts};
 
 /// Roll frequency for futures contracts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

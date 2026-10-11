@@ -8,7 +8,7 @@ use parking_lot::Mutex;
 
 use xbbg_ext::{ExchangeInfo, ExchangeInfoSource};
 
-use crate::cache_io::{read_json_array_bounded, AtomicJsonPublisher, PublicationOutcome};
+use crate::cache_io::{AtomicJsonPublisher, PublicationOutcome, read_json_array_bounded};
 
 /// Days an exchange cache entry stays valid. Exchange metadata (timezones,
 /// session hours) drifts rarely; a month bounds staleness without forcing

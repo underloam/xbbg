@@ -146,9 +146,14 @@ export function resolveNativeAddonCore(options: NativeResolverOptions): NativeAd
 export function resolveNativeAddon(repoRoot: string): NativeAddonResolution {
   const key = platformKey();
   const nativePackage = nativePackageForKey(key);
-  const requirePackage = (id: string): unknown => nodeRequire(id) as unknown;
   if (nativePackage === null) {
-    return resolveNativeAddonCore({ exists, key, nativePackage, repoRoot, requirePackage });
+    return resolveNativeAddonCore({
+      exists,
+      key,
+      nativePackage,
+      repoRoot,
+      requirePackage: nodeRequire,
+    });
   }
-  return resolveNativeAddonCore({ exists, nativePackage, repoRoot, requirePackage });
+  return resolveNativeAddonCore({ exists, nativePackage, repoRoot, requirePackage: nodeRequire });
 }

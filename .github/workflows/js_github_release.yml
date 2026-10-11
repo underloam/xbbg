@@ -148,9 +148,9 @@ jobs:
       - uses: actions/checkout@v7
 
       - name: Setup Rust
-        uses: actions-rust-lang/setup-rust-toolchain@v1
+        uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
-          rustflags: ""
+          build-warnings: warn
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -267,8 +267,10 @@ jobs:
       - name: Build offline bundles
         run: |
           mkdir -p dist-offline
+          # npm --prefix runs the script from js-xbbg/, so a relative --out-dir
+          # would land in js-xbbg/dist-offline instead of the uploaded path.
           for label in linux-x64 win32-x64 darwin-arm64; do
-            npm --prefix js-xbbg run build:offline-bundle -- --label "$label" --out-dir dist-offline
+            npm --prefix js-xbbg run build:offline-bundle -- --label "$label" --out-dir "$GITHUB_WORKSPACE/dist-offline"
           done
           ls -1 dist-offline
 
@@ -277,6 +279,7 @@ jobs:
         with:
           name: js-offline-bundles
           path: dist-offline/*.zip
+          if-no-files-found: error
           retention-days: 7
 
   pack-assets:

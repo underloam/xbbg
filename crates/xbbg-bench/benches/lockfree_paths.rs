@@ -11,10 +11,10 @@
 
 use std::collections::HashMap;
 use std::hint::black_box;
-use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 
-use criterion::{criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use xbbg_async::engine::state::SubscriptionMetrics;
 use xbbg_async::engine::{

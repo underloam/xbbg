@@ -7,7 +7,7 @@
 //!   cargo run -p xbbg_core --example get_by_str_probe --no-default-features --features live
 
 use xbbg_core::{
-    session::Session, CorrelationId, EventType, Name, SessionOptions, SubscriptionList,
+    CorrelationId, EventType, Name, SessionOptions, SubscriptionList, session::Session,
 };
 
 const FIELDS: &[&str] = &[
@@ -151,8 +151,10 @@ fn main() -> xbbg_core::Result<()> {
                             let dt = child.datatype();
                             let is_null = child.is_null();
                             let value = child.get_value(0);
-                            println!("    [{:3}] {:30} => type={:12?} | null={} | value={:?}  *** TARGET ***",
-                                i, name_str, dt, is_null, value);
+                            println!(
+                                "    [{:3}] {:30} => type={:12?} | null={} | value={:?}  *** TARGET ***",
+                                i, name_str, dt, is_null, value
+                            );
 
                             // Cross-check: look it up by the exact name we got from the element
                             let lookup = elem.get(&name);

@@ -355,13 +355,17 @@ mod tests {
                     "Request failed on //blp/refdata",
                 ),
                 (
-                    BlpError::InvalidArgument { detail: "fields required".into() },
+                    BlpError::InvalidArgument {
+                        detail: "fields required".into(),
+                    },
                     ErrorKind::Validation,
                     "Invalid argument: fields required",
                 ),
                 (BlpError::Timeout, ErrorKind::Timeout, "Request timed out"),
                 (
-                    BlpError::TemplateTerminated { cid: Some(CorrelationContext::Tag("synthetic".into())) },
+                    BlpError::TemplateTerminated {
+                        cid: Some(CorrelationContext::Tag("synthetic".into())),
+                    },
                     ErrorKind::Request,
                     "Request template terminated (cid=synthetic)",
                 ),
@@ -379,32 +383,49 @@ mod tests {
                     "Subscription failed (cid=42): synthetic subscription failure",
                 ),
                 (
-                    BlpError::SubscriptionFailure { cid: None, label: None },
+                    BlpError::SubscriptionFailure {
+                        cid: None,
+                        label: None,
+                    },
                     ErrorKind::Request,
                     "Subscription failed",
                 ),
                 (
-                    BlpError::Internal { detail: "session connection dropped (worker=2)".into() },
+                    BlpError::Internal {
+                        detail: "session connection dropped (worker=2)".into(),
+                    },
                     ErrorKind::Internal,
                     "Internal error: session connection dropped (worker=2)",
                 ),
                 (
-                    BlpError::SchemaOperationNotFound { service: "//blp/refdata".into(), operation: "SyntheticRequest".into() },
+                    BlpError::SchemaOperationNotFound {
+                        service: "//blp/refdata".into(),
+                        operation: "SyntheticRequest".into(),
+                    },
                     ErrorKind::Validation,
                     "Operation not found: //blp/refdata::SyntheticRequest",
                 ),
                 (
-                    BlpError::SchemaElementNotFound { parent: "request".into(), name: "synthetic".into() },
+                    BlpError::SchemaElementNotFound {
+                        parent: "request".into(),
+                        name: "synthetic".into(),
+                    },
                     ErrorKind::Validation,
                     "Schema element not found: request.synthetic",
                 ),
                 (
-                    BlpError::SchemaUnsupported { element: "request.synthetic".into(), detail: "choice".into() },
+                    BlpError::SchemaUnsupported {
+                        element: "request.synthetic".into(),
+                        detail: "choice".into(),
+                    },
                     ErrorKind::Validation,
                     "Unsupported schema construct at request.synthetic: choice",
                 ),
                 (
-                    BlpError::Validation { message: "invalid request".into(), errors: Vec::new() },
+                    BlpError::Validation {
+                        message: "invalid request".into(),
+                        errors: Vec::new(),
+                    },
                     ErrorKind::Validation,
                     "invalid request",
                 ),
@@ -412,8 +433,16 @@ mod tests {
                     BlpError::Validation {
                         message: "invalid request".into(),
                         errors: vec![
-                            ValidationError { path: "fields[0]".into(), message: "unknown field".into(), suggestion: Some("PX_LAST".into()) },
-                            ValidationError { path: "securities".into(), message: "required".into(), suggestion: None },
+                            ValidationError {
+                                path: "fields[0]".into(),
+                                message: "unknown field".into(),
+                                suggestion: Some("PX_LAST".into()),
+                            },
+                            ValidationError {
+                                path: "securities".into(),
+                                message: "required".into(),
+                                suggestion: None,
+                            },
                         ],
                     },
                     ErrorKind::Validation,

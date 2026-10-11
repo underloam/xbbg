@@ -276,6 +276,7 @@ describe('platform map packaging metadata', () => {
   it('keeps source and script platform maps in sync', () => {
     expect(toolPlatformPackages).toStrictEqual(platformPackages);
   });
+
   it('keeps optional dependency keys in sync with platform packages', () => {
     expect(Object.keys(packageJson.optionalDependencies).toSorted()).toStrictEqual(
       Object.values(platformPackages).toSorted(),

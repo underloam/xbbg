@@ -299,12 +299,7 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
         "",
         "from __future__ import annotations",
         "",
-        "import sys",
-        "if sys.version_info >= (3, 11):",
-        "    from typing import Literal, NotRequired, TypedDict",
-        "else:",
-        "    from typing import Literal",
-        "    from typing_extensions import NotRequired, TypedDict",
+        "from typing import Literal, NotRequired, TypedDict",
         "",
     ]
 

@@ -6,8 +6,8 @@
 
 use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use smallvec::SmallVec;
@@ -16,11 +16,11 @@ use tokio::sync::{mpsc, oneshot};
 use xbbg_core::{BlpError, DataType as BlpDataType, Message, Name};
 
 use super::super::OverflowPolicy;
+use super::SubscriptionSender;
 use super::update::{
     FieldIndex, FieldKind, FieldLayout, FieldMeta, StringValueCache, SubscriptionUpdate, TopicId,
     UpdateField, UpdateValue,
 };
-use super::SubscriptionSender;
 
 pub struct SubscriptionMetrics {
     pub messages_received: Arc<AtomicU64>,
@@ -392,10 +392,10 @@ impl SubscriptionState {
     /// kind replaces its provisional hint; later observations merge normally.
     pub(crate) fn seed_kinds(&mut self, kinds: &HashMap<String, FieldKind>) {
         for idx in 0..self.field_strings.len() {
-            if self.field_kinds[idx] == FieldKind::Unknown {
-                if let Some(&kind) = kinds.get(self.field_strings[idx].as_ref()) {
-                    self.seed_kind(idx as FieldIndex, kind);
-                }
+            if self.field_kinds[idx] == FieldKind::Unknown
+                && let Some(&kind) = kinds.get(self.field_strings[idx].as_ref())
+            {
+                self.seed_kind(idx as FieldIndex, kind);
             }
         }
         self.refresh_layout();
@@ -823,7 +823,7 @@ impl SubscriptionState {
                             match self.update_value_for_field(idx as usize, &child, datatype) {
                                 Ok(value) => value,
                                 Err(error) if self.stream.report_field_error(&error, true) => {
-                                    continue
+                                    continue;
                                 }
                                 Err(error) => return Err(error),
                             };
@@ -1780,11 +1780,13 @@ mod tests {
         let mut state = SubscriptionState::new("TEST".into(), Vec::new(), tx, true);
         let first = state.project_image(&source);
         assert_eq!(value_names(&first), vec!["TEXT"]);
-        assert!(!first
-            .layout
-            .fields
-            .iter()
-            .any(|field| field.name.as_ref() == "FUTURE"));
+        assert!(
+            !first
+                .layout
+                .fields
+                .iter()
+                .any(|field| field.name.as_ref() == "FUTURE")
+        );
         assert!(Arc::ptr_eq(
             &first.layout.fields[2].name,
             &layout.fields[0].name
@@ -2197,10 +2199,11 @@ mod tests {
 
         deliver(&mut state, &array);
         let update = rx.try_recv().unwrap().unwrap();
-        assert!(!update
-            .values
-            .iter()
-            .any(|field| { update.layout.fields[field.index as usize].name.as_ref() == "LEVELS" }));
+        assert!(
+            !update.values.iter().any(|field| {
+                update.layout.fields[field.index as usize].name.as_ref() == "LEVELS"
+            })
+        );
 
         deliver(&mut state, &following_scalar);
         let update = rx.try_recv().unwrap().unwrap();

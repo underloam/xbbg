@@ -19,17 +19,17 @@ use xbbg_core::{BlpError, Value};
 
 use super::state::typed_builder::{ArrowType, TypedBuilder};
 use super::state::{
-    subscription_channel, subscription_forwarder_channel, FieldKind, FieldLayout, FieldMeta,
-    MessageOutcome, SubscriptionForwarder, SubscriptionSender, SubscriptionState,
-    SubscriptionUpdate, UpdateField, UpdateValue,
+    FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder, SubscriptionSender,
+    SubscriptionState, SubscriptionUpdate, UpdateField, UpdateValue, subscription_channel,
+    subscription_forwarder_channel,
 };
 use super::subscription_pool::FeedRegistration;
 use super::{
-    timestamp_now_us, BlpAsyncError, EngineConfig, OverflowPolicy, SessionClaim,
-    SessionLifecycleState, SharedSubscriptionStatus, SlabKey, SubscriptionCommandHandle,
-    SubscriptionEventInfo, SubscriptionEventLevel, SubscriptionFailureKind,
-    SubscriptionSessionPool, SubscriptionStatusHandle, SubscriptionStatusScope,
-    SubscriptionStatusState, SubscriptionStream, TopicLifecycleState,
+    BlpAsyncError, EngineConfig, OverflowPolicy, SessionClaim, SessionLifecycleState,
+    SharedSubscriptionStatus, SlabKey, SubscriptionCommandHandle, SubscriptionEventInfo,
+    SubscriptionEventLevel, SubscriptionFailureKind, SubscriptionSessionPool,
+    SubscriptionStatusHandle, SubscriptionStatusScope, SubscriptionStatusState, SubscriptionStream,
+    TopicLifecycleState, timestamp_now_us,
 };
 
 const MKTDATA: &str = "//blp/mktdata";
@@ -420,10 +420,8 @@ impl Feed {
             }
         }
         drop(state);
-        if schedule_restart {
-            if let Some(hub) = self.hub.upgrade() {
-                hub.schedule_recovery(&self.identity);
-            }
+        if schedule_restart && let Some(hub) = self.hub.upgrade() {
+            hub.schedule_recovery(&self.identity);
         }
         for (owner, labels) in notices.into_values() {
             owner.status.update(|status| {
@@ -615,10 +613,10 @@ impl Feed {
             if state.repainting {
                 state.repaint_started = false;
             }
-            if let Some(recovery) = &mut state.recovery {
-                if recovery.stage == RecoveryStage::WaitingRestartStart {
-                    recovery.stage = RecoveryStage::WaitingRestartPaint;
-                }
+            if let Some(recovery) = &mut state.recovery
+                && recovery.stage == RecoveryStage::WaitingRestartStart
+            {
+                recovery.stage = RecoveryStage::WaitingRestartPaint;
             }
         }
         let topic = upstream.topic_statuses().get(&self.status_topic);
@@ -627,12 +625,11 @@ impl Feed {
             next_state,
             Some(TopicLifecycleState::Failed | TopicLifecycleState::Terminated)
         );
-        if topic_changed {
-            if let Some(errors) = upstream.field_errors().get(&self.status_topic) {
-                if &state.field_errors != errors {
-                    state.field_errors.clone_from(errors);
-                }
-            }
+        if topic_changed
+            && let Some(errors) = upstream.field_errors().get(&self.status_topic)
+            && &state.field_errors != errors
+        {
+            state.field_errors.clone_from(errors);
         }
         if terminal || session_end.is_some() {
             state.lifecycle = "failed";
@@ -746,27 +743,25 @@ impl Feed {
             drop(snapshot);
             if failure.is_none()
                 && patch.owner.request.field_error_policy == FieldErrorPolicy::Raise
-            {
-                if let Some((field, category)) = field_errors
+                && let Some((field, category)) = field_errors
                     .iter()
                     .filter(|(field, _)| consumer.explicit_fields.contains(*field))
                     .min_by(|(left, _), (right, _)| left.cmp(right))
-                {
-                    let reason = format!("{field}: {category}");
-                    failure = Some((reason.clone(), SubscriptionFailureKind::Failure));
-                    consumer.active = false;
-                    patch.events.push((
-                        (usize::MAX, consumer.key),
-                        SubscriptionEventInfo {
-                            at_us: timestamp_now_us(),
-                            category: super::SubscriptionEventCategory::Subscription,
-                            level: SubscriptionEventLevel::Warning,
-                            message_type: "SubscriptionFailure".into(),
-                            topic: Some(consumer.projection.topic.to_string()),
-                            detail: Some(reason),
-                        },
-                    ));
-                }
+            {
+                let reason = format!("{field}: {category}");
+                failure = Some((reason.clone(), SubscriptionFailureKind::Failure));
+                consumer.active = false;
+                patch.events.push((
+                    (usize::MAX, consumer.key),
+                    SubscriptionEventInfo {
+                        at_us: timestamp_now_us(),
+                        category: super::SubscriptionEventCategory::Subscription,
+                        level: SubscriptionEventLevel::Warning,
+                        message_type: "SubscriptionFailure".into(),
+                        topic: Some(consumer.projection.topic.to_string()),
+                        detail: Some(reason),
+                    },
+                ));
             }
             let order = if session_end.is_some() {
                 usize::MAX
@@ -1095,10 +1090,10 @@ impl ConsumerSessions {
     }
 
     fn update(&mut self, source: usize, upstream: &SubscriptionStatusState) {
-        if let Some(entry) = self.sessions.get_mut(&source) {
-            if !entry.snapshot.matches(upstream) {
-                entry.snapshot = GlobalStatusSnapshot::from_status(upstream);
-            }
+        if let Some(entry) = self.sessions.get_mut(&source)
+            && !entry.snapshot.matches(upstream)
+        {
+            entry.snapshot = GlobalStatusSnapshot::from_status(upstream);
         }
     }
 
@@ -1267,14 +1262,13 @@ impl ConsumerStatusPatch {
             }
             for topic in self.topics {
                 if topic.failure.is_none() && status.topic_for_key(topic.key).is_some() {
-                    if let Some(next) = topic.lifecycle {
-                        if status
+                    if let Some(next) = topic.lifecycle
+                        && status
                             .topic_statuses()
                             .get(topic.label.as_ref())
                             .is_some_and(|info| info.state != next)
-                        {
-                            status.update_topic_state(&topic.label, next);
-                        }
+                    {
+                        status.update_topic_state(&topic.label, next);
                     }
                     if let Some(active) = topic.streams_active {
                         status.set_topic_streams_active(&topic.label, active);
@@ -1836,16 +1830,15 @@ impl SubscriptionHandle {
             };
             if changed {
                 resubscribe.push(feed);
-            } else if !kinds.is_empty() {
-                if let Err(error) = feed
+            } else if !kinds.is_empty()
+                && let Err(error) = feed
                     .session
                     .seed_kinds(feed.upstream_key.load(Ordering::Acquire), &kinds)
-                {
-                    feed.on_error(BlpError::Internal {
-                        detail: error.to_string(),
-                    });
-                    first_error.get_or_insert(error);
-                }
+            {
+                feed.on_error(BlpError::Internal {
+                    detail: error.to_string(),
+                });
+                first_error.get_or_insert(error);
             }
         }
         for feed in resubscribe {
@@ -2412,12 +2405,11 @@ impl SharedSubscriptions {
                         && consumer.request.deliver_rows
                         && !created
                         && feed.identity.service == MKTDATA
+                        && let Some(image) = image_update(&feed, &state, true)
                     {
-                        if let Some(image) = image_update(&feed, &state, true) {
-                            // A synthetic image is always one row, including an
-                            // entirely unknown projection. Only known values have presence bits.
-                            entry.projection.project_update(&image, false);
-                        }
+                        // A synthetic image is always one row, including an
+                        // entirely unknown projection. Only known values have presence bits.
+                        entry.projection.project_update(&image, false);
                     }
                     state.consumers.push(entry);
                     if !allowed {
@@ -2498,11 +2490,7 @@ impl SharedSubscriptions {
             });
             state.consumers.is_empty()
         };
-        if empty {
-            self.retire(feed)
-        } else {
-            Ok(())
-        }
+        if empty { self.retire(feed) } else { Ok(()) }
     }
 
     fn retire(&self, feed: Arc<Feed>) -> Result<(), BlpAsyncError> {
@@ -2677,10 +2665,10 @@ fn validate_existing_labels(
         .map(|member| (member.label.as_str(), member.topic.as_str()))
         .collect();
     for (topic, label) in requested {
-        if let Some(existing) = labels.get(label.as_str()) {
-            if *existing != topic {
-                return Err(alias_label_conflict(label, existing, topic));
-            }
+        if let Some(existing) = labels.get(label.as_str())
+            && *existing != topic
+        {
+            return Err(alias_label_conflict(label, existing, topic));
         }
     }
     Ok(())
@@ -2736,12 +2724,12 @@ fn seed_image_kinds(state: &mut FeedState, kinds: &HashMap<String, FieldKind>) {
         }
     }
     for field in &mut fields {
-        if field.kind == FieldKind::Unknown {
-            if let Some(&kind) = state.kinds.get(field.name.as_ref()) {
-                field.kind = kind;
-                field.provisional = true;
-                changed = true;
-            }
+        if field.kind == FieldKind::Unknown
+            && let Some(&kind) = state.kinds.get(field.name.as_ref())
+        {
+            field.kind = kind;
+            field.provisional = true;
+            changed = true;
         }
     }
     if changed {
@@ -2842,14 +2830,16 @@ fn validate_topic_aliases(
         let topic = topic.trim().to_string();
         if let Some(previous) = by_topic.get(&topic) {
             if previous != &label {
-                return Err(config_error(&format!("subscription topic '{topic}' maps to conflicting labels '{previous}' and '{label}'")));
+                return Err(config_error(&format!(
+                    "subscription topic '{topic}' maps to conflicting labels '{previous}' and '{label}'"
+                )));
             }
             continue;
         }
-        if let Some(previous) = by_label.get(&label) {
-            if previous != &topic {
-                return Err(alias_label_conflict(&label, previous, &topic));
-            }
+        if let Some(previous) = by_label.get(&label)
+            && previous != &topic
+        {
+            return Err(alias_label_conflict(&label, previous, &topic));
         }
         by_label.insert(label.clone(), topic.clone());
         by_topic.insert(topic, label);
@@ -2862,10 +2852,10 @@ fn validate_topic_aliases(
             .get(&topic)
             .cloned()
             .unwrap_or_else(|| topic.clone());
-        if let Some(previous) = by_label.get(&label) {
-            if previous != &topic {
-                return Err(alias_label_conflict(&label, previous, &topic));
-            }
+        if let Some(previous) = by_label.get(&label)
+            && previous != &topic
+        {
+            return Err(alias_label_conflict(&label, previous, &topic));
         }
         by_label.insert(label.clone(), topic.clone());
         if seen.insert(label.clone()) {

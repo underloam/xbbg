@@ -4,7 +4,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::sync::{Arc, Mutex as StdMutex};
 
-use tokio::sync::{watch, Mutex, OwnedMutexGuard};
+use tokio::sync::{Mutex, OwnedMutexGuard, watch};
 use xbbg_core::BlpError;
 
 use crate::engine::state::{FieldLayout, SubscriptionReceiver, SubscriptionUpdate};
@@ -258,20 +258,18 @@ impl SubscriptionConsumer {
             Ok(())
         };
         let mut cleanup_error = if shutting_down() { None } else { result.err() };
-        if drain {
-            if let Some(handle) = &handle {
-                let mut receiver = self.rx.lock().await;
-                let result = match receiver.as_mut() {
-                    Some(rx) => {
-                        self.pending
-                            .drain_forwarder(handle.drain_forwarder(), rx)
-                            .await
-                    }
-                    None => handle.drain_forwarder().await,
-                };
-                if cleanup_error.is_none() && !shutting_down() {
-                    cleanup_error = result.err();
+        if drain && let Some(handle) = &handle {
+            let mut receiver = self.rx.lock().await;
+            let result = match receiver.as_mut() {
+                Some(rx) => {
+                    self.pending
+                        .drain_forwarder(handle.drain_forwarder(), rx)
+                        .await
                 }
+                None => handle.drain_forwarder().await,
+            };
+            if cleanup_error.is_none() && !shutting_down() {
+                cleanup_error = result.err();
             }
         }
         let mut receiver = self.rx.lock().await;
@@ -299,7 +297,7 @@ impl SubscriptionConsumer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::engine::state::{subscription_channel, FieldKind, FieldMeta};
+    use crate::engine::state::{FieldKind, FieldMeta, subscription_channel};
     use std::task::{Context, Poll, Waker};
 
     fn update(field: &str, timestamp_us: i64) -> SubscriptionUpdate {
@@ -355,9 +353,11 @@ mod tests {
     fn rollback_restores_updates_before_the_deferred_boundary() {
         let pending = PendingUpdates::default();
         let mut batch = vec![update("BID", 1), update("BID", 2)];
-        assert!(!pending
-            .append_to_batch(&mut batch, Ok(update("ASK", 3)))
-            .unwrap());
+        assert!(
+            !pending
+                .append_to_batch(&mut batch, Ok(update("ASK", 3)))
+                .unwrap()
+        );
         pending.restore(batch.into_iter());
         let updates = pending.collect_unread(None, true).unwrap();
         assert_eq!(
@@ -423,9 +423,11 @@ mod tests {
     fn drains_report_the_first_unread_error_instead_of_partial_success() {
         let pending = PendingUpdates::default();
         let mut batch = vec![update("BID", 1)];
-        assert!(!pending
-            .append_to_batch(&mut batch, Err(BlpError::Timeout))
-            .unwrap());
+        assert!(
+            !pending
+                .append_to_batch(&mut batch, Err(BlpError::Timeout))
+                .unwrap()
+        );
         pending.restore(batch.into_iter());
         let (tx, rx) = subscription_channel(1);
         tx.fail(BlpError::Internal {

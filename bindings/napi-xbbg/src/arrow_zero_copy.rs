@@ -1,10 +1,10 @@
 use arrow::array::{
     Array, BinaryArray, BooleanArray, Date32Array, Date64Array, Float32Array, Float64Array,
-    Int16Array, Int32Array, Int64Array, Int8Array, LargeBinaryArray, LargeStringArray, NullArray,
+    Int8Array, Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, NullArray,
     StringArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
     Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt16Array, UInt32Array, UInt64Array,
-    UInt8Array,
+    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
+    UInt64Array,
 };
 use arrow::buffer::{Buffer as ArrowBuffer, MutableBuffer};
 use arrow::datatypes::{DataType, TimeUnit};
@@ -599,35 +599,35 @@ impl ToNapiValue for NativeArrowColumn {
         if let Some(timezone) = value.arrow_type.timezone() {
             obj.set_named_property("timezone", timezone)?;
         }
-        if let Some(buffer) = value.data {
-            if let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
+        if let Some(buffer) = value.data
+            && let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
                     format!("failed to expose Arrow data buffer: {e}"),
                 )
-            })? {
-                obj.set_named_property("data", buffer)?;
-            }
+            })?
+        {
+            obj.set_named_property("data", buffer)?;
         }
-        if let Some(buffer) = value.offsets {
-            if let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
+        if let Some(buffer) = value.offsets
+            && let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
                     format!("failed to expose Arrow offsets buffer: {e}"),
                 )
-            })? {
-                obj.set_named_property("offsets", buffer)?;
-            }
+            })?
+        {
+            obj.set_named_property("offsets", buffer)?;
         }
-        if let Some(buffer) = value.null_bitmap {
-            if let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
+        if let Some(buffer) = value.null_bitmap
+            && let Some(buffer) = external_buffer(&env, buffer).map_err(|e| {
                 Error::new(
                     Status::GenericFailure,
                     format!("failed to expose Arrow null bitmap: {e}"),
                 )
-            })? {
-                obj.set_named_property("nullBitmap", buffer)?;
-            }
+            })?
+        {
+            obj.set_named_property("nullBitmap", buffer)?;
         }
         Ok(obj.raw())
     }
@@ -669,9 +669,10 @@ mod tests {
     fn checked_js_u32_len_rejects_overflow() {
         let err = checked_js_u32_len("length", (u32::MAX as usize) + 1).unwrap_err();
         assert_eq!(err.status, Status::InvalidArg);
-        assert!(err
-            .reason
-            .contains("exceeds the JavaScript native Arrow length limit"));
+        assert!(
+            err.reason
+                .contains("exceeds the JavaScript native Arrow length limit")
+        );
     }
 
     #[test]

@@ -21,7 +21,9 @@ pub enum ExtError {
     InvalidTicker(String),
 
     /// Ticker appears to be specific rather than generic.
-    #[error("'{0}' appears to be a specific contract, not generic. Use generic ticker like 'ES1 Index' instead")]
+    #[error(
+        "'{0}' appears to be a specific contract, not generic. Use generic ticker like 'ES1 Index' instead"
+    )]
     SpecificTicker(String),
 
     /// Unknown yield type.

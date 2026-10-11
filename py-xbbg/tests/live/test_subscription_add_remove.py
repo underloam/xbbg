@@ -109,7 +109,7 @@ async def main() -> None:
                 batch_num += 1
                 count += 1
                 print_batch(batch, batch_num)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(f"\n  (timeout after {PHASE_TIMEOUT}s — got {count}/{target} batches)")
         except StopAsyncIteration:
             print(f"\n  (stream ended — got {count}/{target} batches)")

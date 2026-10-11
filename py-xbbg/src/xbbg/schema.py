@@ -24,6 +24,7 @@ from dataclasses import dataclass
 import functools
 import json
 from pathlib import Path
+import tomllib
 from typing import Any
 
 from . import _engine
@@ -266,19 +267,6 @@ def configure_ide_stubs(
             project_root = parent
             break
 
-    def _load_toml_module():
-        try:
-            import tomllib
-
-            return tomllib
-        except ImportError:
-            try:
-                return __import__("tomli")
-            except ImportError:
-                return None
-
-    toml_module = _load_toml_module()
-
     def _configure_json_list_setting(
         config_path: Path,
         key: str,
@@ -301,11 +289,11 @@ def configure_ide_stubs(
             return None
 
     def _load_toml_config(path: Path) -> tuple[str, dict[str, Any]] | None:
-        if toml_module is None or not path.exists():
+        if not path.exists():
             return None
         try:
             content = path.read_text()
-            parsed = toml_module.loads(content)
+            parsed = tomllib.loads(content)
             return content, parsed
         except Exception:
             return None
@@ -515,8 +503,7 @@ def _generate_stub_content(schema: ServiceSchema) -> str:
         '"""',
         "",
         "from __future__ import annotations",
-        "from typing import Any, Dict, List, Literal, Optional, Union",
-        "from typing_extensions import TypedDict, NotRequired",
+        "from typing import Any, Dict, List, Literal, NotRequired, Optional, TypedDict, Union",
         "import datetime",
         "from decimal import Decimal",
         "",

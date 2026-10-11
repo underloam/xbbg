@@ -11,7 +11,7 @@ use std::time::Duration;
 
 use parking_lot::{Condvar, Mutex, RwLock};
 use slab::Slab;
-use tokio::sync::{oneshot, OwnedSemaphorePermit, Semaphore};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, oneshot};
 use tokio::task::JoinHandle;
 
 use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionList};
@@ -21,13 +21,13 @@ use super::session_lifecycle::{
     PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
 };
 use super::state::{
-    subscription_forwarder_channel, FieldKind, MessageOutcome, SubscriptionForwarder,
-    SubscriptionMetrics, SubscriptionSender, SubscriptionState, SubscriptionTerminator,
+    FieldKind, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics, SubscriptionSender,
+    SubscriptionState, SubscriptionTerminator, subscription_forwarder_channel,
 };
 use super::{
-    attach_auth_context, build_session_options, BlpAsyncError, EngineConfig, OverflowPolicy,
-    SessionLifecycleState, SharedSubscriptionStatus, SlabKey, SubscriptionEventCategory,
-    SubscriptionEventLevel, SubscriptionFailureKind, WorkerHealth, SESSION_STARTUP_TIMEOUT_MS,
+    BlpAsyncError, EngineConfig, OverflowPolicy, SESSION_STARTUP_TIMEOUT_MS, SessionLifecycleState,
+    SharedSubscriptionStatus, SlabKey, SubscriptionEventCategory, SubscriptionEventLevel,
+    SubscriptionFailureKind, WorkerHealth, attach_auth_context, build_session_options,
 };
 
 type RegisteredSubscriptions = (
@@ -722,20 +722,20 @@ impl SubscriptionWorkerState {
                 "subscription pending cancel"
             );
         }
-        if let Some(status) = &self.status {
-            if !pending_keys.is_empty() {
-                status.update_topics(&pending_keys, |next| {
-                    for &key in &pending_keys {
-                        let topic = next.mark_topic_unsubscribing(key);
-                        next.record_subscription_event(
-                            "SubscriptionPendingCancel",
-                            topic,
-                            None,
-                            SubscriptionEventLevel::Info,
-                        );
-                    }
-                });
-            }
+        if let Some(status) = &self.status
+            && !pending_keys.is_empty()
+        {
+            status.update_topics(&pending_keys, |next| {
+                for &key in &pending_keys {
+                    let topic = next.mark_topic_unsubscribing(key);
+                    next.record_subscription_event(
+                        "SubscriptionPendingCancel",
+                        topic,
+                        None,
+                        SubscriptionEventLevel::Info,
+                    );
+                }
+            });
         }
 
         (unsub_list, pending_keys.len())
@@ -749,15 +749,15 @@ impl SubscriptionWorkerState {
             while let Some(msg) = messages.next() {
                 self.collect_subscription_status(&msg, &mut mutations);
             }
-            if let Some(status) = &self.status {
-                if !mutations.is_empty() {
-                    let keys: Vec<_> = mutations.iter().map(StatusMutation::key).collect();
-                    status.update_topics(&keys, |next| {
-                        for mutation in mutations {
-                            mutation.apply(next);
-                        }
-                    });
-                }
+            if let Some(status) = &self.status
+                && !mutations.is_empty()
+            {
+                let keys: Vec<_> = mutations.iter().map(StatusMutation::key).collect();
+                status.update_topics(&keys, |next| {
+                    for mutation in mutations {
+                        mutation.apply(next);
+                    }
+                });
             }
             return;
         }
@@ -788,41 +788,40 @@ impl SubscriptionWorkerState {
             } else {
                 Vec::new()
             };
-            if let Some(status) = &self.status {
-                if !data_loss_topics.is_empty()
+            if let Some(status) = &self.status
+                && (!data_loss_topics.is_empty()
                     || !streaming_topics.is_empty()
-                    || !inactive_topics.is_empty()
-                {
-                    let keys: Vec<_> = data_loss_topics
-                        .iter()
-                        .chain(&streaming_topics)
-                        .chain(&inactive_topics)
-                        .copied()
-                        .collect();
-                    status.update_topics(&keys, |next| {
-                        for key in data_loss_topics {
-                            let topic = next.topic_for_key(key).map(str::to_string);
-                            next.record_admin_data_loss(
-                                topic,
-                                Some("subscription data reported DATALOSS".to_string()),
-                            );
+                    || !inactive_topics.is_empty())
+            {
+                let keys: Vec<_> = data_loss_topics
+                    .iter()
+                    .chain(&streaming_topics)
+                    .chain(&inactive_topics)
+                    .copied()
+                    .collect();
+                status.update_topics(&keys, |next| {
+                    for key in data_loss_topics {
+                        let topic = next.topic_for_key(key).map(str::to_string);
+                        next.record_admin_data_loss(
+                            topic,
+                            Some("subscription data reported DATALOSS".to_string()),
+                        );
+                    }
+                    for key in streaming_topics {
+                        let topic = next.mark_topic_streaming(key);
+                        next.record_subscription_event(
+                            "SubscriptionStreaming",
+                            topic,
+                            None,
+                            SubscriptionEventLevel::Info,
+                        );
+                    }
+                    for key in inactive_topics {
+                        if let Some(topic) = next.topic_for_key(key).map(str::to_string) {
+                            let _ = next.set_topic_streams_active(&topic, false);
                         }
-                        for key in streaming_topics {
-                            let topic = next.mark_topic_streaming(key);
-                            next.record_subscription_event(
-                                "SubscriptionStreaming",
-                                topic,
-                                None,
-                                SubscriptionEventLevel::Info,
-                            );
-                        }
-                        for key in inactive_topics {
-                            if let Some(topic) = next.topic_for_key(key).map(str::to_string) {
-                                let _ = next.set_topic_streams_active(&topic, false);
-                            }
-                        }
-                    });
-                }
+                    }
+                });
             }
             return;
         }
@@ -1262,54 +1261,51 @@ impl SubscriptionWorkerState {
         let msg_type_name = msg.message_type();
         let msg_type = msg_type_name.as_str();
 
-        if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure") {
-            if let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0) {
-                if let Some((service_name, open)) =
-                    self.pending_service_opens.remove_by_cid(cid_int)
-                {
-                    match msg_type {
-                        "ServiceOpened" => {
-                            self.open_services.insert(service_name.clone());
-                            if let Some(status) = &self.status {
-                                let service_for_status = service_name.clone();
-                                status.update(|next| {
-                                    next.record_service_state(
-                                        service_for_status,
-                                        true,
-                                        "ServiceOpened",
-                                        Some("service opened on demand".to_string()),
-                                    );
-                                });
-                            }
-                            open.complete(|| Ok(()));
-                        }
-                        "ServiceOpenFailure" => {
-                            let reason = extract_reason_description(msg);
-                            if let Some(status) = &self.status {
-                                let service_for_status = service_name.clone();
-                                let reason_for_status = reason.clone();
-                                status.update(|next| {
-                                    next.record_service_state(
-                                        service_for_status,
-                                        false,
-                                        "ServiceOpenFailure",
-                                        reason_for_status,
-                                    );
-                                });
-                            }
-                            open.complete(|| {
-                                Err(BlpError::OpenService {
-                                    service: service_name.clone(),
-                                    source: None,
-                                    label: reason.clone(),
-                                })
-                            });
-                        }
-                        _ => {}
+        if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure")
+            && let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0)
+            && let Some((service_name, open)) = self.pending_service_opens.remove_by_cid(cid_int)
+        {
+            match msg_type {
+                "ServiceOpened" => {
+                    self.open_services.insert(service_name.clone());
+                    if let Some(status) = &self.status {
+                        let service_for_status = service_name.clone();
+                        status.update(|next| {
+                            next.record_service_state(
+                                service_for_status,
+                                true,
+                                "ServiceOpened",
+                                Some("service opened on demand".to_string()),
+                            );
+                        });
                     }
-                    return;
+                    open.complete(|| Ok(()));
                 }
+                "ServiceOpenFailure" => {
+                    let reason = extract_reason_description(msg);
+                    if let Some(status) = &self.status {
+                        let service_for_status = service_name.clone();
+                        let reason_for_status = reason.clone();
+                        status.update(|next| {
+                            next.record_service_state(
+                                service_for_status,
+                                false,
+                                "ServiceOpenFailure",
+                                reason_for_status,
+                            );
+                        });
+                    }
+                    open.complete(|| {
+                        Err(BlpError::OpenService {
+                            service: service_name.clone(),
+                            source: None,
+                            label: reason.clone(),
+                        })
+                    });
+                }
+                _ => {}
             }
+            return;
         }
 
         let service = msg
@@ -1435,15 +1431,15 @@ impl SubscriptionWorkerState {
         if unattributable {
             // A legacy channel gets one wildcard failure. Callback feeds receive
             // one correlated notification each below, without duplicating the last feed.
-            if let Some(terminator) = &self.stream_terminator {
-                if self.subs.is_empty() || !terminator.is_callback() {
-                    terminator.fail(BlpError::SubscriptionDataLoss {
-                        topic: "*".to_string(),
-                        detail:
-                            "Bloomberg reported unattributable DATALOSS; resubscribe for a fresh image"
-                                .to_string(),
-                    });
-                }
+            if let Some(terminator) = &self.stream_terminator
+                && (self.subs.is_empty() || !terminator.is_callback())
+            {
+                terminator.fail(BlpError::SubscriptionDataLoss {
+                    topic: "*".to_string(),
+                    detail:
+                        "Bloomberg reported unattributable DATALOSS; resubscribe for a fresh image"
+                            .to_string(),
+                });
             }
             topics.reserve(self.subs.len());
             for (key, state) in self.subs.iter_mut() {
@@ -3085,9 +3081,11 @@ mod tests {
         }
         let snapshot = status.load();
         assert_eq!(snapshot.admin().data_loss_count, 1);
-        assert!(topics
-            .iter()
-            .all(|topic| !snapshot.topic_statuses()[topic].streams_active));
+        assert!(
+            topics
+                .iter()
+                .all(|topic| !snapshot.topic_statuses()[topic].streams_active)
+        );
     }
 
     #[test]
@@ -3114,9 +3112,11 @@ mod tests {
         assert_eq!(metrics[0].data_loss_events.load(Ordering::Relaxed), 1);
         assert_eq!(metrics[1].data_loss_events.load(Ordering::Relaxed), 0);
         let snapshot = status.load();
-        assert!(topics
-            .iter()
-            .all(|topic| !snapshot.topic_statuses()[topic].streams_active));
+        assert!(
+            topics
+                .iter()
+                .all(|topic| !snapshot.topic_statuses()[topic].streams_active)
+        );
         assert_eq!(worker.subs.len(), keys.len());
     }
 
@@ -3341,12 +3341,16 @@ mod tests {
 
         let (_, second_cid, _second_rx) = shared.register_service_waiter(service);
         assert_ne!(second_cid, first_cid);
-        assert!(shared
-            .remove_pending_service_open(service, first_cid)
-            .is_none());
-        assert!(shared
-            .remove_pending_service_open(service, second_cid)
-            .is_some());
+        assert!(
+            shared
+                .remove_pending_service_open(service, first_cid)
+                .is_none()
+        );
+        assert!(
+            shared
+                .remove_pending_service_open(service, second_cid)
+                .is_some()
+        );
     }
 
     #[test]

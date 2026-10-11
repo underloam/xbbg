@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use xbbg_log::{debug, info, warn};
 
-use crate::cache_io::{read_json_array_bounded, AtomicJsonPublisher, PublicationOutcome};
+use crate::cache_io::{AtomicJsonPublisher, PublicationOutcome, read_json_array_bounded};
 
 /// Bloomberg field type as returned by //blp/apiflds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -505,11 +505,11 @@ impl FieldTypeResolver {
             let field_upper = field.to_uppercase();
 
             // 1. Check manual overrides
-            if let Some(overrides) = manual_overrides {
-                if let Some(t) = overrides.get(field).or_else(|| overrides.get(&field_upper)) {
-                    result.insert(field.clone(), t.clone());
-                    continue;
-                }
+            if let Some(overrides) = manual_overrides
+                && let Some(t) = overrides.get(field).or_else(|| overrides.get(&field_upper))
+            {
+                result.insert(field.clone(), t.clone());
+                continue;
             }
 
             // 2. Check cache

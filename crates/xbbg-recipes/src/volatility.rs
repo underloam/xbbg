@@ -602,9 +602,10 @@ mod tests {
         )];
         let rows = build_vol_surface_rows(&batch, &specs, true, true, Some(5.0), "EQY_DVD_YLD_12M")
             .unwrap();
-        assert!(rows
-            .iter()
-            .any(|row| row.metric == "implied_volatility" && row.value == 0.20));
+        assert!(
+            rows.iter()
+                .any(|row| row.metric == "implied_volatility" && row.value == 0.20)
+        );
         assert!(rows.iter().any(|row| row.metric == "forward"));
         assert!(rows.iter().any(|row| row.metric == "discount_factor"));
     }

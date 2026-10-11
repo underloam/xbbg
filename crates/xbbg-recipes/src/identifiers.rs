@@ -430,10 +430,12 @@ mod tests {
                 "unresolved"
             );
             assert!(batch.column_by_name("resolved_ticker").unwrap().is_null(0));
-            assert!(as_string_col(&batch, "error")
-                .unwrap()
-                .value(0)
-                .contains(sector));
+            assert!(
+                as_string_col(&batch, "error")
+                    .unwrap()
+                    .value(0)
+                    .contains(sector)
+            );
         }
     }
 

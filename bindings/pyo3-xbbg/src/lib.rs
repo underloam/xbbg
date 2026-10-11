@@ -84,8 +84,8 @@ mod request;
 use request::dict_to_request_params;
 
 use xbbg_async::subscription_consumer::{
-    receive_subscription_updates, subscription_batch_capacity_hint, wait_for_subscription_close,
-    SubscriptionConsumer, SubscriptionRead,
+    SubscriptionConsumer, SubscriptionRead, receive_subscription_updates,
+    subscription_batch_capacity_hint, wait_for_subscription_close,
 };
 type SubscriptionMetricsMap = HashMap<usize, Arc<SubscriptionMetrics>>;
 type SubscriptionEventTuple = (i64, String, String, String, Option<String>, Option<String>);
@@ -2155,10 +2155,10 @@ impl PySubscription {
                     if let Some(batch) = batcher.append(&update) {
                         batches.push(batch);
                     }
-                    if batcher.rows() == batch_items {
-                        if let Some(batch) = batcher.flush() {
-                            batches.push(batch);
-                        }
+                    if batcher.rows() == batch_items
+                        && let Some(batch) = batcher.flush()
+                    {
+                        batches.push(batch);
                     }
                 }
                 if let Some(batch) = batcher.flush() {
@@ -2475,7 +2475,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use tokio::sync::Mutex;
     use xbbg_async::engine::state::{
-        subscription_channel, FieldKind, FieldLayout, FieldMeta, UpdateField,
+        FieldKind, FieldLayout, FieldMeta, UpdateField, subscription_channel,
     };
     use xbbg_async::engine::{
         ExtractorType, SubscriptionEventCategory, SubscriptionEventLevel, SubscriptionStatusHandle,
@@ -2583,11 +2583,13 @@ mod tests {
         Python::attach(|py| {
             let subscription = Py::new(py, closed_subscription(false)).unwrap();
             let subscription = subscription.bind(py);
-            assert!(!subscription
-                .getattr("delivers_rows")
-                .unwrap()
-                .extract::<bool>()
-                .unwrap());
+            assert!(
+                !subscription
+                    .getattr("delivers_rows")
+                    .unwrap()
+                    .extract::<bool>()
+                    .unwrap()
+            );
             for method in ["__aiter__", "__anext__", "__anext_tick_dict__"] {
                 let error = subscription
                     .call_method0(method)
@@ -2658,10 +2660,12 @@ mod tests {
                 detail: "session_wait: subscription session capacity is unavailable".into(),
             });
             assert!(error.is_instance_of::<BlpValidationError>(py));
-            assert!(error
-                .value(py)
-                .to_string()
-                .starts_with("Configuration error: session_wait:"));
+            assert!(
+                error
+                    .value(py)
+                    .to_string()
+                    .starts_with("Configuration error: session_wait:")
+            );
         });
     }
 
@@ -2680,7 +2684,10 @@ mod tests {
                         "Session start failed: unavailable - synthetic cause",
                     ),
                     (
-                        BlpError::SubscriptionFailure { cid: None, label: None },
+                        BlpError::SubscriptionFailure {
+                            cid: None,
+                            label: None,
+                        },
                         "BlpRequestError",
                         "Subscription failed",
                     ),
@@ -2925,9 +2932,10 @@ mod tests {
             Ok(_) => panic!("zero capacity should fail"),
             Err(err) => err,
         };
-        assert!(err
-            .to_string()
-            .contains("subscription_stream_capacity must be greater than zero"));
+        assert!(
+            err.to_string()
+                .contains("subscription_stream_capacity must be greater than zero")
+        );
     }
 
     #[test]
@@ -2948,9 +2956,10 @@ mod tests {
             Ok(_) => panic!("negative keep-alive should fail"),
             Err(err) => err,
         };
-        assert!(err
-            .to_string()
-            .contains("keep_alive_inactivity_ms must be non-negative"));
+        assert!(
+            err.to_string()
+                .contains("keep_alive_inactivity_ms must be non-negative")
+        );
     }
 
     #[test]
@@ -2961,9 +2970,10 @@ mod tests {
             Ok(_) => panic!("hi watermark above 1.0 should fail"),
             Err(err) => err,
         };
-        assert!(err
-            .to_string()
-            .contains("slow_consumer_hi_water_mark must be in 0.0..=1.0"));
+        assert!(
+            err.to_string()
+                .contains("slow_consumer_hi_water_mark must be in 0.0..=1.0")
+        );
 
         // The hi watermark accepts exactly 1.0; the lo watermark is half-open
         // and rejects it (mirrors napi).
@@ -2974,9 +2984,10 @@ mod tests {
             Ok(_) => panic!("lo watermark of 1.0 should fail"),
             Err(err) => err,
         };
-        assert!(err
-            .to_string()
-            .contains("slow_consumer_lo_water_mark must be in 0.0..1.0"));
+        assert!(
+            err.to_string()
+                .contains("slow_consumer_lo_water_mark must be in 0.0..1.0")
+        );
     }
 
     #[test]
@@ -3069,16 +3080,18 @@ mod tests {
         let mut config = PyEngineConfig::new(None).expect("default config");
         config.tls_client_credentials = Some("fixtures/client.p12".to_string());
         let err = EngineConfig::try_from(&config).err().expect("unpaired TLS");
-        assert!(err
-            .to_string()
-            .contains("tls_client_credentials set without tls_trust_material"));
+        assert!(
+            err.to_string()
+                .contains("tls_client_credentials set without tls_trust_material")
+        );
 
         config.tls_client_credentials = None;
         config.tls_trust_material = Some("fixtures/trust.p7".to_string());
         let err = EngineConfig::try_from(&config).err().expect("unpaired TLS");
-        assert!(err
-            .to_string()
-            .contains("tls_trust_material set without tls_client_credentials"));
+        assert!(
+            err.to_string()
+                .contains("tls_trust_material set without tls_client_credentials")
+        );
 
         config.tls_client_credentials = Some("fixtures/client.p12".to_string());
         config.zfp_remote = Some("8194".to_string());
@@ -3092,9 +3105,10 @@ mod tests {
         let err = EngineConfig::try_from(&config)
             .err()
             .expect("ZFP plus host");
-        assert!(err
-            .to_string()
-            .contains("zfp_remote cannot be combined with host/port/servers"));
+        assert!(
+            err.to_string()
+                .contains("zfp_remote cannot be combined with host/port/servers")
+        );
 
         config.host = "localhost".to_string();
         config.socks5_host = Some("proxy.invalid".to_string());
@@ -3102,9 +3116,10 @@ mod tests {
         let err = EngineConfig::try_from(&config)
             .err()
             .expect("ZFP plus SOCKS5");
-        assert!(err
-            .to_string()
-            .contains("zfp_remote cannot be combined with socks5_host/socks5_port"));
+        assert!(
+            err.to_string()
+                .contains("zfp_remote cannot be combined with socks5_host/socks5_port")
+        );
     }
 
     #[test]
@@ -3324,9 +3339,11 @@ mod tests {
             let value = timestamp_micros_to_py(py, 1_704_067_200_123_456).expect("timestamp");
             let dt = value.bind(py);
             let tzinfo = dt.getattr("tzinfo").expect("tzinfo");
-            assert!(tzinfo
-                .eq(PyTzInfo::utc(py).expect("utc"))
-                .expect("tz equality"));
+            assert!(
+                tzinfo
+                    .eq(PyTzInfo::utc(py).expect("utc"))
+                    .expect("tz equality")
+            );
         });
     }
     #[test]
@@ -3349,11 +3366,12 @@ mod tests {
             let value = subscription_update_to_pydict(py, update).expect("tick dict");
             let dict = value.bind(py).cast::<PyDict>().expect("dict");
             assert!(dict.contains("PX_LAST").expect("present field"));
-            assert!(dict
-                .get_item("PX_LAST")
-                .expect("lookup")
-                .expect("present value")
-                .is_none());
+            assert!(
+                dict.get_item("PX_LAST")
+                    .expect("lookup")
+                    .expect("present value")
+                    .is_none()
+            );
             assert!(!dict.contains("BID").expect("absent field"));
         });
     }

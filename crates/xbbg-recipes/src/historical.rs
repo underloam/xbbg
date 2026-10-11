@@ -18,13 +18,13 @@ use crate::utils::{
     apply_request_options, array_value_as_date, array_value_as_f64, array_value_as_string,
     as_string_col, canonical_name, find_column, naive_to_date32,
 };
-use arrow_array::builder::{Date32Builder, Float64Builder, StringBuilder};
 use arrow_array::RecordBatch;
+use arrow_array::builder::{Date32Builder, Float64Builder, StringBuilder};
 use arrow_array::{
-    new_null_array, Array, ArrayRef, Float64Array, Int32Array, Int64Array, LargeStringArray,
-    StringArray,
+    Array, ArrayRef, Float64Array, Int32Array, Int64Array, LargeStringArray, StringArray,
+    new_null_array,
 };
-use arrow_ord::sort::{lexsort_to_indices, SortColumn, SortOptions};
+use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use arrow_select::take::take_record_batch;
 use chrono::{Datelike, Duration, NaiveDate};
@@ -1262,13 +1262,12 @@ fn take_turnover_presentation(options: &mut RequestParams) -> Result<TurnoverPre
     }
     if let Some(value) =
         take_turnover_alias(kwargs, &["Orientation", "Direction", "Dir", "orientation"])
+        && options.format.is_none()
     {
-        if options.format.is_none() {
-            if value.eq_ignore_ascii_case("H") || value.eq_ignore_ascii_case("HORIZONTAL") {
-                options.format = Some("wide".to_string());
-            } else if value.eq_ignore_ascii_case("V") || value.eq_ignore_ascii_case("VERTICAL") {
-                options.format = Some("long".to_string());
-            }
+        if value.eq_ignore_ascii_case("H") || value.eq_ignore_ascii_case("HORIZONTAL") {
+            options.format = Some("wide".to_string());
+        } else if value.eq_ignore_ascii_case("V") || value.eq_ignore_ascii_case("VERTICAL") {
+            options.format = Some("long".to_string());
         }
     }
     Ok(presentation)
@@ -1290,29 +1289,30 @@ fn apply_turnover_presentation(
     mut batch: RecordBatch,
     presentation: &TurnoverPresentation,
 ) -> Result<RecordBatch> {
-    if let Some(descending) = presentation.descending {
-        if batch.num_rows() > 1 && batch.column_by_name("date").is_some() {
-            let mut columns = Vec::with_capacity(3);
-            for (name, descending) in [("ticker", false), ("date", descending), ("field", false)] {
-                if let Some(column) = batch.column_by_name(name) {
-                    columns.push(SortColumn {
-                        values: column.clone(),
-                        options: Some(SortOptions {
-                            descending,
-                            nulls_first: true,
-                        }),
-                    });
-                }
+    if let Some(descending) = presentation.descending
+        && batch.num_rows() > 1
+        && batch.column_by_name("date").is_some()
+    {
+        let mut columns = Vec::with_capacity(3);
+        for (name, descending) in [("ticker", false), ("date", descending), ("field", false)] {
+            if let Some(column) = batch.column_by_name(name) {
+                columns.push(SortColumn {
+                    values: column.clone(),
+                    options: Some(SortOptions {
+                        descending,
+                        nulls_first: true,
+                    }),
+                });
             }
-            let indices = lexsort_to_indices(&columns, None)?;
-            if indices
-                .values()
-                .iter()
-                .enumerate()
-                .any(|(row, &index)| row != index as usize)
-            {
-                batch = take_record_batch(&batch, &indices)?;
-            }
+        }
+        let indices = lexsort_to_indices(&columns, None)?;
+        if indices
+            .values()
+            .iter()
+            .enumerate()
+            .any(|(row, &index)| row != index as usize)
+        {
+            batch = take_record_batch(&batch, &indices)?;
         }
     }
     if !presentation.show_date {
@@ -1585,15 +1585,14 @@ fn merge_turnover_metadata(
 ) {
     for (key, value) in extra {
         if let Some(previous) = metadata.get_mut(key) {
-            if key.starts_with("xbbg.") {
-                if let (
+            if key.starts_with("xbbg.")
+                && let (
                     Ok(serde_json::Value::Object(mut left)),
                     Ok(serde_json::Value::Object(right)),
                 ) = (serde_json::from_str(previous), serde_json::from_str(value))
-                {
-                    left.extend(right);
-                    *previous = serde_json::Value::Object(left).to_string();
-                }
+            {
+                left.extend(right);
+                *previous = serde_json::Value::Object(left).to_string();
             }
         } else {
             metadata.insert(key.clone(), value.clone());
@@ -2567,11 +2566,13 @@ mod tests {
             assert_eq!(request.format.as_deref(), Some("long"));
         }
         // The same consumed options are passed to the currency recipe.
-        assert!(options
-            .kwargs
-            .unwrap()
-            .keys()
-            .all(|key| { matches!(key.as_str(), "periodicitySelection" | "CUSTOM_OVERRIDE") }));
+        assert!(
+            options
+                .kwargs
+                .unwrap()
+                .keys()
+                .all(|key| { matches!(key.as_str(), "periodicitySelection" | "CUSTOM_OVERRIDE") })
+        );
     }
 
     #[test]
@@ -2842,10 +2843,12 @@ mod tests {
                 "expression".to_string(),
                 format!("get({expected}) for(holdings('SYNTH US Equity'))"),
             )));
-            assert!(params
-                .elements
-                .unwrap()
-                .contains(&("mode".to_string(), "cached".to_string())));
+            assert!(
+                params
+                    .elements
+                    .unwrap()
+                    .contains(&("mode".to_string(), "cached".to_string()))
+            );
             assert_eq!(params.kwargs, options.kwargs);
         }
         let params = build_etf_holdings_request("SYNTH LN Equity", None, &options);

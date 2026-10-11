@@ -157,6 +157,7 @@ describe('@xbbg/core surface', () => {
       expect(api).toHaveProperty(key);
     }
   });
+
   it('keeps representative public type exports available', () => {
     const seatType: SeatType = 'BPS';
     const entitlementReport: EntitlementReport = { entitled: false, failedEids: [101] };
@@ -387,44 +388,44 @@ describe('@xbbg/core surface', () => {
   });
 });
 
-describe('conflated market data options', () => {
-  function fakeEngine(captured: Record<string, unknown>): api.Engine {
-    const engine = Object.create(api.Engine.prototype) as api.Engine;
-    (engine as unknown as { inner: unknown }).inner = {
-      subscribe: async (
-        tickers: readonly string[],
-        fields: readonly string[],
-        allFields?: boolean,
-      ) => {
-        captured.subscribe = { allFields, fields, tickers };
-        return fakeNativeSubscription();
-      },
-      subscribeWithOptions: async (
-        service: string,
-        tickers: readonly string[],
-        fields: readonly string[],
-        options?: readonly string[],
-        flushThreshold?: number,
-        overflowPolicy?: string,
-        streamCapacity?: number,
-        allFields?: boolean,
-      ) => {
-        captured.subscribeWithOptions = {
-          allFields,
-          fields,
-          flushThreshold,
-          options,
-          overflowPolicy,
-          service,
-          streamCapacity,
-          tickers,
-        };
-        return fakeNativeSubscription();
-      },
-    };
-    return engine;
-  }
+function fakeEngine(captured: Record<string, unknown>): api.Engine {
+  const engine = Object.create(api.Engine.prototype) as api.Engine;
+  (engine as unknown as { inner: unknown }).inner = {
+    subscribe: async (
+      tickers: readonly string[],
+      fields: readonly string[],
+      allFields?: boolean,
+    ) => {
+      captured.subscribe = { allFields, fields, tickers };
+      return fakeNativeSubscription();
+    },
+    subscribeWithOptions: async (
+      service: string,
+      tickers: readonly string[],
+      fields: readonly string[],
+      options?: readonly string[],
+      flushThreshold?: number,
+      overflowPolicy?: string,
+      streamCapacity?: number,
+      allFields?: boolean,
+    ) => {
+      captured.subscribeWithOptions = {
+        allFields,
+        fields,
+        flushThreshold,
+        options,
+        overflowPolicy,
+        service,
+        streamCapacity,
+        tickers,
+      };
+      return fakeNativeSubscription();
+    },
+  };
+  return engine;
+}
 
+describe('conflated market data options', () => {
   it('adds the conflate Bloomberg option for mktdata subscriptions', async () => {
     const captured: Record<string, unknown> = {};
     await fakeEngine(captured).subscribe(['ES1 Index'], ['BID', 'ASK'], { conflate: true });
@@ -744,6 +745,7 @@ describe('native Arrow zero-copy table construction', () => {
     expect(malformedMetadata.metadata).toStrictEqual({ 'xbbg.eid_data': '{not-json' });
     expect(malformedMetadata.eidData).toBeUndefined();
   });
+
   it.each([
     ['ReferenceDataRequest', 'IBM US Equity'],
     ['HistoricalDataRequest', 'MSFT US Equity'],
@@ -1184,23 +1186,23 @@ describe('recipe wrapper forwarding', () => {
   });
 });
 
+function int32Column(name: string, values: readonly number[]): NativeArrowColumn {
+  return {
+    name,
+    type: 'int32',
+    nullable: false,
+    length: values.length,
+    nullCount: 0,
+    data: typedBuffer(new Int32Array(values)),
+  };
+}
+
 describe('subscribeEtfInav preflight', () => {
   const QQQ = 'QQQ US Equity';
   const AT1 = 'AT1 LN Equity';
   const QQQ_NAV = 'QQQNV Index';
   const QQQ_INAV = 'QXV Index';
   const AT1_INAV = 'AT1IN Index';
-
-  function int32Column(name: string, values: readonly number[]): NativeArrowColumn {
-    return {
-      name,
-      type: 'int32',
-      nullable: false,
-      length: values.length,
-      nullCount: 0,
-      data: typedBuffer(new Int32Array(values)),
-    };
-  }
 
   // Arrow validity bits; each row's bit is set once, so addition equals OR.
   const VALIDITY_BITS = [1, 2, 4, 8, 16, 32, 64, 128] as const;

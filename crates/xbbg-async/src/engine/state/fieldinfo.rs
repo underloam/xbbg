@@ -10,8 +10,8 @@
 
 use std::sync::Arc;
 
-use arrow_array::builder::StringBuilder;
 use arrow_array::RecordBatch;
+use arrow_array::builder::StringBuilder;
 use arrow_schema::{DataType, Field, Schema};
 use tokio::sync::oneshot;
 use xbbg_log::trace;
@@ -178,8 +178,8 @@ mod tests {
     use super::*;
     use crate::field_cache::FieldTypeResolver;
     use arrow_array::StringArray;
-    use xbbg_core::test_support::TestEvent;
     use xbbg_core::EventType;
+    use xbbg_core::test_support::TestEvent;
 
     #[test]
     fn apiflds_datetime_ftype_reaches_the_field_cache() {

@@ -4,7 +4,7 @@
 //!
 //! Requires Bloomberg Terminal or BPIPE connection.
 
-use xbbg_core::{session::Session, EventType, SessionOptions};
+use xbbg_core::{EventType, SessionOptions, session::Session};
 
 #[allow(clippy::result_large_err)]
 fn main() -> xbbg_core::Result<()> {

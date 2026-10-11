@@ -4,10 +4,10 @@ use std::sync::Arc;
 
 use arrow_array::builder::PrimitiveBuilder;
 use arrow_array::types::{
-    ArrowDictionaryKeyType, Int16Type, Int32Type, Int64Type, Int8Type, UInt16Type, UInt32Type,
-    UInt64Type, UInt8Type,
+    ArrowDictionaryKeyType, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
+    UInt32Type, UInt64Type,
 };
-use arrow_array::{make_array, Array, ArrayRef, BinaryViewArray, DictionaryArray, StringViewArray};
+use arrow_array::{Array, ArrayRef, BinaryViewArray, DictionaryArray, StringViewArray, make_array};
 use arrow_buffer::ArrowNativeType;
 use arrow_data::ArrayDataBuilder;
 use arrow_schema::{DataType, FieldRef};

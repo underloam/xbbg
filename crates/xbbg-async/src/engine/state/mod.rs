@@ -23,7 +23,7 @@ pub use bql::BqlState;
 pub use bsrch::BsrchState;
 pub use bulkdata::BulkDataState;
 pub(crate) use channel::SubscriptionTerminator;
-pub use channel::{subscription_channel, SubscriptionReceiver, SubscriptionSender};
+pub use channel::{SubscriptionReceiver, SubscriptionSender, subscription_channel};
 pub use fieldinfo::FieldInfoState;
 pub use generic::GenericState;
 pub use histdata::HistDataState;
@@ -33,15 +33,15 @@ pub use intradaybar_stream::IntradayBarStreamState;
 pub use intradaytick::IntradayTickState;
 pub use intradaytick_stream::IntradayTickStreamState;
 pub use refdata::{LongMode, OutputFormat, RefDataState};
-pub(crate) use subscription::{subscription_forwarder_channel, SubscriptionForwarder};
 pub use subscription::{MessageOutcome, SubscriptionMetrics, SubscriptionState};
+pub(crate) use subscription::{SubscriptionForwarder, subscription_forwarder_channel};
 pub use update::{
     FieldIndex, FieldKind, FieldLayout, FieldMeta, SubscriptionUpdate, TopicId, UpdateField,
     UpdateValue,
 };
-pub use update_arrow::{subscription_update_to_record_batch, SubscriptionArrowBatcher};
+pub use update_arrow::{SubscriptionArrowBatcher, subscription_update_to_record_batch};
 pub(crate) use value_utils::ResponseMetadata;
 pub use value_utils::{
-    FieldExceptionMeta, SecurityErrorMeta, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS,
+    FieldExceptionMeta, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
+    METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
 };

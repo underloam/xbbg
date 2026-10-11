@@ -59,11 +59,13 @@ unsafe extern "C" fn event_trampoline(
     if event.is_null() || user_data.is_null() {
         return;
     }
-    let shared = &*(user_data as *const HandlerShared);
+    // SAFETY: null was rejected above, and the function contract guarantees
+    // `user_data` points at the live `HandlerShared` owned by `AsyncSession`.
+    let shared = unsafe { &*(user_data as *const HandlerShared) };
     // SAFETY: the SDK transfers ownership of the event to the handler (the
     // C++ adapter wraps it in `Event`, whose destructor releases it —
     // blpapi_session.h:1171-1176). `Event::from_raw` models the same.
-    let event = Event::from_raw(event);
+    let event = unsafe { Event::from_raw(event) };
     (shared.f)(event);
 }
 

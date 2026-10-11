@@ -628,8 +628,8 @@ fn parse_datetime_offset(sign: char, offset: &str) -> Result<i16> {
 
 fn parse_datetime(s: &str) -> Result<crate::ffi::blpapi_Datetime_t> {
     use crate::ffi::{
-        blpapi_Datetime_t, BLPAPI_DATETIME_DATE_PART, BLPAPI_DATETIME_HOURS_PART,
-        BLPAPI_DATETIME_MINUTES_PART, BLPAPI_DATETIME_OFFSET_PART, BLPAPI_DATETIME_SECONDS_PART,
+        BLPAPI_DATETIME_DATE_PART, BLPAPI_DATETIME_HOURS_PART, BLPAPI_DATETIME_MINUTES_PART,
+        BLPAPI_DATETIME_OFFSET_PART, BLPAPI_DATETIME_SECONDS_PART, blpapi_Datetime_t,
     };
 
     let mut dt = blpapi_Datetime_t::default();

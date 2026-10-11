@@ -25,8 +25,8 @@
 //! - Field info queries
 
 use std::collections::HashSet;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use arrow_array::RecordBatch;
@@ -57,8 +57,8 @@ use super::state::{
     IntradayTickStreamState, RefDataState,
 };
 use super::{
-    attach_auth_context, build_session_options, EngineConfig, PlannedRequestShape, PreparedRequest,
-    RequestParams, SlabKey, WorkerHealth, SESSION_STARTUP_TIMEOUT_MS,
+    EngineConfig, PlannedRequestShape, PreparedRequest, RequestParams, SESSION_STARTUP_TIMEOUT_MS,
+    SlabKey, WorkerHealth, attach_auth_context, build_session_options,
 };
 
 fn iter_named_request_parameters(
@@ -486,13 +486,13 @@ impl WorkerShared {
                     "request outstanding longer than expected; still waiting on Bloomberg"
                 );
             }
-            if let Some(hard) = hard_timeout {
-                if elapsed >= hard {
-                    expired.push(RequestTicket {
-                        key,
-                        generation: slot.cell.generation,
-                    });
-                }
+            if let Some(hard) = hard_timeout
+                && elapsed >= hard
+            {
+                expired.push(RequestTicket {
+                    key,
+                    generation: slot.cell.generation,
+                });
             }
         }
         expired
@@ -784,10 +784,10 @@ impl WorkerShared {
                     None => None,
                 }
             };
-            if let Some(partial) = partial {
-                if partial.on_partial(msg) {
-                    xbbg_log::trace!(worker_id = self.id, key = key, "partial response");
-                }
+            if let Some(partial) = partial
+                && partial.on_partial(msg)
+            {
+                xbbg_log::trace!(worker_id = self.id, key = key, "partial response");
             }
         }
     }
@@ -992,32 +992,32 @@ impl WorkerShared {
         // If this ServiceOpened/ServiceOpenFailure is a reply to one of our
         // async `open_service_async` calls, resolve the matching pending open
         // so every waiting `ensure_service` unblocks.
-        if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure") {
-            if let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0) {
-                let entry = self.pending_service_opens.lock().remove_by_cid(cid_int);
-                if let Some((service, open)) = entry {
-                    if msg_type == "ServiceOpened" {
-                        self.open_services.write().insert(service.clone());
-                        xbbg_log::debug!(worker_id = self.id, service = %service, "service opened");
-                        open.complete(|| Ok(()));
-                    } else {
-                        let reason = extract_reason_description(msg);
-                        xbbg_log::warn!(
-                            worker_id = self.id,
-                            service = %service,
-                            reason = %reason.as_deref().unwrap_or(""),
-                            "service open failed"
-                        );
-                        open.complete(|| {
-                            Err(BlpError::OpenService {
-                                service: service.clone(),
-                                source: None,
-                                label: reason.clone(),
-                            })
-                        });
-                    }
-                    return;
+        if matches!(msg_type, "ServiceOpened" | "ServiceOpenFailure")
+            && let Some(CorrelationId::Int(cid_int)) = msg.correlation_id(0)
+        {
+            let entry = self.pending_service_opens.lock().remove_by_cid(cid_int);
+            if let Some((service, open)) = entry {
+                if msg_type == "ServiceOpened" {
+                    self.open_services.write().insert(service.clone());
+                    xbbg_log::debug!(worker_id = self.id, service = %service, "service opened");
+                    open.complete(|| Ok(()));
+                } else {
+                    let reason = extract_reason_description(msg);
+                    xbbg_log::warn!(
+                        worker_id = self.id,
+                        service = %service,
+                        reason = %reason.as_deref().unwrap_or(""),
+                        "service open failed"
+                    );
+                    open.complete(|| {
+                        Err(BlpError::OpenService {
+                            service: service.clone(),
+                            source: None,
+                            label: reason.clone(),
+                        })
+                    });
                 }
+                return;
             }
         }
 
@@ -1898,22 +1898,22 @@ fn build_request_from_params(
     }
 
     // Set overrides (fieldId/value pairs on the "overrides" sequence element)
-    if let Some(overrides) = &params.overrides {
-        if !overrides.is_empty() {
-            let overrides_ptr = request.get_or_create_element("overrides")?;
-            for (field_id, value) in overrides {
-                // SAFETY: overrides_ptr is a valid element obtained from
-                // get_or_create_element above; entry_ptr is valid from append_element.
-                let entry_ptr = unsafe { request.append_element(overrides_ptr)? };
-                unsafe { request.set_element_string(entry_ptr, "fieldId", field_id)? };
-                unsafe { request.set_element_string(entry_ptr, "value", value)? };
-            }
-            xbbg_log::debug!(
-                worker_id = worker_id,
-                count = overrides.len(),
-                "overrides applied"
-            );
+    if let Some(overrides) = &params.overrides
+        && !overrides.is_empty()
+    {
+        let overrides_ptr = request.get_or_create_element("overrides")?;
+        for (field_id, value) in overrides {
+            // SAFETY: overrides_ptr is a valid element obtained from
+            // get_or_create_element above; entry_ptr is valid from append_element.
+            let entry_ptr = unsafe { request.append_element(overrides_ptr)? };
+            unsafe { request.set_element_string(entry_ptr, "fieldId", field_id)? };
+            unsafe { request.set_element_string(entry_ptr, "value", value)? };
         }
+        xbbg_log::debug!(
+            worker_id = worker_id,
+            count = overrides.len(),
+            "overrides applied"
+        );
     }
 
     // Set search spec (for FieldSearchRequest)

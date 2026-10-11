@@ -49,7 +49,9 @@ dependency changes must not reuse stale generated declarations.
 
 For cross-build reuse, export bindings once and pass that artifact explicitly
 with `BLPAPI_PREGENERATED_BINDINGS`. The artifact must match the target, SDK
-headers, and binding-generator configuration of the consuming build.
+headers, and binding-generator configuration of the consuming build. Bindings
+target the crate's `rust-version` and Rust 2024, not the compiler running the
+build, so an artifact exported by a newer toolchain still compiles on the MSRV.
 
 ## Dev / CI usage
 

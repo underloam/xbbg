@@ -6,7 +6,7 @@
 //! **Zero allocation**: Messages are borrowed from the event's message
 //! iterator and provide zero-cost access to their contents.
 
-use crate::{ffi, CorrelationId, Element, Name};
+use crate::{CorrelationId, Element, Name, ffi};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;

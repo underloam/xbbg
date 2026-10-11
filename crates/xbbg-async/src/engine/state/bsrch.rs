@@ -287,10 +287,10 @@ impl BsrchState {
 
         for idx in 0..width {
             let name = &self.column_names[idx];
-            if let Some(field) = fields.get_element(idx) {
-                if append_grid_field_value(&mut self.columns, name, field) {
-                    continue;
-                }
+            if let Some(field) = fields.get_element(idx)
+                && append_grid_field_value(&mut self.columns, name, field)
+            {
+                continue;
             }
 
             self.columns.append_null(name);

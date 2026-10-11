@@ -503,16 +503,14 @@ fn validate_field_metadata_aliases(
                         .to_string(),
                 });
             }
-            if !has_search_spec {
-                if let Some(field_values) =
+            if !has_search_spec
+                && let Some(field_values) =
                     params.fields.as_ref().filter(|values| !values.is_empty())
-                {
-                    if field_values.len() != 1 {
-                        return Err(BlpAsyncError::ConfigError {
+                && field_values.len() != 1
+            {
+                return Err(BlpAsyncError::ConfigError {
                             detail: "FieldSearchRequest requires exactly one field value when fields is used as a search alias".to_string(),
                         });
-                    }
-                }
             }
         }
         _ => {}

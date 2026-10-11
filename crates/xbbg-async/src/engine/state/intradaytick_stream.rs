@@ -7,15 +7,15 @@
 
 use std::sync::Arc;
 
+use arrow_array::ArrayRef;
+use arrow_array::RecordBatch;
 use arrow_array::builder::{
     Float64Builder, Int64Builder, StringBuilder, TimestampMicrosecondBuilder,
 };
-use arrow_array::ArrayRef;
-use arrow_array::RecordBatch;
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use tokio::sync::mpsc;
 
-use super::value_utils::{top_level_response_error, ResponseMetadata};
+use super::value_utils::{ResponseMetadata, top_level_response_error};
 use xbbg_core::{BlpError, Message};
 
 /// Streaming state for an intraday tick request (bdtick).

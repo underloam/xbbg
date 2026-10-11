@@ -38,8 +38,8 @@
 //! `error`) sets the initial global level. Python can still change it later via
 //! `xbbg.set_log_level()`.
 
-use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU8, Ordering};
 
 use tracing_core::{LevelFilter, Metadata};
 use tracing_subscriber::layer::{Context, Filter};
@@ -156,10 +156,10 @@ pub fn init() {
     use tracing_subscriber::fmt;
     use tracing_subscriber::prelude::*;
 
-    if let Ok(level) = std::env::var("RUST_LOG") {
-        if let Some(level) = parse_level(&level) {
-            set_level(level);
-        }
+    if let Ok(level) = std::env::var("RUST_LOG")
+        && let Some(level) = parse_level(&level)
+    {
+        set_level(level);
     }
 
     let fmt_layer = fmt::layer()

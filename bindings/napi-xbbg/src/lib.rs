@@ -14,7 +14,7 @@ use std::time::Duration;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrow_zero_copy::NativeArrowBatch;
-use napi::bindgen_prelude::{create_custom_tokio_runtime, Buffer, Error, Status};
+use napi::bindgen_prelude::{Buffer, Error, Status, create_custom_tokio_runtime};
 use napi_derive::napi;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -35,8 +35,8 @@ use xbbg_async::{
 use xbbg_core::BlpError;
 
 use xbbg_async::subscription_consumer::{
-    subscription_batch_capacity_hint, subscription_layouts_match, wait_for_subscription_close,
     PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer,
+    subscription_batch_capacity_hint, subscription_layouts_match, wait_for_subscription_close,
 };
 
 #[napi_derive::module_init]
@@ -2421,10 +2421,10 @@ impl JsSubscription {
                 if let Some(batch) = batcher.append(&update) {
                     remaining.push(to_native_record_batch(batch)?);
                 }
-                if batcher.rows() == self.batch_items {
-                    if let Some(batch) = batcher.flush() {
-                        remaining.push(to_native_record_batch(batch)?);
-                    }
+                if batcher.rows() == self.batch_items
+                    && let Some(batch) = batcher.flush()
+                {
+                    remaining.push(to_native_record_batch(batch)?);
                 }
             }
             if let Some(batch) = batcher.flush() {
@@ -2465,7 +2465,7 @@ impl JsSubscription {
 mod tests {
     use super::*;
     use std::future::Future;
-    use xbbg_async::engine::state::{subscription_channel, FieldLayout, FieldMeta, UpdateField};
+    use xbbg_async::engine::state::{FieldLayout, FieldMeta, UpdateField, subscription_channel};
     use xbbg_async::services::ExtractorType;
     use xbbg_core::AuthConfig;
 
@@ -2671,11 +2671,13 @@ mod tests {
             assert!(subscription.delivers_rows());
             subscription.unsubscribe(Some(false)).await.expect("close");
             assert!(subscription.delivers_rows());
-            assert!(subscription
-                .next_updates(None, None)
-                .await
-                .unwrap()
-                .is_none());
+            assert!(
+                subscription
+                    .next_updates(None, None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
         });
     }
 
@@ -2692,7 +2694,10 @@ mod tests {
                     "[XBBG:SESSION] Session start failed: unavailable - synthetic cause",
                 ),
                 (
-                    BlpError::SubscriptionFailure { cid: None, label: None },
+                    BlpError::SubscriptionFailure {
+                        cid: None,
+                        label: None,
+                    },
                     Status::GenericFailure,
                     "[XBBG:REQUEST] Subscription failed",
                 ),
@@ -2761,7 +2766,9 @@ mod tests {
                     "[XBBG:INTERNAL] synthetic failure",
                 ),
                 (
-                    BlpAsyncError::ConfigError { detail: "synthetic config failure".into() },
+                    BlpAsyncError::ConfigError {
+                        detail: "synthetic config failure".into(),
+                    },
                     Status::InvalidArg,
                     "[XBBG:VALIDATION] Configuration error: synthetic config failure",
                 ),
@@ -2773,7 +2780,8 @@ mod tests {
                 (
                     BlpError::Internal {
                         detail: "session connection dropped (worker=2)".into(),
-                    }.into(),
+                    }
+                    .into(),
                     Status::GenericFailure,
                     "[XBBG:INTERNAL] Internal error: session connection dropped (worker=2)",
                 ),
@@ -2781,7 +2789,8 @@ mod tests {
                     BlpError::SubscriptionDataLoss {
                         topic: "SYNTHETIC Equity".into(),
                         detail: "synthetic overflow".into(),
-                    }.into(),
+                    }
+                    .into(),
                     Status::GenericFailure,
                     "[XBBG:DATALOSS] Subscription data loss [topic=SYNTHETIC Equity]: synthetic overflow",
                 ),
@@ -3382,9 +3391,10 @@ mod tests {
             })
             .err()
             .expect("negative keep-alive duration");
-            assert!(err
-                .to_string()
-                .contains(&format!("{field} must be non-negative")));
+            assert!(
+                err.to_string()
+                    .contains(&format!("{field} must be non-negative"))
+            );
         }
         let err = EngineConfig::try_from(EngineConfigInput {
             request_timeout_ms: Some(-1),

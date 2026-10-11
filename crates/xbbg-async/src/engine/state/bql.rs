@@ -9,8 +9,8 @@
 
 use arrow_array::RecordBatch;
 use serde::{
-    de::{self, MapAccess, SeqAccess, Visitor},
     Deserialize, Deserializer,
+    de::{self, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::Value as JsonValue;
 use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
@@ -238,15 +238,14 @@ impl BqlState {
         if let Some(beql_data) = root.get_by_str("beqlData") {
             if let Some(results) = beql_data.get_by_str("results") {
                 // Check if first result is a JSON string
-                if !results.is_empty() {
-                    if let Some(first) = results.get_element(0) {
-                        if let Some(xbbg_core::Value::String(s)) = first.get_value(0) {
-                            // This is a JSON-encoded response
-                            if s.starts_with('{') {
-                                self.json_buffer = Some(s.to_string());
-                                return;
-                            }
-                        }
+                if !results.is_empty()
+                    && let Some(first) = results.get_element(0)
+                    && let Some(xbbg_core::Value::String(s)) = first.get_value(0)
+                {
+                    // This is a JSON-encoded response
+                    if s.starts_with('{') {
+                        self.json_buffer = Some(s.to_string());
+                        return;
                     }
                 }
                 self.extract_results(&results);
@@ -254,11 +253,11 @@ impl BqlState {
             }
 
             // Check for direct JSON string in beqlData
-            if let Some(xbbg_core::Value::String(s)) = beql_data.get_value(0) {
-                if s.starts_with('{') {
-                    self.json_buffer = Some(s.to_string());
-                    return;
-                }
+            if let Some(xbbg_core::Value::String(s)) = beql_data.get_value(0)
+                && s.starts_with('{')
+            {
+                self.json_buffer = Some(s.to_string());
+                return;
             }
         }
 
@@ -269,11 +268,11 @@ impl BqlState {
         }
 
         // Structure 3: Check if root contains a JSON string value
-        if let Some(xbbg_core::Value::String(s)) = root.get_value(0) {
-            if s.starts_with('{') {
-                self.json_buffer = Some(s.to_string());
-                return;
-            }
+        if let Some(xbbg_core::Value::String(s)) = root.get_value(0)
+            && s.starts_with('{')
+        {
+            self.json_buffer = Some(s.to_string());
+            return;
         }
 
         // Structure 4: Flatten the entire response (fallback)

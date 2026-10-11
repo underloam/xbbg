@@ -7,7 +7,7 @@ name = "xbbg-langgraph"
 version = "0.1.0"
 description = "LangChain and LangGraph tools for Bloomberg workflows backed by Python xbbg"
 readme = { text = "LangChain/LangGraph-compatible Bloomberg tools backed by xbbg. Includes bounded request tools, finite streaming snapshots, native extension helpers, and content-and-artifact results. See https://github.com/underloam/xbbg#python-langchain-and-langgraph for installation and usage. Bloomberg access and SDK runtime libraries are required for live requests.", content-type = "text/plain" }
-requires-python = ">=3.10,<3.15"
+requires-python = ">=3.11,<3.15"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [{ name = "xbbg contributors" }]
@@ -15,7 +15,6 @@ classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Financial and Insurance Industry",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

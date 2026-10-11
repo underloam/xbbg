@@ -4,12 +4,12 @@ use std::sync::{Arc, LazyLock};
 
 use super::refdata::LongMode;
 use super::typed_builder::{ArrowType, ColumnSet, TypedBuilder};
+use arrow_array::ArrayRef;
+use arrow_array::RecordBatch;
 use arrow_array::builder::{
     BooleanBuilder, Date32Builder, Float64Builder, Int64Builder, StringBuilder,
     Time64MicrosecondBuilder, TimestampMicrosecondBuilder,
 };
-use arrow_array::ArrayRef;
-use arrow_array::RecordBatch;
 use arrow_schema::{Field, Schema, SchemaRef};
 use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
@@ -1562,10 +1562,12 @@ mod tests {
             }],
         );
         let batch1 = meta1.attach(tiny_batch());
-        assert!(batch1
-            .schema_ref()
-            .metadata()
-            .contains_key(METADATA_KEY_EID_DATA));
+        assert!(
+            batch1
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_EID_DATA)
+        );
 
         // Shard 2: unentitled security — securityError AND eidData together
         // (the SAPI/B-PIPE case: EIDs are reported for securities the
@@ -1616,8 +1618,8 @@ mod tests {
         use crate::engine::state::refdata::OutputFormat;
         use crate::engine::state::{BulkDataState, RefDataState};
         use tokio::sync::oneshot;
-        use xbbg_core::test_support::TestEvent;
         use xbbg_core::EventType;
+        use xbbg_core::test_support::TestEvent;
 
         fn response(bulk: bool, failed: bool) -> TestEvent {
             let field_data = if bulk {
