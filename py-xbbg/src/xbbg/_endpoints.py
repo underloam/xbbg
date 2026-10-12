@@ -346,8 +346,9 @@ async def abql(
         expression: BQL expression string.
         backend: DataFrame backend to return. If None, uses global default.
         app_name: Bloomberg-authorized application name to set as
-            ``clientContext.appName``. If None, the client context app name is
-            omitted.
+            ``clientContext.appName`` for this request, overriding any engine
+            ``bql_app_name``. If None, the engine default applies when
+            configured; otherwise the request element is omitted.
 
     Returns:
         DataFrame with columns: id, <field1>, <field2>, ...

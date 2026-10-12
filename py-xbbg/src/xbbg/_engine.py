@@ -59,6 +59,10 @@ class Engine:
         df = blp.bdp(..., engine=engine)
 
     The global ``configure()`` + ``blp.bdp()`` API is unaffected.
+
+    ``bql_app_name`` sets the scoped default for BQL
+    ``clientContext.appName`` without configuring authentication. A per-call
+    ``bql(..., app_name=...)`` value overrides it.
     """
 
     def __init__(self, **kwargs: Any) -> None:
@@ -236,6 +240,7 @@ _VALID_CONFIG_KEYS: frozenset[str] = frozenset(
         "overflow_policy",
         "warmup_services",
         "field_cache_path",
+        "bql_app_name",
         "auth_method",
         "app_name",
         "dir_property",
@@ -303,12 +308,17 @@ def configure(
             subscription_pool_size, runtime_worker_threads,
             max_subscription_sessions, shard_requests, shard_threshold,
             shard_chunk_size, shard_max_concurrent, field_cache_path,
-            auth_method, app_name, user_id, ip_address, token, etc.). The closed
-            string fields are ``validation_mode`` (``"disabled"`` (default),
-            ``"lenient"``, or ``"strict"``), ``overflow_policy``
-            (``"drop_newest"`` (default) or ``"block"``), and
-            ``sdk_log_level`` (``"off"`` (default), ``"fatal"``, ``"error"``,
-            ``"warn"``, ``"info"``, ``"debug"``, or ``"trace"``).
+            bql_app_name, auth_method, app_name, user_id, ip_address, token,
+            etc.). ``bql_app_name`` is an optional BQL
+            ``clientContext.appName`` default, independent of the
+            authentication-only ``app_name``. Per-call BQL ``app_name`` values
+            override it; when it is None and no per-call value is supplied, the
+            request element is omitted. The closed string fields are
+            ``validation_mode`` (``"disabled"`` (default), ``"lenient"``, or
+            ``"strict"``), ``overflow_policy`` (``"drop_newest"`` (default) or
+            ``"block"``), and ``sdk_log_level`` (``"off"`` (default),
+            ``"fatal"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"``, or
+            ``"trace"``).
 
     Raises:
         TypeError: If an unknown keyword argument is passed.
@@ -341,7 +351,10 @@ def configure(
         cfg = EngineConfig(request_pool_size=4)
         xbbg.configure(cfg, subscription_pool_size=2)
 
-        # Option 4: B-PIPE / SAPI authentication
+        # Option 4: Default BQL application context (not authentication)
+        xbbg.configure(bql_app_name="example-bql-app")
+
+        # Option 5: B-PIPE / SAPI authentication
         xbbg.configure(
             host="bpipe-host",
             port=8195,
@@ -353,7 +366,7 @@ def configure(
             auto_restart_on_disconnection=False,
         )
 
-        # Option 5: Custom field cache location
+        # Option 6: Custom field cache location
         xbbg.configure(field_cache_path="/data/bloomberg/field_cache.json")
     """
     global _config, _engine

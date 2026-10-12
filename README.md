@@ -162,10 +162,10 @@ per_sec = blp.bdp(
 # Bulk data
 holders = blp.bds("AAPL US Equity", "DVD_Hist_All", DVD_Start_Dt="20240101")
 
-# BQL (clientContext.appName is omitted by default)
+# BQL omits clientContext.appName unless an engine default or per-call value is set.
 result = blp.bql("get(px_last) for('AAPL US Equity')")
 
-# Explicitly select a Bloomberg-authorized application context.
+# Override the engine BQL application context for this request.
 # The application name below is synthetic; replace it with one authorized for your environment.
 authorized_result = blp.bql(
     "get(px_last) for('AAPL US Equity')",
@@ -389,6 +389,22 @@ configure(host="localhost", port=8194)
 print(blp.bdp("AAPL US Equity", "PX_LAST"))
 ```
 
+Set an optional engine-wide BQL request application context before the first
+request:
+
+```python
+from xbbg import configure
+
+configure(bql_app_name="example-bql-app")
+```
+
+`bql_app_name` supplies BQL `sendQuery`'s `clientContext.appName`; it is not a
+session-authentication setting. The authentication-only `app_name` still
+requires the corresponding `auth_method`. A per-call
+`blp.bql(..., app_name="...")` or `blp.abql(..., app_name="...")` value
+overrides the engine BQL default. With `bql_app_name=None` and no per-call
+value, xbbg omits the request element and preserves the service default.
+
 Common environments:
 
 | Environment | Use when | Configuration shape |
@@ -440,7 +456,7 @@ The engine uses separate worker pools for request/response calls and subscriptio
 
 `runtime_worker_threads` defaults to **2** (minimum **1**) and controls the engine's shared Tokio runtime, not the total process thread count. `subscription_pool_size` is the pre-warm count (default **1**, minimum **0**); `max_subscription_sessions` caps concurrent subscription sessions (default **32**, minimum **1**, and at least `subscription_pool_size`). Native subscription admission waits for capacity instead of allocating unbounded sessions. Sessions host shared market-data feeds (see [Subscriptions](#subscriptions-raw-tick-mode-and-all-fields)): a subscription that only joins existing feeds uses no session, and a session returns to the pool once it hosts no feeds. Node uses the corresponding `runtimeWorkerThreads`, `subscriptionPoolSize`, and `maxSubscriptionSessions` fields.
 
-Use `Engine(...)` when an application needs a scoped engine with its own connection settings instead of mutating global configuration.
+Use `Engine(...)` when an application needs a scoped engine with its own connection settings instead of mutating global configuration. `Engine(bql_app_name="example-bql-app")` gives that scope its own BQL request default without configuring authentication.
 
 Engine shutdown closes subscription admission and signals both idle and checked-out sessions, waking pending operations so termination and errors can reach callers. Close subscriptions explicitly before releasing their engine; do not rely on interpreter teardown for application cleanup.
 

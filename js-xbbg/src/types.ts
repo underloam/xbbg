@@ -121,6 +121,8 @@ export interface EngineConfig {
   overflowPolicy?: OverflowPolicy;
   warmupServices?: string[];
   fieldCachePath?: string;
+  /** Default BQL clientContext.appName. Must be non-blank; independent of auth.appName. */
+  bqlAppName?: string;
   auth?: AuthConfig;
   tls?: TlsConfig;
   numStartAttempts?: number;
@@ -285,7 +287,7 @@ export interface CdxOptions extends BdpOptions {
 }
 
 export interface BqlOptions {
-  /** Bloomberg-authorized application name for clientContext.appName. Omitted by default. */
+  /** Per-call clientContext.appName override, ahead of kwargs and EngineConfig.bqlAppName. */
   appName?: string;
   kwargs?: OverridesMap;
   format?: RequestFormat;

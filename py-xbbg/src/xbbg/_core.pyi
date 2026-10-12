@@ -738,6 +738,18 @@ class PyEngineConfig:
         Set to None to use the default path.
         """
     @property
+    def bql_app_name(self) -> typing.Optional[builtins.str]:
+        r"""
+        Optional BQL clientContext.appName request default.
+        Independent of authentication; None leaves the service default unchanged.
+        """
+    @bql_app_name.setter
+    def bql_app_name(self, value: typing.Optional[builtins.str]) -> None:
+        r"""
+        Optional BQL clientContext.appName request default.
+        Independent of authentication; None leaves the service default unchanged.
+        """
+    @property
     def auth_method(self) -> typing.Optional[builtins.str]:
         r"""
         Optional auth method: "none", "user", "app", "userapp", "dir", "manual", or "token".

@@ -130,6 +130,8 @@ pub struct EngineConfigInput {
     pub overflow_policy: Option<String>,
     pub warmup_services: Option<Vec<String>>,
     pub field_cache_path: Option<String>,
+    /// Default BQL clientContext.appName; independent of session authentication.
+    pub bql_app_name: Option<String>,
     pub auth: Option<AuthConfigInput>,
     pub tls: Option<TlsConfigInput>,
     pub num_start_attempts: Option<u32>,
@@ -440,6 +442,7 @@ fn config_field_name(field: &str) -> &str {
     match field {
         "auth_method" => "auth.method",
         "app_name" => "auth.appName",
+        "bql_app_name" => "bqlAppName",
         "dir_property" => "auth.dirProperty",
         "user_id" => "auth.userId",
         "ip_address" => "auth.ipAddress",
@@ -539,6 +542,7 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
         if let Some(field_cache_path) = input.field_cache_path {
             config.field_cache_path = Some(field_cache_path.into());
         }
+        config.bql_app_name = input.bql_app_name;
         if let Some(num_start_attempts) = input.num_start_attempts {
             config.num_start_attempts = num_start_attempts as usize;
         }
@@ -2491,6 +2495,7 @@ mod tests {
             overflow_policy: None,
             warmup_services: None,
             field_cache_path: None,
+            bql_app_name: None,
             auth: None,
             tls: None,
             num_start_attempts: None,
@@ -3050,6 +3055,31 @@ mod tests {
         })
         .expect("subscription prewarm may be disabled");
         assert_eq!(config.subscription_pool_size, 0);
+    }
+
+    #[test]
+    fn engine_config_input_validates_bql_and_auth_app_names_independently() {
+        for (bql_app_name, auth_app_name, expected_field) in [
+            (" \t", "example-auth-app", "bqlAppName"),
+            ("example-bql-app", "", "auth.appName"),
+        ] {
+            let err = EngineConfig::try_from(EngineConfigInput {
+                bql_app_name: Some(bql_app_name.to_string()),
+                auth: Some(AuthConfigInput {
+                    method: "app".to_string(),
+                    app_name: Some(auth_app_name.to_string()),
+                    dir_property: None,
+                    user_id: None,
+                    ip_address: None,
+                    token: None,
+                }),
+                ..minimal_input()
+            })
+            .err()
+            .expect("one valid application name must not mask the other invalid name");
+            assert_eq!(err.status, Status::InvalidArg);
+            assert!(err.to_string().contains(expected_field));
+        }
     }
 
     #[test]

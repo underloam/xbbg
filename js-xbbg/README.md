@@ -82,9 +82,19 @@ try {
 }
 ```
 
-`appName` is optional; when omitted, BQL requests do not set `clientContext.appName`. Raw
-`kwargs: { 'clientContext.appName': '...' }` remains supported, and explicit `appName` takes
-precedence if both are supplied.
+`bqlAppName` sets an optional shared-engine default for BQL `clientContext.appName`:
+
+```ts
+xbbg.configure({ bqlAppName: 'example-bql-app' });
+const bqlEngine = await xbbg.Engine.connect({ bqlAppName: 'example-bql-app' });
+```
+
+It must be non-blank when configured and is independent of `auth.appName`, which
+authorizes the session identity. It does not set an SDK application identity key or
+session diagnostic name. With neither a configured default nor a request override,
+BQL omits `clientContext.appName`; no implicit application name is supplied.
+Per-call `appName` overrides raw `kwargs: { 'clientContext.appName': '...' }`,
+and either explicit request value takes precedence over `bqlAppName`.
 
 ## Connections
 

@@ -394,11 +394,12 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 
 ## Engine configuration
 
-`connect()` and `configure()` accept a structured `EngineConfig` object. The most important connection controls are:
+`Engine.connect()`, `connect()`, and `configure()` accept a structured `EngineConfig` object. The most important connection controls are:
 
 - `host` / `port` for a local Terminal session or an already-provisioned direct endpoint
 - `servers` for ordered failover across already-provisioned direct hosts
 - `auth` for Bloomberg session identity auth: `user`, `app`, `userapp`, `dir`, `manual`, or `token`
+- `bqlAppName` for an optional, non-blank BQL `clientContext.appName` default, independent of `auth.appName`
 - `tls` for encrypted B-PIPE/direct sessions and as a required input for ZFP
 - `zfpRemote` (`'8194'` or `'8196'`) for Bloomberg-assigned ZFP endpoints in an entitled environment; do not combine it with `host`/`port`/`servers`/`socks5`
 - `socks5` for proxied access to already-provisioned direct Bloomberg endpoints
@@ -409,6 +410,24 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 - `maxSubscriptionSessions`: concurrent subscription-session cap, default **32**, minimum **1**, and at least `subscriptionPoolSize`; native admission waits for capacity instead of allocating unbounded sessions
 
 The JS binding forwards these fields directly to the Rust engine, so Node can configure the same auth and transport features already available in the core runtime. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`.
+
+```typescript
+xbbg.configure({ bqlAppName: 'example-bql-app' });
+const bqlEngine = await xbbg.Engine.connect({
+  bqlAppName: 'example-bql-app',
+  auth: { method: 'app', appName: 'example-auth-app' },
+});
+```
+
+`auth.appName` authorizes the session identity; `bqlAppName` only supplies a request
+element for `//blp/bqlsvc` `sendQuery`. It does not set the SDK application identity
+key or session diagnostic name, and neither application name is derived from the
+other. Omitting `bqlAppName` preserves the existing request defaults without an
+implicit application name. Explicit request elements or
+`kwargs: { 'clientContext.appName': 'example-request-app' }` override the engine
+default. `Engine.bql(query, { appName: 'example-call-app' })` remains the per-call
+override and takes precedence over raw kwargs when both are supplied. Invalid
+engine BQL defaults are reported as `bqlAppName`, independently of `auth.appName`.
 
 Engine shutdown closes admission and signals idle and checked-out subscription sessions so blocked operations can terminate. Await subscription cleanup while the engine is still available.
 

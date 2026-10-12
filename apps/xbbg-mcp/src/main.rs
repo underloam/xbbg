@@ -39,7 +39,6 @@ struct XbbgMcpServer {
     tool_router: ToolRouter<Self>,
     engine: OnceCell<Arc<Engine>>,
     engine_config: EngineConfig,
-    bql_app_name: Option<String>,
     result_limits: ResultLimits,
     serialization_permits: Arc<Semaphore>,
 }
@@ -53,7 +52,6 @@ impl XbbgMcpServer {
             tool_router: Self::tool_router(),
             engine: OnceCell::new(),
             engine_config,
-            bql_app_name: env_string(&["XBBG_MCP_BQL_APP_NAME"]),
             result_limits,
             serialization_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SERIALIZATIONS)),
         })
@@ -213,7 +211,7 @@ impl XbbgMcpServer {
         &self,
         Parameters(args): Parameters<BqlArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        let params = self.bounded_input(bql_request_params(args, self.bql_app_name.as_deref()))?;
+        let params = self.bounded_input(bql_request_params(args))?;
         self.execute_request(params).await
     }
 
@@ -401,6 +399,7 @@ fn load_settings_from_env() -> Result<(EngineConfig, ResultLimits), String> {
     ])?
     .unwrap_or(8194);
     config.transport = Transport::Direct(vec![ServerAddr::new(host, port)]);
+    config.bql_app_name = env_string(&["XBBG_MCP_BQL_APP_NAME"]);
     config.request_pool_size =
         env_usize(&["XBBG_MCP_REQUEST_POOL_SIZE", "XBBG_REQUEST_POOL_SIZE"])?
             .unwrap_or(config.request_pool_size);

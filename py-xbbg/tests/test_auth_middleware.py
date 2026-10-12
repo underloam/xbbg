@@ -33,6 +33,7 @@ class DummyConfig:
         self.overflow_policy = "drop_newest"
         self.warmup_services = ["//blp/refdata", "//blp/apiflds"]
         self.field_cache_path = None
+        self.bql_app_name = None
         self.auth_method = None
         self.app_name = None
         self.dir_property = None

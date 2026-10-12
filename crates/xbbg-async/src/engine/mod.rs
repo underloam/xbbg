@@ -581,6 +581,10 @@ pub struct EngineConfig {
     pub field_cache_path: Option<std::path::PathBuf>,
     /// Structured Bloomberg session auth configuration.
     pub auth: Option<AuthConfig>,
+    /// Optional BQL `clientContext.appName` default, independent of session auth.
+    /// Explicit request elements/kwargs take precedence; `None` keeps the
+    /// service's current default unchanged.
+    pub bql_app_name: Option<String>,
     /// Optional TLS material. Required for `Transport::Zfp`; optional for
     /// `Transport::Direct` when connecting to B-PIPE over TLS.
     pub tls: Option<TlsConfig>,
@@ -674,6 +678,15 @@ impl EngineConfig {
                 detail: "shard_max_concurrent must be greater than zero".to_string(),
             });
         }
+        if self
+            .bql_app_name
+            .as_deref()
+            .is_some_and(|name| name.trim().is_empty())
+        {
+            return Err(BlpAsyncError::ConfigError {
+                detail: "bql_app_name must be non-empty when configured".to_string(),
+            });
+        }
         Ok(())
     }
 }
@@ -703,6 +716,7 @@ impl Default for EngineConfig {
             validation_mode: ValidationMode::default(),
             field_cache_path: None,
             auth: None,
+            bql_app_name: None,
             num_start_attempts: 3,
             auto_restart_on_disconnection: true,
             retry_policy: RetryPolicy::default(),
@@ -887,6 +901,7 @@ impl Engine {
         params: RequestParams,
     ) -> Result<PreparedRequestBuilder, BlpAsyncError> {
         let mut builder = PreparedRequestBuilder::prepare(params, &self.schema_cache)?;
+        builder.apply_bql_app_name(self.config.bql_app_name.as_deref());
         self.apply_cached_field_types(&mut builder)?;
         Ok(builder)
     }

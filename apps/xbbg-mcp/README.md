@@ -197,7 +197,7 @@ Common settings:
 - `XBBG_MCP_PORT` / `XBBG_PORT`
 - `XBBG_MCP_AUTH_METHOD` / `XBBG_AUTH_METHOD`
 - `XBBG_MCP_APP_NAME`
-- `XBBG_MCP_BQL_APP_NAME` – optional BQL client context default; independent of session authentication
+- `XBBG_MCP_BQL_APP_NAME` – optional shared-engine BQL client-context default; independent of session authentication
 - `XBBG_MCP_DIR_PROPERTY`
 - `XBBG_MCP_USER_ID`
 - `XBBG_MCP_IP_ADDRESS`
@@ -220,11 +220,13 @@ Supported auth methods:
 
 ### BQL client context
 
-The `bql` tool accepts an optional `app_name` that sets Bloomberg's
-`clientContext.appName`. A per-call value takes precedence over
-`XBBG_MCP_BQL_APP_NAME`, which supplies a server-wide default for this tool.
-If neither is supplied, the app name is omitted and the current Bloomberg
-default is unchanged. No application name is selected automatically.
+The shared Rust engine owns the optional BQL application-name default.
+`XBBG_MCP_BQL_APP_NAME` sets `EngineConfig.bql_app_name` for every BQL `sendQuery`
+dispatched by this server, including the generic `request` tool.
+The `bql` tool's per-call `app_name` and explicit `clientContext.appName` elements
+or kwargs override the engine default. If no value is supplied, the app name is
+omitted and the current Bloomberg default is unchanged; no name is selected
+automatically.
 
 ```json
 {
@@ -238,6 +240,11 @@ does not grant BQL entitlement or change session authentication.
 `XBBG_MCP_APP_NAME` remains an authentication setting, not a BQL client-context
 setting. An explicitly blank per-call `app_name` is rejected rather than falling
 back to the server's application name.
+
+The SDK's [application-mode authentication](https://bloomberg.github.io/blpapi-docs/python/3.26.6/_autosummary/blpapi.AuthOptions.html#blpapi.AuthOptions.createWithApp)
+and [application identity key](https://bloomberg.github.io/blpapi-docs/python/3.26.6/_autosummary/blpapi.SessionOptions.html#blpapi.SessionOptions.setApplicationIdentityKey)
+are separate session settings. The BQL default is a request element and never
+sets either SDK authentication or session-identification options.
 
 The generic `request` tool also accepts `clientContext.appName` as a dotted key
 in its string-valued `elements` map; nested objects are not accepted there.

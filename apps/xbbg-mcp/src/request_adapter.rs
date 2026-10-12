@@ -372,14 +372,11 @@ pub(crate) fn bdib_request_params(args: BdibArgs) -> Result<RequestParams, Error
     })
 }
 
-pub(crate) fn bql_request_params(
-    args: BqlArgs,
-    default_app_name: Option<&str>,
-) -> Result<RequestParams, ErrorData> {
-    let app_name = match args.app_name {
-        Some(value) => Some(normalize_required_string("app_name", value)?),
-        None => default_app_name.map(str::to_owned),
-    };
+pub(crate) fn bql_request_params(args: BqlArgs) -> Result<RequestParams, ErrorData> {
+    let app_name = args
+        .app_name
+        .map(|value| normalize_required_string("app_name", value))
+        .transpose()?;
     let mut elements = Vec::with_capacity(1 + usize::from(app_name.is_some()));
     elements.push((
         "expression".to_string(),
@@ -942,37 +939,13 @@ mod tests {
     }
 
     #[test]
-    fn bql_app_context_selection_preserves_defaults_and_call_precedence() {
-        for (input, configured, expected) in [
-            (None, None, None),
-            (None, Some("SERVER_APP"), Some("SERVER_APP")),
-            (Some("CALL_APP"), Some("SERVER_APP"), Some("CALL_APP")),
-        ] {
-            let args = serde_json::from_value(serde_json::json!({
-                "expression": "get(name()) for('SYNTH US Equity')",
-                "app_name": input,
-            }))
-            .unwrap();
-            let request = bql_request_params(args, configured).unwrap();
-            let selected = request
-                .elements
-                .as_ref()
-                .unwrap()
-                .iter()
-                .find(|(key, _)| key == "clientContext.appName")
-                .map(|(_, value)| value.as_str());
-            assert_eq!(selected, expected);
-        }
-    }
-
-    #[test]
-    fn blank_explicit_bql_app_context_cannot_fall_back_to_server_context() {
+    fn blank_explicit_bql_app_context_is_rejected_before_dispatch() {
         let args = serde_json::from_value(serde_json::json!({
             "expression": "get(name()) for('SYNTH US Equity')",
             "app_name": "  ",
         }))
         .unwrap();
-        let error = bql_request_params(args, Some("SERVER_APP")).unwrap_err();
+        let error = bql_request_params(args).unwrap_err();
         assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         assert!(error.message.contains("app_name"));
     }
