@@ -1228,12 +1228,17 @@ export class Engine {
   }
 
   public async bql(query: string, options: BqlOptions = {}): Promise<unknown> {
+    let kwargs = mapObjectToPairs(options.kwargs);
+    if (options.appName !== undefined) {
+      kwargs ??= [];
+      upsertStringPair(kwargs, 'clientContext.appName', options.appName);
+    }
     return await this.request({
       backend: options.backend,
       elements: [{ key: 'expression', value: toRequestString(query) }],
       extractor: 'bql',
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
+      kwargs,
       operation: 'sendQuery',
       service: '//blp/bqlsvc',
     });

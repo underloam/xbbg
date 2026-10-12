@@ -61,9 +61,14 @@ const ticks = await xbbg.blp.abdtick(
   '2024-12-02T10:00:00',
 );
 
-// BQL and other requests on an engine
+// BQL omits clientContext.appName by default
 const engine = await xbbg.connect({ host: 'localhost', port: 8194 });
 const bql = await engine.bql("get(px_last) for('AAPL US Equity')");
+
+// Explicitly select an authorized application context (the value here is synthetic)
+const authorizedBql = await engine.bql("get(px_last) for('AAPL US Equity')", {
+  appName: 'example-authorized-bql-app',
+});
 
 // Live data
 const sub = await xbbg.blp.asubscribe(['AAPL US Equity'], ['LAST_PRICE', 'BID', 'ASK']);
@@ -76,6 +81,10 @@ try {
   await sub.unsubscribe();
 }
 ```
+
+`appName` is optional; when omitted, BQL requests do not set `clientContext.appName`. Raw
+`kwargs: { 'clientContext.appName': '...' }` remains supported, and explicit `appName` takes
+precedence if both are supplied.
 
 ## Connections
 

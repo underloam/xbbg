@@ -3,11 +3,56 @@
 //! Adapters choose their exception class or status code and attach host-specific
 //! attributes. Existing message differences are limited to [`ErrorStyle`].
 
-use std::fmt::Write;
+use std::fmt::{self, Display, Write};
 
 use xbbg_core::BlpError;
 
 use crate::BlpAsyncError;
+
+/// Borrow a core error's host-facing message without allocating a buffer.
+///
+/// Request failures retain their full service, request, and source context.
+/// Other variants preserve the core error's existing [`Display`] behavior.
+/// Formatting stops immediately when the destination rejects further output.
+pub fn blp_error_display(error: &BlpError) -> impl Display + '_ {
+    BlpErrorDisplay(error)
+}
+
+struct BlpErrorDisplay<'a>(&'a BlpError);
+
+impl Display for BlpErrorDisplay<'_> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let BlpError::RequestFailure {
+            service,
+            operation,
+            cid,
+            label,
+            request_id,
+            source,
+        } = self.0
+        else {
+            return Display::fmt(self.0, formatter);
+        };
+
+        write!(formatter, "Request failed on {service}")?;
+        if let Some(operation) = operation {
+            write!(formatter, "::{operation}")?;
+        }
+        if let Some(cid) = cid {
+            write!(formatter, " (cid={cid})")?;
+        }
+        if let Some(request_id) = request_id {
+            write!(formatter, " [request_id={request_id}]")?;
+        }
+        if let Some(label) = label {
+            write!(formatter, " - {label}")?;
+        }
+        if let Some(source) = source {
+            write!(formatter, ": {source}")?;
+        }
+        Ok(())
+    }
+}
 
 /// Host-independent exception families emitted by the engine.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,36 +105,13 @@ impl ErrorPresentation {
                 append_error_msg(&mut message, "", label.as_deref(), source.as_deref());
                 (ErrorKind::Session, message)
             }
-            BlpError::RequestFailure {
-                service,
-                operation,
-                cid,
-                label,
-                request_id,
-                source,
-            } => {
+            BlpError::RequestFailure { ref label, .. } => {
                 let kind = if request_failure_is_limit(label.as_deref()) {
                     ErrorKind::Limit
                 } else {
                     ErrorKind::Request
                 };
-                let mut message = format!("Request failed on {service}");
-                if let Some(operation) = operation {
-                    write!(message, "::{operation}").expect("writing to a String");
-                }
-                if let Some(cid) = cid {
-                    write!(message, " (cid={cid})").expect("writing to a String");
-                }
-                if let Some(request_id) = request_id {
-                    write!(message, " [request_id={request_id}]").expect("writing to a String");
-                }
-                if let Some(label) = label {
-                    write!(message, " - {label}").expect("writing to a String");
-                }
-                if let Some(source) = source {
-                    write!(message, ": {source}").expect("writing to a String");
-                }
-                (kind, message)
+                (kind, blp_error_display(&error).to_string())
             }
             BlpError::InvalidArgument { detail } => {
                 (ErrorKind::Validation, format!("Invalid argument: {detail}"))

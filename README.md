@@ -162,8 +162,15 @@ per_sec = blp.bdp(
 # Bulk data
 holders = blp.bds("AAPL US Equity", "DVD_Hist_All", DVD_Start_Dt="20240101")
 
-# BQL
+# BQL (clientContext.appName is omitted by default)
 result = blp.bql("get(px_last) for('AAPL US Equity')")
+
+# Explicitly select a Bloomberg-authorized application context.
+# The application name below is synthetic; replace it with one authorized for your environment.
+authorized_result = blp.bql(
+    "get(px_last) for('AAPL US Equity')",
+    app_name="example-authorized-bql-app",
+)
 
 # Field lookup
 fields = blp.bflds(search_spec="vwap")

@@ -334,6 +334,7 @@ async def abql(
     expression: str,
     *,
     backend: Backend | str | None = None,
+    app_name: str | None = None,
 ) -> DataFrameResult:
     """Async Bloomberg Query Language (BQL) request.
 
@@ -344,6 +345,9 @@ async def abql(
     Args:
         expression: BQL expression string.
         backend: DataFrame backend to return. If None, uses global default.
+        app_name: Bloomberg-authorized application name to set as
+            ``clientContext.appName``. If None, the client context app name is
+            omitted.
 
     Returns:
         DataFrame with columns: id, <field1>, <field2>, ...
@@ -353,6 +357,12 @@ async def abql(
 
         # Get price for a single security
         df = await abql("get(px_last) for('AAPL US Equity')")
+
+        # Select an explicitly authorized application context
+        df = await abql(
+            "get(px_last) for('AAPL US Equity')",
+            app_name="example-authorized-bql-app",
+        )
 
         # Get multiple fields
         df = await abql("get(px_last, volume) for('AAPL US Equity')")
@@ -1066,8 +1076,12 @@ async def _build_abdtick_plan(args: dict[str, Any]) -> _EndpointPlan:
 
 
 def _build_abql_plan(args: dict[str, Any]) -> _EndpointPlan:
+    request_kwargs: dict[str, Any] = {"overrides": {"expression": args["expression"]}}
+    app_name = args.get("app_name")
+    if app_name is not None:
+        request_kwargs["elements"] = [("clientContext.appName", app_name)]
     return _EndpointPlan(
-        request_kwargs={"overrides": {"expression": args["expression"]}},
+        request_kwargs=request_kwargs,
         backend=args.get("backend"),
     )
 

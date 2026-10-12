@@ -285,6 +285,8 @@ export interface CdxOptions extends BdpOptions {
 }
 
 export interface BqlOptions {
+  /** Bloomberg-authorized application name for clientContext.appName. Omitted by default. */
+  appName?: string;
   kwargs?: OverridesMap;
   format?: RequestFormat;
   backend?: BackendKind;
