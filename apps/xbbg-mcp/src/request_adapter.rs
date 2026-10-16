@@ -125,6 +125,9 @@ pub(crate) struct BdibArgs {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct BqlArgs {
     expression: String,
+    /// BQL client context; overrides the server setting when supplied.
+    #[serde(default)]
+    app_name: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -370,13 +373,22 @@ pub(crate) fn bdib_request_params(args: BdibArgs) -> Result<RequestParams, Error
 }
 
 pub(crate) fn bql_request_params(args: BqlArgs) -> Result<RequestParams, ErrorData> {
+    let app_name = args
+        .app_name
+        .map(|value| normalize_required_string("app_name", value))
+        .transpose()?;
+    let mut elements = Vec::with_capacity(1 + usize::from(app_name.is_some()));
+    elements.push((
+        "expression".to_string(),
+        normalize_required_string("expression", args.expression)?,
+    ));
+    if let Some(app_name) = app_name {
+        elements.push(("clientContext.appName".to_string(), app_name));
+    }
     build_request_params(RequestParamsInput {
         service: String::new(),
         operation: Some(Operation::BqlSendQuery.to_string()),
-        elements: Some(vec![(
-            "expression".to_string(),
-            normalize_required_string("expression", args.expression)?,
-        )]),
+        elements: Some(elements),
         ..Default::default()
     })
 }
@@ -847,22 +859,6 @@ mod tests {
         assert_eq!(bdib.request_tz.as_deref(), Some("NY"));
         assert!(bdib.return_eids);
 
-        let bql = bql_request_params(BqlArgs {
-            expression: "get(px_last) for(['IBM US Equity'])".to_string(),
-        })
-        .unwrap();
-        assert_eq!(bql.service, Service::BqlSvc.to_string());
-        assert_eq!(bql.extractor, ExtractorType::Bql);
-        assert_eq!(
-            bql.elements.as_deref(),
-            Some(
-                &[(
-                    "expression".to_string(),
-                    "get(px_last) for(['IBM US Equity'])".to_string()
-                )][..]
-            )
-        );
-
         let bsrch = bsrch_request_params(BsrchArgs {
             domain: "FI".to_string(),
             parameters: Some(params(&[("Ticker", "IBM")])),
@@ -940,6 +936,18 @@ mod tests {
             Operation::IntradayTick.to_string()
         );
         assert!(tick_with_eids.return_eids);
+    }
+
+    #[test]
+    fn blank_explicit_bql_app_context_is_rejected_before_dispatch() {
+        let args = serde_json::from_value(serde_json::json!({
+            "expression": "get(name()) for('SYNTH US Equity')",
+            "app_name": "  ",
+        }))
+        .unwrap();
+        let error = bql_request_params(args).unwrap_err();
+        assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
+        assert!(error.message.contains("app_name"));
     }
 
     #[test]

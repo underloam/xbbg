@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use tokio::sync::{OnceCell, Semaphore};
 use xbbg_async::BlpAsyncError;
 use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, ServerAddr, Transport};
+use xbbg_async::error_presentation::blp_error_display;
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
 use xbbg_recipes::{RecipeError, recipe_auction_snapshot, recipe_resolve_venues};
@@ -197,7 +198,7 @@ impl XbbgMcpServer {
     }
 
     #[tool(
-        description = "Bloomberg Query Language request (bql).",
+        description = "Bloomberg Query Language request (bql). app_name sets clientContext.appName and overrides XBBG_MCP_BQL_APP_NAME. Without either setting, the current Bloomberg default is unchanged.",
         annotations(
             title = "Bloomberg Query Language",
             read_only_hint = true,
@@ -210,8 +211,8 @@ impl XbbgMcpServer {
         &self,
         Parameters(args): Parameters<BqlArgs>,
     ) -> Result<CallToolResult, ErrorData> {
-        self.execute_request(self.bounded_input(bql_request_params(args))?)
-            .await
+        let params = self.bounded_input(bql_request_params(args))?;
+        self.execute_request(params).await
     }
 
     #[tool(
@@ -398,6 +399,7 @@ fn load_settings_from_env() -> Result<(EngineConfig, ResultLimits), String> {
     ])?
     .unwrap_or(8194);
     config.transport = Transport::Direct(vec![ServerAddr::new(host, port)]);
+    config.bql_app_name = env_string(&["XBBG_MCP_BQL_APP_NAME"]);
     config.request_pool_size =
         env_usize(&["XBBG_MCP_REQUEST_POOL_SIZE", "XBBG_REQUEST_POOL_SIZE"])?
             .unwrap_or(config.request_pool_size);
@@ -823,7 +825,7 @@ fn map_blp_error(error: BlpError, limits: &ResultLimits) -> ErrorData {
                 })),
             )
         }
-        other => bounded_internal_error(&other, limits),
+        other => bounded_internal_error(&blp_error_display(&other), limits),
     }
 }
 
@@ -1116,6 +1118,138 @@ mod tests {
 
         assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
         assert_eq!(error.data.unwrap()["error_data_omitted"], true);
+    }
+
+    #[test]
+    fn request_failure_context_reaches_mcp_clients() {
+        let denial = "User not authorized to use BQL";
+        let error = map_blp_error(
+            BlpError::RequestFailure {
+                service: "//blp/bqlsvc".into(),
+                operation: Some("sendQuery".into()),
+                cid: None,
+                label: None,
+                request_id: None,
+                source: Some(denial.into()),
+            },
+            &ResultLimits::default(),
+        );
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        assert!(error.message.contains(denial));
+        assert!(error.message.contains("//blp/bqlsvc"));
+        assert!(error.message.contains("sendQuery"));
+    }
+
+    #[test]
+    fn request_failures_without_a_source_retain_request_context() {
+        let error = map_blp_error(
+            BlpError::RequestFailure {
+                service: "//blp/bqlsvc".into(),
+                operation: Some("sendQuery".into()),
+                cid: Some(xbbg_core::errors::CorrelationContext::U64(42)),
+                label: Some("synthetic denial".into()),
+                request_id: Some("synthetic-request".into()),
+                source: None,
+            },
+            &ResultLimits::default(),
+        );
+
+        assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+        for context in [
+            "//blp/bqlsvc",
+            "sendQuery",
+            "42",
+            "synthetic denial",
+            "synthetic-request",
+        ] {
+            assert!(error.message.contains(context));
+        }
+        assert!(error.data.is_none());
+    }
+
+    #[test]
+    fn request_failure_sources_respect_string_and_serialized_budgets() {
+        for fragment in ["\u{1}\"\\\n", "拒否🙂", "synthetic denial "] {
+            for (max_string_chars, max_string_bytes) in [(2_000, 2_000), (128, 256)] {
+                let limits = ResultLimits {
+                    max_result_bytes: MIN_RESULT_BYTES,
+                    max_string_chars,
+                    max_string_bytes,
+                    ..ResultLimits::default()
+                };
+                let source = format!(
+                    "User not authorized to use BQL: {}",
+                    fragment.repeat(10_000)
+                );
+                let error = map_blp_error(
+                    BlpError::RequestFailure {
+                        service: "//blp/bqlsvc".into(),
+                        operation: Some("sendQuery".into()),
+                        cid: None,
+                        label: None,
+                        request_id: None,
+                        source: Some(source.into()),
+                    },
+                    &limits,
+                );
+
+                assert_eq!(error.code, rmcp::model::ErrorCode::INTERNAL_ERROR);
+                assert!(error.message.contains("User not authorized to use BQL"));
+                assert!(error.message.ends_with('…'));
+                assert!(error.message.chars().count() <= limits.max_string_chars);
+                assert!(error.message.len() <= limits.max_string_bytes);
+                assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
+                assert_eq!(error.data.unwrap()["message_truncated"], true);
+            }
+        }
+    }
+
+    #[test]
+    fn request_failure_source_formatting_stops_at_the_output_bound() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        #[derive(Debug)]
+        struct StreamingSource(Arc<AtomicUsize>);
+
+        impl std::fmt::Display for StreamingSource {
+            fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                for _ in 0..1_000_000 {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                    formatter.write_str("synthetic denial 🙂\n")?;
+                }
+                Ok(())
+            }
+        }
+
+        impl std::error::Error for StreamingSource {}
+
+        let limits = ResultLimits {
+            max_result_bytes: MIN_RESULT_BYTES,
+            max_string_chars: 128,
+            max_string_bytes: 256,
+            ..ResultLimits::default()
+        };
+        let writes = Arc::new(AtomicUsize::new(0));
+        let error = map_blp_error(
+            BlpError::RequestFailure {
+                service: "//blp/bqlsvc".into(),
+                operation: Some("sendQuery".into()),
+                cid: None,
+                label: None,
+                request_id: None,
+                source: Some(Box::new(StreamingSource(Arc::clone(&writes)))),
+            },
+            &limits,
+        );
+
+        assert!(error.message.contains("synthetic denial"));
+        assert!(error.message.ends_with('…'));
+        assert_eq!(error.data.as_ref().unwrap()["message_truncated"], true);
+        assert!(serde_json::to_vec(&error).unwrap().len() <= limits.max_result_bytes);
+        let writes = writes.load(Ordering::Relaxed);
+        assert!(writes > 0);
+        assert!(writes <= limits.max_string_chars + 1);
     }
 
     #[test]

@@ -337,6 +337,10 @@ pub struct PyEngineConfig {
     /// Set to None to use the default path.
     #[pyo3(get, set)]
     pub field_cache_path: Option<String>,
+    /// Optional BQL clientContext.appName request default.
+    /// Independent of authentication; None leaves the service default unchanged.
+    #[pyo3(get, set)]
+    pub bql_app_name: Option<String>,
     /// Optional auth method: "none", "user", "app", "userapp", "dir", "manual", or "token".
     /// Default: None (no auth). Also accepts "directory" as an alias for "dir" and the empty
     /// string as "none".
@@ -443,6 +447,7 @@ impl PyEngineConfig {
             command_queue_size: defaults.command_queue_size,
             subscription_stream_capacity: defaults.subscription_stream_capacity,
             overflow_policy: defaults.overflow_policy.to_string(),
+            bql_app_name: defaults.bql_app_name,
             warmup_services: defaults.warmup_services,
             field_cache_path: None,
             auth_method: None,
@@ -534,6 +539,9 @@ impl PyEngineConfig {
             }
             if let Some(v) = kw.get_item("field_cache_path")? {
                 config.field_cache_path = v.extract()?;
+            }
+            if let Some(v) = kw.get_item("bql_app_name")? {
+                config.bql_app_name = v.extract()?;
             }
             if let Some(v) = kw.get_item("auth_method")? {
                 config.auth_method = v.extract()?;
@@ -698,6 +706,7 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
                 .as_ref()
                 .map(std::path::PathBuf::from),
             auth: None,
+            bql_app_name: py_config.bql_app_name.clone(),
             num_start_attempts: py_config.num_start_attempts,
             auto_restart_on_disconnection: py_config.auto_restart_on_disconnection,
             retry_policy: RetryPolicy {
@@ -2813,6 +2822,51 @@ mod tests {
         assert_eq!(config.shard_max_concurrent, 4);
         assert_eq!(config.runtime_worker_threads, 2);
         assert_eq!(config.max_subscription_sessions, 32);
+    }
+
+    #[test]
+    fn py_engine_config_keeps_bql_app_name_independent_from_auth() {
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("bql_app_name", "example-bql-app")
+                .expect("bql_app_name");
+
+            let config = PyEngineConfig::new(Some(&kwargs)).expect("BQL engine config");
+            let engine_config =
+                EngineConfig::try_from(&config).expect("BQL default does not require auth");
+            assert_eq!(
+                engine_config.bql_app_name.as_deref(),
+                Some("example-bql-app")
+            );
+            assert_eq!(engine_config.auth, None);
+
+            let auth_kwargs = PyDict::new(py);
+            auth_kwargs
+                .set_item("app_name", "example-auth-app")
+                .expect("app_name");
+            let auth_config = PyEngineConfig::new(Some(&auth_kwargs)).expect("partial auth config");
+            let auth_error = EngineConfig::try_from(&auth_config)
+                .err()
+                .expect("auth app_name without auth_method should fail");
+            assert!(auth_error.to_string().contains("auth_method is required"));
+
+            let blank_kwargs = PyDict::new(py);
+            blank_kwargs
+                .set_item("bql_app_name", " \t")
+                .expect("blank bql_app_name");
+            let blank_config =
+                PyEngineConfig::new(Some(&blank_kwargs)).expect("blank BQL engine config");
+            let blank_error = EngineConfig::try_from(&blank_config)
+                .err()
+                .expect("blank BQL app name should fail shared validation");
+            assert!(
+                blank_error
+                    .to_string()
+                    .contains("bql_app_name must be non-empty")
+            );
+        });
     }
 
     #[test]

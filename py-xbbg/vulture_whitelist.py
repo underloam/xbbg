@@ -110,6 +110,7 @@ _ = (
     _dynamic.subscription_stream_capacity,
     _dynamic.warmup_services,
     _dynamic.field_cache_path,
+    _dynamic.bql_app_name,
     _dynamic.dir_property,
 )
 

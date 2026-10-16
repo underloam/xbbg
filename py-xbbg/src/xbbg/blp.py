@@ -208,6 +208,7 @@ if TYPE_CHECKING:
         expression: str,
         *,
         backend: Backend | str | None = None,
+        app_name: str | None = None,
     ) -> DataFrameResult:
         """Sync Bloomberg Query Language (BQL) request. See ``abql`` for details."""
         ...

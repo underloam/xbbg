@@ -10,7 +10,7 @@ use std::str::FromStr;
 use crate::errors::BlpAsyncError;
 use crate::request_builder::RequestBuilder;
 use crate::schema::SchemaCache;
-use crate::services::{ExtractorType, Format, Operation};
+use crate::services::{ExtractorType, Format, Operation, Service};
 
 use super::state::{LongMode, OutputFormat};
 use super::{OverridePairs, RequestParams, SecurityOverridePairs};
@@ -225,6 +225,26 @@ impl PreparedRequestBuilder {
 
     pub(crate) fn params(&self) -> &RequestParams {
         &self.params
+    }
+
+    pub(crate) fn apply_bql_app_name(&mut self, app_name: Option<&str>) {
+        let Some(app_name) = app_name else {
+            return;
+        };
+        if !matches!(self.operation, Operation::BqlSendQuery)
+            || self.params.service != Service::BqlSvc.as_str()
+            || self.params.elements.as_ref().is_some_and(|elements| {
+                elements
+                    .iter()
+                    .any(|(key, _)| key == "clientContext.appName")
+            })
+        {
+            return;
+        }
+        self.params
+            .elements
+            .get_or_insert_with(Vec::new)
+            .push(("clientContext.appName".to_string(), app_name.to_owned()));
     }
 
     pub(crate) fn set_field_types(&mut self, field_types: HashMap<String, String>) {
@@ -922,6 +942,117 @@ mod tests {
             fields: Some(vec!["PX_LAST".to_string()]),
             ..Default::default()
         }
+    }
+
+    fn bql_params() -> RequestParams {
+        RequestParams {
+            service: Service::BqlSvc.to_string(),
+            operation: Operation::BqlSendQuery.to_string(),
+            elements: Some(vec![(
+                "expression".to_string(),
+                "get(name()) for('SYNTH US Equity')".to_string(),
+            )]),
+            ..Default::default()
+        }
+    }
+
+    fn selected_bql_app(request: &PreparedRequestBuilder) -> Option<&str> {
+        request
+            .params()
+            .elements
+            .as_ref()
+            .and_then(|elements| {
+                elements
+                    .iter()
+                    .find(|(key, _)| key == "clientContext.appName")
+            })
+            .map(|(_, value)| value.as_str())
+    }
+
+    #[test]
+    fn engine_bql_default_is_scoped_to_query_requests_and_keeps_omission() {
+        for raw in [false, true] {
+            let mut params = bql_params();
+            if raw {
+                params.operation = Operation::RawRequest.to_string();
+                params.request_operation = Some(Operation::BqlSendQuery.to_string());
+            }
+            let mut request = PreparedRequestBuilder::prepare(params, &empty_schema()).unwrap();
+            request.apply_bql_app_name(None);
+            assert_eq!(selected_bql_app(&request), None);
+            request.apply_bql_app_name(Some("ENGINE_APP"));
+            assert_eq!(selected_bql_app(&request), Some("ENGINE_APP"));
+        }
+
+        for params in [
+            refdata_params(),
+            RequestParams {
+                service: "//synthetic/service".to_string(),
+                ..bql_params()
+            },
+            RequestParams {
+                service: Service::BqlSvc.to_string(),
+                operation: "syntheticOtherOperation".to_string(),
+                ..Default::default()
+            },
+        ] {
+            let mut request = PreparedRequestBuilder::prepare(params, &empty_schema()).unwrap();
+            request.apply_bql_app_name(Some("ENGINE_APP"));
+            assert_eq!(selected_bql_app(&request), None);
+        }
+    }
+
+    #[test]
+    fn explicit_bql_elements_and_routed_kwargs_override_the_engine_default() {
+        for raw in [false, true] {
+            for kwargs in [false, true] {
+                let mut params = bql_params();
+                if raw {
+                    params.operation = Operation::RawRequest.to_string();
+                    params.request_operation = Some(Operation::BqlSendQuery.to_string());
+                }
+                if kwargs {
+                    params.kwargs = Some(HashMap::from([(
+                        "clientContext.appName".to_string(),
+                        "CALL_APP".to_string(),
+                    )]));
+                } else {
+                    params
+                        .elements
+                        .as_mut()
+                        .unwrap()
+                        .push(("clientContext.appName".to_string(), "CALL_APP".to_string()));
+                }
+                let mut request = PreparedRequestBuilder::prepare(params, &empty_schema()).unwrap();
+                request.apply_bql_app_name(Some("ENGINE_APP"));
+                assert_eq!(selected_bql_app(&request), Some("CALL_APP"));
+                assert_eq!(
+                    request
+                        .params()
+                        .elements
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .filter(|(key, _)| key == "clientContext.appName")
+                        .count(),
+                    1
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn explicit_empty_raw_bql_context_is_not_replaced_by_an_engine_default() {
+        let mut params = bql_params();
+        params.operation = Operation::RawRequest.to_string();
+        params.request_operation = Some(Operation::BqlSendQuery.to_string());
+        params.kwargs = Some(HashMap::from([(
+            "clientContext.appName".to_string(),
+            String::new(),
+        )]));
+        let mut request = PreparedRequestBuilder::prepare(params, &empty_schema()).unwrap();
+        request.apply_bql_app_name(Some("ENGINE_APP"));
+        assert_eq!(selected_bql_app(&request), Some(""));
     }
 
     #[test]
