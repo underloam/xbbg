@@ -13,6 +13,8 @@ use arrow_array::builder::{
 use arrow_schema::{Field, Schema, SchemaRef};
 use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
+use crate::engine::delayed::{EXCHANGE_DELAY, IS_DELAYED_STREAM, parse_exchange_delay_minutes};
+
 /// Schema-metadata key carrying per-security entitlement IDs
 /// (`securityData[].eidData`, JSON: `{"<ticker>": [eid, ...]}`).
 pub const METADATA_KEY_EID_DATA: &str = "xbbg.eid_data";
@@ -22,6 +24,25 @@ pub const METADATA_KEY_SECURITY_ERRORS: &str = "xbbg.security_errors";
 /// Schema-metadata key carrying per-security `fieldExceptions`
 /// (JSON: `{"<ticker>": [{"field", "category", "code", "subcategory", "message"}, ...]}`).
 pub const METADATA_KEY_FIELD_EXCEPTIONS: &str = "xbbg.field_exceptions";
+/// Schema-metadata key carrying per-security delayed-data status for requests
+/// made with `on_delayed`
+/// (JSON: `{"<ticker>": {"delayed": bool, "delay_minutes": int | null}}`).
+pub const METADATA_KEY_DELAYED: &str = "xbbg.delayed";
+
+/// Delayed-data status for one security, from `IS_DELAYED_STREAM` and
+/// `EXCHANGE_DELAY`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DelayedMeta {
+    /// Whether this session receives delayed rather than real-time data.
+    pub delayed: bool,
+    /// Minutes behind real time; `None` when real time or not reported.
+    pub delay_minutes: Option<u32>,
+}
+
+/// Read the `xbbg.delayed` status map from a request result.
+pub fn delayed_metadata(batch: &RecordBatch) -> Option<BTreeMap<String, DelayedMeta>> {
+    ResponseMetadata::parse_json(batch.schema_ref().metadata().get(METADATA_KEY_DELAYED))
+}
 
 /// `securityError` details captured for batch metadata.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -52,6 +73,9 @@ struct ResponseElementNames {
     code: Name,
     subcategory: Name,
     message: Name,
+    field_data: Name,
+    is_delayed_stream: Name,
+    exchange_delay: Name,
 }
 
 static RESPONSE_NAMES: LazyLock<ResponseElementNames> = LazyLock::new(|| ResponseElementNames {
@@ -64,6 +88,9 @@ static RESPONSE_NAMES: LazyLock<ResponseElementNames> = LazyLock::new(|| Respons
     code: Name::get_or_intern("code"),
     subcategory: Name::get_or_intern("subcategory"),
     message: Name::get_or_intern("message"),
+    field_data: Name::get_or_intern("fieldData"),
+    is_delayed_stream: Name::get_or_intern(IS_DELAYED_STREAM),
+    exchange_delay: Name::get_or_intern(EXCHANGE_DELAY),
 });
 
 /// Borrowed error details let callers log or emit an error row without copying
@@ -112,9 +139,30 @@ pub(crate) struct ResponseMetadata {
     eid_data: BTreeMap<String, Vec<i64>>,
     security_errors: BTreeMap<String, SecurityErrorMeta>,
     field_exceptions: BTreeMap<String, Vec<FieldExceptionMeta>>,
+    delayed: BTreeMap<String, DelayedMeta>,
+    /// Record `fieldData` delay status (bdp requests made with `on_delayed`).
+    capture_delayed: bool,
+    /// Status fields xbbg appended to the wire request; their exceptions are
+    /// not the caller's, so they are not reported.
+    hidden_fields: Vec<&'static str>,
 }
 
 impl ResponseMetadata {
+    /// Record `IS_DELAYED_STREAM` / `EXCHANGE_DELAY` from each security's
+    /// `fieldData`, dropping exceptions for the `hidden_fields` xbbg added.
+    pub(crate) fn capture_delayed(&mut self, hidden_fields: Vec<&'static str>) {
+        self.capture_delayed = true;
+        self.hidden_fields = hidden_fields;
+    }
+
+    /// Metadata carrying only delay status from a separate status lookup.
+    pub(crate) fn with_delayed(delayed: BTreeMap<String, DelayedMeta>) -> Self {
+        Self {
+            delayed,
+            ..Self::default()
+        }
+    }
+
     /// Collect all diagnostics before callers decide whether to skip a security.
     /// This also preserves field exceptions accompanying a security error.
     pub(super) fn record_security<'a>(
@@ -148,6 +196,13 @@ impl ResponseMetadata {
                     .get(&names.field_id)
                     .and_then(|element| element.get_str(0))
                     .unwrap_or("?");
+                if self
+                    .hidden_fields
+                    .iter()
+                    .any(|hidden| hidden.eq_ignore_ascii_case(field))
+                {
+                    continue;
+                }
                 let error_info = exception.get(&names.error_info);
                 let error = SecurityErrorDetails::read(error_info.as_ref(), names);
                 self.record_field_exception(
@@ -169,10 +224,47 @@ impl ResponseMetadata {
                 );
             }
         }
+        if self.capture_delayed
+            && let Some(field_data) = security.get(&names.field_data)
+        {
+            self.record_delayed(ticker, &field_data);
+        }
         SecurityDiagnostics {
             security_error,
             field_exception_count,
         }
+    }
+
+    /// Record one security's delay status; absent when Bloomberg did not
+    /// return the flag (bad security or field not applicable).
+    fn record_delayed(&mut self, ticker: &str, field_data: &Element<'_>) {
+        let names = &RESPONSE_NAMES;
+        let Some(delayed) = field_data
+            .get(&names.is_delayed_stream)
+            .filter(|flag| !flag.is_null())
+            .and_then(|flag| {
+                flag.get_bool(0)
+                    .or_else(|| flag.get_str(0).and_then(parse_flag_text))
+            })
+        else {
+            return;
+        };
+        let delay_minutes = if delayed {
+            field_data
+                .get(&names.exchange_delay)
+                .filter(|text| !text.is_null())
+                .and_then(|text| text.get_str(0))
+                .and_then(parse_exchange_delay_minutes)
+        } else {
+            None
+        };
+        self.delayed.insert(
+            ticker.to_string(),
+            DelayedMeta {
+                delayed,
+                delay_minutes,
+            },
+        );
     }
 
     /// Record `securityData[].eidData` (an int array element) for `ticker`.
@@ -200,6 +292,7 @@ impl ResponseMetadata {
         self.eid_data.is_empty()
             && self.security_errors.is_empty()
             && self.field_exceptions.is_empty()
+            && self.delayed.is_empty()
     }
 
     /// Attach the collected diagnostics to `batch` as schema metadata.
@@ -221,6 +314,7 @@ impl ResponseMetadata {
             METADATA_KEY_FIELD_EXCEPTIONS,
             &self.field_exceptions,
         );
+        Self::insert_json(&mut metadata, METADATA_KEY_DELAYED, &self.delayed);
         let schema = Arc::new(batch.schema_ref().as_ref().clone().with_metadata(metadata));
         match batch.clone().with_schema(schema) {
             Ok(with_meta) => with_meta,
@@ -282,6 +376,11 @@ impl ResponseMetadata {
                         .extend(exceptions);
                 }
             }
+            if let Some(map) = Self::parse_json::<BTreeMap<String, DelayedMeta>>(
+                metadata.get(METADATA_KEY_DELAYED),
+            ) {
+                merged.delayed.extend(map);
+            }
         }
         merged
     }
@@ -295,6 +394,15 @@ impl ResponseMetadata {
                 None
             }
         }
+    }
+}
+
+/// Read a text boolean ("true", "Y", "1") for flags Bloomberg returns as text.
+fn parse_flag_text(text: &str) -> Option<bool> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "true" | "y" | "yes" | "1" => Some(true),
+        "false" | "n" | "no" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -1561,6 +1669,13 @@ mod tests {
                 message: "Field not applicable".to_string(),
             }],
         );
+        meta1.delayed.insert(
+            "IBM US Equity".to_string(),
+            DelayedMeta {
+                delayed: false,
+                delay_minutes: None,
+            },
+        );
         let batch1 = meta1.attach(tiny_batch());
         assert!(
             batch1
@@ -1585,6 +1700,13 @@ mod tests {
                 message: "Not entitled to security".to_string(),
             },
         );
+        meta2.delayed.insert(
+            "PRIVATE US Equity".to_string(),
+            DelayedMeta {
+                delayed: true,
+                delay_minutes: Some(15),
+            },
+        );
         let batch2 = meta2.attach(tiny_batch());
 
         // Empty metadata attaches nothing.
@@ -1604,6 +1726,14 @@ mod tests {
         let excs = merged.field_exceptions.get("IBM US Equity").unwrap();
         assert_eq!(excs.len(), 1);
         assert_eq!(excs[0].field, "BAD_FIELD");
+        assert_eq!(merged.delayed.len(), 2);
+        assert_eq!(
+            merged.delayed.get("PRIVATE US Equity"),
+            Some(&DelayedMeta {
+                delayed: true,
+                delay_minutes: Some(15),
+            })
+        );
 
         // Re-attach of the merged map keeps JSON parseable end to end.
         let final_batch = merged.attach(tiny_batch());
@@ -1611,6 +1741,7 @@ mod tests {
         assert_eq!(re_merged.eid_data.len(), 2);
         assert_eq!(re_merged.security_errors.len(), 1);
         assert_eq!(re_merged.field_exceptions.len(), 1);
+        assert_eq!(re_merged.delayed.len(), 2);
     }
 
     #[test]
@@ -1747,6 +1878,160 @@ mod tests {
                     .unwrap();
                 assert!(values.value(1).contains("Synthetic diagnostic"));
             }
+        }
+    }
+
+    #[test]
+    fn bdp_delay_capture_records_status_without_rows_or_added_field_exceptions() {
+        use crate::engine::state::RefDataState;
+        use crate::engine::state::refdata::OutputFormat;
+        use tokio::sync::oneshot;
+        use xbbg_core::EventType;
+        use xbbg_core::test_support::TestEvent;
+
+        // TestUtil materializes every declared field, so a security without the
+        // flag needs its own schema rather than an omitted value.
+        let schema = |status_fields: &str| {
+            format!(
+                r#"<ServiceDefinition name="xbbg.test.delayed" version="1.0.0.0">
+            <service name="//xbbg/test/delayed" version="1.0.0.0">
+                <event name="ReferenceDataResponse" eventType="Response"/>
+            </service>
+            <schema>
+                <sequenceType name="Response">
+                    <element name="securityData" type="SecurityData" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="SecurityData">
+                    <element name="security" type="String"/>
+                    <element name="fieldData" type="FieldData"/>
+                    <element name="fieldExceptions" type="FieldException" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="FieldData">
+                    <element name="VALUE" type="Float64"/>{status_fields}
+                </sequenceType>
+                <sequenceType name="FieldException">
+                    <element name="fieldId" type="String"/>
+                    <element name="errorInfo" type="ErrorInfo"/>
+                </sequenceType>
+                <sequenceType name="ErrorInfo">
+                    <element name="category" type="String"/>
+                    <element name="code" type="Int32"/>
+                    <element name="subcategory" type="String"/>
+                    <element name="message" type="String"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#
+            )
+        };
+        let not_applicable = |field: &str| {
+            serde_json::json!({"fieldId": field, "errorInfo": {
+                "category": "BAD_FLD", "code": 9,
+                "subcategory": "NOT_APPLICABLE_TO_REF_DATA",
+                "message": "Field not applicable to security"
+            }})
+        };
+        let flagged = serde_json::json!({"securityData": [
+            {"security": "VOD LN Equity", "fieldExceptions": [],
+             "fieldData": {"VALUE": 1.5, "IS_DELAYED_STREAM": true, "EXCHANGE_DELAY": "15 Minutes"}},
+            {"security": "AAPL US Equity", "fieldExceptions": [],
+             "fieldData": {"VALUE": 2.5, "IS_DELAYED_STREAM": false, "EXCHANGE_DELAY": "15 Minutes"}}
+        ]})
+        .to_string();
+        let unflagged = serde_json::json!({"securityData": [
+            {"security": "BOND Corp", "fieldData": {"VALUE": 3.5},
+             "fieldExceptions": [not_applicable("IS_DELAYED_STREAM"), not_applicable("EXCHANGE_DELAY")]}
+        ]})
+        .to_string();
+        let partial = TestEvent::with_schema(
+            &schema(
+                r#"<element name="IS_DELAYED_STREAM" type="Boolean"/>
+                    <element name="EXCHANGE_DELAY" type="String"/>"#,
+            ),
+            EventType::PartialResponse,
+            "ReferenceDataResponse",
+            &[],
+            |formatter| formatter.json(&flagged),
+        );
+        let last = TestEvent::with_schema(
+            &schema(""),
+            EventType::Response,
+            "ReferenceDataResponse",
+            &[],
+            |formatter| formatter.json(&unflagged),
+        );
+
+        // The caller asked only for VALUE: both status fields were added by xbbg.
+        // When the caller asks for the flag itself, its exceptions are theirs.
+        for (fields, hidden, reported_exceptions) in [
+            (
+                vec!["VALUE"],
+                vec![IS_DELAYED_STREAM, EXCHANGE_DELAY],
+                vec![],
+            ),
+            (
+                vec!["VALUE", IS_DELAYED_STREAM],
+                vec![EXCHANGE_DELAY],
+                vec![IS_DELAYED_STREAM],
+            ),
+        ] {
+            let (sender, mut receiver) = oneshot::channel();
+            let mut state = RefDataState::with_format(
+                fields.iter().map(|field| (*field).to_string()).collect(),
+                OutputFormat::Long,
+                LongMode::String,
+                None,
+                false,
+                sender,
+            )
+            .capture_delayed(hidden);
+            state.on_partial(&partial.event().messages().next().unwrap());
+            state.finish(&last.event().messages().next().unwrap());
+            let batch = receiver.try_recv().unwrap().unwrap();
+
+            let row_fields = batch
+                .column_by_name("field")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap();
+            assert!(
+                row_fields
+                    .iter()
+                    .flatten()
+                    .all(|field| fields.contains(&field)),
+                "added status fields must not become rows"
+            );
+            assert_eq!(
+                delayed_metadata(&batch).unwrap(),
+                BTreeMap::from([
+                    (
+                        "AAPL US Equity".to_string(),
+                        DelayedMeta {
+                            delayed: false,
+                            delay_minutes: None,
+                        },
+                    ),
+                    (
+                        "VOD LN Equity".to_string(),
+                        DelayedMeta {
+                            delayed: true,
+                            delay_minutes: Some(15),
+                        },
+                    ),
+                ])
+            );
+            let exceptions: BTreeMap<String, Vec<FieldExceptionMeta>> = batch
+                .schema_ref()
+                .metadata()
+                .get(METADATA_KEY_FIELD_EXCEPTIONS)
+                .map(|json| serde_json::from_str(json).unwrap())
+                .unwrap_or_default();
+            let reported: Vec<&str> = exceptions
+                .values()
+                .flatten()
+                .map(|exception| exception.field.as_str())
+                .collect();
+            assert_eq!(reported, reported_exceptions);
         }
     }
 }

@@ -28,6 +28,10 @@ and the preferreds/corporate_bonds/index_members/etf_holdings recipes for those 
 For dealer quotes use xbbg_bqr with a supplied quote source, such as
 /isin/<ISIN>@<QUOTE_SOURCE> <MARKET_SECTOR>. Do not manufacture quote-source identifiers.
 Request return_eids only when needed; use xbbg_check_entitlements for the returned IDs.
+Use xbbg_delay_status to learn whether securities return delayed or real-time data; set
+check_identity only for an EMRS-enrolled or SAPI/B-PIPE-authorized identity. On xbbg_bdp,
+xbbg_bdh, xbbg_bdib, and xbbg_bdtick, on_delayed records per-security delay in the
+result's delayed map, or with raise fails the call when Bloomberg delivers delayed data.
 Use xbbg_resolve_venues to validate auction venues and xbbg_auction_snapshot for finite
 reference-data auction fields. Do not assume composite listings carry exchange imbalances.
 These tools preserve unresolved/unsupported/mismatch status rows; inspect their errors
@@ -35,7 +39,7 @@ and never treat null auction fields as zero. Supply pcs_overrides only for known
 preferred-stock exchange-to-pricing-source mappings. Omitted or empty snapshot fields
 select AUCTION.DEFAULT; this snapshot does not open a live subscription.
 Auction time-of-day values are terminal-local, not necessarily exchange time or UTC.
-A reference-data auction snapshot does not establish stream delay or real-time entitlement.
+An auction snapshot does not report data delay; use xbbg_delay_status for that.
 
 ## BQL and live observation
 Use BQL only for an explicit, bounded universe-oriented request. It is one complete

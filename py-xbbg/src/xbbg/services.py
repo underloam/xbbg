@@ -75,6 +75,14 @@ __all__ = [
     "Service",
 ]
 
+_ON_DELAYED_POLICIES = ("warn", "raise", "ignore")
+_ON_DELAYED_OPERATIONS = (
+    Operation.REFERENCE_DATA.value,
+    Operation.HISTORICAL_DATA.value,
+    Operation.INTRADAY_BAR.value,
+    Operation.INTRADAY_TICK.value,
+)
+
 
 @dataclass
 class RequestParams:
@@ -137,6 +145,10 @@ class RequestParams:
         validate_fields: Optional per-request override for field validation.
             ``True`` forces strict validation, ``False`` disables it, and
             ``None`` (default) follows engine configuration.
+        on_delayed: Delayed-data check for ReferenceDataRequest (bdp shape, not
+            bulk), HistoricalDataRequest, IntradayBarRequest, and
+            IntradayTickRequest: ``"warn"``, ``"raise"``, or ``"ignore"``
+            (case-insensitive). ``None`` (default) skips the check.
     """
 
     service: str | Service
@@ -166,6 +178,7 @@ class RequestParams:
     _is_raw_request: bool = field(init=False, repr=False)
     return_eids: bool = False
     validate_fields: bool | None = None
+    on_delayed: str | None = None
 
     def __post_init__(self) -> None:
         """Convert enums to strings and set defaults."""
@@ -178,6 +191,8 @@ class RequestParams:
             self.request_operation = self.request_operation.value
         if isinstance(self.output, str):
             self.output = OutputMode(self.output)
+        if isinstance(self.on_delayed, str):
+            self.on_delayed = self.on_delayed.strip().lower()
 
     def validate(self) -> None:
         """Validate parameters for the given operation.
@@ -203,6 +218,17 @@ class RequestParams:
                 "return_eids is only supported for ReferenceDataRequest, "
                 "HistoricalDataRequest, IntradayBarRequest, and IntradayTickRequest"
             )
+        if self.on_delayed is not None:
+            if self.on_delayed not in _ON_DELAYED_POLICIES:
+                raise BlpValidationError("on_delayed must be warn, raise, or ignore")
+            bdp_shape = self.extractor in (None, ExtractorHint.REFDATA)
+            if effective_operation not in _ON_DELAYED_OPERATIONS or (
+                effective_operation == Operation.REFERENCE_DATA.value and not bdp_shape
+            ):
+                raise BlpValidationError(
+                    "on_delayed is only supported for ReferenceDataRequest (bdp, not bulk), "
+                    "HistoricalDataRequest, IntradayBarRequest, and IntradayTickRequest"
+                )
 
         if self._is_raw_request:
             return
@@ -341,5 +367,7 @@ class RequestParams:
             result["return_eids"] = True
         if self.validate_fields is not None:
             result["validate_fields"] = self.validate_fields
+        if self.on_delayed is not None:
+            result["on_delayed"] = self.on_delayed
 
         return result

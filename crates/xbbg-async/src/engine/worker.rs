@@ -47,6 +47,7 @@ const APIAUTH_SERVICE: &str = "//blp/apiauth";
 /// Threshold for warning about slow Bloomberg responses (30 seconds).
 const SLOW_REQUEST_WARN_THRESHOLD: Duration = Duration::from_secs(30);
 
+use super::delayed;
 use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID};
 use super::session_lifecycle::{
     PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
@@ -1752,14 +1753,19 @@ fn create_request_state(
 
     match request.shape() {
         PlannedRequestShape::RefData(output) => {
-            UnifiedRequestState::RefData(RefDataState::with_format(
+            let state = RefDataState::with_format(
                 fields,
                 output.format,
                 output.long_mode,
                 field_types,
                 params.include_security_errors,
                 reply,
-            ))
+            );
+            UnifiedRequestState::RefData(if params.on_delayed.is_some() {
+                state.capture_delayed(delayed::hidden_refdata_fields(request))
+            } else {
+                state
+            })
         }
         PlannedRequestShape::HistData(output) => UnifiedRequestState::HistData(
             HistDataState::with_format(fields, output.format, output.long_mode, field_types, reply),
@@ -1837,6 +1843,16 @@ fn build_request_from_params(
             xbbg_log::trace!(element = "fields", value = %field, "appending");
             request.append_str("fields", field)?;
         }
+    }
+    // `on_delayed` status fields ride on the same bdp request; the RefData
+    // state records them as metadata instead of rows.
+    for field in delayed::hidden_refdata_fields(prepared) {
+        xbbg_log::trace!(
+            element = "fields",
+            value = field,
+            "appending delay status field"
+        );
+        request.append_str("fields", field)?;
     }
 
     // Set date range (for historical) - scalar elements use set_str

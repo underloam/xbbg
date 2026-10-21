@@ -19,6 +19,7 @@ _DESCRIPTIONS = {
     "xbbg_bdib": "Bloomberg intraday bars for one security. Requires explicit ISO start/end datetimes with time components and a positive interval in minutes. Ask when timezone or interval is ambiguous.",
     "xbbg_bdtick": "Bloomberg intraday ticks for one security. Requires explicit ISO start/end datetimes. Specify event_types when the default stream is not intended; request broker/condition codes only when needed.",
     "xbbg_check_entitlements": "Read-only check of the current Bloomberg identity against positive entitlement IDs returned by requests with return_eids enabled. The default service is //blp/refdata.",
+    "xbbg_delay_status": "Read-only check of whether this Bloomberg session receives delayed or real-time data for exact supplied securities. Returns one row per unique security with delayed, delay_minutes, exchange_delay, exch_code, realtime_eid1-realtime_eid4, delayed_eid, and error. Set check_identity only for an EMRS-enrolled or SAPI/B-PIPE-authorized identity; it adds realtime_entitled and delayed_entitled.",
     "xbbg_bql": "Execute one complete Bloomberg Query Language expression with an explicit bounded universe. Prefer xbbg_bdp/xbbg_bdh for simple reference/historical requests. Never invent fields or BQL functions.",
     "xbbg_bsrch": "Bloomberg search/grid request for an existing saved search or ExcelGetGrid-style search_spec. Not an ordinary security lookup tool.",
     "xbbg_bqr": "Bloomberg dealer quote ticks for fixed income. Preserve the supplied ticker or /isin/<ISIN>@<QUOTE_SOURCE> Corp identifier. Requires explicit ISO start/end datetimes; specify event_types when needed.",
@@ -31,7 +32,7 @@ _DESCRIPTIONS = {
     "xbbg_resolve_isins": "Resolve user-supplied raw ISIN strings through Bloomberg's identifier recipe. Do not add /isin/ prefixes; never infer an ISIN or ticker.",
     "xbbg_issuer_isins": "Resolve supplied raw bond ISIN strings to issuer equity ISINs through Bloomberg's native recipe.",
     "xbbg_resolve_venues": "Resolve and validate exchange-auction venues for supplied tickers, bare ISINs, /isin/ or /bbgid/ topics. Preserve explicit venues; never guess an exchange or pricing source. Optional pcs_overrides maps preferred-stock exchange names to pricing-source codes. Inspect each row's status and error.",
-    "xbbg_auction_snapshot": "Fetch a finite reference-data auction snapshot from validated primary venues, not composite listings or an open stream. Supply exact securities and optional fields; omitted or empty fields select AUCTION.DEFAULT. Optional pcs_overrides maps preferred-stock exchange names to pricing-source codes. Unresolved, unsupported, or mismatched venues retain status/error rows with null data fields. Time-of-day values are terminal-local; the snapshot does not establish stream delay or real-time entitlement.",
+    "xbbg_auction_snapshot": "Fetch a finite reference-data auction snapshot from validated primary venues, not composite listings or an open stream. Supply exact securities and optional fields; omitted or empty fields select AUCTION.DEFAULT. Optional pcs_overrides maps preferred-stock exchange names to pricing-source codes. Unresolved, unsupported, or mismatched venues retain status/error rows with null data fields. Time-of-day values are terminal-local; the snapshot does not report data delay or real-time entitlement, so use xbbg_delay_status for that.",
     "xbbg_etf_holdings": "Fetch bounded ETF holdings for the exact qualified Equity ticker. Resolve supplied identifiers first; never guess the ETF ticker.",
     "xbbg_stream_snapshot": "Bounded live //blp/mktdata snapshot. Requires max_updates; collects until that count, timeout, or stream completion, then always unsubscribes. Returns finite updates, not an open subscription.",
     "xbbg_mktbar_snapshot": "Bounded live //blp/mktbar snapshot for one security. Requires max_updates. Native market bars require LAST_PRICE and a bar_size subscription option (default 1 minute). Always unsubscribes.",
@@ -194,6 +195,8 @@ async def _execute(name: str, input: ToolInput, options: BloombergToolsOptions) 
     if name == "xbbg_check_entitlements":
         report = await blp.acheck_entitlements(**data)
         return {"entitled": report.entitled, "failedEids": report.failed_eids}
+    if name == "xbbg_delay_status":
+        return await blp.adelay_status(data.pop("securities"), backend="native", **data)
     if name == "xbbg_bql":
         return await blp.abql(data["query"], backend="native")
     if name == "xbbg_bsrch":
@@ -305,6 +308,10 @@ def create_check_entitlements_tool(options: BloombergToolsOptions | None = None,
     return _build_tool("xbbg_check_entitlements", resolve_options(options, kwargs))
 
 
+def create_delay_status_tool(options: BloombergToolsOptions | None = None, **kwargs: Any) -> StructuredTool:
+    return _build_tool("xbbg_delay_status", resolve_options(options, kwargs))
+
+
 def create_bql_tool(options: BloombergToolsOptions | None = None, **kwargs: Any) -> StructuredTool:
     return _build_tool("xbbg_bql", resolve_options(options, kwargs))
 
@@ -387,6 +394,7 @@ __all__ = [
     "create_bdib_tool",
     "create_bdtick_tool",
     "create_check_entitlements_tool",
+    "create_delay_status_tool",
     "create_bql_tool",
     "create_bsrch_tool",
     "create_bqr_tool",

@@ -178,6 +178,8 @@ pub struct RequestInput {
     pub field_types: Option<Vec<StringPair>>,
     pub include_security_errors: Option<bool>,
     pub return_eids: Option<bool>,
+    /// Delayed-data policy: "warn", "raise", or "ignore". Omitted skips the check.
+    pub on_delayed: Option<String>,
     pub validate_fields: Option<bool>,
     pub search_spec: Option<String>,
     pub field_ids: Option<Vec<String>>,
@@ -1887,6 +1889,24 @@ impl JsEngine {
         to_native_record_batch(batch)
     }
 
+    /// Report per security whether this session receives delayed data, with
+    /// feed EIDs and optional identity entitlement checks.
+    #[napi]
+    pub async fn recipe_delay_status(
+        &self,
+        securities: Vec<String>,
+        check_identity: Option<bool>,
+    ) -> napi::Result<NativeArrowBatch> {
+        let batch = xbbg_recipes::recipe_delay_status(
+            &self.engine,
+            securities,
+            check_identity.unwrap_or(false),
+        )
+        .await
+        .map_err(recipe_error_to_napi)?;
+        to_native_record_batch(batch)
+    }
+
     #[napi]
     pub async fn recipe_issuer_isins(
         &self,
@@ -2939,6 +2959,7 @@ mod tests {
             field_types: Some(vec![pair("PX_LAST", "Float64")]),
             include_security_errors: Some(true),
             return_eids: Some(true),
+            on_delayed: Some("warn".to_string()),
             validate_fields: Some(false),
             search_spec: Some("price".to_string()),
             field_ids: Some(vec!["PX_LAST".to_string()]),
@@ -3013,6 +3034,7 @@ mod tests {
         );
         assert!(params.include_security_errors);
         assert!(params.return_eids);
+        assert_eq!(params.on_delayed, Some(DelayedPolicy::Warn));
         assert_eq!(params.validate_fields, Some(false));
         assert_eq!(params.search_spec.as_deref(), Some("price"));
         assert_eq!(

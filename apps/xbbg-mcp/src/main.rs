@@ -14,7 +14,9 @@ use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, Serve
 use xbbg_async::error_presentation::blp_error_display;
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
-use xbbg_recipes::{RecipeError, recipe_auction_snapshot, recipe_resolve_venues};
+use xbbg_recipes::{
+    RecipeError, recipe_auction_snapshot, recipe_delay_status, recipe_resolve_venues,
+};
 
 mod request_adapter;
 mod serialization;
@@ -22,10 +24,10 @@ mod stdin;
 
 use request_adapter::{
     AuctionSnapshotArgs, BdhArgs, BdibArgs, BdpArgs, BdsArgs, BfldsArgs, BqlArgs, BsrchArgs,
-    CheckEntitlementsArgs, RequestArgs, ResolveVenuesArgs, auction_snapshot_params,
-    bdh_request_params, bdib_request_params, bdp_request_params, bds_request_params,
-    bflds_request_params, bql_request_params, bsrch_request_params, check_entitlements_params,
-    generic_request_params, resolve_venues_params,
+    CheckEntitlementsArgs, DelayStatusArgs, RequestArgs, ResolveVenuesArgs,
+    auction_snapshot_params, bdh_request_params, bdib_request_params, bdp_request_params,
+    bds_request_params, bflds_request_params, bql_request_params, bsrch_request_params,
+    check_entitlements_params, delay_status_params, generic_request_params, resolve_venues_params,
 };
 
 use serialization::{
@@ -277,7 +279,7 @@ impl XbbgMcpServer {
     }
 
     #[tool(
-        description = "Read auction/imbalance values from Bloomberg reference data on the primary venue. Uses the default auction field group unless fields or groups are selected; groups expand first, then explicit fields, with duplicates removed. Returns one row per input with status/error and bounded structured JSON with Arrow schema metadata. Time-of-day fields are terminal-local. Reference data carries no delayed/real-time flag; use subscriptions for that.",
+        description = "Read auction/imbalance values from Bloomberg reference data on the primary venue. Uses the default auction field group unless fields or groups are selected; groups expand first, then explicit fields, with duplicates removed. Returns one row per input with status/error and bounded structured JSON with Arrow schema metadata. Time-of-day fields are terminal-local. Values can be delayed for this session; delay_status reports which tickers are.",
         annotations(
             title = "Bloomberg Auction Snapshot",
             read_only_hint = true,
@@ -337,7 +339,29 @@ impl XbbgMcpServer {
     }
 
     #[tool(
-        description = "Generic Bloomberg request. Supports raw/custom service and operation strings, including RawRequest via request_operation. return_eids supports ReferenceDataRequest (including BDS/bulk), HistoricalDataRequest, IntradayBarRequest, and IntradayTickRequest.",
+        description = "Report per ticker whether this Bloomberg session receives delayed or real-time data. delayed is what this session receives (Bloomberg IS_DELAYED_STREAM), not the exchange's standard delay: delay_minutes is set only when delayed, and exchange_delay is the raw EXCHANGE_DELAY text. Returns one row per unique ticker in input order, including exch_code, real-time feed EIDs (realtime_eid1 to realtime_eid4), delayed_eid, and error, as bounded structured JSON with Arrow schema metadata. check_identity=true also checks the session identity against those feed EIDs on //blp/mktdata and fills realtime_entitled and delayed_entitled; it needs SAPI/B-PIPE authorization or an EMRS-enrolled Desktop API user, otherwise the call fails.",
+        annotations(
+            title = "Bloomberg Delayed-Data Status",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
+    )]
+    async fn delay_status(
+        &self,
+        Parameters(args): Parameters<DelayStatusArgs>,
+    ) -> Result<CallToolResult, ErrorData> {
+        let params = self.bounded_input(delay_status_params(args))?;
+        let engine = self.engine().await?;
+        let batch = recipe_delay_status(engine, params.tickers, params.check_identity)
+            .await
+            .map_err(|error| map_recipe_error(error, &self.result_limits))?;
+        self.serialize_batch(batch).await
+    }
+
+    #[tool(
+        description = "Generic Bloomberg request. Supports raw/custom service and operation strings, including RawRequest via request_operation. return_eids supports ReferenceDataRequest (including BDS/bulk), HistoricalDataRequest, IntradayBarRequest, and IntradayTickRequest. on_delayed supports ReferenceDataRequest (not BDS/bulk), HistoricalDataRequest, IntradayBarRequest, and IntradayTickRequest.",
         annotations(
             title = "Bloomberg Raw Request",
             read_only_hint = true,
@@ -373,7 +397,7 @@ impl ServerHandler for XbbgMcpServer {
                     ),
             )
             .with_instructions(
-                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, resolve_venues, auction_snapshot, check_entitlements, or request. resolve_venues routes composite equities to primary exchange listings and preferreds to venue pricing sources, preserving one status/error row per input. auction_snapshot reads Bloomberg reference data on the primary venue; time-of-day fields are terminal-local, and reference data carries no delayed/real-time flag (use subscriptions for that). Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block.",
+                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, resolve_venues, auction_snapshot, check_entitlements, delay_status, or request. resolve_venues routes composite equities to primary exchange listings and preferreds to venue pricing sources, preserving one status/error row per input. auction_snapshot reads Bloomberg reference data on the primary venue; time-of-day fields are terminal-local. Bloomberg can serve delayed data without marking the rows: delay_status reports per ticker whether this session receives delayed data (check_identity=true also checks feed-EID entitlements on //blp/mktdata and needs SAPI/B-PIPE authorization or an EMRS-enrolled Desktop API user), and on_delayed on bdp, bdh, bdib, or request either reports xbbg.delayed metadata (warn and ignore behave the same) or fails the call (raise). Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block.",
             )
     }
 }
@@ -945,6 +969,7 @@ mod tests {
                 "bql",
                 "bsrch",
                 "check_entitlements",
+                "delay_status",
                 "request",
                 "resolve_venues"
             ]
@@ -978,6 +1003,24 @@ mod tests {
             );
         }
 
+        for tool_name in ["bdp", "bdh", "bdib", "request"] {
+            let schema = &tool_by_name[tool_name].input_schema;
+            assert!(
+                schema["properties"].get("on_delayed").is_some(),
+                "{tool_name} must advertise on_delayed"
+            );
+            assert_eq!(
+                schema["$defs"]["DelayedDataPolicy"]["enum"],
+                json!(["warn", "raise", "ignore"])
+            );
+        }
+        assert!(
+            tool_by_name["bds"].input_schema["properties"]
+                .get("on_delayed")
+                .is_none(),
+            "bulk data does not support on_delayed"
+        );
+
         let entitlement_schema = tool_by_name
             .get("check_entitlements")
             .expect("check_entitlements tool")
@@ -986,6 +1029,18 @@ mod tests {
             .expect("check_entitlements properties");
         assert!(entitlement_schema.get("eids").is_some());
         assert!(entitlement_schema.get("service").is_some());
+
+        let delay_status = tool_by_name["delay_status"];
+        assert_eq!(
+            delay_status.input_schema.get("required"),
+            Some(&json!(["tickers"]))
+        );
+        let delay_schema = delay_status.input_schema.get("properties").unwrap();
+        assert_eq!(delay_schema["tickers"]["minItems"], 1);
+        assert_eq!(delay_schema["check_identity"]["type"], "boolean");
+        let annotations = delay_status.annotations.as_ref().unwrap();
+        assert_eq!(annotations.read_only_hint, Some(true));
+        assert_eq!(annotations.destructive_hint, Some(false));
 
         for tool_name in ["resolve_venues", "auction_snapshot"] {
             let tool = tool_by_name.get(tool_name).expect("auction tool");

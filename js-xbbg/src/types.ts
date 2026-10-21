@@ -52,9 +52,19 @@ export interface BloombergFieldException extends BloombergMetadataError {
   field?: string;
 }
 
+/** Per-ticker delayed-data flag parsed from `xbbg.delayed` result metadata. */
+export interface DelayedDataInfo {
+  /** Bloomberg `IS_DELAYED_STREAM` for the requesting session. */
+  delayed: boolean;
+  /** Minutes behind real time from `EXCHANGE_DELAY`; null when real-time or unparseable. */
+  delay_minutes: number | null;
+}
+
 export interface ResultMetadata {
   metadata: Record<string, string>;
   eidData?: Record<string, number[]>;
+  /** Present when an `onDelayed` check ran; tickers Bloomberg returned no flag for are absent. */
+  delayed?: Record<string, DelayedDataInfo>;
   securityErrors?: Record<string, BloombergMetadataError>;
   fieldExceptions?: Record<string, BloombergFieldException[]>;
 }
@@ -181,6 +191,7 @@ export interface RequestInput {
   fieldTypes?: readonly StringPair[];
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
+  onDelayed?: StreamOptions['onDelayed'];
   validateFields?: boolean;
   searchSpec?: string;
   fieldIds?: readonly string[];
@@ -235,6 +246,11 @@ export interface BdpOptions {
   backend?: BackendKind;
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
+  /**
+   * Delayed-data check: warn per delayed ticker, reject the call, or only record `delayed`.
+   * Omitted skips the check.
+   */
+  onDelayed?: StreamOptions['onDelayed'];
   validateFields?: boolean;
 }
 
@@ -246,6 +262,11 @@ export interface BdhOptions {
   format?: RequestFormat;
   backend?: BackendKind;
   returnEids?: boolean;
+  /**
+   * Delayed-data check: warn per delayed ticker, reject the call, or only record `delayed`.
+   * Omitted skips the check.
+   */
+  onDelayed?: StreamOptions['onDelayed'];
   validateFields?: boolean;
 }
 
@@ -259,6 +280,11 @@ export interface BdibOptions {
   kwargs?: OverridesMap;
   backend?: BackendKind;
   returnEids?: boolean;
+  /**
+   * Delayed-data check: warn per delayed ticker, reject the call, or only record `delayed`.
+   * Omitted skips the check.
+   */
+  onDelayed?: StreamOptions['onDelayed'];
 }
 
 export interface BdtickOptions {
@@ -277,6 +303,11 @@ export interface BdtickOptions {
   kwargs?: OverridesMap;
   backend?: BackendKind;
   returnEids?: boolean;
+  /**
+   * Delayed-data check: warn per delayed ticker, reject the call, or only record `delayed`.
+   * Omitted skips the check.
+   */
+  onDelayed?: StreamOptions['onDelayed'];
 }
 
 export interface CdxOptions extends BdpOptions {
@@ -445,6 +476,11 @@ export interface ResolveVenuesOptions extends RecipeBackendOptions {
 
 export interface AuctionSnapshotOptions extends ResolveVenuesOptions {
   fields?: readonly string[];
+}
+
+export interface DelayStatusOptions extends RecipeBackendOptions {
+  /** Also check identity entitlement to each feed EID; requires an authorized identity. */
+  checkIdentity?: boolean;
 }
 
 export interface AuctionStreamOptions extends Omit<StreamOptions, 'aliases'> {

@@ -21,6 +21,7 @@ import warnings
 
 from . import _engine, _request_options, _sync, backend as _backend
 from .backend import Backend
+from .exceptions import _warn_at_user_frame
 from .services import OVERFLOW_POLICIES, OVERFLOW_POLICY_VALUES, Service
 
 DataFrameResult: TypeAlias = Any
@@ -184,14 +185,7 @@ def _warn_subscription(message: str, category: type[Warning]) -> None:
     if sink is not None:
         sink(message, category)
         return
-    frame = sys._getframe(1)
-    stacklevel = 2
-    while frame is not None and (
-        frame.f_globals.get("__name__", "") == "xbbg" or frame.f_globals.get("__name__", "").startswith("xbbg.")
-    ):
-        stacklevel += 1
-        frame = frame.f_back
-    warnings.warn(message, category, stacklevel=stacklevel)
+    _warn_at_user_frame(message, category)
 
 
 class Subscription:

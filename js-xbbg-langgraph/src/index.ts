@@ -56,6 +56,7 @@ export {
   createBdpTool,
   createBdsTool,
   createCheckEntitlementsTool,
+  createDelayStatusTool,
   createBfldsTool,
   createCorporateBondsTool,
   createEtfHoldingsTool,

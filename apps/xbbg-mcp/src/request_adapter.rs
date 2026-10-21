@@ -50,6 +50,27 @@ impl HistoricalFormat {
     }
 }
 
+/// `on_delayed` policy. `warn` and `ignore` both return per-ticker `{delayed, delay_minutes}` at
+/// `metadata["xbbg.delayed"]` because MCP results have no warnings channel; `raise` fails the
+/// call when Bloomberg is delivering delayed data for any requested ticker.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum DelayedDataPolicy {
+    Warn,
+    Raise,
+    Ignore,
+}
+
+impl DelayedDataPolicy {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Raise => "raise",
+            Self::Ignore => "ignore",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub(crate) struct BdpArgs {
     tickers: Vec<String>,
@@ -68,6 +89,10 @@ pub(crate) struct BdpArgs {
     validate_fields: Option<bool>,
     #[serde(default)]
     return_eids: bool,
+    /// Check whether Bloomberg is delivering delayed data for each ticker: `warn`, `raise`, or
+    /// `ignore`. Omit to skip the check.
+    #[serde(default)]
+    on_delayed: Option<DelayedDataPolicy>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -88,6 +113,11 @@ pub(crate) struct BdhArgs {
     validate_fields: Option<bool>,
     #[serde(default)]
     return_eids: bool,
+    /// Check whether Bloomberg is delivering delayed data for each ticker: `warn`, `raise`, or
+    /// `ignore`. Omit to skip the check. It runs only when `end_date` is on or after yesterday
+    /// (UTC); older windows report nothing.
+    #[serde(default)]
+    on_delayed: Option<DelayedDataPolicy>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -120,6 +150,11 @@ pub(crate) struct BdibArgs {
     options: Option<BTreeMap<String, String>>,
     #[serde(default)]
     return_eids: bool,
+    /// Check whether Bloomberg is delivering delayed data for the ticker: `warn`, `raise`, or
+    /// `ignore`. Omit to skip the check. It runs only when `end_datetime` is no earlier than 24
+    /// hours ago; older windows report nothing.
+    #[serde(default)]
+    on_delayed: Option<DelayedDataPolicy>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -197,6 +232,12 @@ pub(crate) struct RequestArgs {
     /// IntradayBarRequest, and IntradayTickRequest.
     #[serde(default)]
     return_eids: Option<bool>,
+    /// Check whether Bloomberg is delivering delayed data: `warn`, `raise`, or `ignore`; omit to
+    /// skip the check. Supported by ReferenceDataRequest (not BDS/bulk), HistoricalDataRequest,
+    /// IntradayBarRequest, and IntradayTickRequest. History and intraday requests check only
+    /// windows that reach the last 24 hours.
+    #[serde(default)]
+    on_delayed: Option<DelayedDataPolicy>,
     #[serde(default)]
     validate_fields: Option<bool>,
     #[serde(default)]
@@ -217,6 +258,23 @@ pub(crate) struct CheckEntitlementsArgs {
     /// Bloomberg service used for the check. Defaults to `//blp/refdata`.
     #[serde(default)]
     service: Option<String>,
+}
+
+/// Longest accepted `delay_status` ticker, in UTF-8 bytes.
+const MAX_TICKER_BYTES: usize = 1_024;
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub(crate) struct DelayStatusArgs {
+    /// One or more tickers, at most 1,024 UTF-8 bytes each. Values are trimmed and blank entries
+    /// are dropped; results keep input order with duplicates removed.
+    #[schemars(length(min = 1))]
+    tickers: Vec<String>,
+    /// Also check this session's identity against each ticker's real-time (`FEED_EID1` to
+    /// `FEED_EID4`) and delayed (`FEED_DELAYED_EID1`) feed EIDs on `//blp/mktdata`. Needs
+    /// SAPI/B-PIPE authorization or an EMRS-enrolled Desktop API user; otherwise the call fails.
+    /// Defaults to false.
+    #[serde(default)]
+    check_identity: bool,
 }
 
 const MAX_AUCTION_FIELDS: usize = 256;
@@ -273,6 +331,12 @@ pub(crate) struct AuctionSnapshotParams {
     pub(crate) pcs_overrides: HashMap<String, String>,
 }
 
+#[derive(Debug)]
+pub(crate) struct DelayStatusParams {
+    pub(crate) tickers: Vec<String>,
+    pub(crate) check_identity: bool,
+}
+
 fn build_request_params(input: RequestParamsInput) -> Result<RequestParams, ErrorData> {
     if let Some(extractor) = input.extractor.as_deref()
         && ExtractorType::parse(extractor).is_none()
@@ -307,6 +371,7 @@ pub(crate) fn bdp_request_params(args: BdpArgs) -> Result<RequestParams, ErrorDa
         include_security_errors: Some(args.include_security_errors),
         validate_fields: args.validate_fields,
         return_eids: Some(args.return_eids),
+        on_delayed: args.on_delayed.map(|policy| policy.as_str().to_string()),
         format: args.format.map(|format| format.as_str().to_string()),
         ..Default::default()
     })
@@ -325,6 +390,7 @@ pub(crate) fn bdh_request_params(args: BdhArgs) -> Result<RequestParams, ErrorDa
         field_types: map_to_hash_map(args.field_types),
         validate_fields: args.validate_fields,
         return_eids: Some(args.return_eids),
+        on_delayed: args.on_delayed.map(|policy| policy.as_str().to_string()),
         format: args.format.map(|format| format.as_str().to_string()),
         ..Default::default()
     })
@@ -368,6 +434,7 @@ pub(crate) fn bdib_request_params(args: BdibArgs) -> Result<RequestParams, Error
         output_tz: trim_optional(args.output_tz),
         options: map_to_pairs(args.options),
         return_eids: Some(args.return_eids),
+        on_delayed: args.on_delayed.map(|policy| policy.as_str().to_string()),
         ..Default::default()
     })
 }
@@ -493,6 +560,7 @@ pub(crate) fn generic_request_params(args: RequestArgs) -> Result<RequestParams,
         field_types: map_to_hash_map(args.field_types),
         include_security_errors: args.include_security_errors,
         return_eids: args.return_eids,
+        on_delayed: args.on_delayed.map(|policy| policy.as_str().to_string()),
         validate_fields: args.validate_fields,
         search_spec,
         field_ids,
@@ -526,6 +594,22 @@ pub(crate) fn check_entitlements_params(
         None => "//blp/refdata".to_string(),
     };
     Ok((service, eids))
+}
+
+pub(crate) fn delay_status_params(args: DelayStatusArgs) -> Result<DelayStatusParams, ErrorData> {
+    let tickers = normalize_nonempty_list("tickers", args.tickers)?;
+    for ticker in &tickers {
+        if ticker.len() > MAX_TICKER_BYTES {
+            return Err(ErrorData::invalid_params(
+                format!("tickers must contain strings of at most {MAX_TICKER_BYTES} UTF-8 bytes"),
+                None,
+            ));
+        }
+    }
+    Ok(DelayStatusParams {
+        tickers,
+        check_identity: args.check_identity,
+    })
 }
 
 pub(crate) fn resolve_venues_params(
@@ -733,6 +817,7 @@ fn map_to_hash_map(map: Option<BTreeMap<String, String>>) -> Option<HashMap<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
+    use xbbg_async::DelayedPolicy;
     use xbbg_async::services::Service;
 
     fn params(values: &[(&str, &str)]) -> BTreeMap<String, String> {
@@ -768,6 +853,7 @@ mod tests {
             field_types: None,
             include_security_errors: None,
             return_eids: None,
+            on_delayed: None,
             validate_fields: None,
             search_spec: None,
             field_ids: None,
@@ -787,6 +873,7 @@ mod tests {
             include_security_errors: true,
             validate_fields: Some(false),
             return_eids: true,
+            on_delayed: Some(DelayedDataPolicy::Raise),
         })
         .unwrap();
         assert_eq!(bdp.service, Service::RefData.to_string());
@@ -802,6 +889,7 @@ mod tests {
         assert!(bdp.include_security_errors);
         assert_eq!(bdp.validate_fields, Some(false));
         assert!(bdp.return_eids);
+        assert_eq!(bdp.on_delayed, Some(DelayedPolicy::Raise));
 
         let bdh = bdh_request_params(BdhArgs {
             tickers: vec!["IBM US Equity".to_string()],
@@ -814,6 +902,7 @@ mod tests {
             format: Some(HistoricalFormat::SemiLong),
             validate_fields: Some(true),
             return_eids: true,
+            on_delayed: Some(DelayedDataPolicy::Warn),
         })
         .unwrap();
         assert_eq!(bdh.operation, Operation::HistoricalData.to_string());
@@ -823,6 +912,7 @@ mod tests {
         assert_eq!(bdh.format.as_deref(), Some("semi_long"));
         assert_eq!(bdh.validate_fields, Some(true));
         assert!(bdh.return_eids);
+        assert_eq!(bdh.on_delayed, Some(DelayedPolicy::Warn));
 
         let bds = bds_request_params(BdsArgs {
             tickers: vec!["INDU Index".to_string()],
@@ -851,6 +941,7 @@ mod tests {
             output_tz: Some("UTC".to_string()),
             options: Some(params(&[("gapFillInitialBar", "true")])),
             return_eids: true,
+            on_delayed: Some(DelayedDataPolicy::Ignore),
         })
         .unwrap();
         assert_eq!(bdib.extractor, ExtractorType::IntradayBar);
@@ -858,6 +949,7 @@ mod tests {
         assert_eq!(bdib.interval, Some(5));
         assert_eq!(bdib.request_tz.as_deref(), Some("NY"));
         assert!(bdib.return_eids);
+        assert_eq!(bdib.on_delayed, Some(DelayedPolicy::Ignore));
 
         let bsrch = bsrch_request_params(BsrchArgs {
             domain: "FI".to_string(),
@@ -930,12 +1022,14 @@ mod tests {
         tick_with_eids.security = Some("IBM US Equity".to_string());
         tick_with_eids.event_types = Some(vec!["TRADE".to_string()]);
         tick_with_eids.return_eids = Some(true);
+        tick_with_eids.on_delayed = Some(DelayedDataPolicy::Raise);
         let tick_with_eids = generic_request_params(tick_with_eids).unwrap();
         assert_eq!(
             tick_with_eids.operation,
             Operation::IntradayTick.to_string()
         );
         assert!(tick_with_eids.return_eids);
+        assert_eq!(tick_with_eids.on_delayed, Some(DelayedPolicy::Raise));
     }
 
     #[test]
@@ -981,6 +1075,40 @@ mod tests {
                 })
                 .is_err()
             );
+        }
+    }
+
+    #[test]
+    fn delay_status_arguments_are_normalized_and_bounded() {
+        let args = serde_json::from_value(serde_json::json!({
+            "tickers": [" SYNTH LN Equity ", " ", "SYNTH US Equity"]
+        }))
+        .unwrap();
+        let params = delay_status_params(args).unwrap();
+        assert_eq!(params.tickers, ["SYNTH LN Equity", "SYNTH US Equity"]);
+        assert!(!params.check_identity);
+
+        let at_limit = "x".repeat(MAX_TICKER_BYTES);
+        let params = delay_status_params(DelayStatusArgs {
+            tickers: vec![at_limit.clone()],
+            check_identity: true,
+        })
+        .unwrap();
+        assert_eq!(params.tickers, [at_limit]);
+        assert!(params.check_identity);
+
+        for tickers in [
+            Vec::new(),
+            vec![" ".to_string()],
+            vec!["x".repeat(MAX_TICKER_BYTES + 1)],
+            vec!["é".repeat(MAX_TICKER_BYTES / 2 + 1)],
+        ] {
+            let error = delay_status_params(DelayStatusArgs {
+                tickers,
+                check_identity: false,
+            })
+            .unwrap_err();
+            assert_eq!(error.code, rmcp::model::ErrorCode::INVALID_PARAMS);
         }
     }
 

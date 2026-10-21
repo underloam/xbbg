@@ -50,6 +50,10 @@ _NATIVE_SCALARS = (
 )
 _NATIVE_VARIABLE = ("Utf8", "LargeUtf8", "Utf8View", "Binary", "LargeBinary", "BinaryView")
 _OMIT = object()
+# Lists under these keys are diagnostics or metadata, which max_rows never truncates.
+_METADATA_CHILD_KEYS = frozenset(
+    (*_ERROR_KEYS, "eidData", "eidDataTruncation", "delayed", "failedEids", "diagnostics", "metadata")
+)
 
 
 def _json(value: Any) -> str:
@@ -498,6 +502,7 @@ class _Projection:
                     b"xbbg.security_errors",
                     b"xbbg.field_exceptions",
                     b"xbbg.eid_data",
+                    b"xbbg.delayed",
                 ):
                     continue
                 if isinstance(key, bytes):
@@ -524,8 +529,7 @@ class _Projection:
                 value[original_key],
                 available - key_size,
                 depth + 1,
-                metadata
-                or key in (*_ERROR_KEYS, "eidData", "eidDataTruncation", "failedEids", "diagnostics", "metadata"),
+                metadata or key in _METADATA_CHILD_KEYS,
             )
             if child is _OMIT:
                 continue

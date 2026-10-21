@@ -133,6 +133,7 @@ _RESERVED_REQUEST_KEYS = frozenset(
         "security_overrides",
         "validate_fields",
         "return_eids",
+        "on_delayed",
         "include_security_errors",
         "include_bic_mic_codes",
         "include_bloomberg_standard_condition_codes",
@@ -302,6 +303,15 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
         override_map, "Global field overrides or nested field maps keyed by an exact supplied security."
     )
     return_eids = optional(StrictBool, "Request Bloomberg entitlement IDs in result metadata.")
+    delayed_policy = Literal["warn", "raise", "ignore"]
+    delayed_check = (
+        "Delayed-data check: raise fails when Bloomberg delivers delayed data; warn or ignore record "
+        "per-security delay in the result's delayed map. Omit to skip the check."
+    )
+    on_delayed = optional(delayed_policy, delayed_check)
+    recent_on_delayed = optional(
+        delayed_policy, f"{delayed_check} Only windows reaching the last 24 hours are checked."
+    )
     validate_fields = optional(StrictBool, "Override configured field validation for this request.")
     ref = {
         "securities": securities_field,
@@ -323,6 +333,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             "fields": fields_field,
             "format": optional(ReferenceFormat, "Reference output shape; usually omit."),
             "include_security_errors": optional(StrictBool, "Retain Bloomberg security errors in the response."),
+            "on_delayed": on_delayed,
         }
     elif name == "xbbg_bdh":
         shape = {
@@ -331,6 +342,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             "start": required(date_input, "Explicit start date, YYYY-MM-DD or YYYYMMDD."),
             "end": required(date_input, "Explicit end date, YYYY-MM-DD or YYYYMMDD."),
             "format": optional(HistoricalFormat, "Historical output shape; semi_long puts fields in columns."),
+            "on_delayed": recent_on_delayed,
         }
     elif name == "xbbg_bds":
         shape = {**ref, "field": required(text, "Exactly one Bloomberg bulk/table field, not a field list.")}
@@ -339,6 +351,7 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             **intraday,
             "kwargs": kwargs_field,
             "return_eids": return_eids,
+            "on_delayed": recent_on_delayed,
             "request_tz": optional(text, "Timezone for naive datetimes; omit for the native UTC default."),
             "output_tz": optional(text, "Output timezone for the same instants."),
         }
@@ -370,6 +383,15 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
             "service": (
                 service,
                 Field(default="//blp/refdata", description="Bloomberg service URI, such as //blp/refdata."),
+            ),
+        }
+    elif name == "xbbg_delay_status":
+        shape = {
+            "securities": securities_field,
+            "check_identity": optional(
+                StrictBool,
+                "Also check the identity's entitlement to each feed EID; requires an EMRS-enrolled Desktop "
+                "user or SAPI/B-PIPE authorization.",
             ),
         }
     elif name == "xbbg_bql":

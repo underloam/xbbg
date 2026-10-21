@@ -195,10 +195,12 @@ class TestConvertBackendPandas:
             metadata = {
                 "xbbg.eid_data": '{"IBM US Equity":[101,202]}',
                 "xbbg.security_errors": '{"BAD Ticker":{"message":"bad security"}}',
+                "xbbg.delayed": '{"IBM US Equity":{"delayed":true,"delay_minutes":15}}',
             }
             eid_data = {"IBM US Equity": [101, 202]}
             security_errors = {"BAD Ticker": {"message": "bad security"}}
             field_exceptions = None
+            delayed = {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
 
         frame = pd.DataFrame({"ticker": ["IBM US Equity"]})
 
@@ -208,6 +210,7 @@ class TestConvertBackendPandas:
         assert frame.attrs["xbbg_eid_data"] == {"IBM US Equity": [101, 202]}
         assert frame.attrs["xbbg_security_errors"] == {"BAD Ticker": {"message": "bad security"}}
         assert "xbbg_field_exceptions" not in frame.attrs
+        assert frame.attrs["xbbg_delayed"] == {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
 
     def test_convert_pandas_falls_back_when_pyarrow_import_raises(
         self, arrow_table: Any, monkeypatch: pytest.MonkeyPatch

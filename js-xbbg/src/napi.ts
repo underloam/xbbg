@@ -301,6 +301,10 @@ export interface NativeEngine {
     fields?: readonly string[],
     pcsOverrides?: Readonly<Record<string, string>>,
   ): Promise<NativeArrowZeroCopyBatch>;
+  recipeDelayStatus(
+    securities: readonly string[],
+    checkIdentity?: boolean,
+  ): Promise<NativeArrowZeroCopyBatch>;
   recipeIssuerIsins(bondIsins: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
   recipeEtfNavRelationships(tickers: readonly string[]): Promise<NativeArrowZeroCopyBatch>;
   recipeEtfNavSnapshot(tickers: readonly string[]): Promise<NativeArrowZeroCopyBatch>;

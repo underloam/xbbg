@@ -81,6 +81,7 @@ __all__ = [
     "recipe_cdx_ticker",
     "recipe_corporate_bonds",
     "recipe_currency_conversion",
+    "recipe_delay_status",
     "recipe_dividend",
     "recipe_dividend_yield",
     "recipe_earning",
@@ -243,6 +244,8 @@ class ArrowTable:
     def security_errors(self) -> typing.Any: ...
     @property
     def field_exceptions(self) -> typing.Any: ...
+    @property
+    def delayed(self) -> typing.Any: ...
     @classmethod
     def from_pylist(cls, rows: typing.Any, schema: typing.Optional[typing.Any] = None) -> ArrowTable: ...
     @classmethod
@@ -1526,6 +1529,17 @@ def recipe_currency_conversion(engine: PyEngine, ticker: builtins.str, target_cc
         target_ccy: Target currency (e.g., "USD", "EUR")
         start_date: Start date (YYYYMMDD format)
         end_date: End date (YYYYMMDD format)
+    """
+
+def recipe_delay_status(engine: PyEngine, securities: typing.Sequence[builtins.str], check_identity: builtins.bool = False) -> typing.Any:
+    r"""
+    Report per-ticker delayed-data status and feed entitlement IDs.
+    
+    Args:
+        engine: Bloomberg engine instance
+        securities: Securities to check; input order kept, duplicates removed
+        check_identity: Also check the authorized identity against each ticker's
+            real-time and delayed feed EIDs on //blp/mktdata
     """
 
 def recipe_dividend(engine: PyEngine, tickers: typing.Sequence[builtins.str], start_date: builtins.str, end_date: builtins.str, dvd_type: typing.Optional[builtins.str] = None, request_options: typing.Optional[dict] = None) -> typing.Any:

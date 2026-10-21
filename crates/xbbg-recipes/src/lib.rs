@@ -9,6 +9,7 @@
 
 pub mod auction;
 pub mod currency;
+pub mod entitlements;
 pub mod error;
 pub mod etf;
 pub mod fixed_income;
@@ -20,5 +21,6 @@ pub mod utils;
 pub mod volatility;
 
 pub use auction::{clear_venue_cache, recipe_auction_snapshot, recipe_resolve_venues};
+pub use entitlements::recipe_delay_status;
 pub use error::{RecipeError, Result};
 pub use utils::*;

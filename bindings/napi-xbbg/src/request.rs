@@ -49,6 +49,7 @@ impl TryFrom<RequestInput> for RequestParams {
             field_types: pairs_to_map(input.field_types),
             include_security_errors: input.include_security_errors,
             return_eids: input.return_eids,
+            on_delayed: input.on_delayed,
             validate_fields: input.validate_fields,
             search_spec: input.search_spec,
             field_ids: input.field_ids,

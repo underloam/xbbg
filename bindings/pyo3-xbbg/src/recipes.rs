@@ -659,6 +659,28 @@ recipe_wrapper!(
 );
 
 // =============================================================================
+// Delayed Data Recipes
+// =============================================================================
+
+recipe_wrapper!(
+    /// Report per-ticker delayed-data status and feed entitlement IDs.
+    ///
+    /// Args:
+    ///     engine: Bloomberg engine instance
+    ///     securities: Securities to check; input order kept, duplicates removed
+    ///     check_identity: Also check the authorized identity against each ticker's
+    ///         real-time and delayed feed EIDs on //blp/mktdata
+    #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+    #[pyfunction]
+    #[pyo3(signature = (engine, securities, check_identity=false))]
+    |eng|
+    fn recipe_delay_status(
+        securities: Vec<String>,
+        check_identity: bool,
+    ) => xbbg_recipes::recipe_delay_status(&eng, securities, check_identity)
+);
+
+// =============================================================================
 // Currency Recipes
 // =============================================================================
 
@@ -746,6 +768,7 @@ pub(crate) fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
         recipe_etf_nav_history,
         recipe_resolve_venues,
         recipe_auction_snapshot,
+        recipe_delay_status,
         recipe_currency_conversion,
         recipe_adjust_ccy,
     )

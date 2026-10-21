@@ -186,6 +186,7 @@ def main() -> int:
             "resolve_venues",
             "auction_snapshot",
             "check_entitlements",
+            "delay_status",
             "request",
         }
         missing_tools = sorted(expected_tools.difference(tool_names))

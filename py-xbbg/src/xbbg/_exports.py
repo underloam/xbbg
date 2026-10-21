@@ -95,6 +95,8 @@ PACKAGE_GENERIC_EXPORTS = (
     "seat_type",
     "acheck_entitlements",
     "check_entitlements",
+    "adelay_status",
+    "delay_status",
     "aidentity_is_authorized",
     "identity_is_authorized",
 )
@@ -241,6 +243,8 @@ BLP_MODULE_EXPORTS = (
     "seat_type",
     "acheck_entitlements",
     "check_entitlements",
+    "adelay_status",
+    "delay_status",
     "aidentity_is_authorized",
     "identity_is_authorized",
     "abdp",

@@ -1,8 +1,9 @@
 import type { Table } from 'apache-arrow';
 
-import { DataType, DateUnit, TimeUnit } from 'apache-arrow';
+import { DataType, DateUnit, tableToIPC, TimeUnit } from 'apache-arrow';
 
 import { TA_DEFAULTS } from '../src/_defs_gen';
+import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
 import * as api from '../src/index';
 import type {
   NativeArrowColumn,
@@ -35,6 +36,8 @@ vi.mock(import('node:module'), async (importOriginal) => {
     getLogLevel: () => 'off',
     setLogLevel: () => undefined,
   };
+  // The optional nodejs-polars peer is replaced by a frame that records its IPC input size.
+  const polars = { readIPC: (buffer: Buffer) => ({ polarsIpcBytes: buffer.byteLength }) };
 
   return {
     ...actual,
@@ -45,6 +48,9 @@ vi.mock(import('node:module'), async (importOriginal) => {
           const moduleId: unknown = argumentsList[0];
           if (typeof moduleId === 'string' && /(?:^|[/\\])napi[-_]xbbg\.node$/u.test(moduleId)) {
             return nativeAddon;
+          }
+          if (moduleId === 'nodejs-polars') {
+            return polars;
           }
           return Reflect.apply(target, thisArgument, argumentsList);
         },
@@ -839,6 +845,113 @@ describe('temporal native table results', () => {
   });
 });
 
+const DELAYED_TICKERS = {
+  'SYN_A Equity': { delayed: true, delay_minutes: 15 },
+  'SYN_B Equity': { delayed: false, delay_minutes: null },
+  'SYN_C Equity': { delayed: true, delay_minutes: null },
+};
+const DELAYED_METADATA = { 'xbbg.delayed': JSON.stringify(DELAYED_TICKERS) };
+const DELAYED_WARNING = { type: 'BlpDelayedDataWarning', code: 'XBBG_DELAYED_DATA' };
+const DELAYED_WARNINGS = [
+  [
+    'SYN_A Equity: Bloomberg is delivering delayed data (15 minutes behind real time)',
+    DELAYED_WARNING,
+  ],
+  ['SYN_C Equity: Bloomberg is delivering delayed data', DELAYED_WARNING],
+];
+
+interface DelayedRequestCase {
+  name: string;
+  invoke: (
+    engine: api.Engine,
+    options: Pick<api.BdpOptions, 'backend' | 'onDelayed'>,
+  ) => Promise<unknown>;
+}
+
+const delayedRequests: readonly DelayedRequestCase[] = [
+  {
+    name: 'bdp',
+    invoke: async (engine, options) => await engine.bdp(['SYN_A Equity'], ['PX_LAST'], options),
+  },
+  {
+    name: 'bdh',
+    invoke: async (engine, options) => await engine.bdh(['SYN_A Equity'], ['PX_LAST'], options),
+  },
+  {
+    name: 'bdib',
+    invoke: async (engine, options) => await engine.bdib('SYN_A Equity', options),
+  },
+  {
+    name: 'bdtick',
+    invoke: async (engine, options) => await engine.bdtick('SYN_A Equity', options),
+  },
+];
+
+describe('request delayed-data policy', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it.each(delayedRequests)(
+    '$name sends the policy to native and warns once per delayed ticker',
+    async ({ invoke }) => {
+      const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
+      const request = vi
+        .fn<NativeEngine['request']>()
+        .mockResolvedValue(int32ArrowBatch(1, DELAYED_METADATA));
+      const engine = engineWithNative({ request });
+
+      const rows = await invoke(engine, { backend: 'json', onDelayed: 'warn' });
+
+      expect(request.mock.calls[0]?.[0]).toMatchObject({ onDelayed: 'warn' });
+      expect(emitted.mock.calls).toStrictEqual(DELAYED_WARNINGS);
+      expect(rows).toMatchObject({ delayed: DELAYED_TICKERS });
+    },
+  );
+
+  it('warns from IPC schema metadata for Polars and raw IPC callers', async () => {
+    const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
+    const ipc = Buffer.from(
+      tableToIPC(tableFromNativeArrowBatch(int32ArrowBatch(1, DELAYED_METADATA)), 'stream'),
+    );
+    const engine = engineWithNative({ requestRaw: async () => ipc });
+
+    const frame = await engine.bdp(['SYN_A Equity'], ['PX_LAST'], {
+      backend: 'polars',
+      onDelayed: 'warn',
+    });
+    const raw = await engine.requestRaw({
+      onDelayed: 'warn',
+      operation: 'ReferenceDataRequest',
+      service: '//blp/refdata',
+    });
+
+    expect(frame).toStrictEqual({ polarsIpcBytes: ipc.byteLength });
+    expect(raw).toBe(ipc);
+    expect(emitted.mock.calls).toStrictEqual([...DELAYED_WARNINGS, ...DELAYED_WARNINGS]);
+  });
+
+  it('records delayed tickers without warnings when the policy is ignore', async () => {
+    const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
+    const engine = engineWithNative({ request: async () => int32ArrowBatch(1, DELAYED_METADATA) });
+
+    const table = await engine.bdp(['SYN_A Equity'], ['PX_LAST'], { onDelayed: 'ignore' });
+
+    expect((table as api.ResultMetadata).delayed).toStrictEqual(DELAYED_TICKERS);
+    expect(emitted).not.toHaveBeenCalled();
+  });
+
+  it('rejects an unknown policy before calling native', async () => {
+    const request = vi.fn<NativeEngine['request']>();
+    const engine = engineWithNative({ request });
+
+    await expect(
+      engine.bdp(['SYN_A Equity'], ['PX_LAST'], { onDelayed: 'WARN' as never }),
+    ).rejects.toMatchObject({ name: 'BlpValidationError', element: 'onDelayed' });
+    expect(request).not.toHaveBeenCalled();
+  });
+});
+
 interface RecipeCase {
   name: string;
   invoke: (engine: api.Engine, options: api.RecipeBackendOptions) => Promise<unknown>;
@@ -917,6 +1030,10 @@ const recipes: readonly RecipeCase[] = [
   {
     name: 'auctionSnapshot',
     invoke: async (engine, options) => await engine.auctionSnapshot('SYN', options),
+  },
+  {
+    name: 'delayStatus',
+    invoke: async (engine, options) => await engine.delayStatus('SYN', options),
   },
   {
     name: 'issuerIsins',

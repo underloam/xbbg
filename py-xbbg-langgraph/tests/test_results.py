@@ -154,13 +154,14 @@ def test_depth_is_bounded_without_python_recursion_failure() -> None:
     assert "max_result_depth" in artifact["truncation"]["reasons"]
 
 
-def test_zero_row_arrow_preserves_diagnostics_entitlements_and_metadata() -> None:
+def test_zero_row_arrow_preserves_diagnostics_entitlements_delay_and_metadata() -> None:
     pa = pytest.importorskip("pyarrow")
     table = pa.table({"price": pa.array([], type=pa.float64())}).replace_schema_metadata(
         {
             b"xbbg.security_errors": b'{"BAD Security":{"message":"NO_AUTH"}}',
             b"xbbg.field_exceptions": b'{"IBM US Equity":[{"fieldId":"BAD_FIELD"}]}',
             b"xbbg.eid_data": b'{"IBM US Equity":[101,202]}',
+            b"xbbg.delayed": b'{"IBM US Equity":{"delayed":true,"delay_minutes":15}}',
             b"source": b"ReferenceDataRequest",
         }
     )
@@ -172,7 +173,9 @@ def test_zero_row_arrow_preserves_diagnostics_entitlements_and_metadata() -> Non
         assert result["data"]["securityErrors"]["BAD Security"]["message"] == "NO_AUTH"
         assert result["data"]["fieldExceptions"]["IBM US Equity"][0]["fieldId"] == "BAD_FIELD"
         assert result["data"]["eidData"] == {"IBM US Equity": [101, 202]}
-        assert result["data"]["metadata"]["source"] == "ReferenceDataRequest"
+        assert result["data"]["delayed"] == {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
+        # Parsed xbbg.* payloads are not repeated as raw strings in the generic metadata map.
+        assert result["data"]["metadata"] == {"source": "ReferenceDataRequest"}
         assert result["truncated"] is False
     content, artifact = _project(table, max_result_nodes=10, max_result_bytes=256, max_content_bytes=256)
     for result in (content, artifact):

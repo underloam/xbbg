@@ -512,9 +512,13 @@ def build_manifest(version: str) -> dict[str, object]:
             },
             {
                 "name": "auction_snapshot",
-                "description": "Bloomberg primary-venue auction reference data; terminal-local times, no delayed/real-time flag.",
+                "description": "Bloomberg primary-venue auction reference data; terminal-local times, may be delayed.",
             },
             {"name": "check_entitlements", "description": "Bloomberg entitlement-ID check for a service."},
+            {
+                "name": "delay_status",
+                "description": "Per-ticker Bloomberg delayed/real-time status, with an optional feed-EID entitlement check.",
+            },
             {"name": "request", "description": "Generic Bloomberg request."},
         ],
         "tools_generated": True,

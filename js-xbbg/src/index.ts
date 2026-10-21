@@ -14,7 +14,9 @@ import {
 } from './_defs_gen';
 import {
   Backend,
+  emitDelayedDataWarnings,
   Format,
+  ipcSchemaMetadata,
   ipcToPolars,
   nativeArrowToBackend,
   nativeRecipeResult,
@@ -39,7 +41,12 @@ import type { NativeAddon, NativeEngine } from './napi';
 import { resolveNativeAddon } from './native/resolve-native';
 import { isPlainObject } from './objects';
 import { configureRuntimeSearchPath } from './runtime-search-path';
-import { createSubscription, MKTDATA_SERVICE, validateStreamControls } from './subscriptions';
+import {
+  createSubscription,
+  MKTDATA_SERVICE,
+  validateDelayedPolicy,
+  validateStreamControls,
+} from './subscriptions';
 import type { Subscription } from './subscriptions';
 import type {
   ActiveCdxOptions,
@@ -67,6 +74,8 @@ import type {
   CorporateBondsOptions,
   DateLike,
   DateTimeLike,
+  DelayedDataInfo,
+  DelayStatusOptions,
   DividendOptions,
   DividendYieldOptions,
   EngineConfig,
@@ -435,6 +444,12 @@ function getLegacySecurityOverrides(params: RequestInput): unknown {
     return params.securityOverrides;
   }
   return undefined;
+}
+
+/** Validate a request `onDelayed` policy; true when the host must emit delayed-data warnings. */
+function warnsOnDelayedData(policy: unknown): boolean {
+  validateDelayedPolicy(policy);
+  return policy === 'warn';
 }
 
 function mapObjectToPairs(obj: OverridesMap | undefined): StringPair[] | undefined {
@@ -1095,6 +1110,7 @@ export class Engine {
 
   public async request(params: RequestInput): Promise<unknown> {
     const backend = normalizeBackend(params.backend);
+    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { backend: _discarded, overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -1105,9 +1121,16 @@ export class Engine {
     const nativeParams = { ...rest, ...mapOverridesToRequestParts(overrides) };
     try {
       if (backend === Backend.POLARS) {
-        return ipcToPolars(await this.inner.requestRaw(nativeParams));
+        const ipc = await this.inner.requestRaw(nativeParams);
+        if (warnDelayed) {
+          emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
+        }
+        return ipcToPolars(ipc);
       }
       const batch = await this.inner.request(nativeParams);
+      if (warnDelayed) {
+        emitDelayedDataWarnings(batch.metadata);
+      }
       return nativeArrowToBackend(batch, backend);
     } catch (error) {
       throw wrapError(error);
@@ -1115,6 +1138,7 @@ export class Engine {
   }
 
   public async requestRaw(params: RequestInput): Promise<Buffer> {
+    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -1123,7 +1147,14 @@ export class Engine {
       );
     }
     try {
-      return await this.inner.requestRaw({ ...rest, ...mapOverridesToRequestParts(overrides) });
+      const ipc = await this.inner.requestRaw({
+        ...rest,
+        ...mapOverridesToRequestParts(overrides),
+      });
+      if (warnDelayed) {
+        emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
+      }
+      return ipc;
     } catch (error) {
       throw wrapError(error);
     }
@@ -1141,6 +1172,7 @@ export class Engine {
       format: options.format,
       includeSecurityErrors: Boolean(options.includeSecurityErrors),
       returnEids: options.returnEids,
+      onDelayed: options.onDelayed,
       kwargs: mapObjectToPairs(options.kwargs),
       operation: 'ReferenceDataRequest',
       overrides: options.overrides,
@@ -1153,7 +1185,7 @@ export class Engine {
   public async bds(
     tickers: readonly string[],
     fields: readonly string[],
-    options: BdpOptions = {},
+    options: Omit<BdpOptions, 'onDelayed'> = {},
   ): Promise<unknown> {
     return await this.request({
       backend: options.backend,
@@ -1182,6 +1214,7 @@ export class Engine {
       fields,
       format: options.format,
       returnEids: options.returnEids,
+      onDelayed: options.onDelayed,
       kwargs: mapObjectToPairs(options.kwargs),
       operation: 'HistoricalDataRequest',
       overrides: options.overrides,
@@ -1200,6 +1233,7 @@ export class Engine {
       extractor: 'intraday_bar',
       interval: options.interval ?? 1,
       returnEids: options.returnEids,
+      onDelayed: options.onDelayed,
       kwargs: mapObjectToPairs(options.kwargs),
       operation: 'IntradayBarRequest',
       outputTz: options.outputTz,
@@ -1218,6 +1252,7 @@ export class Engine {
       extractor: 'intraday_tick',
       kwargs: buildBdtickKwargs(options),
       returnEids: options.returnEids,
+      onDelayed: options.onDelayed,
       operation: 'IntradayTickRequest',
       outputTz: options.outputTz,
       requestTz: options.requestTz,
@@ -1917,6 +1952,24 @@ export class Engine {
     );
   }
 
+  /**
+   * Report per security whether this session receives delayed data, with the
+   * exchange delay, feed EIDs and any Bloomberg security error.
+   *
+   * `checkIdentity: true` also checks entitlement to each feed EID. That needs an
+   * authorized identity (SAPI/B-PIPE `auth`, or an EMRS-enrolled Desktop user).
+   */
+  public async delayStatus(
+    tickers: string | readonly string[],
+    options: DelayStatusOptions = {},
+  ): Promise<unknown> {
+    return await nativeRecipeResult(
+      options.backend,
+      async () =>
+        await this.inner.recipeDelayStatus(toStringArray(tickers), options.checkIdentity ?? false),
+    );
+  }
+
   /** Resolve every input before opening a single, venue-only subscription. */
   public async subscribeAuction(
     securities: string | readonly string[],
@@ -2144,10 +2197,10 @@ export async function abds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
   overrides?: OverridesInput,
-  options: BdpOptions = {},
+  options: Omit<BdpOptions, 'onDelayed'> = {},
 ): Promise<unknown> {
   const engine = await getConfiguredEngine();
-  const normalizedOptions: BdpOptions =
+  const normalizedOptions: Omit<BdpOptions, 'onDelayed'> =
     overrides === undefined
       ? options
       : { ...options, overrides: ovr(options.overrides ?? {}, overrides) };
@@ -2157,7 +2210,7 @@ export async function abds(
 export async function bds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
-  options: BdpOptions = {},
+  options: Omit<BdpOptions, 'onDelayed'> = {},
 ): Promise<unknown> {
   return await abds(tickers, fields, undefined, options);
 }
@@ -2227,6 +2280,21 @@ export async function subscribe(
   return await asubscribe(tickers, fields, options);
 }
 
+export async function adelayStatus(
+  tickers: string | readonly string[],
+  options: DelayStatusOptions = {},
+): Promise<unknown> {
+  const engine = await getConfiguredEngine();
+  return await engine.delayStatus(tickers, options);
+}
+
+export async function delayStatus(
+  tickers: string | readonly string[],
+  options: DelayStatusOptions = {},
+): Promise<unknown> {
+  return await adelayStatus(tickers, options);
+}
+
 async function acdxInfo(ticker: string, options: BdpOptions = {}): Promise<unknown> {
   const engine = await getConfiguredEngine();
   return await engine.bdp([toRequestString(ticker)], [...CDX_INFO_FIELDS], options);
@@ -2256,12 +2324,14 @@ export const blp = Object.freeze({
   abdp,
   abds,
   abdtick,
+  adelayStatus,
   asubscribe,
   bdh,
   bdib,
   bdp,
   bds,
   bdtick,
+  delayStatus,
   subscribe,
 });
 
@@ -2379,6 +2449,8 @@ export type {
   CorporateBondsOptions,
   DateLike,
   DateTimeLike,
+  DelayedDataInfo,
+  DelayStatusOptions,
   DividendOptions,
   DividendYieldOptions,
   EngineConfig,

@@ -559,8 +559,9 @@ fields = ["INDX_MWEIGHT", "INDX_MEMBERS", "INDX_MEMBERS3"]
 [langgraph]
 tool_names = [
     "xbbg_bdp", "xbbg_bdh", "xbbg_bds", "xbbg_bdib", "xbbg_bdtick",
-    "xbbg_check_entitlements", "xbbg_bql", "xbbg_bsrch", "xbbg_bqr", "xbbg_bflds",
-    "xbbg_beqs", "xbbg_yas", "xbbg_preferreds", "xbbg_corporate_bonds",
+    "xbbg_check_entitlements", "xbbg_delay_status", "xbbg_bql", "xbbg_bsrch",
+    "xbbg_bqr", "xbbg_bflds", "xbbg_beqs", "xbbg_yas", "xbbg_preferreds",
+    "xbbg_corporate_bonds",
     "xbbg_index_members", "xbbg_resolve_isins", "xbbg_resolve_venues",
     "xbbg_auction_snapshot", "xbbg_issuer_isins", "xbbg_etf_holdings",
     "xbbg_stream_snapshot", "xbbg_mktbar_snapshot", "xbbg_depth_snapshot",
@@ -617,11 +618,11 @@ python_error_keys = [
     "field_exception", "field_exceptions", "field_errors", "unsubscribe_error",
 ]
 priority_keys = [
-    "truncated", "truncatedInput", "eidData", "eidDataTruncation", "diagnostics",
+    "truncated", "truncatedInput", "eidData", "eidDataTruncation", "delayed", "diagnostics",
     "metadata",
 ]
 python_priority_keys = [
-    "hasErrors", "truncated", "truncatedInput", "eidData", "eidDataTruncation",
+    "hasErrors", "truncated", "truncatedInput", "eidData", "eidDataTruncation", "delayed",
     "entitled", "failedEids", "diagnostics", "metadata", "rowCount", "updateCount",
     "renderable", "spec",
 ]
@@ -637,6 +638,7 @@ javascript_only_reasons = ["accessor_omitted", "invalid_entitlement_data", "enti
 "xbbg.security_errors" = "securityErrors"
 "xbbg.field_exceptions" = "fieldExceptions"
 "xbbg.eid_data" = "eidData"
+"xbbg.delayed" = "delayed"
 
 [langgraph.chart]
 kinds = ["line", "area", "bar", "scatter", "candlestick", "depth"]

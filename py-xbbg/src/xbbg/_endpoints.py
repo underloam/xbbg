@@ -73,6 +73,7 @@ async def abdp(
     field_types: dict[str, str] | None = None,
     include_security_errors: bool = False,
     return_eids: bool = False,
+    on_delayed: str | None = None,
     validate_fields: bool | None = None,
     **kwargs,
 ):
@@ -98,6 +99,16 @@ async def abdp(
             ``.eid_data``; pandas stores it in ``attrs["xbbg_eid_data"]``;
             PyArrow preserves ``xbbg.eid_data`` in schema metadata.
             Polars and DuckDB have no stable metadata channel.
+        on_delayed: Check whether Bloomberg is delivering delayed data for
+            these tickers. ``"warn"`` emits one ``BlpDelayedDataWarning`` per
+            delayed ticker (for every backend, including polars and duckdb),
+            ``"raise"`` fails the call with ``BlpRequestError`` naming the
+            delayed tickers, and ``"ignore"`` only records the status.
+            ``None`` (default) skips the check. The flags ride on the same
+            request and surface per ticker as ``{"delayed": bool,
+            "delay_minutes": int | None}``: native Arrow results expose
+            ``.delayed``; pandas stores it in ``attrs["xbbg_delayed"]``;
+            PyArrow preserves ``xbbg.delayed`` in schema metadata.
         validate_fields: Optional per-request override for field validation.
             ``True`` forces strict validation, ``False`` disables it, and
             ``None`` follows engine-level validation mode.
@@ -132,6 +143,7 @@ async def abdh(
     field_types: dict[str, str] | None = None,
     validate_fields: bool | None = None,
     return_eids: bool = False,
+    on_delayed: str | None = None,
     **kwargs,
 ):
     """Async Bloomberg historical data (BDH).
@@ -159,6 +171,11 @@ async def abdh(
             ``.eid_data``; pandas stores it in ``attrs["xbbg_eid_data"]``;
             PyArrow preserves ``xbbg.eid_data`` in schema metadata.
             Polars and DuckDB have no stable metadata channel.
+        on_delayed: Delayed-data check; see ``abdp`` for the policies and the
+            ``.delayed`` / ``attrs["xbbg_delayed"]`` metadata. Runs one extra
+            small reference request, and only when ``end_date`` is on or after
+            yesterday (UTC), because a delayed feed only changes today's row;
+            older windows skip the check and carry no ``xbbg.delayed``.
         **kwargs: Additional overrides and infrastructure options.
             adjust: Adjustment type ('all', 'dvd', 'split', '-', None).
 
@@ -231,6 +248,7 @@ async def abdib(
     request_tz: str | None = None,
     output_tz: str | None = None,
     return_eids: bool = False,
+    on_delayed: str | None = None,
     **kwargs,
 ):
     """Async Bloomberg intraday bar data (BDIB).
@@ -253,6 +271,12 @@ async def abdib(
             ``.eid_data``; pandas stores it in ``attrs["xbbg_eid_data"]``;
             PyArrow preserves ``xbbg.eid_data`` in schema metadata.
             Polars and DuckDB have no stable metadata channel.
+        on_delayed: Delayed-data check; see ``abdp`` for the policies and the
+            ``.delayed`` / ``attrs["xbbg_delayed"]`` metadata. Runs one extra
+            small reference request, and only when the requested window ends
+            later than 24 hours ago, since a delayed feed's data stops at now
+            minus the delay; older windows skip the check and carry no
+            ``xbbg.delayed``.
         **kwargs: Additional Bloomberg options (e.g., intervalHasSeconds,
             gapFillInitialBar, or 0.x request-element aliases such as ``Points=1``).
             Pass true Bloomberg field overrides via ``overrides={...}``.
@@ -289,6 +313,7 @@ async def abdtick(
     request_tz: str | None = None,
     output_tz: str | None = None,
     return_eids: bool = False,
+    on_delayed: str | None = None,
     **kwargs,
 ):
     """Async Bloomberg tick data (BDTICK).
@@ -306,6 +331,12 @@ async def abdtick(
             ``.eid_data``; pandas stores it in ``attrs["xbbg_eid_data"]``;
             PyArrow preserves ``xbbg.eid_data`` in schema metadata.
             Polars and DuckDB have no stable metadata channel.
+        on_delayed: Delayed-data check; see ``abdp`` for the policies and the
+            ``.delayed`` / ``attrs["xbbg_delayed"]`` metadata. Runs one extra
+            small reference request, and only when the requested window ends
+            later than 24 hours ago, since a delayed feed's data stops at now
+            minus the delay; older windows skip the check and carry no
+            ``xbbg.delayed``.
         **kwargs: Additional Bloomberg options. Schema-recognized request elements
             and 0.x request-element aliases such as ``Points=1`` may be passed as
             individual keyword arguments. Pass true Bloomberg field overrides via
@@ -868,6 +899,7 @@ async def _build_abdp_plan(args: dict[str, Any]) -> _EndpointPlan:
             "format": fmt,
             "include_security_errors": args.get("include_security_errors", False),
             "return_eids": args.get("return_eids", False),
+            "on_delayed": args.get("on_delayed"),
             "validate_fields": args.get("validate_fields"),
         },
         backend=args.get("backend"),
@@ -958,6 +990,7 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
             "format": fmt,
             "validate_fields": args.get("validate_fields"),
             "return_eids": args.get("return_eids", False),
+            "on_delayed": args.get("on_delayed"),
         },
         backend=backend,
         postprocess=postprocess if needs_presentation_postprocess else None,
@@ -1028,6 +1061,8 @@ async def _build_abdib_plan(args: dict[str, Any]) -> _EndpointPlan:
     }
     if args.get("return_eids"):
         req["return_eids"] = True
+    if args.get("on_delayed") is not None:
+        req["on_delayed"] = args["on_delayed"]
     if args.get("request_tz") is not None:
         req["request_tz"] = args["request_tz"]
     if args.get("output_tz") is not None:
@@ -1065,6 +1100,8 @@ async def _build_abdtick_plan(args: dict[str, Any]) -> _EndpointPlan:
     }
     if args.get("return_eids"):
         req["return_eids"] = True
+    if args.get("on_delayed") is not None:
+        req["on_delayed"] = args["on_delayed"]
     if args.get("request_tz") is not None:
         req["request_tz"] = args["request_tz"]
     if args.get("output_tz") is not None:

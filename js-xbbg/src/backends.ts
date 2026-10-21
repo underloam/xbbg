@@ -1,5 +1,6 @@
 import type { Table } from 'apache-arrow';
 
+import { RecordBatchReader } from 'apache-arrow';
 import { createRequire } from 'node:module';
 
 import { FORMAT_BY_NAME } from './_defs_gen';
@@ -11,6 +12,7 @@ import type {
   BackendKind,
   BloombergFieldException,
   BloombergMetadataError,
+  DelayedDataInfo,
   FormatKind,
   ResultMetadata,
 } from './types';
@@ -51,6 +53,7 @@ function requirePolarsModule(): PolarsModule {
 const METADATA_KEY_EID_DATA = 'xbbg.eid_data';
 const METADATA_KEY_SECURITY_ERRORS = 'xbbg.security_errors';
 const METADATA_KEY_FIELD_EXCEPTIONS = 'xbbg.field_exceptions';
+const METADATA_KEY_DELAYED = 'xbbg.delayed';
 
 function metadataRecordFromMap(metadata: ReadonlyMap<string, string>): Record<string, string> {
   return Object.fromEntries(metadata.entries());
@@ -123,11 +126,58 @@ function isFieldExceptionRecord(
   );
 }
 
+function isDelayedDataInfo(value: unknown): value is DelayedDataInfo {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  const { delayed, delay_minutes: delayMinutes } = value;
+  return (
+    typeof delayed === 'boolean' && (delayMinutes === null || typeof delayMinutes === 'number')
+  );
+}
+
+function isDelayedDataRecord(value: unknown): value is Record<string, DelayedDataInfo> {
+  if (!isPlainObject(value)) {
+    return false;
+  }
+  return Object.values(value).every(isDelayedDataInfo);
+}
+
+/**
+ * Emit one `BlpDelayedDataWarning` per delayed ticker in `xbbg.delayed`.
+ *
+ * Callers pass native result metadata before backend conversion, so every
+ * backend warns.
+ */
+export function emitDelayedDataWarnings(metadata: Record<string, string>): void {
+  const delayed = parseJsonMetadata(metadata, METADATA_KEY_DELAYED, isDelayedDataRecord);
+  if (delayed === undefined) {
+    return;
+  }
+  for (const [ticker, info] of Object.entries(delayed)) {
+    if (!info.delayed) {
+      continue;
+    }
+    const lag =
+      info.delay_minutes === null ? '' : ` (${info.delay_minutes} minutes behind real time)`;
+    process.emitWarning(`${ticker}: Bloomberg is delivering delayed data${lag}`, {
+      type: 'BlpDelayedDataWarning',
+      code: 'XBBG_DELAYED_DATA',
+    });
+  }
+}
+
+/** Read the schema metadata of an Arrow IPC buffer without decoding its record batches. */
+export function ipcSchemaMetadata(buffer: Buffer): Record<string, string> {
+  return metadataRecordFromMap(RecordBatchReader.from(buffer).open().schema.metadata);
+}
+
 function attachResultMetadata<T extends object>(
   result: T,
   metadata: Record<string, string>,
 ): T & ResultMetadata {
   const eidData = parseJsonMetadata(metadata, METADATA_KEY_EID_DATA, isNumberArrayRecord);
+  const delayed = parseJsonMetadata(metadata, METADATA_KEY_DELAYED, isDelayedDataRecord);
   const securityErrors = parseJsonMetadata(
     metadata,
     METADATA_KEY_SECURITY_ERRORS,
@@ -139,6 +189,7 @@ function attachResultMetadata<T extends object>(
     isFieldExceptionRecord,
   );
   Object.defineProperties(result, {
+    delayed: { enumerable: true, value: delayed },
     eidData: { enumerable: true, value: eidData },
     fieldExceptions: { enumerable: true, value: fieldExceptions },
     metadata: { enumerable: true, value: { ...metadata } },

@@ -3,11 +3,15 @@
 Canonical exception classes are defined by the Rust extension module
 (`xbbg._core`) and re-exported here for a stable Python import path.
 
-Python-only exceptions inherit from the Rust base; subscription warnings are
-ordinary ``UserWarning`` subclasses and can be filtered with ``warnings``.
+Python-only exceptions inherit from the Rust base; subscription and delayed-data
+warnings are ordinary ``UserWarning`` subclasses and can be filtered with
+``warnings``.
 """
 
 from __future__ import annotations
+
+import sys
+import warnings
 
 from . import _core
 
@@ -23,11 +27,29 @@ class BlpSubscriptionWarning(UserWarning):
 
 
 class BlpDelayedDataWarning(BlpSubscriptionWarning):
-    """A subscribed topic is receiving delayed rather than real-time data."""
+    """Bloomberg is delivering delayed rather than real-time data.
+
+    Emitted per subscribed topic, and per requested ticker when a request
+    passes ``on_delayed="warn"``.
+    """
 
 
 class BlpFieldWarning(BlpSubscriptionWarning):
     """Bloomberg rejected an explicitly requested subscription field."""
+
+
+def _warn_at_user_frame(message: str, category: type[Warning]) -> None:
+    """Warn at the nearest caller outside xbbg and the asyncio loop driving it.
+
+    Async callers see their own ``await`` line; sync wrappers drive coroutines
+    through ``asyncio.run``, so loop frames are skipped to reach the sync caller.
+    """
+    frame = sys._getframe(1)
+    stacklevel = 2
+    while frame is not None and frame.f_globals.get("__name__", "").partition(".")[0] in ("xbbg", "asyncio"):
+        stacklevel += 1
+        frame = frame.f_back
+    warnings.warn(message, category, stacklevel=stacklevel)
 
 
 class BlpRequestError(_core.BlpRequestError):

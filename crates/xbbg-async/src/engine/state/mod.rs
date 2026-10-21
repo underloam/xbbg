@@ -42,6 +42,7 @@ pub use update::{
 pub use update_arrow::{SubscriptionArrowBatcher, subscription_update_to_record_batch};
 pub(crate) use value_utils::ResponseMetadata;
 pub use value_utils::{
-    FieldExceptionMeta, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
+    DelayedMeta, FieldExceptionMeta, METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA,
+    METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
+    delayed_metadata,
 };

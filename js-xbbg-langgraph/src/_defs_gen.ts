@@ -166,6 +166,7 @@ export const BLOOMBERG_TOOL_NAMES = [
   "xbbg_bdib",
   "xbbg_bdtick",
   "xbbg_check_entitlements",
+  "xbbg_delay_status",
   "xbbg_bql",
   "xbbg_bsrch",
   "xbbg_bqr",
@@ -272,6 +273,7 @@ export const PRIORITY_KEYS = [
   "truncatedInput",
   "eidData",
   "eidDataTruncation",
+  "delayed",
   "diagnostics",
   "metadata",
 ] as const;

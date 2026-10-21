@@ -61,14 +61,18 @@ function validateAliases(aliases: unknown): void {
   });
 }
 
-export function validateStreamControls(options: SubscriptionOptions): void {
-  validateAliases(options.aliases);
-  const policy: unknown = options.onDelayed;
+/** Reject `onDelayed` values other than warn, raise, or ignore (subscriptions and requests). */
+export function validateDelayedPolicy(policy: unknown): void {
   if (policy !== undefined && policy !== 'warn' && policy !== 'raise' && policy !== 'ignore') {
     throw new BlpValidationError('onDelayed must be warn, raise, or ignore', {
       element: 'onDelayed',
     });
   }
+}
+
+export function validateStreamControls(options: SubscriptionOptions): void {
+  validateAliases(options.aliases);
+  validateDelayedPolicy(options.onDelayed);
   const isolated: unknown = options.isolated;
   if (isolated !== undefined && typeof isolated !== 'boolean') {
     throw new BlpValidationError('isolated must be a boolean', { element: 'isolated' });

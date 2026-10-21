@@ -3295,6 +3295,7 @@ mod tests {
             dict.set_item("include_security_errors", true)
                 .expect("include_security_errors");
             dict.set_item("return_eids", true).expect("return_eids");
+            dict.set_item("on_delayed", "Raise").expect("on_delayed");
             dict.set_item("validate_fields", false)
                 .expect("validate_fields");
             dict.set_item("search_spec", "price").expect("search_spec");
@@ -3362,6 +3363,7 @@ mod tests {
             );
             assert!(params.include_security_errors);
             assert!(params.return_eids);
+            assert_eq!(params.on_delayed, Some(DelayedPolicy::Raise));
             assert_eq!(params.validate_fields, Some(false));
             assert_eq!(params.search_spec.as_deref(), Some("price"));
             assert_eq!(

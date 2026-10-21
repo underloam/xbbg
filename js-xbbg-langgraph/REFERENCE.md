@@ -10,7 +10,7 @@ Append the exported instructions to your system prompt:
 import { BLOOMBERG_TOOL_INSTRUCTIONS } from "@xbbg/langgraph";
 ```
 
-The instructions tell the model to ask clarifying questions for ambiguous tickers, fields, date ranges, currencies, periodicity, overrides, or universes; request `/isin/{isin}` for ISIN identifiers and `/cusip/{cusip}` for CUSIPs (the auction recipes also accept valid bare ISINs); use `xbbg_bflds` for unknown fields; prefer finite recipe tools for BEQS/YAS/universe and validated auction workflows; use bounded snapshot tools instead of open subscriptions; keep requests bounded; and report empty, truncated, or errored responses directly.
+The instructions tell the model to ask clarifying questions for ambiguous tickers, fields, date ranges, currencies, periodicity, overrides, or universes; request `/isin/{isin}` for ISIN identifiers and `/cusip/{cusip}` for CUSIPs (the auction recipes also accept valid bare ISINs); use `xbbg_bflds` for unknown fields; prefer finite recipe tools for BEQS/YAS/universe and validated auction workflows; check data delay with `xbbg_delay_status` or `onDelayed`; use bounded snapshot tools instead of open subscriptions; keep requests bounded; and report empty, truncated, or errored responses directly.
 
 ## LangChain `createAgent` example
 
@@ -91,7 +91,7 @@ All tools use LangChain `responseFormat: "content_and_artifact"`. In `ToolNode`,
 
 ## Tool factories
 
-`createBloombergTools()` includes all 23 core tools by default. `createBloombergExtTools()` adds 11 extension helpers; `createAllBloombergTools()` includes all 34 tools. `BLOOMBERG_TOOL_NAMES` lists the complete inventory, and `disabledTools` removes named tools from these factories.
+`createBloombergTools()` includes all 24 core tools by default. `createBloombergExtTools()` adds 11 extension helpers; `createAllBloombergTools()` includes all 35 tools. `BLOOMBERG_TOOL_NAMES` lists the complete inventory, and `disabledTools` removes named tools from these factories.
 
 Core Bloomberg request tools:
 
@@ -101,6 +101,7 @@ Core Bloomberg request tools:
 - `xbbg_bdib` - intraday bars; requires explicit `start`, `end`, and `interval`.
 - `xbbg_bdtick` - intraday ticks; requires explicit `start`, `end`, and event types when the default stream is not intended.
 - `xbbg_check_entitlements` - checks a nonempty EID list against `//blp/refdata` or an explicitly supplied Bloomberg service.
+- `xbbg_delay_status` - per-security delayed/real-time status, delay minutes, exchange code, and feed EIDs; `checkIdentity` also checks the identity's entitlement to those EIDs.
 - `xbbg_bql` - BQL expressions only.
 - `xbbg_bsrch` - Bloomberg search/grid requests, not normal security lookup.
 - `xbbg_bqr` - Bloomberg Quote Request / fixed-income dealer quotes; prefer identifiers such as `/isin/<ISIN>@<QUOTE_SOURCE> <MARKET_SECTOR>`.
@@ -148,6 +149,29 @@ await auction.invoke({
 
 These tools use finite recipe requests with `backend: "json"`; they do not open streams or require `maxUpdates`.
 
+### Delayed data
+
+Without real-time entitlement, Bloomberg silently serves delayed data: `bdp` returns a delayed snapshot, `bdh` a delayed current-day row, and intraday requests end at now minus the delay. `xbbg_delay_status` reports, for each unique security, whether this session receives delayed data (`delayed`), how far behind it is (`delay_minutes`, parsed from the raw `exchange_delay` text), `exch_code`, the real-time feed EIDs `realtime_eid1` to `realtime_eid4`, the delayed feed EID `delayed_eid`, and any security `error`. EIDs are decimal strings in JSON. The check works on any Desktop Terminal; `checkIdentity` is covered under [Entitlement IDs](#entitlement-ids).
+
+`xbbg_bdp`, `xbbg_bdh`, `xbbg_bdib`, and `xbbg_bdtick` accept `onDelayed: "warn" | "raise" | "ignore"`; omit it to skip the check. `raise` fails the call when Bloomberg is delivering delayed data. `warn` and `ignore` attach a per-security `delayed` map to the result, and `warn` also emits a `BlpDelayedDataWarning` process warning from `@xbbg/core`:
+
+```json
+{
+  "tool": "xbbg_bdp",
+  "data": {
+    "rows": [{ "ticker": "<TICKER> <MARKET_SECTOR>", "field": "<FIELD>", "value": "<VALUE>" }],
+    "delayed": { "<TICKER> <MARKET_SECTOR>": { "delayed": true, "delay_minutes": 15 } },
+    "metadata": {
+      "xbbg.delayed": "{\"<TICKER> <MARKET_SECTOR>\":{\"delayed\":true,\"delay_minutes\":15}}"
+    }
+  },
+  "rowCount": 1,
+  "truncated": false
+}
+```
+
+`delay_minutes` is null when the data is real-time or the delay text cannot be parsed. Securities without a Bloomberg delay flag are absent from the map. `xbbg_bdh`, `xbbg_bdib`, and `xbbg_bdtick` check only windows that reach the last 24 hours; older windows carry no `delayed` map. `xbbg_bds` has no `onDelayed` input.
+
 ### Entitlement IDs
 
 The `xbbg_bdp`, `xbbg_bds`, `xbbg_bdh`, `xbbg_bdib`, and `xbbg_bdtick` inputs accept `returnEids: true`. These map only to Bloomberg's EID-capable `ReferenceDataRequest` (including BDS), `HistoricalDataRequest`, `IntradayBarRequest`, and `IntradayTickRequest` operations.
@@ -167,11 +191,13 @@ When EIDs are requested, bounded tool artifacts can retain result metadata along
 }
 ```
 
-The row limit alone does not discard attached `eidData`, `metadata`, `securityErrors`, or `fieldExceptions`; byte, node, string, and entitlement limits still apply. Diagnostics and EID metadata are prioritized over ordinary properties. When present, `eidDataTruncation` reports retained IDs and securities, omissions, and whether original totals are complete; an unknown original count is not zero. Metadata may itself be omitted under tighter budgets, so inspect the truncation diagnostics before treating an EID map as complete. Pass the collected IDs to `xbbg_check_entitlements`:
+The row limit alone does not discard attached `eidData`, `delayed`, `metadata`, `securityErrors`, or `fieldExceptions`; byte, node, string, and entitlement limits still apply. Diagnostics, EID, and delay metadata are prioritized over ordinary properties. When present, `eidDataTruncation` reports retained IDs and securities, omissions, and whether original totals are complete; an unknown original count is not zero. Metadata may itself be omitted under tighter budgets, so inspect the truncation diagnostics before treating an EID map as complete. Pass the collected IDs to `xbbg_check_entitlements`:
 
 ```json
 { "eids": [101, 202], "service": "//blp/refdata" }
 ```
+
+To check market-data entitlement without a prior EID request, call `xbbg_delay_status` with `checkIdentity: true`. It checks each security's feed EIDs against `//blp/mktdata` and fills `realtime_entitled` (entitled to every real-time EID) and `delayed_entitled`. Both entitlement tools need an authorized identity: an EMRS-enrolled Desktop user or SAPI/B-PIPE authorization.
 
 Securities are passed through in the form the user supplied them: Bloomberg tickers as `<TICKER> <MARKET_SECTOR>` (for example `<TICKER> <EXCHANGE> Equity`, `<INDEX_TICKER> Index`, `<CCY_PAIR> Curncy`), raw ISINs as `/isin/<ISIN>`, raw CUSIPs as `/cusip/<CUSIP>`. The auction recipes also accept valid bare ISINs and normalize them in the core. The market sector ending is Bloomberg's yellow key — `Equity`, `Index`, `Curncy`, `Comdty`, `Corp`, `Govt`, `Muni`, `Mtge`, `M-Mkt`, or `Pfd` (preferred securities) — and general request tools pass it through to Bloomberg unvalidated; auction recipes validate venue routing separately. The agent guidance and securities/ticker field descriptions instruct the model that the ticker format is a template, not authorization to construct one — identifiers are never converted into guessed tickers; `xbbg_resolve_isins` exists for explicit security resolution and `xbbg_resolve_venues` for venue resolution. Note `xbbg_ext_ticker`'s `parse_ticker` is narrower than the request tools: it parses generic futures-style tickers only (`Index`/`Curncy`/`Comdty`/`Corp`, or `<ROOT><N> <EXCHANGE> Equity`) and rejects other sectors.
 BQL is passed as one complete expression string. Use placeholder shapes such as `get(<FIELD>) for('<TICKER> <MARKET_SECTOR>')`, `get(<FIELD_1>, <FIELD_2>) for(['<TICKER_1> <MARKET_SECTOR>', '<TICKER_2> <MARKET_SECTOR>'])`, `get(<FIELD>, <WEIGHT_FIELD>) for(holdings('<ETF_TICKER> <MARKET_SECTOR>'))`, or `get(<FIELD>) for(members('<INDEX_TICKER> <MARKET_SECTOR>')) with(...)`. Prefer `xbbg_bdp`/`xbbg_bdh` for simple reference or historical requests.

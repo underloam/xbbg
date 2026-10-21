@@ -44,6 +44,7 @@ BLOOMBERG_TOOL_NAMES: tuple[str, ...] = (
     "xbbg_bdib",
     "xbbg_bdtick",
     "xbbg_check_entitlements",
+    "xbbg_delay_status",
     "xbbg_bql",
     "xbbg_bsrch",
     "xbbg_bqr",
@@ -159,6 +160,7 @@ PRIORITY_KEYS: tuple[str, ...] = (
     "truncatedInput",
     "eidData",
     "eidDataTruncation",
+    "delayed",
     "entitled",
     "failedEids",
     "diagnostics",
@@ -227,6 +229,7 @@ ARROW_METADATA_KEYS = {
     "xbbg.security_errors": "securityErrors",
     "xbbg.field_exceptions": "fieldExceptions",
     "xbbg.eid_data": "eidData",
+    "xbbg.delayed": "delayed",
 }
 
 ReferenceFormat = Literal["long", "long_typed", "long_metadata"]

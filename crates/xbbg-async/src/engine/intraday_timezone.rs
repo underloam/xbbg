@@ -177,6 +177,16 @@ fn parse_user_datetime(input: &str) -> Result<UserDateTime, BlpAsyncError> {
     })
 }
 
+/// Parse a prepared request's start/end datetime as a UTC instant. Naive values
+/// are UTC by then: Bloomberg reads them as UTC, and `request_tz` conversion
+/// already rewrote wall-clock inputs to UTC.
+pub(crate) fn parse_utc_instant(input: &str) -> Option<DateTime<Utc>> {
+    match parse_user_datetime(input).ok()? {
+        UserDateTime::Utc(instant) => Some(instant),
+        UserDateTime::Naive(naive) => Some(naive.and_utc()),
+    }
+}
+
 fn format_utc_iso(dt: &DateTime<Utc>) -> String {
     let base = dt.format("%Y-%m-%dT%H:%M:%S").to_string();
     let micros = dt.timestamp_subsec_micros();

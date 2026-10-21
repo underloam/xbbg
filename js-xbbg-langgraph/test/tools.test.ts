@@ -79,6 +79,7 @@ function fakeEngine(): XbbgEngineLike {
     resolveIsins: vi.fn(async () => [{ isin: "US0378331005", security: "AAPL US Equity" }]),
     resolveVenues: vi.fn(async () => []),
     auctionSnapshot: vi.fn(async () => []),
+    delayStatus: vi.fn(async () => []),
     issuerIsins: vi.fn(async () => [{ issuer: "Apple Inc", isin: "US037833FB15" }]),
     etfHoldings: vi.fn(async () => [{ ticker: "AAPL US Equity", weight: 0.07 }]),
     stream: vi.fn(async () => fakeSubscription([]).subscription),
@@ -627,6 +628,68 @@ describe("Bloomberg request tools", () => {
         rows: [{ value: 1 }],
       });
     }
+  });
+
+  it("forwards onDelayed and keeps per-security delay metadata on the four checkable requests", async () => {
+    const engine = fakeEngine();
+    const delayed = { "AAPL US Equity": { delay_minutes: 15, delayed: true } };
+    const tools = createBloombergTools({ core: fakeCore(engine), maxRows: 1 });
+    const intraday = {
+      end: "2024-01-02T10:00:00Z",
+      start: "2024-01-02T09:30:00Z",
+      ticker: "AAPL US Equity",
+    };
+    const cases = [
+      {
+        input: { fields: ["PX_LAST"], securities: ["AAPL US Equity"] },
+        method: engine.bdp,
+        name: "xbbg_bdp",
+      },
+      {
+        input: {
+          end: "20240102",
+          fields: ["PX_LAST"],
+          securities: ["AAPL US Equity"],
+          start: "20240101",
+        },
+        method: engine.bdh,
+        name: "xbbg_bdh",
+      },
+      { input: { ...intraday, interval: 5 }, method: engine.bdib, name: "xbbg_bdib" },
+      { input: intraday, method: engine.bdtick, name: "xbbg_bdtick" },
+    ] as const;
+    for (const testCase of cases) {
+      vi.mocked(testCase.method).mockResolvedValueOnce(
+        Object.assign([{ value: 1 }, { value: 2 }], { delayed }),
+      );
+      const artifact = await invokeJson(byName(tools, testCase.name), {
+        ...testCase.input,
+        onDelayed: "warn",
+      });
+      // The row limit must not drop the delay map the model needs to qualify the rows.
+      expect(artifact.data).toMatchObject({ delayed, rows: [{ value: 1 }] });
+    }
+    for (const method of [engine.bdp, engine.bdh]) {
+      expect(method).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.anything(),
+        expect.objectContaining({ onDelayed: "warn" }),
+      );
+    }
+    for (const method of [engine.bdib, engine.bdtick]) {
+      expect(method).toHaveBeenCalledWith(
+        expect.anything(),
+        expect.objectContaining({ onDelayed: "warn" }),
+      );
+    }
+    await expect(
+      byName(tools, "xbbg_bdp").invoke({
+        fields: ["PX_LAST"],
+        onDelayed: "error",
+        securities: ["AAPL US Equity"],
+      }),
+    ).rejects.toThrow(/onDelayed/u);
+    expect(engine.bdp).toHaveBeenCalledTimes(1);
   });
 
   it("retains array-attached Bloomberg diagnostics under tight budgets", async () => {

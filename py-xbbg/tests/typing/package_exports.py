@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     assert_type(xbbg.request(xbbg.Service.REFDATA, xbbg.Operation.REFERENCE_DATA), Any)
     assert_type(xbbg.seat_type(), str)
     assert_type(xbbg.check_entitlements([1]), xbbg._core.EntitlementReport)
+    assert_type(xbbg.delay_status("TEST US Equity"), Any)
     assert_type(xbbg.identity_is_authorized(), bool)
     assert_type(xbbg.subscribe("TEST US Equity", "PX_LAST"), xbbg.Subscription)
     assert_type(xbbg.vwap("TEST US Equity"), xbbg.Subscription)

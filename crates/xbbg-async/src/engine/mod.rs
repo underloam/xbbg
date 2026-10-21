@@ -7,6 +7,7 @@
 //! Workers encode stable dispatch keys into Bloomberg correlation IDs for O(1) dispatch.
 //! Pool sizes are configurable with sensible defaults.
 
+mod delayed;
 mod dispatch;
 mod exchange;
 mod exchange_cache;
@@ -43,13 +44,12 @@ use exchange_cache::ExchangeCache;
 // Re-export here so existing `use xbbg_async::engine::ExtractorType` paths keep working.
 pub use crate::services::ExtractorType;
 
+pub use delayed::DelayedPolicy;
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
 use request_sharding::sharded_requests;
 use shared_subscriptions::SharedSubscriptions;
-pub use shared_subscriptions::{
-    DelayedPolicy, FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle,
-};
+pub use shared_subscriptions::{FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle};
 #[cfg(test)]
 use state::subscription_channel;
 pub use state::{
@@ -310,6 +310,10 @@ pub struct RequestParams {
     /// intraday bar, and intraday tick requests; per-security EIDs surface in
     /// the batch metadata under `xbbg.eid_data`.
     pub return_eids: bool,
+    /// Delayed-data policy for reference (bdp), historical, intraday bar, and
+    /// intraday tick requests; `None` (the default) skips the check. Per-security
+    /// status surfaces in the batch metadata under `xbbg.delayed`.
+    pub on_delayed: Option<DelayedPolicy>,
     /// Optional per-request field validation override.
     ///
     /// - Some(true): force strict field validation for this request
@@ -387,6 +391,7 @@ pub struct RequestParamsInput {
     pub field_types: Option<HashMap<String, String>>,
     pub include_security_errors: Option<bool>,
     pub return_eids: Option<bool>,
+    pub on_delayed: Option<String>,
     pub validate_fields: Option<bool>,
     pub search_spec: Option<String>,
     pub field_ids: Option<Vec<String>>,
@@ -431,6 +436,13 @@ impl RequestParamsInput {
             }
         }
 
+        let on_delayed = normalize_input_string(self.on_delayed)
+            .map(|policy| DelayedPolicy::from_str(&policy))
+            .transpose()
+            .map_err(|_| {
+                RequestParamsInputError::new("on_delayed must be warn, raise, or ignore")
+            })?;
+
         let mut params = RequestParams {
             service,
             operation,
@@ -458,6 +470,7 @@ impl RequestParamsInput {
             field_types: self.field_types,
             include_security_errors: self.include_security_errors.unwrap_or(false),
             return_eids: self.return_eids.unwrap_or(false),
+            on_delayed,
             validate_fields: self.validate_fields,
             search_spec: self.search_spec,
             field_ids: self.field_ids,
@@ -870,12 +883,26 @@ impl Engine {
         let prepared = builder.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
         let output_params = prepared.params().clone();
-        let batch = if let Some(shards) = sharded_requests(self.config.as_ref(), &prepared) {
-            self.request_shards_ordered(shards).await?
-        } else {
-            self.request_pool.request(prepared).await?
+        let operation = prepared.effective_operation().to_string();
+        let delay_lookup = delayed::lookup_securities(&prepared, chrono::Utc::now());
+        let response = async move {
+            if let Some(shards) = sharded_requests(self.config.as_ref(), &prepared) {
+                self.request_shards_ordered(shards).await
+            } else {
+                self.request_pool.request(prepared).await
+            }
         };
-        intraday_timezone::apply_intraday_output_timezone(self, batch, &output_params).await
+        let batch = match delay_lookup {
+            Some(securities) => {
+                let (batch, status) =
+                    tokio::try_join!(response, delayed::lookup(self, securities))?;
+                state::ResponseMetadata::with_delayed(status).attach(batch)
+            }
+            None => response.await?,
+        };
+        let batch =
+            intraday_timezone::apply_intraday_output_timezone(self, batch, &output_params).await?;
+        delayed::enforce(&output_params, &operation, batch)
     }
 
     /// Streaming generic request - dispatches to worker pool.
@@ -886,6 +913,12 @@ impl Engine {
         &self,
         params: RequestParams,
     ) -> Result<RequestStream, BlpAsyncError> {
+        if params.on_delayed.is_some() {
+            return Err(BlpAsyncError::ConfigError {
+                detail: "on_delayed is not supported for streamed requests; use Engine::request"
+                    .to_string(),
+            });
+        }
         let mut builder = self.prepare_request_builder(params)?;
         self.apply_intraday_request_timezone(&mut builder).await?;
         let out_iana = intraday_timezone::resolve_output_tz_iana(self, builder.params()).await?;
@@ -1907,6 +1940,67 @@ mod tests {
         explicit_element
             .validate()
             .expect("generic explicit returnEids element remains an escape hatch");
+    }
+
+    #[test]
+    fn on_delayed_input_parses_policy_and_rejects_unsupported_requests() {
+        let bdp = RequestParamsInput {
+            service: Service::RefData.to_string(),
+            operation: Some(Operation::ReferenceData.to_string()),
+            securities: Some(vec!["VOD LN Equity".to_string()]),
+            fields: Some(vec!["PX_LAST".to_string()]),
+            ..Default::default()
+        };
+        assert_eq!(bdp.clone().into_request_params().unwrap().on_delayed, None);
+        for (input, policy) in [
+            (" WARN ", DelayedPolicy::Warn),
+            ("Raise", DelayedPolicy::Raise),
+            ("ignore", DelayedPolicy::Ignore),
+        ] {
+            let params = RequestParamsInput {
+                on_delayed: Some(input.to_string()),
+                ..bdp.clone()
+            }
+            .into_request_params()
+            .unwrap();
+            assert_eq!(params.on_delayed, Some(policy));
+            params.validate().expect("on_delayed is valid for bdp");
+        }
+        let invalid = RequestParamsInput {
+            on_delayed: Some("warning".to_string()),
+            ..bdp
+        }
+        .into_request_params()
+        .unwrap_err();
+        assert_eq!(
+            invalid.detail(),
+            "on_delayed must be warn, raise, or ignore"
+        );
+
+        // Bulk and non-price requests reject the policy rather than skip the check.
+        let bulk = RequestParams {
+            service: Service::RefData.to_string(),
+            operation: Operation::ReferenceData.to_string(),
+            extractor: ExtractorType::BulkData,
+            extractor_set: true,
+            securities: Some(vec!["VOD LN Equity".to_string()]),
+            fields: Some(vec!["DVD_HIST_ALL".to_string()]),
+            on_delayed: Some(DelayedPolicy::Warn),
+            ..Default::default()
+        };
+        let field_info = RequestParams {
+            service: Service::ApiFlds.to_string(),
+            operation: Operation::FieldInfo.to_string(),
+            field_ids: Some(vec!["PX_LAST".to_string()]),
+            on_delayed: Some(DelayedPolicy::Raise),
+            ..Default::default()
+        };
+        for unsupported in [bulk, field_info] {
+            let err = unsupported
+                .validate()
+                .expect_err("on_delayed must be rejected");
+            assert!(err.to_string().contains("on_delayed"), "unexpected: {err}");
+        }
     }
 
     #[tokio::test]

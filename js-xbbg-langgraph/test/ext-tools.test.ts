@@ -37,6 +37,7 @@ function engine(): XbbgEngineLike {
     resolveIsins: vi.fn(async () => []),
     resolveVenues: vi.fn(async () => []),
     auctionSnapshot: vi.fn(async () => []),
+    delayStatus: vi.fn(async () => []),
     issuerIsins: vi.fn(async () => []),
     etfHoldings: vi.fn(async () => []),
     stream: vi.fn(async () => emptySubscription()),

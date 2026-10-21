@@ -26,6 +26,8 @@ import type { NormalizedBloombergToolsOptions } from "./options";
 
 type ReferenceFormat = (typeof REFERENCE_FORMATS)[number];
 type HistoricalFormat = (typeof HISTORICAL_FORMATS)[number];
+const DELAYED_POLICIES = ["warn", "raise", "ignore"] as const;
+type DelayedPolicy = (typeof DELAYED_POLICIES)[number];
 interface ReferenceCallOptions {
   readonly securities: readonly string[];
   readonly overrides?: OverrideMap;
@@ -38,6 +40,7 @@ export interface BdpInput extends ReferenceCallOptions {
   readonly fields: readonly string[];
   readonly format?: ReferenceFormat;
   readonly includeSecurityErrors?: boolean;
+  readonly onDelayed?: DelayedPolicy;
 }
 
 export interface BdsInput extends ReferenceCallOptions {
@@ -49,6 +52,7 @@ export interface BdhInput extends ReferenceCallOptions {
   readonly start: string;
   readonly end: string;
   readonly format?: HistoricalFormat;
+  readonly onDelayed?: DelayedPolicy;
 }
 
 export interface BdibInput {
@@ -61,6 +65,7 @@ export interface BdibInput {
   readonly outputTz?: string;
   readonly kwargs?: PrimitiveMap;
   readonly returnEids?: boolean;
+  readonly onDelayed?: DelayedPolicy;
 }
 
 export interface BdtickInput {
@@ -79,11 +84,17 @@ export interface BdtickInput {
   readonly outputTz?: string;
   readonly kwargs?: PrimitiveMap;
   readonly returnEids?: boolean;
+  readonly onDelayed?: DelayedPolicy;
 }
 
 export interface CheckEntitlementsInput {
   readonly eids: readonly number[];
   readonly service?: string;
+}
+
+export interface DelayStatusInput {
+  readonly securities: readonly string[];
+  readonly checkIdentity?: boolean;
 }
 
 export interface BqlInput {
@@ -423,6 +434,24 @@ function overflowPolicy(tool: string): ZodOutput<OverflowPolicy | undefined> {
     );
 }
 
+/**
+ * Request-side delayed-data policy. Bulk/BDS requests cannot be checked, so
+ * only the bdp, bdh, bdib, and bdtick schemas expose it. Windowed requests are
+ * checked only when their window reaches the last 24 hours.
+ */
+function delayedPolicy(tool: string, windowed: boolean): ZodOutput<DelayedPolicy | undefined> {
+  const check =
+    "Delayed-data check: raise fails when Bloomberg delivers delayed data; warn or ignore record per-security delay in the result's delayed map. Omit to skip the check.";
+  return z
+    .enum(DELAYED_POLICIES, {
+      errorMap: () => ({
+        message: `${tool}: onDelayed must be one of ${DELAYED_POLICIES.join(", ")}`,
+      }),
+    })
+    .optional()
+    .describe(windowed ? `${check} Only windows reaching the last 24 hours are checked.` : check);
+}
+
 interface ReferenceRequestShape {
   readonly kwargs: ZodOutput<PrimitiveMap | undefined>;
   readonly overrides: ZodOutput<OverrideMap | undefined>;
@@ -477,6 +506,7 @@ export function createBdpSchema(options: NormalizedBloombergToolsOptions): ZodOu
       .boolean()
       .optional()
       .describe("Include Bloomberg security errors in the response when supported."),
+    onDelayed: delayedPolicy(tool, false),
   });
 }
 
@@ -496,6 +526,7 @@ export function createBdhSchema(options: NormalizedBloombergToolsOptions): ZodOu
       format: historicalFormat(tool).describe(
         "Historical JSON output shape. Use semi_long only when the user asks for a table by date.",
       ),
+      onDelayed: delayedPolicy(tool, true),
       start: dateField(tool, "start").describe("Required start date. Use YYYY-MM-DD or YYYYMMDD."),
     })
     .superRefine((value, ctx) => {
@@ -536,6 +567,7 @@ export function createBdibSchema(options: NormalizedBloombergToolsOptions): ZodO
     kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced Bloomberg request kwargs as flat string/number/boolean values only.",
     ),
+    onDelayed: delayedPolicy(tool, true),
     outputTz: nonEmptyString(tool, "outputTz", options.maxStringChars, "<TIMEZONE>")
       .optional()
       .describe("Optional output timezone."),
@@ -588,6 +620,7 @@ export function createBdtickSchema(
     kwargs: primitiveMap(tool, "kwargs", options).describe(
       "Advanced IntradayTickRequest kwargs as flat string/number/boolean values only.",
     ),
+    onDelayed: delayedPolicy(tool, true),
     outputTz: nonEmptyString(tool, "outputTz", options.maxStringChars, "<TIMEZONE>")
       .optional()
       .describe("Optional output timezone."),
@@ -635,6 +668,29 @@ export function createCheckEntitlementsSchema(
       .optional()
       .default("//blp/refdata")
       .describe("Bloomberg service to check. Defaults to //blp/refdata."),
+  });
+}
+
+export function createDelayStatusSchema(
+  options: NormalizedBloombergToolsOptions,
+): ZodOutput<DelayStatusInput> {
+  const tool = "xbbg_delay_status";
+  return z.object({
+    checkIdentity: z
+      .boolean()
+      .optional()
+      .describe(
+        "Also check the identity's entitlement to each feed EID. Requires an EMRS-enrolled Desktop user or SAPI/B-PIPE authorization; omit otherwise.",
+      ),
+    securities: stringArray(
+      tool,
+      "securities",
+      options.maxSecurities,
+      options.maxStringChars,
+      '["<TICKER> <MARKET_SECTOR>"]',
+    ).describe(
+      "Securities exactly as the user supplied them: '<TICKER> <MARKET_SECTOR>' for Bloomberg tickers, '/isin/<ISIN>' for raw ISINs, '/cusip/<CUSIP>' for raw CUSIPs. Never invent, guess, or convert identifiers into tickers.",
+    ),
   });
 }
 

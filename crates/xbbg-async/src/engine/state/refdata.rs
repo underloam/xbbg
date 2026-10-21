@@ -163,6 +163,14 @@ impl RefDataState {
         }
     }
 
+    /// Record `on_delayed` status as `xbbg.delayed` metadata. `hidden_fields`
+    /// are the status fields xbbg appended to the wire request: never emitted
+    /// as rows, and their field exceptions are not reported.
+    pub(crate) fn capture_delayed(mut self, hidden_fields: Vec<&'static str>) -> Self {
+        self.response_meta.capture_delayed(hidden_fields);
+        self
+    }
+
     /// Process a PARTIAL_RESPONSE message.
     pub fn on_partial(&mut self, msg: &Message) {
         self.process_message(msg);

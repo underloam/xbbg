@@ -9,10 +9,14 @@ interface EntitlementReport {
   readonly failedEids: readonly number[];
 }
 
+/** Request options the tools forward on top of each core request's own options. */
+interface ForwardedRequestOptions {
+  readonly returnEids?: boolean;
+  readonly onDelayed?: "warn" | "raise" | "ignore";
+}
+
 type CoreEngineMethods = Pick<
   Awaited<ReturnType<XbbgCoreModule["connect"]>>,
-  | "bdp"
-  | "bdh"
   | "bds"
   | "bql"
   | "bsrch"
@@ -26,6 +30,7 @@ type CoreEngineMethods = Pick<
   | "resolveIsins"
   | "resolveVenues"
   | "auctionSnapshot"
+  | "delayStatus"
   | "issuerIsins"
   | "etfHoldings"
   | "stream"
@@ -36,13 +41,23 @@ type CoreEngineMethods = Pick<
 export type XbbgEngineLike = {
   readonly [Method in keyof CoreEngineMethods]: OmitThisParameter<CoreEngineMethods[Method]>;
 } & {
+  readonly bdp: (
+    tickers: readonly string[],
+    fields: readonly string[],
+    options: xbbg.BdpOptions & ForwardedRequestOptions,
+  ) => Promise<unknown>;
+  readonly bdh: (
+    tickers: readonly string[],
+    fields: readonly string[],
+    options: xbbg.BdhOptions & ForwardedRequestOptions,
+  ) => Promise<unknown>;
   readonly bdib: (
     ticker: string,
-    options: xbbg.BdibOptions & { readonly returnEids?: boolean },
+    options: xbbg.BdibOptions & ForwardedRequestOptions,
   ) => Promise<unknown>;
   readonly bdtick: (
     ticker: string,
-    options: xbbg.BdtickOptions & { readonly returnEids?: boolean },
+    options: xbbg.BdtickOptions & ForwardedRequestOptions,
   ) => Promise<unknown>;
   readonly checkEntitlements: (
     service: string,

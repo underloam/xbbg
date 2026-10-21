@@ -10,6 +10,7 @@ import {
   BDIB_DESCRIPTION,
   BDTICK_DESCRIPTION,
   CHECK_ENTITLEMENTS_DESCRIPTION,
+  DELAY_STATUS_DESCRIPTION,
   BFLDS_DESCRIPTION,
   BQL_DESCRIPTION,
   BSRCH_DESCRIPTION,
@@ -42,6 +43,7 @@ import {
   createBdtickSchema,
   createBdpSchema,
   createCheckEntitlementsSchema,
+  createDelayStatusSchema,
   createBdsSchema,
   createBfldsSchema,
   createBqlSchema,
@@ -66,6 +68,7 @@ import {
   type BdpInput,
   type BdsInput,
   type CheckEntitlementsInput,
+  type DelayStatusInput,
   type BfldsInput,
   type BqlInput,
   type BsrchInput,
@@ -346,6 +349,7 @@ function bdpWithResolver(resolver: CoreResolver): BloombergTool {
         format: input.format,
         includeSecurityErrors: input.includeSecurityErrors,
         kwargs: input.kwargs,
+        onDelayed: input.onDelayed,
         overrides: input.overrides as never,
         validateFields: validationSetting(resolver, input.validateFields),
         returnEids: input.returnEids,
@@ -372,6 +376,7 @@ function bdhWithResolver(resolver: CoreResolver): BloombergTool {
         end: input.end,
         format: input.format,
         kwargs: input.kwargs,
+        onDelayed: input.onDelayed,
         overrides: input.overrides as never,
         start: input.start,
         returnEids: input.returnEids,
@@ -424,6 +429,7 @@ function bdibWithResolver(resolver: CoreResolver): BloombergTool {
         eventType: input.eventType,
         interval: input.interval,
         kwargs: input.kwargs,
+        onDelayed: input.onDelayed,
         outputTz: input.outputTz,
         requestTz: input.requestTz,
         returnEids: input.returnEids,
@@ -457,6 +463,7 @@ function bdtickWithResolver(resolver: CoreResolver): BloombergTool {
         includeNonPlottableEvents: input.includeNonPlottableEvents,
         includeRpsCodes: input.includeRpsCodes,
         kwargs: input.kwargs,
+        onDelayed: input.onDelayed,
         outputTz: input.outputTz,
         requestTz: input.requestTz,
         returnEids: input.returnEids,
@@ -486,6 +493,26 @@ function checkEntitlementsWithResolver(resolver: CoreResolver): BloombergTool {
       name,
       limits: { ...resolver.options, maxRows: MAX_ENTITLEMENT_EIDS },
       schema: createCheckEntitlementsSchema(resolver.options),
+    },
+  );
+}
+
+function delayStatusWithResolver(resolver: CoreResolver): BloombergTool {
+  const name = "xbbg_delay_status" satisfies BloombergToolName;
+  return createBloombergStructuredTool(
+    async (input: DelayStatusInput): Promise<BloombergToolResult> => {
+      const engine = await resolver.getEngine();
+      const result = await engine.delayStatus(input.securities, {
+        backend: "json",
+        checkIdentity: input.checkIdentity,
+      });
+      return { value: result };
+    },
+    {
+      description: DELAY_STATUS_DESCRIPTION,
+      name,
+      limits: resolver.options,
+      schema: createDelayStatusSchema(resolver.options),
     },
   );
 }
@@ -903,6 +930,10 @@ export function createCheckEntitlementsTool(options: BloombergToolsOptions = {})
   return checkEntitlementsWithResolver(createCoreResolver(options));
 }
 
+export function createDelayStatusTool(options: BloombergToolsOptions = {}): BloombergTool {
+  return delayStatusWithResolver(createCoreResolver(options));
+}
+
 export function createBqlTool(options: BloombergToolsOptions = {}): BloombergTool {
   return bqlWithResolver(createCoreResolver(options));
 }
@@ -983,6 +1014,7 @@ const CORE_TOOL_DEFINITIONS: readonly CoreToolDefinition[] = Object.freeze([
   { create: bdibWithResolver, name: "xbbg_bdib" },
   { create: bdtickWithResolver, name: "xbbg_bdtick" },
   { create: checkEntitlementsWithResolver, name: "xbbg_check_entitlements" },
+  { create: delayStatusWithResolver, name: "xbbg_delay_status" },
   { create: bqlWithResolver, name: "xbbg_bql" },
   { create: bsrchWithResolver, name: "xbbg_bsrch" },
   { create: bqrWithResolver, name: "xbbg_bqr" },

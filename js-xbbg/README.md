@@ -133,6 +133,15 @@ try {
 - `onDelayed` and `onFieldError` choose whether delayed data and fields Bloomberg rejects warn (through `process.emitWarning`), raise, or are only recorded.
 - Iterate scalar ticks or call `sub.arrow()` for Apache Arrow tables. Row subscriptions end with `BlpSubscriptionDataLossError` on data loss; `rows: false` boards re-subscribe automatically.
 
+## Delayed data
+
+When a session lacks real-time entitlement for an exchange, Bloomberg serves delayed data in the same response shape as real-time data. Set `onDelayed` on `bdp`, `bdh`, `bdib`, or `bdtick` to check: `'warn'` emits one `BlpDelayedDataWarning` per delayed ticker through `process.emitWarning`, `'raise'` rejects the call with `BlpRequestError`, and `'ignore'` only records the flags. Arrow and JSON results then expose `delayed`, keyed by ticker. `engine.delayStatus(tickers)` reports, per security, whether this session gets delayed data, the exchange delay, and the feed EIDs; `checkIdentity: true` also checks the identity's entitlement to those EIDs and needs an authorized identity (SAPI/B-PIPE auth or an EMRS-enrolled Desktop user).
+
+```ts
+const ref = await engine.bdp(['VOD LN Equity'], ['PX_LAST'], { onDelayed: 'warn' });
+const status = await engine.delayStatus(['VOD LN Equity', 'AAPL US Equity'], { backend: 'json' });
+```
+
 ## Exchange auctions and imbalance
 
 Bloomberg publishes imbalance and auction data only on the listing where the auction runs. These helpers route each ticker or ISIN to that venue and check Bloomberg's answer before returning data.

@@ -1,6 +1,6 @@
 # xbbg-mcp
 
-Last updated: 2026-09-30.
+Last updated: 2026-10-20.
 
 Stdio MCP server for Bloomberg request/response workflows backed by `xbbg-async`.
 
@@ -20,6 +20,7 @@ The current server exposes request/response tools only:
 - `resolve_venues` - resolve composite equity and preferred inputs to validated auction venues
 - `auction_snapshot` - primary-venue auction and imbalance reference data
 - `check_entitlements` - entitlement-ID check for a Bloomberg service
+- `delay_status` - per-ticker delayed/real-time status for this session, with an optional feed-EID entitlement check
 - `request` - generic raw/custom request path
 
 Responses are returned as bounded structured JSON with Arrow schema metadata so an agent can inspect the shape without receiving an unbounded payload. Limits cover rows, cells, strings, metadata inspection/retention, and the final serialized payload; a row limit alone is not the output bound.
@@ -51,7 +52,7 @@ The optional `groups` list accepts `imbalance`, `indicative`, `state`, `halts`, 
 
 Both tools require at least one nonblank security (there is no count limit; results are bounded by the output limits) and accept at most 128 pricing-source overrides. `auction_snapshot` accepts up to eight group entries, 256 explicit fields, and 256 unique fields after expansion. Every input string, including override keys and values, is limited to 1,024 UTF-8 bytes; blank securities, fields, group names, or override keys are rejected rather than silently dropped. Blank override values are allowed to disable a mapping.
 
-**Timing and delayedness:** time-of-day fields are terminal-local, not exchange-local. Reference data carries no delayed/real-time flag. Use the xbbg subscription APIs for that information; this MCP server exposes request/response tools, not subscriptions.
+**Timing and delayedness:** time-of-day fields are terminal-local, not exchange-local. Bloomberg can serve delayed values without marking them in the rows. The delayed flag for this session is available from `delay_status`, from `on_delayed` on `bdp`, `bdh`, `bdib`, and `request`, or by requesting `IS_DELAYED_STREAM` and `EXCHANGE_DELAY` with `bdp`; see [Delayed data](#delayed-data).
 
 Temporal cells use the existing Arrow JSON string conventions: `Date32` is `YYYY-MM-DD`, and `Time64` is `HH:MM:SS[.fraction]` without an invented date or timezone. Timestamps include both date and time; UTC ends in `Z`, other declared timezones include their offset, and timestamps without a timezone have no suffix. Fractional seconds are preserved without rounding, including the microseconds in auction snapshots. Null cells remain JSON `null`. The same serialization applies to typed request columns such as `value_time` and `value_ts`; the Arrow schema retains the original temporal type, unit, and timezone.
 
@@ -90,6 +91,54 @@ When retained within the metadata and output budgets, results expose the EID map
 ```
 
 The check result includes `service`, `eids`, `entitled`, and `failed_eids`, plus total, returned, and omitted counts for both ID lists and per-component `truncated` flags. Failed IDs receive the shared cell/byte allowance before the echoed input IDs. A shortened list must not be interpreted as the full entitlement result.
+
+### Delayed data
+
+Bloomberg serves delayed data without marking the rows: a delayed `bdp` snapshot, a delayed "today" row from `bdh`, and intraday bars or ticks that stop at the current time minus the delay. `IS_DELAYED_STREAM` is the delayed flag for the requesting session. `EXCHANGE_DELAY` is the exchange's standard delay as text, such as `15 Minutes`, and is set for real-time securities too.
+
+`delay_status` reads both fields, `EXCH_CODE`, and the feed EIDs in one reference-data request and returns one row per unique ticker, in input order:
+
+```json
+{ "tickers": ["VOD LN Equity", "AAPL US Equity"], "check_identity": false }
+```
+
+| Column | Meaning |
+| --- | --- |
+| `ticker` | Requested security |
+| `delayed` | This session receives delayed data (`IS_DELAYED_STREAM`); `null` when unknown |
+| `delay_minutes` | Minutes behind real time, parsed from `EXCHANGE_DELAY`; `null` when real-time or unknown |
+| `exchange_delay` | Raw `EXCHANGE_DELAY` text |
+| `exch_code` | `EXCH_CODE` |
+| `realtime_eid1` to `realtime_eid4` | Real-time feed EIDs `FEED_EID1` to `FEED_EID4`; `null` when Bloomberg returns none |
+| `delayed_eid` | Delayed-feed EID `FEED_DELAYED_EID1`; `null` when none |
+| `realtime_entitled` | The session identity is entitled to every real-time feed EID; `null` unless `check_identity` is set and the ticker has at least one |
+| `delayed_entitled` | The session identity is entitled to `delayed_eid`; `null` unless `check_identity` is set and the EID exists |
+| `error` | Bloomberg security error message, else `null` |
+
+`check_identity` defaults to `false`, which works on any Desktop Terminal. Setting it to `true` also runs one entitlement check of all returned feed EIDs against `//blp/mktdata` and maps the failures back to each ticker. That needs an authorized identity: SAPI/B-PIPE authorization configured through `XBBG_MCP_AUTH_METHOD` (see [Runtime environment](#runtime-environment)), or a Desktop API user enrolled in EMRS. Otherwise the call fails.
+
+`on_delayed` runs the same check alongside a data request on `bdp`, `bdh`, `bdib`, and the generic `request` tool (`ReferenceDataRequest`, `HistoricalDataRequest`, `IntradayBarRequest`, or `IntradayTickRequest`). `bds` does not offer it, and the generic `request` tool rejects it as an invalid parameter for any other operation, including BDS/bulk.
+
+- `bdp` adds whichever of `IS_DELAYED_STREAM` and `EXCHANGE_DELAY` you did not request to the same request; the added fields are not returned as rows.
+- `bdh`, `bdib`, and intraday-tick requests send one extra small reference-data request, only when the window reaches the last 24 hours: `end_date` on or after yesterday (UTC), or `end_datetime` no earlier than 24 hours ago. Older windows skip the check and add no metadata.
+
+| `on_delayed` | Result |
+| --- | --- |
+| omitted | No check |
+| `warn` | Data plus `metadata["xbbg.delayed"]` |
+| `ignore` | Data plus `metadata["xbbg.delayed"]` |
+| `raise` | The call fails with an error containing `Bloomberg is delivering delayed data; on_delayed=raise` and the delayed tickers |
+
+MCP results have no warnings channel, so `warn` and `ignore` behave the same here: inspect the metadata. It is keyed by ticker; tickers whose flag Bloomberg did not return (an invalid security, or a field that does not apply) are absent:
+
+```json
+{
+  "VOD LN Equity": { "delayed": true, "delay_minutes": 15 },
+  "AAPL US Equity": { "delayed": false, "delay_minutes": null }
+}
+```
+
+`xbbg.delayed` is priority metadata: `metadata_counts["xbbg.delayed"]` reports returned and omitted properties, and `truncation_counts.omitted_priority_metadata` lists it if it could not be retained.
 
 ## Install from GitHub Releases
 
@@ -271,7 +320,7 @@ The final-byte limit includes JSON escaping and envelope overhead; it is not jus
 
 String values are shortened on Unicode boundaries. Column names and metadata keys are identities: oversized names are omitted rather than shortened, and duplicate column names are not silently overwritten in JSON rows. Nested Arrow values are represented by a bounded omission marker instead of recursively formatting an unbounded cell; omission counts distinguish this from an ordinary scalar value. Integer values outside JavaScript's safe range are returned as strings rather than rounded numbers.
 
-Metadata inspection is bounded before JSON parsing. Oversized entries and generic metadata that cannot be inspected within the aggregate allowance may be omitted without a full scan. `xbbg.security_errors`, `xbbg.field_exceptions`, and `xbbg.eid_data` are prioritized before generic metadata and rows. Diagnostic records are retained with their structure rather than arbitrary property fragments, but string contents and the number of records remain bounded; even priority metadata can be omitted when it cannot fit.
+Metadata inspection is bounded before JSON parsing. Oversized entries and generic metadata that cannot be inspected within the aggregate allowance may be omitted without a full scan. `xbbg.security_errors`, `xbbg.field_exceptions`, `xbbg.delayed`, and `xbbg.eid_data` are prioritized before generic metadata and rows. Diagnostic records are retained with their structure rather than arbitrary property fragments, but string contents and the number of records remain bounded; even priority metadata can be omitted when it cannot fit.
 
 ### Output diagnostics and errors
 

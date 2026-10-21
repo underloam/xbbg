@@ -63,11 +63,11 @@ For a custom LangGraph graph, bind the same tools to your model and route tool c
 
 ## Tools
 
-`createBloombergTools()` returns the 23 Bloomberg tools, `createBloombergExtTools()` the 11 helpers, and `createAllBloombergTools()` all 34. Remove any with `disabledTools`, or build one with its factory, such as `createBdpTool()`.
+`createBloombergTools()` returns the 24 Bloomberg tools, `createBloombergExtTools()` the 11 helpers, and `createAllBloombergTools()` all 35. Remove any with `disabledTools`, or build one with its factory, such as `createBdpTool()`.
 
 | Group          | Tools                                                                                                                                                                                                                                          |
 | -------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Requests       | `xbbg_bdp`, `xbbg_bdh`, `xbbg_bds`, `xbbg_bdib`, `xbbg_bdtick`, `xbbg_bql`, `xbbg_bsrch`, `xbbg_bqr`, `xbbg_bflds`, `xbbg_beqs`, `xbbg_check_entitlements`                                                                                     |
+| Requests       | `xbbg_bdp`, `xbbg_bdh`, `xbbg_bds`, `xbbg_bdib`, `xbbg_bdtick`, `xbbg_bql`, `xbbg_bsrch`, `xbbg_bqr`, `xbbg_bflds`, `xbbg_beqs`, `xbbg_check_entitlements`, `xbbg_delay_status`                                                                |
 | Recipes        | `xbbg_yas`, `xbbg_preferreds`, `xbbg_corporate_bonds`, `xbbg_index_members`, `xbbg_resolve_isins`, `xbbg_issuer_isins`, `xbbg_etf_holdings`                                                                                                    |
 | Auctions       | `xbbg_resolve_venues`, `xbbg_auction_snapshot`                                                                                                                                                                                                 |
 | Live snapshots | `xbbg_stream_snapshot`, `xbbg_mktbar_snapshot`, `xbbg_depth_snapshot`                                                                                                                                                                          |

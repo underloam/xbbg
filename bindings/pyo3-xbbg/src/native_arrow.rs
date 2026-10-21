@@ -35,7 +35,8 @@ use xbbg_arrow::{
     cell_has_value, cell_to_string,
 };
 use xbbg_async::engine::state::{
-    METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
+    METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
+    METADATA_KEY_SECURITY_ERRORS,
 };
 
 fn core_err_to_py(err: ArrowCoreError) -> PyErr {
@@ -1268,6 +1269,11 @@ impl ArrowTable {
         )
     }
 
+    #[getter]
+    fn delayed(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        parse_metadata_json(py, self.data.schema.metadata(), METADATA_KEY_DELAYED)
+    }
+
     #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_stream__<'py>(
         &self,
@@ -1916,6 +1922,10 @@ mod tests {
                         METADATA_KEY_FIELD_EXCEPTIONS.to_string(),
                         r#"{"IBM US Equity":[{"field":"PX_BAD","category":"BAD_FLD","code":2,"subcategory":"INVALID","message":"bad field"}]}"#.to_string(),
                     ),
+                    (
+                        METADATA_KEY_DELAYED.to_string(),
+                        r#"{"IBM US Equity":{"delayed":true,"delay_minutes":15},"MSFT US Equity":{"delayed":false,"delay_minutes":null}}"#.to_string(),
+                    ),
                 ]));
             let batch = RecordBatch::try_new(
                 Arc::new(schema),
@@ -1944,6 +1954,31 @@ mod tests {
                     .get_item("IBM US Equity")
                     .expect("field exception")
                     .is_instance_of::<PyList>()
+            );
+
+            let delayed = table.delayed(py).expect("delayed");
+            let delayed = delayed.bind(py);
+            let ibm = delayed.get_item("IBM US Equity").expect("delayed ticker");
+            assert!(
+                ibm.get_item("delayed")
+                    .expect("delayed flag")
+                    .extract::<bool>()
+                    .expect("bool flag")
+            );
+            assert_eq!(
+                ibm.get_item("delay_minutes")
+                    .expect("delay minutes")
+                    .extract::<u32>()
+                    .expect("integer minutes"),
+                15
+            );
+            assert!(
+                delayed
+                    .get_item("MSFT US Equity")
+                    .expect("real-time ticker")
+                    .get_item("delay_minutes")
+                    .expect("delay minutes")
+                    .is_none()
             );
         });
     }

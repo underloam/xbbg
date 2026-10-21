@@ -41,7 +41,7 @@ The JS package automatically loads a local `js-xbbg/napi_xbbg.node` addon first,
 
 ## Request and subscription behavior
 
-`bdp()` / `bds()` / `bdh()` forward `validateFields` for per-request field validation. `bdib()` and `bdtick()` forward `requestTz` / `outputTz`; `bdtick()` also exposes common include-code request flags such as `includeConditionCodes` and `includeExchangeCodes` as typed options while still accepting raw Bloomberg request kwargs.
+`bdp()` / `bds()` / `bdh()` forward `validateFields` for per-request field validation. `bdib()` and `bdtick()` forward `requestTz` / `outputTz`; `bdtick()` also exposes common include-code request flags such as `includeConditionCodes` and `includeExchangeCodes` as typed options while still accepting raw Bloomberg request kwargs. `bdp()`, `bdh()`, `bdib()` and `bdtick()` accept `onDelayed`; see [Delayed data](#delayed-data).
 
 ### Date and datetime input (#317)
 
@@ -271,6 +271,59 @@ if (eids.length > 0) {
 ```
 
 `eidData` belongs to the outer result container, not to individual rows. The outer result also exposes the raw schema metadata through `metadata`.
+
+## Delayed data
+
+When a session lacks real-time entitlement for an exchange, Bloomberg serves delayed data in the same response shape as real-time data: `bdp` returns a delayed snapshot, `bdh` a delayed "today" row, and `bdib`/`bdtick` stop at the current time minus the exchange delay. Set `onDelayed` on `bdp`, `bdh`, `bdib`, `bdtick`, or a raw `request` to check:
+
+- `'warn'` emits one warning per delayed ticker per call through `process.emitWarning`, with type `BlpDelayedDataWarning` and code `XBBG_DELAYED_DATA`, for example `VOD LN Equity: Bloomberg is delivering delayed data (15 minutes behind real time)`. The parenthetical is omitted when the delay is unknown.
+- `'raise'` rejects the whole call with `BlpRequestError`; the message names the delayed tickers.
+- `'ignore'` only records the flags on the result.
+
+Omitting `onDelayed` skips the check. Other values reject with `BlpValidationError` before any request is sent. Only reference data (the `bdp` shape), historical, intraday bar and intraday tick requests support the check; other requests, including BDS and BQL, reject `onDelayed` with `BlpValidationError`.
+
+`bdp` adds `IS_DELAYED_STREAM` and `EXCHANGE_DELAY` to the same Bloomberg request and never returns them as rows. `bdh`, `bdib` and `bdtick` send one small extra reference-data request in parallel, and only when the requested window reaches into the last 24 hours; older windows skip the check.
+
+When the check runs, Arrow and JSON results expose `delayed` next to `eidData`, keyed by ticker: `{ delayed: boolean, delay_minutes: number | null }`. `delayed` is Bloomberg's `IS_DELAYED_STREAM` for this session; `delay_minutes` comes from `EXCHANGE_DELAY` and is null when the data is real-time or the delay is unparseable. Tickers without a Bloomberg flag are absent. Polars frames carry no metadata, but warnings fire before Polars conversion, so `'warn'` also works with `backend: 'polars'` and `requestRaw`.
+
+```ts
+import { connect, type ResultMetadata } from '@xbbg/core';
+
+const engine = await connect({ host: 'localhost', port: 8194 });
+process.on('warning', (warning) => {
+  if (warning.name === 'BlpDelayedDataWarning') {
+    console.warn(warning.message);
+  }
+});
+const ref = (await engine.bdp(['VOD LN Equity'], ['PX_LAST'], {
+  onDelayed: 'warn',
+})) as ResultMetadata;
+console.log(ref.delayed); // { 'VOD LN Equity': { delayed: true, delay_minutes: 15 } }
+```
+
+### Delay status
+
+`delayStatus(tickers, { checkIdentity?, backend? })` (top level, `blp.delayStatus`, or `engine.delayStatus`) sends one reference-data request and returns one row per unique ticker, in input order, as an Arrow table or JSON rows (like other recipes, it rejects `backend: 'polars'`):
+
+| Column                           | Meaning                                                  |
+| -------------------------------- | -------------------------------------------------------- |
+| `ticker`                         | Requested security                                       |
+| `delayed`                        | This session receives delayed data; null when unknown    |
+| `delay_minutes`                  | Minutes behind real time; null when real-time or unknown |
+| `exchange_delay`                 | Raw `EXCHANGE_DELAY` text                                |
+| `exch_code`                      | `EXCH_CODE`                                              |
+| `realtime_eid1`..`realtime_eid4` | `FEED_EID1`..`FEED_EID4`                                 |
+| `delayed_eid`                    | `FEED_DELAYED_EID1`                                      |
+| `realtime_entitled`              | Identity is entitled to every real-time EID              |
+| `delayed_entitled`               | Identity is entitled to the delayed EID                  |
+| `error`                          | Bloomberg security error message, else null              |
+
+EID columns are `Int64` (`bigint` in JS) and null when Bloomberg reports none. The entitlement columns stay null unless `checkIdentity: true` and the security has those EIDs. `checkIdentity` runs one `//blp/mktdata` entitlement check over all EIDs, so it needs an authorized identity: SAPI/B-PIPE `auth` in `EngineConfig`, or an EMRS-enrolled Desktop user. Otherwise the call fails with the identity error. Without `checkIdentity`, `delayStatus` works on any Desktop Terminal.
+
+```ts
+const status = await engine.delayStatus(['VOD LN Equity', 'AAPL US Equity'], { backend: 'json' });
+const entitled = await engine.delayStatus('VOD LN Equity', { checkIdentity: true });
+```
 
 ## Recipes
 

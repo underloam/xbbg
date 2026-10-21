@@ -115,4 +115,4 @@ _ = (
 )
 
 # Dataframe metadata is inspected with getattr; synthetic modules use __path__.
-_ = (_dynamic.eid_data, _dynamic.security_errors, _dynamic.field_exceptions, _dynamic.__path__)
+_ = (_dynamic.eid_data, _dynamic.security_errors, _dynamic.field_exceptions, _dynamic.delayed, _dynamic.__path__)

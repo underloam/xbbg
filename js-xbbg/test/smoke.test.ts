@@ -132,12 +132,14 @@ describe('@xbbg/core surface', () => {
       'bdib',
       'bdtick',
       'subscribe',
+      'delayStatus',
       'abdp',
       'abdh',
       'abds',
       'abdib',
       'abdtick',
       'asubscribe',
+      'adelayStatus',
       'BlpError',
       'BlpSessionError',
       'BlpRequestError',
@@ -162,8 +164,12 @@ describe('@xbbg/core surface', () => {
     const seatType: SeatType = 'BPS';
     const entitlementReport: EntitlementReport = { entitled: false, failedEids: [101] };
     const resultMetadata: ResultMetadata = {
+      delayed: { 'IBM US Equity': { delayed: true, delay_minutes: 15 } },
       eidData: { 'IBM US Equity': [101] },
-      metadata: { 'xbbg.eid_data': '{"IBM US Equity":[101]}' },
+      metadata: {
+        'xbbg.delayed': '{"IBM US Equity":{"delayed":true,"delay_minutes":15}}',
+        'xbbg.eid_data': '{"IBM US Equity":[101]}',
+      },
     };
 
     expectTypeOf(seatType).toExtend<SeatType>();
@@ -369,12 +375,14 @@ describe('@xbbg/core surface', () => {
       'bdib',
       'bdtick',
       'subscribe',
+      'delayStatus',
       'abdp',
       'abdh',
       'abds',
       'abdib',
       'abdtick',
       'asubscribe',
+      'adelayStatus',
     ] as const;
     for (const m of methods) {
       expectTypeOf(api.blp[m]).toBeFunction();
@@ -674,6 +682,7 @@ describe('native Arrow zero-copy table construction', () => {
     expect(metadataResult.eidData).toStrictEqual({ 'IBM US Equity': [101] });
     expect(metadataResult.securityErrors).toBeUndefined();
     expect(metadataResult.fieldExceptions).toBeUndefined();
+    expect(metadataResult.delayed).toBeUndefined();
   });
 
   it('parses JSON result metadata and ignores absent or malformed convenience payloads', async () => {
@@ -1587,6 +1596,7 @@ describe('engine instantiation', () => {
         'etfNavHistory',
         'subscribeEtfInav',
         'currencyConversion',
+        'delayStatus',
         'subscribe',
         'subscribeWithOptions',
         'request',

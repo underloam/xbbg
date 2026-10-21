@@ -17,6 +17,7 @@ use smallvec::SmallVec;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use xbbg_core::{BlpError, Value};
 
+use super::delayed::DelayedPolicy;
 use super::state::typed_builder::{ArrowType, TypedBuilder};
 use super::state::{
     FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder, SubscriptionSender,
@@ -43,28 +44,6 @@ use tests::TestSessionFactory;
 const EVENT_TYPE: &str = "MKTDATA_EVENT_TYPE";
 const EVENT_SUBTYPE: &str = "MKTDATA_EVENT_SUBTYPE";
 const SESSION_WAIT_TIMED_OUT: &str = "session_wait: subscription session capacity wait timed out";
-
-/// Consumer-local policy for a delayed Bloomberg stream.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum DelayedPolicy {
-    #[default]
-    Warn,
-    Raise,
-    Ignore,
-}
-
-impl FromStr for DelayedPolicy {
-    type Err = BlpAsyncError;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim().to_ascii_lowercase().as_str() {
-            "warn" => Ok(Self::Warn),
-            "raise" => Ok(Self::Raise),
-            "ignore" => Ok(Self::Ignore),
-            _ => Err(config_error("on_delayed must be warn, raise, or ignore")),
-        }
-    }
-}
 
 /// Consumer-local treatment of fields rejected by Bloomberg.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

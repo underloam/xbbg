@@ -38,6 +38,7 @@ Latest release: xbbg==1.5.1 (release: [notes](https://github.com/underloam/xbbg/
 - [Configuration and engines](#configuration-and-engines)
 - [Common API surface](#common-api-surface)
 - [Entitlement IDs](#entitlement-ids)
+- [Delayed data](#delayed-data)
 - [Output backends](#output-backends)
 - [Async usage](#async-usage)
 - [Subscriptions: raw, tick mode, and all fields](#subscriptions-raw-tick-mode-and-all-fields)
@@ -260,13 +261,13 @@ Reading the data:
 - `THEO_PRICE` and `VOLUME_THEO` reset to 0 at the start of each auction call, and Bloomberg sends 0 for a price it does not have. Auction subscriptions therefore show 0 in `THEO_PRICE`, `INDICATIVE_NEAR`, `INDICATIVE_FAR`, `IMBALANCE_BUY`, `IMBALANCE_SELL`, and `REFERENCE_PRICE_RT` (`ext.AUCTION.ZERO_PRICE_FIELDS`) as missing in `latest()`; pass `zero_as_null=()` to keep the zeros. Rows always carry the raw values. Imbalance values can persist after an auction ends: use `AUCTION_TYPE_REALTIME`, `IN_AUCTION_RT`, and the `live` column of `latest()` to tell current values from leftovers.
 - Time-of-day fields such as `IMBALANCE_TIMESTAMP_RT` are times without a date, in the terminal's local time zone, in snapshots and streams alike. Date fields such as `CLOSING_AUCTION_VOLUME_DATE_RT` are dates.
 - Bloomberg keeps no imbalance history; record the stream to keep it (see [Recording a stream](#recording-a-stream)). Auction results do have history on the venue listing, for example `blp.bdh("IBM UN Equity", "OFFICIAL_CLOSE_AUCTION_VOLUME", ...)`; the composite returns none.
-- Reference data has no delayed/real-time flag; live subscriptions warn when a stream is delayed (see [Subscriptions](#subscriptions-raw-tick-mode-and-all-fields)).
+- Delayed data does not need a subscription: `blp.delay_status(...)` reports per security whether this session's data is delayed, and `bdp`/`bdh`/`bdib`/`bdtick` accept `on_delayed=` (see [Delayed data](#delayed-data)). Live subscriptions also warn when a stream is delayed (see [Subscriptions](#subscriptions-raw-tick-mode-and-all-fields)).
 
 Node exposes `engine.resolveVenues()`, `engine.auctionSnapshot()`, `engine.subscribeAuction()`, `engine.streamAuction()`, `AuctionFields`, and `imbalanceSide()`. The LangGraph adapters add `xbbg_resolve_venues` and `xbbg_auction_snapshot`, and the MCP server adds `resolve_venues` and `auction_snapshot`.
 
 ## Python LangChain and LangGraph
 
-[`py-xbbg-langgraph`](py-xbbg-langgraph/) provides the separate `xbbg-langgraph` distribution, imported as `xbbg_langgraph`. It exposes the same 34 tool names as the JavaScript adapter: 23 Bloomberg request/recipe/snapshot tools and 11 extension helpers, including inline Vega-Lite chart specifications. Python arguments and factory names use `snake_case`.
+[`py-xbbg-langgraph`](py-xbbg-langgraph/) provides the separate `xbbg-langgraph` distribution, imported as `xbbg_langgraph`. It exposes the same 35 tool names as the JavaScript adapter: 24 Bloomberg request/recipe/snapshot tools and 11 extension helpers, including inline Vega-Lite chart specifications. Python arguments and factory names use `snake_case`.
 
 Install from this checkout (the new distribution has not yet been published):
 
@@ -474,6 +475,7 @@ Field-cache snapshots are published atomically. On Windows this uses `FileRename
 | Exchange auctions (`xbbg.ext`) | `resolve_venues`, `auction_snapshot`, `subscribe_auction`, `stream_auction`, `AUCTION`, `imbalance_side` |
 | Real-time data | `subscribe`, `stream`, `vwap`, `mktbar`, `depth`, `chains`, `subscription_feeds` |
 | Generic requests | `request`, `Service`, `Operation`, `RequestParams`, `OutputMode` |
+| Entitlements and delayed data | `delay_status`, `check_entitlements`, `seat_type`, `identity_is_authorized` |
 | Schema and diagnostics | `bops`, `bschema`, `get_sdk_info`, `enable_sdk_logging`, `print_backend_status` |
 | Testing helpers | `xbbg.testing.create_mock_response`, `xbbg.testing.mock_engine` |
 
@@ -512,6 +514,35 @@ if eids:
 EID metadata remains available through the native `ArrowTable.eid_data` property, pandas `attrs["xbbg_eid_data"]`, or PyArrow schema metadata under `xbbg.eid_data`. Polars and DuckDB do not provide a stable entitlement-metadata side channel; use the native, PyArrow, or pandas backend when EIDs are required.
 
 This opt-in request metadata is separate from a subscription message's top-level `EID` field.
+
+Bloomberg returns EIDs only for exchanges the requester is entitled to, so a security whose data is delayed comes back with none; [`delay_status`](#delayed-data) reports its feed EIDs.
+
+## Delayed data
+
+Bloomberg serves delayed data to sessions without a real-time entitlement for an exchange, and requests neither fail nor flag it: `bdp` returns delayed snapshot values, `bdh` returns a delayed row for today, and `bdib`/`bdtick` stop the delay period before now. Check each security with `delay_status`:
+
+```python
+from xbbg import blp
+
+status = blp.delay_status(["AAPL US Equity", "VOD LN Equity", "CL1 Comdty"])
+```
+
+It makes one reference-data request and works on any Desktop, Server API, or B-PIPE session. Each row has `delayed` (this session receives delayed data), `delay_minutes` (minutes behind real time; null when real time), `exchange_delay` (Bloomberg's `EXCHANGE_DELAY` text, which also names the delay a real-time security would have), `exch_code`, the feed entitlement IDs `realtime_eid1` to `realtime_eid4` and `delayed_eid`, and `error` for securities Bloomberg rejects.
+
+`check_identity=True` also checks the feed EIDs against the engine's authorized identity on `//blp/mktdata` and fills `realtime_entitled` (every real-time EID is entitled) and `delayed_entitled`. It needs SAPI/B-PIPE authorization through `configure(auth_method=...)` or a Desktop user enrolled in EMRS; otherwise the call raises Bloomberg's identity error.
+
+`bdp`, `bdh`, `bdib`, and `bdtick` accept `on_delayed`:
+
+| Value | Behavior |
+| --- | --- |
+| `None` (default) | No check. |
+| `"warn"` | One `BlpDelayedDataWarning` per delayed security. |
+| `"raise"` | `BlpRequestError` naming the delayed securities. |
+| `"ignore"` | Status recorded in the result metadata only. |
+
+`bdp` reads the status from the same request. `bdh`, `bdib`, and `bdtick` make one extra reference-data request alongside the data, and only when the requested window ends within the last 24 hours; older windows are complete whatever the entitlement, so they are not checked. The status is in the result metadata under `xbbg.delayed` as `{ticker: {"delayed": bool, "delay_minutes": int | None}}`, available through the native `ArrowTable.delayed` property, pandas `attrs["xbbg_delayed"]`, or PyArrow schema metadata. Warnings are raised before backend conversion, so Polars and DuckDB results still warn.
+
+Node exposes `engine.delayStatus(tickers, { checkIdentity })` and `onDelayed` on `bdp`, `bdh`, `bdib`, and `bdtick`; the MCP server adds the `delay_status` tool and `on_delayed` on `bdp`, `bdh`, `bdib`, and `request`; the LangGraph adapters add `xbbg_delay_status`.
 
 ## Output backends
 
@@ -615,7 +646,7 @@ Native queues fail closed on any continuity gap: Bloomberg `DATALOSS`, a full `d
 
 **Boards without rows.** `asubscribe(..., rows=False)` keeps only current values for `latest()`: nothing is queued, so a subscription you only poll cannot overflow, and iterating it raises `RuntimeError`. If Bloomberg reports `DATALOSS`, xbbg re-subscribes the feed for a fresh image instead of ending the subscription: `live` turns false and a `DataLoss` event is recorded, then the image is rebuilt from Bloomberg's new paint and a `FeedRecovered` event follows. Subscriptions that read rows still fail closed on data loss, because they must see the gap.
 
-**Delayed data and rejected fields.** Bloomberg marks delayed streams with `IS_DELAYED_STREAM`; xbbg reads it for every subscription, records `sub.topic_states[topic]["delayed"]`, and by default warns once per security with `BlpDelayedDataWarning` (Node: `process.emitWarning` with type `BlpDelayedDataWarning`). `on_delayed="raise"` fails that security instead while its siblings keep streaming; `on_delayed="ignore"` only records the flag. Fields Bloomberg rejects when the subscription starts (for example static-only `PX_BID`, which live subscriptions call `BAD_FLD`) are listed in `sub.field_errors` and reported once with `BlpFieldWarning`, instead of silently staying empty. `on_field_error="raise"` fails the securities that requested a rejected field while their siblings keep streaming; `on_field_error="ignore"` records the error without a warning.
+**Delayed data and rejected fields.** Bloomberg marks delayed streams with `IS_DELAYED_STREAM`; xbbg reads it for every subscription, records `sub.topic_states[topic]["delayed"]`, and by default warns once per security with `BlpDelayedDataWarning` (Node: `process.emitWarning` with type `BlpDelayedDataWarning`). `on_delayed="raise"` fails that security instead while its siblings keep streaming; `on_delayed="ignore"` only records the flag. Requests take the same `on_delayed` values, unchecked by default (see [Delayed data](#delayed-data)). Fields Bloomberg rejects when the subscription starts (for example static-only `PX_BID`, which live subscriptions call `BAD_FLD`) are listed in `sub.field_errors` and reported once with `BlpFieldWarning`, instead of silently staying empty. `on_field_error="raise"` fails the securities that requested a rejected field while their siblings keep streaming; `on_field_error="ignore"` records the error without a warning.
 
 Python `stream()` producers share one managed background event-loop thread, not a thread per stream. Each sync bridge has a bounded queue (`stream_capacity`, default **256**, minimum **1**) and asynchronously waits for consumer space; native overflow policy remains separate. A sync stream that only joins existing shared feeds needs no subscription session; one that needs a session waits up to 5 seconds for capacity when all `max_subscription_sessions` are in use and then raises `RuntimeError` instead of blocking forever. Callbacks run on the consuming thread. Close the generator explicitly when stopping early: close cancels and waits for producer cleanup, and a cleanup timeout is reported. In async applications use `astream()` directly and close it explicitly when retaining the generator after an early exit.
 

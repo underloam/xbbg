@@ -23,7 +23,7 @@ from xbbg_langgraph import (
 
 
 def test_generated_tool_names_and_option_defaults_match_runtime():
-    assert len(BLOOMBERG_TOOL_NAMES) == len(set(BLOOMBERG_TOOL_NAMES)) == 34
+    assert len(BLOOMBERG_TOOL_NAMES) == len(set(BLOOMBERG_TOOL_NAMES)) == 35
     assert set(BLOOMBERG_TOOL_NAMES) == {tool.name for tool in create_all_bloomberg_tools()}
     assert (
         BLOOMBERG_TOOL_NAMES.index("xbbg_issuer_isins")
@@ -72,6 +72,19 @@ def test_reference_requests_share_bounded_maps(factory, arguments):
     )
     assert validated.kwargs == {"FLAG": "yes"}
     assert validated.overrides == {"GLOBAL": False, "SYNTH": {"PX_LAST": "value"}}
+
+
+def test_delayed_policy_is_closed_and_limited_to_checkable_requests():
+    request = {"securities": ["SYNTH"], "fields": ["PX_LAST"]}
+    schema = create_bdp_tool().args_schema
+    assert schema.model_validate({**request, "on_delayed": "raise"}).on_delayed == "raise"
+    # The policy is a typed option: no unknown value, and no smuggling through Bloomberg kwargs.
+    for invalid in ({"on_delayed": "error"}, {"kwargs": {"onDelayed": "ignore"}}):
+        with pytest.raises(ValidationError):
+            schema.model_validate({**request, **invalid})
+    bulk = create_bds_tool().args_schema
+    with pytest.raises(ValidationError):
+        bulk.model_validate({"securities": ["SYNTH"], "field": "MEMBERS", "on_delayed": "warn"})
 
 
 @pytest.mark.asyncio

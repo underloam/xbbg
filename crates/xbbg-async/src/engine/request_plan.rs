@@ -321,6 +321,7 @@ impl PreparedRequest {
                 field_types: params.field_types.clone(),
                 include_security_errors: params.include_security_errors,
                 return_eids: params.return_eids,
+                on_delayed: params.on_delayed,
                 validate_fields: params.validate_fields,
                 search_spec: params.search_spec.clone(),
                 field_ids: params.field_ids.clone(),
@@ -397,6 +398,7 @@ fn validate_request_params_with_operation(
     validate_field_metadata_aliases(params, operation)?;
     validate_security_overrides(params, operation, raw)?;
     validate_return_eids(params, operation)?;
+    validate_on_delayed(params, operation, raw)?;
     PlannedRequestShape::from_params(operation, raw, params)?;
 
     if raw {
@@ -447,6 +449,39 @@ fn validate_return_eids(
             ),
         }),
     }
+}
+
+/// `on_delayed` qualifies per-security price data: bdp (status fields added
+/// inline) and bdh/bdib/bdtick (separate status lookup). Reject it elsewhere so
+/// a requested check is never silently skipped.
+fn validate_on_delayed(
+    params: &RequestParams,
+    operation: &Operation,
+    raw: bool,
+) -> Result<(), BlpAsyncError> {
+    if params.on_delayed.is_none() {
+        return Ok(());
+    }
+    let detail = match operation {
+        Operation::HistoricalData | Operation::IntradayBar | Operation::IntradayTick => {
+            return Ok(());
+        }
+        Operation::ReferenceData => {
+            if matches!(
+                PlannedRequestShape::from_params(operation, raw, params)?,
+                PlannedRequestShape::RefData(_)
+            ) {
+                return Ok(());
+            }
+            "on_delayed is not supported for bulk (BDS) or generic reference data requests"
+                .to_string()
+        }
+        other => format!(
+            "on_delayed is only supported for ReferenceData (bdp), HistoricalData, IntradayBar, \
+             and IntradayTick requests (got {other})"
+        ),
+    };
+    Err(BlpAsyncError::ConfigError { detail })
 }
 
 fn route_request_params(

@@ -29,9 +29,10 @@ const BLOCKING_STRING_BYTES_THRESHOLD: usize = 256 * 1024;
 const MAX_INLINE_METADATA_ENTRIES: usize = 16;
 
 const EID_METADATA_KEY: &str = "xbbg.eid_data";
-const PRIORITY_METADATA_KEYS: [&str; 3] = [
+const PRIORITY_METADATA_KEYS: [&str; 4] = [
     "xbbg.security_errors",
     "xbbg.field_exceptions",
+    "xbbg.delayed",
     EID_METADATA_KEY,
 ];
 
@@ -1872,6 +1873,44 @@ mod tests {
         assert_eq!(
             payload["truncation_counts"]["metadata_property_count_complete"],
             false
+        );
+        assert_eq!(payload["truncated"]["metadata"], true);
+    }
+
+    #[test]
+    fn delayed_metadata_is_kept_when_generic_metadata_is_skipped() {
+        let delayed = json!({
+            "SYNTH LN Equity": {"delayed": true, "delay_minutes": 15},
+            "SYNTH US Equity": {"delayed": false, "delay_minutes": null},
+        });
+        let mut metadata = (0..20)
+            .map(|index| (format!("key-{index}"), r#"{"ok":true}"#.to_string()))
+            .collect::<HashMap<_, _>>();
+        metadata.insert("xbbg.delayed".to_string(), delayed.to_string());
+        let batch = batch_with_metadata(
+            vec![("value", Arc::new(Int32Array::from(vec![1])))],
+            metadata,
+        );
+        let bounded = ResultLimits {
+            max_metadata_properties: 10,
+            ..limits()
+        };
+
+        let payload = record_batch_to_json(&batch, &bounded).unwrap();
+
+        assert_eq!(payload["metadata"]["xbbg.delayed"], delayed);
+        assert!(payload["metadata"].get("key-0").is_none());
+        assert_eq!(
+            payload["metadata_counts"]["xbbg.delayed"],
+            json!({
+                "returned_properties": 6,
+                "known_omitted_properties": 0,
+                "property_count_complete": true,
+            })
+        );
+        assert_eq!(
+            payload["truncation_counts"]["omitted_priority_metadata"],
+            json!([])
         );
         assert_eq!(payload["truncated"]["metadata"], true);
     }

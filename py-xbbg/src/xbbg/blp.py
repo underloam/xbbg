@@ -71,6 +71,7 @@ from ._technical import (
     ta_study_params as ta_study_params,
 )
 from .backend import Backend, ensure_arrow_table, get_backend as get_backend, set_backend as set_backend
+from .exceptions import BlpDelayedDataWarning, _warn_at_user_frame
 from .request_middleware import (
     RequestContext,
     RequestEnvironment,
@@ -137,6 +138,7 @@ if TYPE_CHECKING:
         field_types: dict[str, str] | None = None,
         include_security_errors: bool = False,
         return_eids: bool = False,
+        on_delayed: str | None = None,
         validate_fields: bool | None = None,
         **kwargs: Any,
     ) -> DataFrameResult:
@@ -154,6 +156,7 @@ if TYPE_CHECKING:
         field_types: dict[str, str] | None = None,
         validate_fields: bool | None = None,
         return_eids: bool = False,
+        on_delayed: str | None = None,
         **kwargs: Any,
     ) -> DataFrameResult:
         """Sync Bloomberg historical data (BDH). See ``abdh`` for details."""
@@ -184,6 +187,7 @@ if TYPE_CHECKING:
         request_tz: str | None = None,
         output_tz: str | None = None,
         return_eids: bool = False,
+        on_delayed: str | None = None,
         **kwargs: Any,
     ) -> DataFrameResult:
         """Sync Bloomberg intraday bar data (BDIB). See ``abdib`` for details."""
@@ -199,6 +203,7 @@ if TYPE_CHECKING:
         request_tz: str | None = None,
         output_tz: str | None = None,
         return_eids: bool = False,
+        on_delayed: str | None = None,
         **kwargs: Any,
     ) -> DataFrameResult:
         """Sync Bloomberg tick data (BDTICK). See ``abdtick`` for details."""
@@ -333,6 +338,7 @@ if TYPE_CHECKING:
         format: Format | str | None = None,
         include_security_errors: bool = False,
         return_eids: bool = False,
+        on_delayed: str | None = None,
         validate_fields: bool | None = None,
         backend: Backend | str | None = None,
         request_tz: str | None = None,
@@ -348,6 +354,15 @@ if TYPE_CHECKING:
 
     def check_entitlements(eids: Sequence[int], service: str = Service.REFDATA.value) -> EntitlementReport:
         """Sync EID entitlement check. See ``acheck_entitlements`` for details."""
+        ...
+
+    def delay_status(
+        tickers: str | Sequence[str],
+        *,
+        check_identity: bool = False,
+        backend: Backend | str | None = None,
+    ) -> DataFrameResult:
+        """Sync delayed-data status. See ``adelay_status`` for details."""
         ...
 
     def identity_is_authorized(service: str = Service.REFDATA.value) -> bool:
@@ -476,6 +491,49 @@ async def acheck_entitlements(
     return await _engine._get_engine().check_entitlements(service, list(eids))
 
 
+async def adelay_status(
+    tickers: str | Sequence[str],
+    *,
+    check_identity: bool = False,
+    backend: Backend | str | None = None,
+) -> DataFrameResult:
+    """Report whether Bloomberg delivers delayed data for each ticker.
+
+    Sends one ReferenceDataRequest for ``IS_DELAYED_STREAM``,
+    ``EXCHANGE_DELAY``, ``EXCH_CODE``, ``FEED_EID1``-``FEED_EID4``, and
+    ``FEED_DELAYED_EID1``. Bloomberg evaluates ``IS_DELAYED_STREAM`` for the
+    requesting session, so ``delayed`` reflects this login's entitlements.
+
+    Args:
+        tickers: Single ticker or list of tickers. Input order is kept and
+            duplicates are removed.
+        check_identity: Also check the authorized identity's entitlement to each
+            ticker's real-time and delayed feed EIDs on ``//blp/mktdata``. This
+            needs SAPI/B-PIPE auth (``configure(auth_method=...)``) or an
+            EMRS-enrolled Desktop user; otherwise the call fails with the
+            identity error. The default works on any Desktop Terminal.
+        backend: DataFrame backend to return. If None, uses global default.
+
+    Returns:
+        One row per ticker with columns ``ticker``, ``delayed`` (null when
+        Bloomberg did not say), ``delay_minutes`` (null when real-time or
+        unparseable), ``exchange_delay`` (raw ``EXCHANGE_DELAY`` text),
+        ``exch_code``, ``realtime_eid1``-``realtime_eid4`` and ``delayed_eid``
+        (feed EIDs, null when absent), ``realtime_entitled`` and
+        ``delayed_entitled`` (null unless ``check_identity`` and the EIDs
+        exist), and ``error`` (Bloomberg security error message).
+
+    Example::
+
+        status = await adelay_status(["AAPL US Equity", "VOD LN Equity"])
+    """
+    from . import _core
+
+    engine = _engine._get_engine()
+    batch = await _core.recipe_delay_status(engine, _request_options._normalize_tickers(tickers), check_identity)
+    return _backend._convert_result_backend(batch, backend)
+
+
 async def aidentity_is_authorized(service: str = Service.REFDATA.value) -> bool:
     """Return whether the lazily authorized identity is authorized for *service*.
 
@@ -571,8 +629,20 @@ async def _execute_request_terminal(context: RequestContext) -> DataFrameResult:
     )
 
     context.table = ensure_arrow_table(batch)
+    if context.params.on_delayed == "warn":
+        _warn_delayed_data(context.table)
     context.frame = context.table
     return context.table
+
+
+def _warn_delayed_data(table: Any) -> None:
+    """Emit one ``BlpDelayedDataWarning`` per ticker flagged in ``xbbg.delayed``."""
+    for ticker, status in (getattr(table, "delayed", None) or {}).items():
+        if not status.get("delayed"):
+            continue
+        minutes = status.get("delay_minutes")
+        behind = "" if minutes is None else f" ({minutes} minutes behind real time)"
+        _warn_at_user_frame(f"{ticker}: Bloomberg is delivering delayed data{behind}", BlpDelayedDataWarning)
 
 
 # =============================================================================
@@ -605,6 +675,7 @@ async def arequest(
     format: Format | str | None = None,
     include_security_errors: bool = False,
     return_eids: bool = False,
+    on_delayed: str | None = None,
     validate_fields: bool | None = None,
     backend: Backend | str | None = None,
     request_tz: str | None = None,
@@ -666,6 +737,10 @@ async def arequest(
         return_eids: Request EID entitlement metadata for ReferenceDataRequest
             (including BDS bulk data), HistoricalDataRequest, IntradayBarRequest,
             and IntradayTickRequest.
+        on_delayed: Delayed-data check for ReferenceDataRequest (bdp shape, not
+            bulk), HistoricalDataRequest, IntradayBarRequest, and
+            IntradayTickRequest: ``"warn"``, ``"raise"``, or ``"ignore"``; see
+            ``abdp``. ``None`` (default) skips the check.
         validate_fields: Optional per-request override for field validation.
             ``True`` forces strict validation, ``False`` disables it, and
             ``None`` follows engine-level validation mode.
@@ -795,6 +870,7 @@ async def arequest(
         format=format_hint,
         include_security_errors=include_security_errors,
         return_eids=return_eids,
+        on_delayed=on_delayed,
         validate_fields=validate_fields,
         request_tz=request_tz,
         output_tz=output_tz,
@@ -1022,6 +1098,7 @@ def _install_manual_sync_wrappers() -> None:
         ("request", arequest),
         ("seat_type", aseat_type),
         ("check_entitlements", acheck_entitlements),
+        ("delay_status", adelay_status),
         ("identity_is_authorized", aidentity_is_authorized),
         ("subscribe", asubscribe),
         ("vwap", avwap),

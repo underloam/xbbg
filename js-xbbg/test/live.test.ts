@@ -11,7 +11,7 @@ import assert from 'node:assert/strict';
 import { performance } from 'node:perf_hooks';
 
 import { Backend, connect } from '../src/index';
-import type { Engine, FeedInfo, Subscription } from '../src/index';
+import type { Engine, FeedInfo, ResultMetadata, Subscription } from '../src/index';
 
 const CONFIG = Object.freeze({
   bond_ticker: 'GT10 Govt',
@@ -1692,6 +1692,54 @@ describe('js-xbbg live Bloomberg API', () => {
         assert.ok(stringCell(table, 'kind', 0) === 'pfd', 'Expected a preferred security');
         assert.ok(stringCell(table, 'status', 0) === 'resolved', 'Preferred venue must validate');
         assert.ok(stringCell(table, 'venue_topic', 0) !== null, 'Expected a venue topic');
+      }));
+  });
+
+  describe('delayed-data checks', () => {
+    it('records the delayed flag on bdp without returning the injected fields', async (t) =>
+      runCase(t, 'bdp onDelayed', async () => {
+        const table = (await engine!.bdp([CONFIG.equity_single], [CONFIG.price_field], {
+          onDelayed: 'ignore',
+        })) as Table & ResultMetadata;
+        assertArrowTable(table, ['ticker', 'field', 'value'], 1);
+        assert.equal(table.numRows, 1, 'Injected delay fields must not appear as rows');
+        const flag = table.delayed?.[CONFIG.equity_single];
+        assert.ok(flag, 'Expected an xbbg.delayed entry for the requested ticker');
+        assert.equal(typeof flag.delayed, 'boolean');
+        assert.ok(flag.delay_minutes === null || Number.isInteger(flag.delay_minutes));
+        console.log(`  delayed=${String(flag.delayed)}, minutes=${String(flag.delay_minutes)}`);
+      }));
+
+    it('reports one delay-status row per unique ticker with the documented columns', async (t) =>
+      runCase(t, 'delay status', async () => {
+        const table = (await withTimeout(
+          engine!.delayStatus([CONFIG.equity_single, CONFIG.equity_single, CONFIG.bond_ticker]),
+          15_000,
+          'delay status',
+        )) as Table;
+        assert.deepEqual(columnsOf(table), [
+          'ticker',
+          'delayed',
+          'delay_minutes',
+          'exchange_delay',
+          'exch_code',
+          'realtime_eid1',
+          'realtime_eid2',
+          'realtime_eid3',
+          'realtime_eid4',
+          'delayed_eid',
+          'realtime_entitled',
+          'delayed_entitled',
+          'error',
+        ]);
+        assert.deepEqual(
+          [0, 1].map((row) => stringCell(table, 'ticker', row)),
+          [CONFIG.equity_single, CONFIG.bond_ticker],
+        );
+        assert.equal(table.numRows, 2);
+        // Entitlement columns stay null unless checkIdentity is requested.
+        assert.equal(cellValue(table, 'realtime_entitled', 0), null);
+        assert.equal(cellValue(table, 'delayed_entitled', 0), null);
       }));
   });
 });
