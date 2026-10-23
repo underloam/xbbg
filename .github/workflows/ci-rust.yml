@@ -860,9 +860,12 @@ jobs:
         shell: bash
         env:
           UV_RESOLUTION: lowest-direct
+        # lowest-direct lowers only direct requirements, and a wheel's own
+        # dependencies are transitive, so `${WHEEL}[test]` alone resolves the
+        # newest releases. Naming the declared requirements makes them direct.
         run: |
           WHEEL=$(echo dist/*.whl)
-          uv pip install --system "${WHEEL}[test]"
+          uv pip install --system "${WHEEL}[test]" -r pyproject.toml --extra test
 
       - name: Show resolved floor versions
         run: uv pip list --system

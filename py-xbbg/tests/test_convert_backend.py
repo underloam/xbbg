@@ -292,7 +292,7 @@ class TestConvertBackendPolars:
         result = backend_module._to_polars_frame(table)
         empty = backend_module._to_polars_frame(source.slice(0, 0))
 
-        assert result.schema == pl.Schema({"value": pl.Int64, "when": pl.Date, "timestamp": pl.Datetime("us", "UTC")})
+        assert dict(result.schema) == {"value": pl.Int64, "when": pl.Date, "timestamp": pl.Datetime("us", "UTC")}
         assert result.to_dicts() == [
             {"value": 1, "when": date(2024, 1, 1), "timestamp": timestamp},
             {"value": None, "when": None, "timestamp": None},
