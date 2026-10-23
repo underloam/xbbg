@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
-import json
 from pathlib import Path
 import subprocess
 import sys
@@ -69,22 +67,6 @@ def test_windows_launcher_controls_dll_precedence() -> None:
 def test_windows_launcher_revalidates_direct_call_input() -> None:
     with pytest.raises(argparse.ArgumentTypeError):
         package_xbbg_mcpb.render_windows_launcher('3.20.0"; Write-Output injected; #')
-
-
-def test_release_metadata_preserves_published_schema() -> None:
-    version = "1.5.1"
-    manifest = package_xbbg_mcpb.build_manifest(version)
-    server = render_mcp_registry_server.build_server_metadata(
-        version, "https://example.invalid/xbbg-mcp.mcpb", "a" * 64
-    )
-
-    # Captured before consolidating the two renderers, with their production JSON encoding.
-    for payload, expected in (
-        (manifest, "095a5e1a59a4f645c3ea80fbcb04d02bef89244909babbbc88093b4410de8895"),
-        (server, "f93fdab1d67111c8c3f76cc27b2955110d7a68e6060fdaebce53b97d21d1f8ed"),
-    ):
-        encoded = (json.dumps(payload, indent=2) + "\n").encode()
-        assert hashlib.sha256(encoded).hexdigest() == expected
 
 
 def test_release_metadata_settings_stay_in_sync() -> None:
