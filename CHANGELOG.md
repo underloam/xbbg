@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.6.0] - 2026-10-23
+
 ### Added
 
 - **Dead-code and import-graph checks.** CI and pre-commit now run vulture and import-linter for both Python packages (`pixi run -e lint deadcode`, `deadcode-langgraph`, `imports`, `imports-langgraph`), Knip and dependency-cruiser in both JavaScript packages' `npm run quality`, `cargo shear` for unused Rust dependencies (replacing the non-blocking nightly `cargo udeps` job), `cargo deny` bans that keep the binding frameworks, the MCP SDK, and `xbbg-blpapi-sys` inside their owning crates, and the `unreachable_pub` lint, so rustc's dead-code analysis also covers crate-internal items.
@@ -1737,7 +1739,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.5.1...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/underloam/xbbg/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/underloam/xbbg/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/underloam/xbbg/compare/v1.4.12...v1.5.0
 [1.4.12]: https://github.com/underloam/xbbg/compare/v1.4.11...v1.4.12
