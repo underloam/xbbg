@@ -127,12 +127,8 @@ def convert_session_times_to_utc(
         _, end_utc = _core.ext_session_times_to_utc(end_clock, end_clock, exchange_tz, end.date().isoformat())
 
     # The native binding has second precision; retain caller-supplied fractions.
-    start_result = pd.Timestamp(start_utc, tz="UTC") + pd.Timedelta(
-        microseconds=start.microsecond, nanoseconds=start.nanosecond
-    )
-    end_result = pd.Timestamp(end_utc, tz="UTC") + pd.Timedelta(
-        microseconds=end.microsecond, nanoseconds=end.nanosecond
-    )
+    start_result = pd.Timestamp(start_utc, tz="UTC").replace(microsecond=start.microsecond, nanosecond=start.nanosecond)
+    end_result = pd.Timestamp(end_utc, tz="UTC").replace(microsecond=end.microsecond, nanosecond=end.nanosecond)
     return start_result.strftime(time_fmt), end_result.strftime(time_fmt)
 
 
