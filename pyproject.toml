@@ -57,13 +57,15 @@ dependencies = [
 #     2.2.2 is the first release that supports numpy 2.
 #   * duckdb below 1.5.0 loses the connection backing a returned relation
 #     ("Connection has already been closed"); 1.0.0 additionally cannot register
-#     an Arrow PyCapsule object at all.
+#     an Arrow PyCapsule object at all. 1.5.0 maps its block allocator eagerly,
+#     tens of GB of virtual memory, and os.fork() after DuckDB starts then fails
+#     with ENOMEM on the 16 GB CI runners; 1.5.1 maps it lazily (duckdb#21276).
 #   * narwhals below 2.10.0 ignores our plugin entry point (see above).
 pyarrow = ["pyarrow>=22.0.0"]
 pandas = ["pandas>=2.2.2,<4"]
 # Polars' timezone extra supplies tzdata on Windows, including at the floor.
 polars = ["polars[timezone]>=0.20.4"]
-duckdb = ["duckdb>=1.5.0"]
+duckdb = ["duckdb>=1.5.1"]
 test = [
   "pytest>=8.4",
   # Bounded deliberately: unpinned, a lowest-direct resolve selects pytest-cov
@@ -75,7 +77,7 @@ test = [
   "polars[timezone]>=0.20.4",
   # duckdb publishes no CPython 3.15 wheels yet, and its sdist is a full C++
   # build. The duckdb tests skip when it is absent.
-  "duckdb>=1.5.0; python_version < '3.15'",
+  "duckdb>=1.5.1; python_version < '3.15'",
 ]
 
 [project.urls]

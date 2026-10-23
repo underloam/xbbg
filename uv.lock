@@ -6,10 +6,10 @@ resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'emscripten'",
     "python_full_version >= '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and python_full_version < '3.14' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
 
@@ -764,8 +764,8 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "duckdb", marker = "python_full_version < '3.15' and extra == 'test'", specifier = ">=1.5.0" },
-    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.0" },
+    { name = "duckdb", marker = "python_full_version < '3.15' and extra == 'test'", specifier = ">=1.5.1" },
+    { name = "duckdb", marker = "extra == 'duckdb'", specifier = ">=1.5.1" },
     { name = "narwhals", specifier = ">=2.10.0" },
     { name = "pandas", marker = "extra == 'pandas'", specifier = ">=2.2.2,<4" },
     { name = "pandas", marker = "extra == 'test'", specifier = ">=2.2.2,<4" },
