@@ -329,7 +329,10 @@ class TestConvertBackendDuckDB:
     def test_convert_duckdb_relation(self, arrow_table: Any):
         duckdb = pytest.importorskip("duckdb")
         result = convert_backend_frame(arrow_table, Backend.DUCKDB)
-        assert result.fetchone() is not None
+        assert result.fetchall() == [
+            ("AAPL US Equity", "2024-01-01", 150.0),
+            ("MSFT US Equity", "2024-01-01", 380.0),
+        ]
         assert result.columns == arrow_table.column_names
         del duckdb
 
@@ -364,7 +367,7 @@ class TestConvertBackendDuckDB:
         with ThreadPoolExecutor(max_workers=4) as executor:
             relations = list(executor.map(convert, range(16)))
 
-        assert [relation.fetchone()[0] for relation in relations] == list(range(16))
+        assert [relation.fetchall() for relation in relations] == [[(value,)] for value in range(16)]
 
     @pytest.mark.skipif(not hasattr(os, "fork"), reason="requires POSIX fork")
     def test_initialized_database_is_rejected_in_forked_child(self):
