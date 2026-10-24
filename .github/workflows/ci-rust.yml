@@ -799,14 +799,14 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-      # xbbg-langgraph stays below 3.15 until LangGraph's dependency chain
-      # builds there: ormsgpack 1.12.2 (via langgraph-checkpoint) ships no 3.15
-      # wheels and its PyO3 0.27 refuses to compile for 3.15.
+      # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
+      # wheels: PyYAML (via langchain-core) and zstandard (via langsmith) have none
+      # on any platform, nor does orjson for Linux.
       - name: Install Python LangGraph adapter
         if: matrix.python != '3.15'
         shell: bash
         # This run's wheel carries an untagged CI version below the adapter's
-        # `xbbg>=1.5.0` floor. Without the override uv swaps it for the newest
+        # `xbbg>=1.6.0` floor. Without the override uv swaps it for the newest
         # PyPI release, and the adapter tests would exercise that instead.
         run: |
           python -c "import glob, pathlib; print('xbbg @ ' + pathlib.Path(glob.glob('dist/*.whl')[0]).resolve().as_uri())" > "${{ runner.temp }}/xbbg-override.txt"
