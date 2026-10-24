@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Changed
 
 - **The Python LangGraph adapter requires xbbg 1.6.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.6.0,<2`, the first release with the `adelay_status()` function and `on_delayed` request parameter behind its `xbbg_delay_status` tool and `on_delayed` arguments; xbbg 1.5 has neither.
+- **DuckDB tests run on Python 3.15.** duckdb 2.0 publishes stable-ABI wheels that install on CPython 3.15, so the `test` extra no longer leaves duckdb out there, the 3.15 CI jobs run the DuckDB tests, and `xbbg[duckdb]` on 3.15 installs duckdb 2.0 from a wheel instead of needing a source build. The `uv.lock` pin moves from duckdb 1.5.6 to 2.0.0.
 
 ### Fixed
 

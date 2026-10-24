@@ -75,9 +75,9 @@ test = [
   "pyarrow>=22.0.0",
   "pandas>=2.2.2,<4",
   "polars[timezone]>=0.20.4",
-  # duckdb publishes no CPython 3.15 wheels yet, and its sdist is a full C++
-  # build. The duckdb tests skip when it is absent.
-  "duckdb>=1.5.1; python_version < '3.15'",
+  # duckdb 2.0 publishes stable-ABI (abi3) wheels, the only ones that install on
+  # CPython 3.15, so resolvers pick 2.0+ there.
+  "duckdb>=1.5.1",
 ]
 
 [project.urls]
