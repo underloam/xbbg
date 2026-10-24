@@ -362,11 +362,11 @@ def generate_ta_stubs(output_dir: str | None = None) -> str:
     output_path.mkdir(parents=True, exist_ok=True)
 
     stub_path = output_path / "ta_studies.pyi"
-    stub_path.write_text("\n".join(lines))
+    stub_path.write_text("\n".join(lines), encoding="utf-8")
 
     # Also write .py for runtime imports
     py_path = output_path / "ta_studies.py"
-    py_path.write_text("\n".join(lines))
+    py_path.write_text("\n".join(lines), encoding="utf-8")
 
     # Configure IDE
     from .schema import configure_ide_stubs

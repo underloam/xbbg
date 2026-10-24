@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **The Python LangGraph adapter requires xbbg 1.6.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.6.0,<2`, the first release with the `adelay_status()` function and `on_delayed` request parameter behind its `xbbg_delay_status` tool and `on_delayed` arguments; xbbg 1.5 has neither.
 
+### Fixed
+
+- **Stub generation no longer depends on the default text encoding, and no longer breaks TOML config files.** `generate_stubs()`, `generate_ta_stubs()`, and `configure_ide_stubs()` read and wrote files in the platform's default encoding. Python 3.15 made that UTF-8 (PEP 686), but on Windows with Python 3.11–3.14 it is the ANSI code page, so stub modules generated from schema descriptions with characters such as `’` failed to import or to write, and editing `.vscode/settings.json`, `pyrightconfig.json`, `pyproject.toml`, or `ty.toml` could garble existing non-ASCII entries, raise, or silently skip the file. These files are now always read and written as UTF-8. The stubs path inserted into `pyproject.toml` or `ty.toml`, and shown in the manual setup instructions, is now quoted: Windows backslashes were written unescaped, so on Windows the file stopped parsing as TOML on every Python version.
+
 ## [1.6.0] - 2026-10-23
 
 ### Added

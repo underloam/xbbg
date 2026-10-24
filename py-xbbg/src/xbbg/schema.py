@@ -258,6 +258,11 @@ def configure_ide_stubs(
     """
     stubs_path = Path.home() / ".xbbg" / "stubs" if stubs_dir is None else Path(stubs_dir)
     stubs_str = str(stubs_path)
+    # Config files and the TOML/JSON syntax around the path: read and write UTF-8 whatever the
+    # platform default (Python 3.15 made it UTF-8, Windows 3.11-3.14 use the ANSI code page), and
+    # quote the path, since Windows backslashes are escapes inside TOML and JSON strings. JSON's
+    # string escapes are all valid TOML escapes.
+    stubs_quoted = json.dumps(stubs_str, ensure_ascii=False)
 
     # Find project root (look for common markers)
     cwd = Path.cwd()
@@ -277,22 +282,22 @@ def configure_ide_stubs(
         if not config_path.exists():
             return None
         try:
-            config = json.loads(config_path.read_text())
+            config = json.loads(config_path.read_text(encoding="utf-8"))
             values = config.get(key, [])
             if stubs_str in values:
                 return f"{label} already configured with {stubs_str}"
             values.append(stubs_str)
             config[key] = values
-            config_path.write_text(json.dumps(config, indent=indent))
+            config_path.write_text(json.dumps(config, indent=indent), encoding="utf-8")
             return f"Configured {label}: added {stubs_str} to {key}"
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             return None
 
     def _load_toml_config(path: Path) -> tuple[str, dict[str, Any]] | None:
         if not path.exists():
             return None
         try:
-            content = path.read_text()
+            content = path.read_text(encoding="utf-8")
             parsed = tomllib.loads(content)
             return content, parsed
         except Exception:
@@ -336,10 +341,10 @@ def configure_ide_stubs(
         if "extraPaths" in content:
             return None
 
-        new_content = _insert_setting(content, "[tool.pyright]", f'extraPaths = ["{stubs_str}"]')
+        new_content = _insert_setting(content, "[tool.pyright]", f"extraPaths = [{stubs_quoted}]")
         if new_content is None:
             return None
-        pyproject.write_text(new_content)
+        pyproject.write_text(new_content, encoding="utf-8")
         return f"Configured pyproject.toml: added {stubs_str} to [tool.pyright].extraPaths"
 
     def _configure_ty() -> str | None:
@@ -356,10 +361,10 @@ def configure_ide_stubs(
         if "extra-paths" in content:
             return None
 
-        new_content = _insert_setting(content, "[environment]", f'extra-paths = ["{stubs_str}"]')
+        new_content = _insert_setting(content, "[environment]", f"extra-paths = [{stubs_quoted}]")
         if new_content is None:
             return None
-        ty_config.write_text(new_content)
+        ty_config.write_text(new_content, encoding="utf-8")
         return f"Configured ty.toml: added {stubs_str} to [environment].extra-paths"
 
     def _configure_pyproject_ty() -> str | None:
@@ -379,15 +384,15 @@ def configure_ide_stubs(
         if "extra-paths" in content:
             return None
 
-        new_content = _insert_setting(content, "[tool.ty.environment]", f'extra-paths = ["{stubs_str}"]')
+        new_content = _insert_setting(content, "[tool.ty.environment]", f"extra-paths = [{stubs_quoted}]")
         if new_content is not None:
-            pyproject.write_text(new_content)
+            pyproject.write_text(new_content, encoding="utf-8")
             return f"Configured pyproject.toml: added {stubs_str} to [tool.ty.environment].extra-paths"
 
-        new_content = _insert_setting(content, "[tool.ty]", f'environment.extra-paths = ["{stubs_str}"]')
+        new_content = _insert_setting(content, "[tool.ty]", f"environment.extra-paths = [{stubs_quoted}]")
         if new_content is None:
             return None
-        pyproject.write_text(new_content)
+        pyproject.write_text(new_content, encoding="utf-8")
         return f"Configured pyproject.toml: added {stubs_str} to [tool.ty].environment.extra-paths"
 
     # Configure specific IDE if requested
@@ -433,14 +438,14 @@ def configure_ide_stubs(
 To enable IDE autocomplete, add the stubs path to your IDE/type checker config:
 
 VS Code (.vscode/settings.json):
-    {{"python.analysis.extraPaths": ["{stubs_str}"]}}
+    {{"python.analysis.extraPaths": [{stubs_quoted}]}}
 
 Pyright (pyrightconfig.json):
-    {{"extraPaths": ["{stubs_str}"]}}
+    {{"extraPaths": [{stubs_quoted}]}}
 
 ty (ty.toml):
     [environment]
-    extra-paths = ["{stubs_str}"]
+    extra-paths = [{stubs_quoted}]
 
 PyCharm:
     Settings > Project > Python Interpreter > Show All > Show paths > Add {stubs_str}
@@ -479,11 +484,11 @@ def generate_stubs(
 
     # Write files
     stub_path = output_dir / f"blp_{service_name}.pyi"
-    stub_path.write_text(stub_content)
+    stub_path.write_text(stub_content, encoding="utf-8")
 
     # Also write .py for runtime imports
     py_path = output_dir / f"blp_{service_name}.py"
-    py_path.write_text(stub_content)
+    py_path.write_text(stub_content, encoding="utf-8")
 
     # Configure IDE
     ide_msg = configure_ide_stubs(output_dir)
