@@ -14,7 +14,10 @@ use std::time::Duration;
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrow_zero_copy::NativeArrowBatch;
-use napi::bindgen_prelude::{Buffer, Error, Status, create_custom_tokio_runtime};
+use napi::bindgen_prelude::{
+    Buffer, Either, Error, FromNapiValue, Status, ToNapiValue, TypeName, Uint8Array,
+    ValidateNapiValue, create_custom_tokio_runtime,
+};
 use napi_derive::napi;
 use tokio::sync::watch;
 use tokio::time::Instant;
@@ -25,7 +28,7 @@ use xbbg_async::engine::state::{
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr,
     ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, SubscriptionEventInfo,
-    SubscriptionFailureInfo, SubscriptionStatusState, TopicStatusInfo, Transport,
+    SubscriptionFailureInfo, SubscriptionStatusState, TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
@@ -83,11 +86,148 @@ pub struct AuthConfigInput {
 
 #[napi(object)]
 pub struct TlsConfigInput {
-    pub client_credentials: Option<String>,
+    /// File path, or DER PKCS#12 bytes. Must match the representation of trustMaterial.
+    #[napi(ts_type = "string | Buffer | Uint8Array")]
+    pub client_credentials: Option<TlsMaterialInput>,
     pub client_credentials_password: Option<String>,
-    pub trust_material: Option<String>,
+    /// File path, or DER PKCS#7 bytes. Required together with clientCredentials.
+    #[napi(ts_type = "string | Buffer | Uint8Array")]
+    pub trust_material: Option<TlsMaterialInput>,
     pub handshake_timeout_ms: Option<i32>,
     pub crl_fetch_timeout_ms: Option<i32>,
+}
+
+/// Own TLS material while extracting synchronous JS arguments, before an async
+/// factory can move its configuration to Tokio. No JS memory survives this boundary.
+pub struct TlsMaterialInput(TlsMaterial);
+
+impl TlsMaterialInput {
+    fn from_bytes(bytes: &[u8]) -> Self {
+        Self(TlsMaterial::Blob(Arc::from(bytes)))
+    }
+}
+
+impl TypeName for TlsMaterialInput {
+    fn type_name() -> &'static str {
+        "string | Buffer | Uint8Array"
+    }
+
+    fn value_type() -> napi::ValueType {
+        napi::ValueType::Unknown
+    }
+}
+
+impl ValidateNapiValue for TlsMaterialInput {
+    unsafe fn validate(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> napi::Result<napi::sys::napi_value> {
+        unsafe { Either::<String, Uint8Array>::validate(env, value) }
+    }
+}
+
+impl FromNapiValue for TlsMaterialInput {
+    unsafe fn from_napi_value(
+        env: napi::sys::napi_env,
+        value: napi::sys::napi_value,
+    ) -> napi::Result<Self> {
+        if unsafe { String::validate(env, value) }.is_ok() {
+            return unsafe { String::from_napi_value(env, value) }
+                .map(|path| Self(TlsMaterial::Path(path)));
+        }
+
+        let mut is_typed_array = false;
+        napi::check_status!(unsafe {
+            napi::sys::napi_is_typedarray(env, value, &mut is_typed_array)
+        })?;
+        if !is_typed_array {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS material must be a string or Buffer/Uint8Array",
+            ));
+        }
+
+        let mut array_type = 0;
+        let mut len = 0;
+        let mut data = std::ptr::null_mut();
+        let mut backing = std::ptr::null_mut();
+        napi::check_status!(
+            unsafe {
+                napi::sys::napi_get_typedarray_info(
+                    env,
+                    value,
+                    &mut array_type,
+                    &mut len,
+                    &mut data,
+                    &mut backing,
+                    std::ptr::null_mut(),
+                )
+            },
+            "TLS material must use a non-detached ArrayBuffer, not SharedArrayBuffer",
+        )?;
+        if array_type != napi::sys::TypedarrayType::uint8_array {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS blob material must be a Buffer or Uint8Array",
+            ));
+        }
+        if backing.is_null() {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS material must not use detached ArrayBuffer backing",
+            ));
+        }
+        let mut is_array_buffer = false;
+        napi::check_status!(unsafe {
+            napi::sys::napi_is_arraybuffer(env, backing, &mut is_array_buffer)
+        })?;
+        if !is_array_buffer {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS material must not use SharedArrayBuffer backing",
+            ));
+        }
+        let mut is_detached = false;
+        napi::check_status!(unsafe {
+            napi::sys::napi_is_detached_arraybuffer(env, backing, &mut is_detached)
+        })?;
+        if is_detached || (len != 0 && data.is_null()) {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS material must not use detached ArrayBuffer backing",
+            ));
+        }
+        if len > i32::MAX as usize {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "TLS blob exceeds the SDK maximum length",
+            ));
+        }
+
+        // No JS callbacks occur between checking this non-shared backing and
+        // copying the exact view. In particular, do not construct a Rust slice
+        // over SharedArrayBuffer memory that another JS worker can mutate.
+        let bytes = if len == 0 {
+            &[]
+        } else {
+            unsafe { std::slice::from_raw_parts(data.cast::<u8>(), len) }
+        };
+        Ok(Self::from_bytes(bytes))
+    }
+}
+
+impl ToNapiValue for TlsMaterialInput {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        match value.0 {
+            TlsMaterial::Path(path) => unsafe { String::to_napi_value(env, path) },
+            TlsMaterial::Blob(blob) => unsafe {
+                Buffer::to_napi_value(env, Buffer::from(blob.as_ref().to_vec()))
+            },
+        }
+    }
 }
 
 #[napi(object)]
@@ -596,7 +736,16 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
         config.overflow_policy = overflow_policy;
 
         let auth = input.auth.as_ref();
-        let tls = input.tls.as_ref();
+        let mut tls = input.tls;
+        let client_credentials = tls
+            .as_mut()
+            .and_then(|tls| tls.client_credentials.take())
+            .map(|material| material.0);
+        let trust_material = tls
+            .as_mut()
+            .and_then(|tls| tls.trust_material.take())
+            .map(|material| material.0);
+        let tls = tls.as_ref();
         xbbg_async::config::normalize(
             config,
             xbbg_async::config::ConfigInput {
@@ -609,10 +758,10 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
                     token: auth.and_then(|auth| auth.token.as_deref()),
                 },
                 tls: xbbg_async::config::TlsInput {
-                    client_credentials: tls.and_then(|tls| tls.client_credentials.as_deref()),
+                    client_credentials,
                     client_credentials_password: tls
                         .and_then(|tls| tls.client_credentials_password.as_deref()),
-                    trust_material: tls.and_then(|tls| tls.trust_material.as_deref()),
+                    trust_material,
                     handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
                     crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
                 },
@@ -958,6 +1107,29 @@ fn error_presentation_to_napi(presentation: ErrorPresentation) -> Error {
         ErrorKind::Timeout => (Status::GenericFailure, "TIMEOUT"),
         ErrorKind::Internal => (Status::GenericFailure, "INTERNAL"),
     };
+    if let Some(context) = presentation.request_context
+        && !context.bloomberg_request_ids.is_empty()
+    {
+        let ids: Vec<&str> = context
+            .bloomberg_request_ids
+            .iter()
+            .map(AsRef::as_ref)
+            .collect();
+        // One JSON line is unambiguous even when labels or IDs contain brackets.
+        // The JS adapter removes the transport envelope from the user message.
+        let context = serde_json::json!({
+            "service": context.service,
+            "operation": context.operation,
+            "request_id": context.request_id,
+            "bloomberg_request_id": if ids.len() == 1 { Some(ids[0]) } else { None },
+            "bloomberg_request_ids": ids,
+        });
+        return coded(
+            status,
+            code,
+            format!("[XBBG_CONTEXT]{context}\n{}", presentation.message),
+        );
+    }
     coded(status, code, presentation.message)
 }
 
@@ -1001,16 +1173,37 @@ fn subscription_control_error_to_napi(error: BlpAsyncError) -> Error {
 }
 
 fn recipe_error_to_napi(e: xbbg_recipes::RecipeError) -> Error {
-    match e {
-        // Delegate engine errors so they carry their precise code.
-        xbbg_recipes::RecipeError::Engine(inner) => blp_async_error_to_napi(*inner),
-        xbbg_recipes::RecipeError::InvalidArgument(detail) => coded(
-            Status::InvalidArg,
-            "VALIDATION",
-            format!("Invalid argument: {detail}"),
-        ),
-        other => coded(Status::GenericFailure, "INTERNAL", other.to_string()),
+    let (source, request_ids) = e.into_request_context();
+    let mut presentation = match source {
+        // Classify the original engine error, not its recipe support context.
+        xbbg_recipes::RecipeError::Engine(inner) => {
+            ErrorPresentation::from_async(*inner, ErrorStyle::JavaScript)
+        }
+        xbbg_recipes::RecipeError::InvalidArgument(detail) => ErrorPresentation {
+            kind: ErrorKind::Validation,
+            message: format!("Invalid argument: {detail}"),
+            data_loss: None,
+            request_context: None,
+        },
+        other => ErrorPresentation {
+            kind: ErrorKind::Internal,
+            message: other.to_string(),
+            data_loss: None,
+            request_context: None,
+        },
+    };
+    if !request_ids.is_empty() {
+        let context = presentation.request_context.get_or_insert_with(|| {
+            xbbg_async::error_presentation::RequestErrorContext {
+                service: None,
+                operation: None,
+                request_id: None,
+                bloomberg_request_ids: Vec::new(),
+            }
+        });
+        context.bloomberg_request_ids = request_ids.iter().cloned().collect();
     }
+    error_presentation_to_napi(presentation)
 }
 
 #[napi]
@@ -2708,6 +2901,59 @@ mod tests {
     }
 
     #[test]
+    fn request_error_transport_preserves_structured_sdk_identifiers() {
+        for timeout in [false, true] {
+            for count in [1, 2] {
+                let ids: Vec<std::sync::Arc<str>> = ["sdk-synthetic-]\"\\\n", "sdk-synthetic-z"]
+                    .into_iter()
+                    .take(count)
+                    .map(std::sync::Arc::from)
+                    .collect();
+                let core = if timeout {
+                    BlpError::RequestTimeout {
+                        request_id: Some("req-label".into()),
+                        bloomberg_request_ids: ids.clone(),
+                    }
+                } else {
+                    BlpError::RequestFailure {
+                        service: "//synthetic/refdata".into(),
+                        operation: Some("SyntheticRequest".into()),
+                        cid: None,
+                        label: Some("synthetic failure".into()),
+                        request_id: Some("req-label".into()),
+                        bloomberg_request_ids: ids.clone(),
+                        source: None,
+                    }
+                };
+                let error = blp_error_to_napi(core);
+                let prefix = if timeout {
+                    "[XBBG:TIMEOUT] [XBBG_CONTEXT]"
+                } else {
+                    "[XBBG:REQUEST] [XBBG_CONTEXT]"
+                };
+                let (json, message) = error
+                    .reason
+                    .strip_prefix(prefix)
+                    .expect("context prefix")
+                    .split_once('\n')
+                    .expect("one JSON line");
+                let context: serde_json::Value = serde_json::from_str(json).unwrap();
+                assert_eq!(context["request_id"], "req-label");
+                assert_eq!(
+                    context["bloomberg_request_ids"],
+                    serde_json::json!(ids.iter().map(AsRef::as_ref).collect::<Vec<&str>>())
+                );
+                assert_eq!(
+                    context["bloomberg_request_id"].as_str(),
+                    (count == 1).then(|| ids[0].as_ref())
+                );
+                assert!(message.contains("[request_id=req-label]"));
+                assert_eq!(error.status, Status::GenericFailure);
+            }
+        }
+    }
+
+    #[test]
     fn core_error_adapters_preserve_napi_status_codes_and_context() {
         for wrapped in [false, true] {
             for (error, status, message) in [
@@ -2734,6 +2980,7 @@ mod tests {
                         cid: Some(xbbg_core::errors::CorrelationContext::U64(42)),
                         label: Some("subcategory=DAILY_CAPACITY_REACHED".into()),
                         request_id: Some("synthetic-request".into()),
+                        bloomberg_request_ids: Vec::new(),
                         source: Some(Box::new(std::io::Error::other("synthetic cause"))),
                     },
                     Status::GenericFailure,
@@ -2828,6 +3075,59 @@ mod tests {
                 };
                 assert_eq!(error.status, status);
                 assert_eq!(error.reason, message);
+            }
+        }
+    }
+
+    #[test]
+    fn contextual_recipe_errors_keep_codes_messages_and_sdk_ids() {
+        use xbbg_recipes::RecipeError;
+
+        let sources: [fn() -> RecipeError; 5] = [
+            || RecipeError::Other("synthetic recipe rejection".into()),
+            || RecipeError::InvalidArgument("synthetic recipe argument".into()),
+            || {
+                RecipeError::from(BlpAsyncError::ConfigError {
+                    detail: "synthetic engine validation".into(),
+                })
+            },
+            || RecipeError::from(BlpAsyncError::AllWorkersDown { pool_size: 2 }),
+            || RecipeError::from(BlpAsyncError::from(BlpError::Timeout)),
+        ];
+        for count in [1, 2] {
+            for source in sources {
+                let plain = recipe_error_to_napi(source());
+                let (code, message) = plain
+                    .reason
+                    .strip_prefix("[XBBG:")
+                    .unwrap()
+                    .split_once("] ")
+                    .unwrap();
+                let ids = ["synthetic_a", "synthetic_z"];
+                let error = recipe_error_to_napi(source().with_bloomberg_request_ids(
+                    ids.iter().take(count).map(|id| std::sync::Arc::from(*id)),
+                ));
+                assert_eq!(error.status, plain.status);
+                let prefix = format!("[XBBG:{code}] [XBBG_CONTEXT]");
+                let (context, actual_message) = error
+                    .reason
+                    .strip_prefix(&prefix)
+                    .unwrap()
+                    .split_once('\n')
+                    .unwrap();
+                let context: serde_json::Value = serde_json::from_str(context).unwrap();
+                assert_eq!(actual_message, message);
+                assert_eq!(
+                    context["bloomberg_request_ids"],
+                    serde_json::json!(&ids[..count])
+                );
+                assert_eq!(
+                    context["bloomberg_request_id"].as_str(),
+                    (count == 1).then_some(ids[0])
+                );
+                for attribute in ["service", "operation", "request_id"] {
+                    assert!(context[attribute].is_null(), "no invented {attribute}");
+                }
             }
         }
     }
@@ -3249,9 +3549,9 @@ mod tests {
         let config = EngineConfig::try_from(EngineConfigInput {
             zfp_remote: Some("8194".to_string()),
             tls: Some(TlsConfigInput {
-                client_credentials: Some("/tmp/client.p12".to_string()),
+                client_credentials: Some(TlsMaterialInput("/tmp/client.p12".into())),
                 client_credentials_password: Some("secret".to_string()),
-                trust_material: Some("/tmp/trust.p7".to_string()),
+                trust_material: Some(TlsMaterialInput("/tmp/trust.p7".into())),
                 handshake_timeout_ms: Some(2000),
                 crl_fetch_timeout_ms: Some(3000),
             }),
@@ -3266,9 +3566,15 @@ mod tests {
             other => panic!("expected Zfp, got {other}"),
         }
         let tls = config.tls.as_ref().expect("tls should be set");
-        assert_eq!(tls.client_credentials, "/tmp/client.p12");
+        assert_eq!(
+            tls.client_credentials,
+            TlsMaterial::Path("/tmp/client.p12".into())
+        );
         assert_eq!(tls.client_credentials_password, "secret");
-        assert_eq!(tls.trust_material, "/tmp/trust.p7");
+        assert_eq!(
+            tls.trust_material,
+            TlsMaterial::Path("/tmp/trust.p7".into())
+        );
         assert_eq!(tls.handshake_timeout_ms, Some(2000));
         assert_eq!(tls.crl_fetch_timeout_ms, Some(3000));
     }
@@ -3345,6 +3651,88 @@ mod tests {
     }
 
     #[test]
+    fn tls_input_owns_offset_bytes_before_async_normalization() {
+        let credentials = b"\x30\0\xffsynthetic-client";
+        let trust = b"\x30\0\xfesynthetic-trust";
+        let mut client_backing = [b"prefix".as_slice(), credentials, b"suffix"].concat();
+        let mut trust_backing = [b"prefix".as_slice(), trust, b"suffix"].concat();
+        let client_input = TlsMaterialInput::from_bytes(&client_backing[6..6 + credentials.len()]);
+        let trust_input = TlsMaterialInput::from_bytes(&trust_backing[6..6 + trust.len()]);
+        let TlsMaterial::Blob(owned_client) = &client_input.0 else {
+            panic!("expected owned blob");
+        };
+        let owned_client = owned_client.clone();
+        let input = EngineConfigInput {
+            zfp_remote: Some("8194".into()),
+            tls: Some(TlsConfigInput {
+                client_credentials: Some(client_input),
+                client_credentials_password: Some("synthetic-password".into()),
+                trust_material: Some(trust_input),
+                handshake_timeout_ms: Some(0),
+                crl_fetch_timeout_ms: Some(25),
+            }),
+            ..minimal_input()
+        };
+        client_backing.fill(0);
+        trust_backing.fill(0);
+        drop(client_backing);
+        drop(trust_backing);
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        let config = runtime
+            .block_on(async move {
+                tokio::spawn(async move { EngineConfig::try_from(input) })
+                    .await
+                    .unwrap()
+            })
+            .unwrap();
+        let tls = config.tls.as_ref().unwrap();
+        let TlsMaterial::Blob(actual_client) = &tls.client_credentials else {
+            panic!("expected client blob");
+        };
+        assert_eq!(actual_client.as_ref(), credentials);
+        assert!(Arc::ptr_eq(actual_client, &owned_client));
+        assert_eq!(tls.trust_material, TlsMaterial::Blob(Arc::from(&trust[..])));
+        assert_eq!(tls.handshake_timeout_ms, Some(0));
+        assert_eq!(tls.crl_fetch_timeout_ms, Some(25));
+        assert!(matches!(config.transport, Transport::Zfp(_)));
+        assert!(!format!("{tls:?}").contains("synthetic"));
+    }
+
+    #[test]
+    fn engine_config_input_rejects_missing_and_mixed_blob_pairs() {
+        let blob = || TlsMaterialInput::from_bytes(b"synthetic-secret-blob");
+        let path = || TlsMaterialInput("fixtures/material.der".into());
+        for (credentials, trust) in [
+            (Some(blob()), None),
+            (None, Some(blob())),
+            (Some(blob()), Some(path())),
+            (Some(path()), Some(blob())),
+        ] {
+            let error = EngineConfig::try_from(EngineConfigInput {
+                tls: Some(TlsConfigInput {
+                    client_credentials: credentials,
+                    client_credentials_password: Some("synthetic-secret-password".into()),
+                    trust_material: trust,
+                    handshake_timeout_ms: None,
+                    crl_fetch_timeout_ms: None,
+                }),
+                ..minimal_input()
+            })
+            .err()
+            .expect("missing or mixed TLS material should fail");
+            assert_eq!(error.status, Status::InvalidArg);
+            assert!(error.reason.contains("tls.clientCredentials"));
+            assert!(error.reason.contains("tls.trustMaterial"));
+            assert!(!error.reason.contains("synthetic-secret"));
+            assert!(!error.reason.contains("fixtures/material.der"));
+        }
+    }
+
+    #[test]
     fn engine_config_input_rejects_negative_tls_timeouts_without_or_with_credentials() {
         for with_material in [false, true] {
             for (handshake, crl, field) in [
@@ -3354,9 +3742,10 @@ mod tests {
                 let err = EngineConfig::try_from(EngineConfigInput {
                     tls: Some(TlsConfigInput {
                         client_credentials: with_material
-                            .then(|| "fixtures/client.p12".to_string()),
+                            .then(|| TlsMaterialInput("fixtures/client.p12".into())),
                         client_credentials_password: None,
-                        trust_material: with_material.then(|| "fixtures/trust.p7".to_string()),
+                        trust_material: with_material
+                            .then(|| TlsMaterialInput("fixtures/trust.p7".into())),
                         handshake_timeout_ms: handshake,
                         crl_fetch_timeout_ms: crl,
                     }),
@@ -3388,9 +3777,9 @@ mod tests {
         ] {
             let err = EngineConfig::try_from(EngineConfigInput {
                 tls: Some(TlsConfigInput {
-                    client_credentials: credentials,
+                    client_credentials: credentials.map(|path| TlsMaterialInput(path.into())),
                     client_credentials_password: None,
-                    trust_material: trust,
+                    trust_material: trust.map(|path| TlsMaterialInput(path.into())),
                     handshake_timeout_ms: None,
                     crl_fetch_timeout_ms: None,
                 }),

@@ -203,7 +203,8 @@ fn normalize_batch_to_schema(
     batch: RecordBatch,
     schema: &SchemaRef,
 ) -> Result<RecordBatch, BlpAsyncError> {
-    if batch.schema_ref().as_ref() == schema.as_ref() {
+    // Diagnostics are unioned before normalization; concat reads only the fields.
+    if batch.schema_ref().fields() == schema.fields() {
         return Ok(batch);
     }
     if batch.num_columns() != schema.fields().len() {
@@ -293,11 +294,40 @@ impl Engine {
             "dispatching sharded request"
         );
 
+        let error_context = shards
+            .first()
+            .map(|request| super::RequestParams {
+                service: request.params().service.clone(),
+                operation: request.effective_operation().to_owned(),
+                request_id: request.params().request_id.clone(),
+                ..Default::default()
+            })
+            .unwrap_or_default();
         let results = stream::iter(shards)
             .map(|request| async move { self.request_pool.request(request).await })
             .buffered(self.config.shard_max_concurrent)
             .collect::<Vec<_>>()
             .await;
+        if results.iter().any(Result::is_err) {
+            let mut ids = state::BloombergRequestIds::default();
+            let mut first_error = None;
+            for result in results {
+                match result {
+                    Ok(batch) => ids.collect(&batch),
+                    Err(error) => {
+                        ids.extend(error.bloomberg_request_ids().iter().cloned());
+                        if first_error.is_none() {
+                            first_error = Some(error);
+                        }
+                    }
+                }
+            }
+            return Err(super::request_pool::enrich_async_request_error(
+                first_error.expect("at least one failed shard"),
+                &error_context,
+                &ids.iter().cloned().collect::<Vec<_>>(),
+            ));
+        }
 
         let mut batches = Vec::with_capacity(results.len());
         for result in results {
@@ -674,6 +704,118 @@ mod tests {
         assert_eq!(ticker.value(1), "B");
         assert_eq!(ticker.value(2), "C");
         assert_eq!(ticker.value(3), "D");
+    }
+
+    #[test]
+    fn same_field_shards_reuse_columns_and_preserve_provenance_and_diagnostics() {
+        use state::{
+            METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+            METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
+            METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES, ResponseMetadata,
+        };
+
+        let mut first = ResponseMetadata::attach_bloomberg_request_id(
+            px_last_batch(
+                &["SYNTHETIC_A"],
+                Arc::new(Float64Array::from(vec![Some(1.25)])) as ArrayRef,
+            ),
+            "sdk-synthetic-z",
+        );
+        let mut second = ResponseMetadata::attach_bloomberg_request_id(
+            px_last_batch(
+                &["SYNTHETIC_B"],
+                Arc::new(Float64Array::from(vec![Some(2.5)])) as ArrayRef,
+            ),
+            "sdk-synthetic-a",
+        );
+        for (batch, ticker, misses) in [
+            (&mut first, "SYNTHETIC_A", 1),
+            (&mut second, "SYNTHETIC_B", 2),
+        ] {
+            for (key, value) in [
+                (
+                    METADATA_KEY_EID_DATA,
+                    serde_json::json!({(ticker): [misses]}),
+                ),
+                (
+                    METADATA_KEY_SECURITY_ERRORS,
+                    serde_json::json!({(ticker): {
+                        "category": "SYNTHETIC", "code": misses,
+                        "subcategory": "SYNTHETIC", "message": "synthetic diagnostic"
+                    }}),
+                ),
+                (
+                    METADATA_KEY_FIELD_EXCEPTIONS,
+                    serde_json::json!({(ticker): [{
+                        "field": "SYNTHETIC_FIELD", "category": "SYNTHETIC", "code": misses,
+                        "subcategory": "SYNTHETIC", "message": "synthetic diagnostic"
+                    }]}),
+                ),
+                (
+                    METADATA_KEY_DELAYED,
+                    serde_json::json!({(ticker): {"delayed": true, "delay_minutes": 15}}),
+                ),
+                (
+                    METADATA_KEY_TYPE_MISSES,
+                    serde_json::json!({"PX_LAST": misses}),
+                ),
+            ] {
+                batch
+                    .schema_metadata_mut()
+                    .insert(key.into(), value.to_string());
+            }
+        }
+        let first_schema = first.schema();
+        let second_schema = second.schema();
+        let source_columns = second.columns().as_ptr();
+        let second = normalize_batch_to_schema(second, &first_schema).unwrap();
+        assert_eq!(second.columns().as_ptr(), source_columns);
+        assert!(Arc::ptr_eq(second.schema_ref(), &second_schema));
+
+        let combined = concat_sharded_batches(vec![first, second]).unwrap();
+        assert_eq!(combined.num_rows(), 2);
+        assert_eq!(combined.num_columns(), 2);
+        assert_eq!(combined.schema_ref().fields(), first_schema.fields());
+        let tickers = combined
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(tickers.value(0), "SYNTHETIC_A");
+        assert_eq!(tickers.value(1), "SYNTHETIC_B");
+        let prices = combined
+            .column(1)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(prices.value(0), 1.25);
+        assert_eq!(prices.value(1), 2.5);
+        let metadata = combined.schema_ref().metadata();
+        assert!(!metadata.contains_key(METADATA_KEY_BLOOMBERG_REQUEST_ID));
+        assert_eq!(
+            metadata[METADATA_KEY_BLOOMBERG_REQUEST_IDS],
+            r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+        );
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&metadata[METADATA_KEY_TYPE_MISSES]).unwrap(),
+            serde_json::json!({"PX_LAST": 3})
+        );
+        for key in [
+            METADATA_KEY_EID_DATA,
+            METADATA_KEY_SECURITY_ERRORS,
+            METADATA_KEY_FIELD_EXCEPTIONS,
+            METADATA_KEY_DELAYED,
+        ] {
+            let actual: serde_json::Value = serde_json::from_str(&metadata[key]).unwrap();
+            assert_eq!(actual.as_object().unwrap().len(), 2);
+            for schema in [&first_schema, &second_schema] {
+                let expected: serde_json::Value =
+                    serde_json::from_str(&schema.metadata()[key]).unwrap();
+                for (security, value) in expected.as_object().unwrap() {
+                    assert_eq!(actual.get(security.as_str()).unwrap(), value);
+                }
+            }
+        }
     }
 
     #[test]

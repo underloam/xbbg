@@ -935,6 +935,7 @@ mod tests {
                 label,
                 request_id,
                 source,
+                ..
             } => {
                 assert_eq!(service, "//blp/bqlsvc");
                 assert_eq!(operation.as_deref(), Some("sendQuery"));

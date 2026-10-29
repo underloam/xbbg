@@ -2,6 +2,9 @@
 //!
 //! Convenience recipes for dividend, earnings, turnover, and ETF holdings data.
 //!
+//! Derived results retain the SDK request IDs of their contributing requests in
+//! Arrow schema metadata.
+//!
 //! # Recipes
 //!
 //! - [`recipe_dividend`]: Fetch dividend history
@@ -28,6 +31,7 @@ use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use arrow_select::take::take_record_batch;
 use chrono::{Datelike, Duration, NaiveDate};
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::constants::DVD_TYPES;
@@ -151,24 +155,35 @@ pub async fn recipe_dividend_yield(
         ..Default::default()
     };
     let dividend_batch = engine.request(dividend_params).await?;
-    let events = aggregate_dividend_events(extract_dividend_events(
-        &dividend_batch,
-        dividend_type_filter.as_ref(),
-    )?);
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&dividend_batch);
+    let result: Result<_> = async {
+        let events = aggregate_dividend_events(extract_dividend_events(
+            &dividend_batch,
+            dividend_type_filter.as_ref(),
+        )?);
+        drop(dividend_batch);
 
-    let price_params = RequestParams {
-        service: Service::RefData.to_string(),
-        operation: Operation::HistoricalData.to_string(),
-        securities: Some(tickers.clone()),
-        fields: Some(vec!["PX_LAST".to_string()]),
-        start_date: Some(fmt_date(start, None)),
-        end_date: Some(fmt_date(end, None)),
-        ..Default::default()
-    };
-    let price_batch = engine.request(price_params).await?;
-    let prices = extract_price_history(&price_batch)?;
-    let rows = build_dividend_yield_rows(&tickers, start, end, window_days, &events, &prices);
-    build_dividend_yield_batch(&rows)
+        let price_params = RequestParams {
+            service: Service::RefData.to_string(),
+            operation: Operation::HistoricalData.to_string(),
+            securities: Some(tickers.clone()),
+            fields: Some(vec!["PX_LAST".to_string()]),
+            start_date: Some(fmt_date(start, None)),
+            end_date: Some(fmt_date(end, None)),
+            ..Default::default()
+        };
+        let price_batch = engine.request(price_params).await?;
+        request_ids.collect(&price_batch);
+        let prices = extract_price_history(&price_batch)?;
+        drop(price_batch);
+        let rows = build_dividend_yield_rows(&tickers, start, end, window_days, &events, &prices);
+        build_dividend_yield_batch(&rows)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 fn normalize_dividend_type_filter(dividend_types: Option<Vec<String>>) -> Option<HashSet<String>> {
@@ -609,7 +624,9 @@ pub async fn recipe_earning(
         &options,
     )?;
     let header_batch = engine.request(header_params).await?;
-    let data_batch = engine.request(data_params).await?;
+    let data_batch = engine.request(data_params).await.map_err(|error| {
+        RecipeError::from(error).with_bloomberg_request_ids_from_batch(&header_batch)
+    })?;
     shape_earning_output(&header_batch, data_batch)
 }
 
@@ -659,13 +676,21 @@ fn shape_earning_output(
     header_batch: &RecordBatch,
     mut data_batch: RecordBatch,
 ) -> Result<RecordBatch> {
-    if header_batch.num_rows() > 0 && data_batch.num_rows() > 0 {
-        let renames = build_earning_header_rename(header_batch, &data_batch);
-        if !renames.is_empty() {
-            data_batch = apply_column_renames(&data_batch, &renames)?;
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(header_batch);
+    let result: Result<_> = (|| {
+        if header_batch.num_rows() > 0 && data_batch.num_rows() > 0 {
+            let renames = build_earning_header_rename(header_batch, &data_batch);
+            if !renames.is_empty() {
+                request_ids.collect(&data_batch);
+                data_batch = apply_column_renames(&data_batch, &renames)?;
+            }
         }
-    }
-    add_earning_percentage_columns(data_batch)
+        add_earning_percentage_columns(data_batch)
+    })();
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 fn normalize_earning_type(typ: &str) -> Result<String> {
@@ -867,7 +892,8 @@ fn add_earning_percentage_columns(batch: RecordBatch) -> Result<RecordBatch> {
         }
 
         let percentages = calculate_level_percentages(&values, &levels);
-        output = insert_pct_column_after(&output, &value_col, &pct_col, percentages)?;
+        output = insert_pct_column_after(&output, &value_col, &pct_col, percentages)
+            .map_err(|error| error.with_bloomberg_request_ids_from_batch(&output))?;
     }
 
     Ok(output)
@@ -1114,15 +1140,25 @@ pub async fn recipe_turnover(
         .column_by_name("value")
         .is_some_and(|column| column.data_type().is_numeric());
     let mut metadata = direct.schema().metadata().clone();
-    let mut rows = extract_turnover_rows(&direct)?;
-    let missing = missing_turnover_tickers(&tickers, &rows);
-    if !missing.is_empty() {
-        let params = build_turnover_request(missing.clone(), &start, &end, true, &options);
-        let fallback = engine.request(params).await?;
-        append_turnover_fallback(&mut rows, &missing, &fallback)?;
-        merge_turnover_metadata(&mut metadata, fallback.schema().metadata());
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&direct);
+    let result: Result<_> = async {
+        let mut rows = extract_turnover_rows(&direct)?;
+        drop(direct);
+        let missing = missing_turnover_tickers(&tickers, &rows);
+        if !missing.is_empty() {
+            let params = build_turnover_request(missing.clone(), &start, &end, true, &options);
+            let fallback = engine.request(params).await?;
+            request_ids.collect(&fallback);
+            append_turnover_fallback(&mut rows, &missing, &fallback)?;
+            merge_turnover_metadata(&mut metadata, fallback.schema().metadata());
+        }
+        build_turnover_batch(rows, metadata)
     }
-    let mut data = build_turnover_batch(rows, metadata)?;
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    let mut data = request_ids.attach(batch);
     if let Some(target) = ccy.filter(|value| !value.eq_ignore_ascii_case("local")) {
         data =
             crate::currency::recipe_adjust_ccy(engine, data, target, start, end, options).await?;
@@ -1305,14 +1341,18 @@ fn apply_turnover_presentation(
                 });
             }
         }
-        let indices = lexsort_to_indices(&columns, None)?;
+        let indices = lexsort_to_indices(&columns, None).map_err(|error| {
+            RecipeError::from(error).with_bloomberg_request_ids_from_batch(&batch)
+        })?;
         if indices
             .values()
             .iter()
             .enumerate()
             .any(|(row, &index)| row != index as usize)
         {
-            batch = take_record_batch(&batch, &indices)?;
+            batch = take_record_batch(&batch, &indices).map_err(|error| {
+                RecipeError::from(error).with_bloomberg_request_ids_from_batch(&batch)
+            })?;
         }
     }
     if !presentation.show_date {
@@ -1325,7 +1365,9 @@ fn apply_turnover_presentation(
                 (!matches!(field.name().as_str(), "date" | "period")).then_some(index)
             })
             .collect::<Vec<_>>();
-        return batch.project(&columns).map_err(Into::into);
+        return batch.project(&columns).map_err(|error| {
+            RecipeError::from(error).with_bloomberg_request_ids_from_batch(&batch)
+        });
     }
     if presentation.date_format == TurnoverDateFormat::Date {
         return Ok(batch);
@@ -1359,7 +1401,7 @@ fn apply_turnover_presentation(
         )),
         columns,
     )
-    .map_err(Into::into)
+    .map_err(|error| RecipeError::from(error).with_bloomberg_request_ids_from_batch(&batch))
 }
 
 fn format_turnover_period_label(
@@ -1668,6 +1710,7 @@ fn shape_turnover_output(
         .and_then(|column| column.as_any().downcast_ref::<Float64Array>())
         .ok_or_else(|| {
             RecipeError::Other("turnover calculation requires Float64 values".to_string())
+                .with_bloomberg_request_ids_from_batch(&batch)
         })?;
     let scaled: ArrayRef = if factor == 1.0 {
         batch
@@ -1749,7 +1792,7 @@ fn shape_turnover_output(
         )),
         columns,
     )
-    .map_err(Into::into)
+    .map_err(|error| RecipeError::from(error).with_bloomberg_request_ids_from_batch(&batch))
 }
 
 /// Fetch ETF constituent holdings via BQL.
@@ -2140,12 +2183,16 @@ mod tests {
 
     #[test]
     fn test_earning_output_renames_and_shapes_native_percentages() {
-        let header = RecordBatch::try_from_iter(vec![(
+        let mut header = RecordBatch::try_from_iter(vec![(
             "Period 1 Header",
             Arc::new(StringArray::from(vec!["FY 2024"])) as ArrayRef,
         )])
         .unwrap();
-        let data = RecordBatch::try_from_iter(vec![
+        header.schema_metadata_mut().insert(
+            "xbbg.bloomberg_request_id".to_string(),
+            "synthetic-header-request".to_string(),
+        );
+        let mut data = RecordBatch::try_from_iter(vec![
             ("Level", Arc::new(Int32Array::from(vec![1, 1])) as ArrayRef),
             (
                 "Period 1 Value",
@@ -2153,6 +2200,11 @@ mod tests {
             ),
         ])
         .unwrap();
+        data.schema_metadata_mut().insert(
+            "xbbg.bloomberg_request_ids".to_string(),
+            r#"["synthetic-value-request","synthetic-shard-request","synthetic-value-request"]"#
+                .to_string(),
+        );
         let output = shape_earning_output(&header, data.clone()).unwrap();
         assert_eq!(
             output
@@ -2170,8 +2222,22 @@ mod tests {
             .downcast_ref::<Float64Array>()
             .unwrap();
         assert_eq!(percentages.values().as_ref(), &[25.0, 75.0]);
+        assert_eq!(
+            output.schema().metadata()["xbbg.bloomberg_request_ids"],
+            r#"["synthetic-header-request","synthetic-shard-request","synthetic-value-request"]"#
+        );
+        assert!(
+            !output
+                .schema()
+                .metadata()
+                .contains_key("xbbg.bloomberg_request_id")
+        );
         let output = shape_earning_output(&header.slice(0, 0), data).unwrap();
         assert!(output.column_by_name("Period 1 Value_pct").is_some());
+        assert_eq!(
+            output.schema().metadata()["xbbg.bloomberg_request_ids"],
+            r#"["synthetic-header-request","synthetic-shard-request","synthetic-value-request"]"#
+        );
     }
 
     #[test]

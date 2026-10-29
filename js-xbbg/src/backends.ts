@@ -54,6 +54,8 @@ const METADATA_KEY_EID_DATA = 'xbbg.eid_data';
 const METADATA_KEY_SECURITY_ERRORS = 'xbbg.security_errors';
 const METADATA_KEY_FIELD_EXCEPTIONS = 'xbbg.field_exceptions';
 const METADATA_KEY_DELAYED = 'xbbg.delayed';
+const METADATA_KEY_BLOOMBERG_REQUEST_ID = 'xbbg.bloomberg_request_id';
+const METADATA_KEY_BLOOMBERG_REQUEST_IDS = 'xbbg.bloomberg_request_ids';
 
 function metadataRecordFromMap(metadata: ReadonlyMap<string, string>): Record<string, string> {
   return Object.fromEntries(metadata.entries());
@@ -176,6 +178,16 @@ function attachResultMetadata<T extends object>(
   result: T,
   metadata: Record<string, string>,
 ): T & ResultMetadata {
+  const bloombergRequestId = metadata[METADATA_KEY_BLOOMBERG_REQUEST_ID];
+  const bloombergRequestIds =
+    bloombergRequestId === undefined
+      ? parseJsonMetadata(
+          metadata,
+          METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+          (value): value is string[] =>
+            Array.isArray(value) && value.every((id) => typeof id === 'string'),
+        )
+      : [bloombergRequestId];
   const eidData = parseJsonMetadata(metadata, METADATA_KEY_EID_DATA, isNumberArrayRecord);
   const delayed = parseJsonMetadata(metadata, METADATA_KEY_DELAYED, isDelayedDataRecord);
   const securityErrors = parseJsonMetadata(
@@ -189,6 +201,8 @@ function attachResultMetadata<T extends object>(
     isFieldExceptionRecord,
   );
   Object.defineProperties(result, {
+    bloombergRequestId: { enumerable: true, value: bloombergRequestId },
+    bloombergRequestIds: { enumerable: true, value: bloombergRequestIds },
     delayed: { enumerable: true, value: delayed },
     eidData: { enumerable: true, value: eidData },
     fieldExceptions: { enumerable: true, value: fieldExceptions },

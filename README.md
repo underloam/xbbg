@@ -445,9 +445,11 @@ configure(
     zfp_remote="8194",
     tls_client_credentials="/path/to/client.p12",
     tls_client_credentials_password="<load from your secret store>",
-    tls_trust_material="/path/to/trust.pem",
+    tls_trust_material="/path/to/trust.p7",
 )
 ```
+
+`tls_client_credentials` and `tls_trust_material` also accept `bytes` from a secret store: DER-encoded PKCS#12 client credentials and DER-encoded PKCS#7 trust material. Supply both as paths or both as bytes; missing or mixed pairs are rejected before session startup. The engine passes blobs directly to the SDK without temporary files, shares their immutable storage across session configurations, and redacts blobs and the password from configuration representations.
 
 The engine uses separate worker pools for request/response calls and subscriptions:
 
@@ -516,6 +518,17 @@ EID metadata remains available through the native `ArrowTable.eid_data` property
 This opt-in request metadata is separate from a subscription message's top-level `EID` field.
 
 Bloomberg returns EIDs only for exchanges the requester is entitled to, so a security whose data is delayed comes back with none; [`delay_status`](#delayed-data) reports its feed EIDs.
+
+## Bloomberg support RequestIds
+
+Results retain the SDK-assigned RequestId for Bloomberg support. It is distinct from xbbg's `request_id` label and the SDK correlation ID.
+
+- Native Python: `table.bloomberg_request_id` for one ID, or `table.bloomberg_request_ids` for the complete list.
+- PyArrow: `schema.metadata[b"xbbg.bloomberg_request_id"]` is plain UTF-8; composed results use `b"xbbg.bloomberg_request_ids"` with a sorted, unique JSON array instead.
+- pandas: `attrs["xbbg_bloomberg_request_id"]` or `attrs["xbbg_bloomberg_request_ids"]`, matching the singular/plural metadata.
+- Node Arrow/JSON: `result.bloombergRequestId`, `result.bloombergRequestIds`, and the raw `result.metadata`.
+
+`BlpRequestError` and `BlpTimeoutError` carry `bloomberg_request_id` and `bloomberg_request_ids` attributes in both Python and Node; `request_id` remains the xbbg label. Sharding, streaming, and derived recipe composition retain contributing data-request IDs, including completed contributors when a recipe fails. Cached field/exchange introspection is not part of this provenance. An unavailable SDK ID is never replaced with a label. Polars and DuckDB have no stable metadata side channel; retain the native/Arrow result or use pandas when these IDs are needed.
 
 ## Delayed data
 

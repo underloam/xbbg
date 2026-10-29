@@ -319,6 +319,10 @@ def configure(
             ``"block"``), and ``sdk_log_level`` (``"off"`` (default),
             ``"fatal"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"``, or
             ``"trace"``).
+            ``tls_client_credentials`` and ``tls_trust_material`` accept file
+            paths as ``str`` or in-memory DER material as ``bytes`` (PKCS#12
+            credentials and PKCS#7 trust). Supply both, using the same
+            representation; byte material is never written to temporary files.
 
     Raises:
         TypeError: If an unknown keyword argument is passed.
@@ -466,14 +470,20 @@ def _normalize_engine_exception(exc: Exception) -> Exception:
     )
 
     if isinstance(exc, _core.BlpSubscriptionDataLossError) and not isinstance(exc, BlpSubscriptionDataLossError):
-        return BlpSubscriptionDataLossError(
+        mapped = BlpSubscriptionDataLossError(
             str(exc),
             topic=getattr(exc, "topic", ""),
             detail=getattr(exc, "detail", ""),
         )
+        mapped.bloomberg_request_id = getattr(exc, "bloomberg_request_id", None)
+        mapped.bloomberg_request_ids = getattr(exc, "bloomberg_request_ids", [])
+        return mapped
 
     if isinstance(exc, _core.BlpValidationError) and not isinstance(exc, BlpValidationError):
-        return BlpValidationError.from_rust_error(str(exc))
+        mapped = BlpValidationError.from_rust_error(str(exc))
+        mapped.bloomberg_request_id = getattr(exc, "bloomberg_request_id", None)
+        mapped.bloomberg_request_ids = getattr(exc, "bloomberg_request_ids", [])
+        return mapped
 
     for native_cls, public_cls in (
         (_core.BlpLimitError, BlpLimitError),
@@ -482,6 +492,14 @@ def _normalize_engine_exception(exc: Exception) -> Exception:
         (_core.BlpRequestError, BlpRequestError),
     ):
         if isinstance(exc, native_cls) and not isinstance(exc, public_cls):
-            return public_cls(str(exc))
+            return public_cls(
+                str(exc),
+                service=getattr(exc, "service", None),
+                operation=getattr(exc, "operation", None),
+                request_id=getattr(exc, "request_id", None),
+                code=getattr(exc, "code", None),
+                bloomberg_request_id=getattr(exc, "bloomberg_request_id", None),
+                bloomberg_request_ids=getattr(exc, "bloomberg_request_ids", None),
+            )
 
     return exc

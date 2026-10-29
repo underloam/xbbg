@@ -1,6 +1,7 @@
 import { expectTypeOf } from 'vitest';
 
 import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
+import { nativeArrowToBackend } from '../src/backends';
 import * as api from '../src/index';
 import type {
   BackendKind,
@@ -684,6 +685,25 @@ describe('native Arrow zero-copy table construction', () => {
     expect(metadataResult.fieldExceptions).toBeUndefined();
     expect(metadataResult.delayed).toBeUndefined();
   });
+
+  it.each([api.Backend.ARROW, api.Backend.JSON])(
+    'preserves SDK provenance in %s conversion',
+    (backend) => {
+      const cases: Record<string, string>[] = [
+        { 'xbbg.bloomberg_request_id': 'sdk-synthetic-a' },
+        { 'xbbg.bloomberg_request_ids': '["sdk-synthetic-a","sdk-synthetic-z"]' },
+      ];
+      for (const metadata of cases) {
+        const result = nativeArrowToBackend(metadataBatch(metadata), backend) as ResultMetadata;
+        expect(result.metadata).toStrictEqual(metadata);
+        const singular = metadata['xbbg.bloomberg_request_id'];
+        expect(result.bloombergRequestId).toBe(singular);
+        expect(result.bloombergRequestIds).toStrictEqual(
+          singular === undefined ? ['sdk-synthetic-a', 'sdk-synthetic-z'] : [singular],
+        );
+      }
+    },
+  );
 
   it('parses JSON result metadata and ignores absent or malformed convenience payloads', async () => {
     const engine = Object.create(api.Engine.prototype) as api.Engine;

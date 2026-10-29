@@ -122,7 +122,9 @@ pub use blpapi_sys::{
 };
 
 // --- Request functions ---
-pub use blpapi_sys::{blpapi_Request_destroy, blpapi_Request_elements};
+pub use blpapi_sys::{
+    blpapi_Request_destroy, blpapi_Request_elements, blpapi_Request_getRequestId,
+};
 
 // --- SubscriptionList functions ---
 pub use blpapi_sys::{

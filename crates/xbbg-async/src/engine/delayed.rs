@@ -17,7 +17,7 @@
 //! `raise` fails the call once the status is known. `warn` is left to the host
 //! binding, which owns its warning channel; `ignore` keeps the metadata only.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 use std::fmt::Write;
 use std::str::FromStr;
 
@@ -29,7 +29,7 @@ use crate::errors::BlpAsyncError;
 use crate::services::{ExtractorType, Operation, Service};
 
 use super::intraday_timezone::parse_utc_instant;
-use super::state::{DelayedMeta, delayed_metadata};
+use super::state::{ResponseMetadata, delayed_metadata};
 use super::{Engine, PlannedRequestShape, PreparedRequest, RequestParams};
 
 /// What to do when Bloomberg delivers delayed rather than real-time data.
@@ -147,7 +147,7 @@ pub(crate) fn lookup_securities(
 pub(crate) async fn lookup(
     engine: &Engine,
     securities: Vec<String>,
-) -> Result<BTreeMap<String, DelayedMeta>, BlpAsyncError> {
+) -> Result<ResponseMetadata, BlpAsyncError> {
     let params = RequestParams {
         service: Service::RefData.to_string(),
         operation: Operation::ReferenceData.to_string(),
@@ -160,7 +160,47 @@ pub(crate) async fn lookup(
         ..Default::default()
     };
     let batch = engine.request_without_intraday_transform(params).await?;
-    Ok(delayed_metadata(&batch).unwrap_or_default())
+    let mut metadata = ResponseMetadata::with_delayed(delayed_metadata(&batch).unwrap_or_default());
+    metadata.collect_bloomberg_request_ids(&batch);
+    Ok(metadata)
+}
+
+/// Retain completed contributors' IDs without changing fail-fast cancellation.
+pub(crate) async fn combine(
+    params: &RequestParams,
+    response: impl Future<Output = Result<RecordBatch, BlpAsyncError>>,
+    lookup: impl Future<Output = Result<ResponseMetadata, BlpAsyncError>>,
+) -> Result<RecordBatch, BlpAsyncError> {
+    let completed = parking_lot::Mutex::new(super::state::BloombergRequestIds::default());
+    let response = async {
+        let result = response.await;
+        let mut ids = completed.lock();
+        match &result {
+            Ok(batch) => ids.collect(batch),
+            Err(error) => ids.extend(error.bloomberg_request_ids().iter().cloned()),
+        }
+        result
+    };
+    let lookup = async {
+        let result = lookup.await;
+        let mut ids = completed.lock();
+        match &result {
+            Ok(metadata) => ids.extend(metadata.request_ids()),
+            Err(error) => ids.extend(error.bloomberg_request_ids().iter().cloned()),
+        }
+        result
+    };
+    match tokio::try_join!(response, lookup) {
+        Ok((batch, mut metadata)) => {
+            metadata.extend_request_ids(completed.into_inner().iter().cloned());
+            Ok(metadata.attach(batch))
+        }
+        Err(error) => Err(super::request_pool::enrich_async_request_error(
+            error,
+            params,
+            &completed.lock().iter().cloned().collect::<Vec<_>>(),
+        )),
+    }
 }
 
 /// Apply `on_delayed=raise` to a finished result: fail when any security is
@@ -196,6 +236,7 @@ pub(crate) fn enforce(
         cid: None,
         label: Some(label),
         request_id: params.request_id.clone(),
+        bloomberg_request_ids: ResponseMetadata::bloomberg_request_ids(&batch),
         source: None,
     }
     .into())
@@ -217,9 +258,72 @@ mod tests {
     use chrono::TimeZone;
 
     use super::*;
-    use crate::engine::state::ResponseMetadata;
+    use crate::engine::state::{DelayedMeta, ResponseMetadata};
     use crate::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
     use crate::schema::SchemaCache;
+
+    #[tokio::test]
+    async fn delayed_lookup_composition_keeps_success_and_failure_provenance() {
+        let params = RequestParams {
+            service: "//synthetic/refdata".into(),
+            operation: "SyntheticRequest".into(),
+            request_id: Some("req-label".into()),
+            ..Default::default()
+        };
+        let empty = || RecordBatch::new_empty(Arc::new(Schema::empty()));
+        let data = || ResponseMetadata::attach_bloomberg_request_id(empty(), "sdk-synthetic-data");
+        let status =
+            || ResponseMetadata::with_bloomberg_request_ids([Arc::from("sdk-synthetic-status")]);
+        let success = combine(
+            &params,
+            std::future::ready(Ok(data())),
+            std::future::ready(Ok(status())),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ResponseMetadata::bloomberg_request_ids(&success),
+            vec![
+                Arc::<str>::from("sdk-synthetic-data"),
+                Arc::from("sdk-synthetic-status"),
+            ]
+        );
+        let error = combine(
+            &params,
+            std::future::ready(Ok(data())),
+            std::future::ready(Err(BlpError::RequestTimeout {
+                request_id: None,
+                bloomberg_request_ids: vec![Arc::from("sdk-synthetic-status")],
+            }
+            .into())),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.bloomberg_request_ids(),
+            [
+                Arc::<str>::from("sdk-synthetic-data"),
+                Arc::from("sdk-synthetic-status"),
+            ]
+        );
+        let failed = std::future::ready(Err(BlpError::RequestTimeout {
+            request_id: None,
+            bloomberg_request_ids: vec![Arc::from("sdk-synthetic-data")],
+        }
+        .into()));
+        let pending = std::future::pending::<Result<ResponseMetadata, BlpAsyncError>>();
+        let error = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            combine(&params, failed, pending),
+        )
+        .await
+        .expect("request failures remain fail-fast")
+        .unwrap_err();
+        assert_eq!(
+            error.bloomberg_request_ids(),
+            [Arc::<str>::from("sdk-synthetic-data")]
+        );
+    }
 
     fn prepared(params: RequestParams) -> PreparedRequest {
         PreparedRequest::prepare(params, &SchemaCache::new()).unwrap()

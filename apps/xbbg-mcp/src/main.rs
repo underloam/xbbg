@@ -706,6 +706,7 @@ fn bounded_internal_error(error: &impl std::fmt::Display, limits: &ResultLimits)
 
 fn map_recipe_error(error: RecipeError, limits: &ResultLimits) -> ErrorData {
     match error {
+        RecipeError::RequestContext { source, .. } => map_recipe_error(*source, limits),
         RecipeError::Engine(error) => map_request_error(*error, limits),
         RecipeError::InvalidArgument(detail) => bounded_invalid_params(&detail, limits),
         other @ (RecipeError::Ext(_) | RecipeError::Arrow(_) | RecipeError::Other(_)) => {
@@ -1176,6 +1177,34 @@ mod tests {
     }
 
     #[test]
+    fn recipe_context_keeps_mcp_error_classification_and_bounds() {
+        let limits = ResultLimits {
+            max_result_bytes: MIN_RESULT_BYTES,
+            max_string_chars: 128,
+            max_string_bytes: 256,
+            ..ResultLimits::default()
+        };
+        for invalid_argument in [false, true] {
+            let make_error = || {
+                let detail = "synthetic failure ".repeat(1_000);
+                if invalid_argument {
+                    RecipeError::InvalidArgument(detail)
+                } else {
+                    RecipeError::Other(detail)
+                }
+            };
+            let expected = map_recipe_error(make_error(), &limits);
+            let wrapped =
+                make_error().with_bloomberg_request_ids([std::sync::Arc::from("sdk-synthetic")]);
+            let actual = map_recipe_error(wrapped, &limits);
+            assert_eq!(actual.code, expected.code);
+            assert_eq!(actual.message, expected.message);
+            assert_eq!(actual.data, expected.data);
+            assert!(serde_json::to_vec(&actual).unwrap().len() <= limits.max_result_bytes);
+        }
+    }
+
+    #[test]
     fn request_failure_context_reaches_mcp_clients() {
         let denial = "User not authorized to use BQL";
         let error = map_blp_error(
@@ -1185,6 +1214,7 @@ mod tests {
                 cid: None,
                 label: None,
                 request_id: None,
+                bloomberg_request_ids: Vec::new(),
                 source: Some(denial.into()),
             },
             &ResultLimits::default(),
@@ -1205,6 +1235,7 @@ mod tests {
                 cid: Some(xbbg_core::errors::CorrelationContext::U64(42)),
                 label: Some("synthetic denial".into()),
                 request_id: Some("synthetic-request".into()),
+                bloomberg_request_ids: Vec::new(),
                 source: None,
             },
             &ResultLimits::default(),
@@ -1244,6 +1275,7 @@ mod tests {
                         cid: None,
                         label: None,
                         request_id: None,
+                        bloomberg_request_ids: Vec::new(),
                         source: Some(source.into()),
                     },
                     &limits,
@@ -1293,6 +1325,7 @@ mod tests {
                 cid: None,
                 label: None,
                 request_id: None,
+                bloomberg_request_ids: Vec::new(),
                 source: Some(Box::new(StreamingSource(Arc::clone(&writes)))),
             },
             &limits,

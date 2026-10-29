@@ -111,6 +111,10 @@ const bpipe = await xbbg.connect({
 });
 ```
 
+TLS credentials and trust material may instead both be `Buffer`/`Uint8Array` values containing DER PKCS#12 and DER PKCS#7 data. Bytes are snapshotted before async startup, shared by session configurations, and never written to temporary files; mixed path/blob pairs and shared or detached backing buffers are rejected.
+
+Arrow/JSON results expose Bloomberg support identifiers through `bloombergRequestId`/`bloombergRequestIds`. Request and timeout errors expose `bloomberg_request_id`/`bloomberg_request_ids`, separately from xbbg's `request_id` label. See the [reference](REFERENCE.md#bloomberg-support-requestids) for composition and metadata details.
+
 ## Subscriptions
 
 ```ts

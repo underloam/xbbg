@@ -4,7 +4,7 @@
 //! options and engine invariants are checked here before starting any workers.
 
 use crate::BlpAsyncError;
-use crate::engine::{EngineConfig, ServerAddr, Socks5Proxy, TlsConfig, Transport};
+use crate::engine::{EngineConfig, ServerAddr, Socks5Proxy, TlsConfig, TlsMaterial, Transport};
 use xbbg_core::AuthConfig;
 
 /// Borrowed authentication fields, before selecting an authentication method.
@@ -18,12 +18,15 @@ pub struct AuthInput<'a> {
     pub token: Option<&'a str>,
 }
 
-/// Borrowed TLS material. Timeouts are validated even without credentials.
+/// Owned TLS material and a borrowed password.
+///
+/// Blobs share immutable storage across normalized configuration clones.
+/// Timeouts are validated even without credentials.
 #[derive(Default)]
 pub struct TlsInput<'a> {
-    pub client_credentials: Option<&'a str>,
+    pub client_credentials: Option<TlsMaterial>,
     pub client_credentials_password: Option<&'a str>,
-    pub trust_material: Option<&'a str>,
+    pub trust_material: Option<TlsMaterial>,
     pub handshake_timeout_ms: Option<i32>,
     pub crl_fetch_timeout_ms: Option<i32>,
 }
@@ -212,13 +215,20 @@ fn normalize_tls(
     }
     match (input.client_credentials, input.trust_material) {
         (None, None) => Ok(None),
+        (Some(credentials), Some(trust)) if credentials.is_blob() != trust.is_blob() => {
+            Err(config_error(format!(
+                "{} and {} must both be file paths or both be blobs",
+                field_name("tls_client_credentials"),
+                field_name("tls_trust_material")
+            )))
+        }
         (Some(credentials), Some(trust)) => Ok(Some(TlsConfig {
-            client_credentials: credentials.to_owned(),
+            client_credentials: credentials,
             client_credentials_password: input
                 .client_credentials_password
                 .unwrap_or_default()
                 .to_owned(),
-            trust_material: trust.to_owned(),
+            trust_material: trust,
             handshake_timeout_ms: input.handshake_timeout_ms,
             crl_fetch_timeout_ms: input.crl_fetch_timeout_ms,
         })),
@@ -494,8 +504,8 @@ mod tests {
                 ] {
                     let detail = error_detail(convert(ConfigInput {
                         tls: TlsInput {
-                            client_credentials: credentials,
-                            trust_material: trust,
+                            client_credentials: credentials.map(Into::into),
+                            trust_material: trust.map(Into::into),
                             handshake_timeout_ms: handshake,
                             crl_fetch_timeout_ms: crl,
                             ..TlsInput::default()
@@ -528,8 +538,8 @@ mod tests {
             assert_eq!(
                 error_detail(convert(ConfigInput {
                     tls: TlsInput {
-                        client_credentials: credentials,
-                        trust_material: trust,
+                        client_credentials: credentials.map(Into::into),
+                        trust_material: trust.map(Into::into),
                         ..TlsInput::default()
                     },
                     ..ConfigInput::default()
@@ -539,8 +549,8 @@ mod tests {
         }
         let config = convert(ConfigInput {
             tls: TlsInput {
-                client_credentials: Some("fixtures/client.p12"),
-                trust_material: Some("fixtures/trust.p7"),
+                client_credentials: Some("fixtures/client.p12".into()),
+                trust_material: Some("fixtures/trust.p7".into()),
                 handshake_timeout_ms: Some(0),
                 crl_fetch_timeout_ms: Some(25),
                 ..TlsInput::default()
@@ -549,8 +559,14 @@ mod tests {
         })
         .unwrap();
         let tls = config.tls.unwrap();
-        assert_eq!(tls.client_credentials, "fixtures/client.p12");
-        assert_eq!(tls.trust_material, "fixtures/trust.p7");
+        assert_eq!(
+            tls.client_credentials,
+            TlsMaterial::Path("fixtures/client.p12".into())
+        );
+        assert_eq!(
+            tls.trust_material,
+            TlsMaterial::Path("fixtures/trust.p7".into())
+        );
         assert_eq!(tls.client_credentials_password, "");
         assert_eq!(tls.handshake_timeout_ms, Some(0));
         assert_eq!(tls.crl_fetch_timeout_ms, Some(25));
@@ -564,6 +580,60 @@ mod tests {
         })
         .unwrap();
         assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn tls_blobs_preserve_bytes_shared_ownership_and_timeouts() {
+        let credentials = std::sync::Arc::<[u8]>::from(&b"\x30\0\xffsynthetic-client"[..]);
+        let trust = std::sync::Arc::<[u8]>::from(&b"\x30\0\xfesynthetic-trust"[..]);
+        let config = convert(ConfigInput {
+            tls: TlsInput {
+                client_credentials: Some(TlsMaterial::Blob(credentials.clone())),
+                client_credentials_password: Some("synthetic-password"),
+                trust_material: Some(TlsMaterial::Blob(trust.clone())),
+                handshake_timeout_ms: Some(0),
+                crl_fetch_timeout_ms: Some(25),
+            },
+            ..ConfigInput::default()
+        })
+        .unwrap();
+        let tls = config.tls.unwrap();
+        let (TlsMaterial::Blob(actual_credentials), TlsMaterial::Blob(actual_trust)) =
+            (&tls.client_credentials, &tls.trust_material)
+        else {
+            panic!("expected blob material");
+        };
+        assert!(std::sync::Arc::ptr_eq(actual_credentials, &credentials));
+        assert!(std::sync::Arc::ptr_eq(actual_trust, &trust));
+        assert_eq!(tls.client_credentials_password, "synthetic-password");
+        assert_eq!(tls.handshake_timeout_ms, Some(0));
+        assert_eq!(tls.crl_fetch_timeout_ms, Some(25));
+    }
+
+    #[test]
+    fn tls_rejects_missing_or_mixed_blob_pairs_without_disclosure() {
+        let blob = TlsMaterial::Blob(std::sync::Arc::from(&b"synthetic-secret-blob"[..]));
+        let path = TlsMaterial::Path("fixtures/material.der".into());
+        for (credentials, trust) in [
+            (Some(blob.clone()), None),
+            (None, Some(blob.clone())),
+            (Some(blob.clone()), Some(path.clone())),
+            (Some(path), Some(blob)),
+        ] {
+            let detail = error_detail(convert(ConfigInput {
+                tls: TlsInput {
+                    client_credentials: credentials,
+                    client_credentials_password: Some("synthetic-secret-password"),
+                    trust_material: trust,
+                    ..TlsInput::default()
+                },
+                ..ConfigInput::default()
+            }));
+            assert!(detail.contains("tls_client_credentials"));
+            assert!(detail.contains("tls_trust_material"));
+            assert!(!detail.contains("synthetic-secret"));
+            assert!(!detail.contains("fixtures/material.der"));
+        }
     }
 
     #[test]

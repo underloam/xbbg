@@ -24,3 +24,13 @@ pub enum BlpAsyncError {
     #[error("all {pool_size} request workers are dead — no healthy worker available")]
     AllWorkersDown { pool_size: usize },
 }
+
+impl BlpAsyncError {
+    /// SDK support identifiers carried by a failed data request.
+    pub fn bloomberg_request_ids(&self) -> &[std::sync::Arc<str>] {
+        match self {
+            Self::Blp(error) => error.bloomberg_request_ids(),
+            _ => &[],
+        }
+    }
+}

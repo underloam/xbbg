@@ -135,6 +135,7 @@ impl HistDataState {
                     self.failed_securities.join(", ")
                 )),
                 request_id: None,
+                bloomberg_request_ids: Vec::new(),
                 source: None,
             }));
             return;

@@ -35,8 +35,9 @@ use xbbg_arrow::{
     cell_has_value, cell_to_string,
 };
 use xbbg_async::engine::state::{
-    METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
+    METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS, METADATA_KEY_DELAYED,
+    METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
+    METADATA_KEY_TYPE_MISSES,
 };
 
 fn core_err_to_py(err: ArrowCoreError) -> PyErr {
@@ -1238,6 +1239,35 @@ impl ArrowTable {
     }
 
     #[getter]
+    fn bloomberg_request_id(&self) -> Option<&str> {
+        self.data
+            .schema
+            .metadata()
+            .get(METADATA_KEY_BLOOMBERG_REQUEST_ID)
+            .map(String::as_str)
+    }
+
+    #[getter]
+    fn bloomberg_request_ids(&self) -> PyResult<Vec<String>> {
+        if let Some(id) = self.bloomberg_request_id() {
+            return Ok(vec![id.to_owned()]);
+        }
+        self.data
+            .schema
+            .metadata()
+            .get(METADATA_KEY_BLOOMBERG_REQUEST_IDS)
+            .map(|raw| {
+                serde_json::from_str(raw).map_err(|err| {
+                    PyValueError::new_err(format!(
+                        "invalid JSON in {METADATA_KEY_BLOOMBERG_REQUEST_IDS}: {err}"
+                    ))
+                })
+            })
+            .transpose()
+            .map(Option::unwrap_or_default)
+    }
+
+    #[getter]
     fn eid_data(&self) -> PyResult<Option<HashMap<String, Vec<i32>>>> {
         self.data
             .schema
@@ -1908,6 +1938,58 @@ mod tests {
             let unsupported = StructArray::new_empty_fields(1, None);
             let err = scalar_to_py(py, &unsupported, 0).unwrap_err();
             assert!(err.is_instance_of::<PyTypeError>(py));
+        });
+    }
+
+    #[test]
+    fn arrow_table_sdk_provenance_survives_native_composition_and_export() {
+        Python::initialize();
+        Python::attach(|py| {
+            let batch = |id: &str| {
+                let schema = Arc::new(
+                    Schema::new(vec![Field::new("row", DataType::Int64, false)]).with_metadata(
+                        HashMap::from([(METADATA_KEY_BLOOMBERG_REQUEST_ID.into(), id.into())]),
+                    ),
+                );
+                RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1_i64]))]).unwrap()
+            };
+            let first = ArrowTable::try_new(vec![batch("sdk-synthetic-z")]).unwrap();
+            assert_eq!(first.bloomberg_request_id(), Some("sdk-synthetic-z"));
+            assert_eq!(first.bloomberg_request_ids().unwrap(), ["sdk-synthetic-z"]);
+            let table =
+                ArrowTable::try_new(vec![batch("sdk-synthetic-z"), batch("sdk-synthetic-a")])
+                    .unwrap();
+            assert!(table.bloomberg_request_id().is_none());
+            assert_eq!(
+                table.bloomberg_request_ids().unwrap(),
+                ["sdk-synthetic-a", "sdk-synthetic-z"]
+            );
+            let native = Py::new(py, table).unwrap();
+            let ids = native
+                .bind(py)
+                .getattr("bloomberg_request_ids")
+                .unwrap()
+                .extract::<Vec<String>>()
+                .unwrap();
+            assert_eq!(ids, ["sdk-synthetic-a", "sdk-synthetic-z"]);
+            if let Ok(pa) = py.import("pyarrow") {
+                let arrow = pa.getattr("table").unwrap().call1((native,)).unwrap();
+                let metadata = arrow
+                    .getattr("schema")
+                    .unwrap()
+                    .getattr("metadata")
+                    .unwrap();
+                let raw = metadata
+                    .get_item(PyBytes::new(
+                        py,
+                        METADATA_KEY_BLOOMBERG_REQUEST_IDS.as_bytes(),
+                    ))
+                    .unwrap();
+                assert_eq!(
+                    raw.extract::<Vec<u8>>().unwrap(),
+                    br#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+                );
+            }
         });
     }
 

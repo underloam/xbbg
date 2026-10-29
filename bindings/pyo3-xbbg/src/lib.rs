@@ -52,7 +52,7 @@ use arrow_array::RecordBatch;
 use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyDate, PyDateTime, PyDict, PyTime, PyTzInfo};
+use pyo3::types::{PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyString, PyTime, PyTzInfo};
 use pyo3_async_runtimes::tokio::future_into_py;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
@@ -65,7 +65,7 @@ use xbbg_async::engine::state::{
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
     SessionStatusInfo, SharedSubscriptionStatus, SubscriptionEventInfo, SubscriptionFailureInfo,
-    TopicStatusInfo, Transport,
+    TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
@@ -228,6 +228,36 @@ fn error_presentation_to_pyerr(presentation: ErrorPresentation) -> PyErr {
         ErrorKind::Timeout => BlpTimeoutError::new_err(presentation.message),
         ErrorKind::Internal => BlpInternalError::new_err(presentation.message),
     };
+    if let Some(context) = presentation.request_context {
+        let _ = Python::try_attach(|py| {
+            let value = error.value(py);
+            value.setattr("service", context.service)?;
+            value.setattr("operation", context.operation)?;
+            value.setattr("request_id", context.request_id)?;
+            let singular = (context.bloomberg_request_ids.len() == 1)
+                .then(|| context.bloomberg_request_ids[0].as_ref());
+            value.setattr("bloomberg_request_id", singular)?;
+            let ids: Vec<&str> = context
+                .bloomberg_request_ids
+                .iter()
+                .map(AsRef::as_ref)
+                .collect();
+            value.setattr("bloomberg_request_ids", ids)
+        });
+    } else if matches!(
+        presentation.kind,
+        ErrorKind::Request | ErrorKind::Limit | ErrorKind::DataLoss | ErrorKind::Timeout
+    ) {
+        let _ = Python::try_attach(|py| {
+            error.value(py).setattr("service", py.None())?;
+            error.value(py).setattr("operation", py.None())?;
+            error.value(py).setattr("request_id", py.None())?;
+            error.value(py).setattr("bloomberg_request_id", py.None())?;
+            error
+                .value(py)
+                .setattr("bloomberg_request_ids", Vec::<String>::new())
+        });
+    }
     if let Some(context) = presentation.data_loss {
         let _ = Python::try_attach(|py| {
             let value = error.value(py);
@@ -261,6 +291,56 @@ fn subscription_control_error_to_pyerr(error: BlpAsyncError) -> PyErr {
     match error {
         BlpAsyncError::ChannelClosed => PyRuntimeError::new_err("subscription already closed"),
         error => blp_async_error_to_pyerr(error),
+    }
+}
+
+/// Python's `str | bytes` TLS input, with immutable owned storage after extraction.
+#[derive(Clone)]
+pub struct PyTlsMaterial(TlsMaterial);
+
+impl FromPyObject<'_, '_> for PyTlsMaterial {
+    type Error = PyErr;
+
+    fn extract(value: pyo3::Borrowed<'_, '_, PyAny>) -> PyResult<Self> {
+        if let Ok(path) = value.cast::<PyString>() {
+            return Ok(Self(TlsMaterial::Path(path.to_str()?.to_owned())));
+        }
+        if let Ok(blob) = value.cast::<PyBytes>() {
+            return Ok(Self(TlsMaterial::Blob(Arc::from(blob.as_bytes()))));
+        }
+        Err(pyo3::exceptions::PyTypeError::new_err(
+            "TLS material must be str (file path) or bytes (DER-encoded material)",
+        ))
+    }
+}
+
+impl<'py> IntoPyObject<'py> for &PyTlsMaterial {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        Ok(match &self.0 {
+            TlsMaterial::Path(path) => PyString::new(py, path).into_any(),
+            TlsMaterial::Blob(blob) => PyBytes::new(py, blob).into_any(),
+        })
+    }
+}
+
+impl<'py> IntoPyObject<'py> for PyTlsMaterial {
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
+    type Error = std::convert::Infallible;
+
+    fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
+        (&self).into_pyobject(py)
+    }
+}
+
+#[cfg(feature = "stub-gen")]
+impl pyo3_stub_gen::PyStubType for PyTlsMaterial {
+    fn type_output() -> pyo3_stub_gen::TypeInfo {
+        pyo3_stub_gen::TypeInfo::builtin("str") | pyo3_stub_gen::TypeInfo::builtin("bytes")
     }
 }
 
@@ -360,12 +440,16 @@ pub struct PyEngineConfig {
     pub ip_address: Option<String>,
     #[pyo3(get, set)]
     pub token: Option<String>,
+    /// Client credentials: file path (`str`) or DER PKCS#12 material (`bytes`).
+    /// Must use the same representation as `tls_trust_material`.
     #[pyo3(get, set)]
-    pub tls_client_credentials: Option<String>,
+    pub tls_client_credentials: Option<PyTlsMaterial>,
     #[pyo3(get, set)]
     pub tls_client_credentials_password: Option<String>,
+    /// Trust material: file path (`str`) or DER PKCS#7 material (`bytes`).
+    /// Must be supplied together with `tls_client_credentials`.
     #[pyo3(get, set)]
-    pub tls_trust_material: Option<String>,
+    pub tls_trust_material: Option<PyTlsMaterial>,
     #[pyo3(get, set)]
     pub tls_handshake_timeout_ms: Option<i32>,
     #[pyo3(get, set)]
@@ -739,11 +823,17 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
                     token: py_config.token.as_deref(),
                 },
                 tls: xbbg_async::config::TlsInput {
-                    client_credentials: py_config.tls_client_credentials.as_deref(),
+                    client_credentials: py_config
+                        .tls_client_credentials
+                        .as_ref()
+                        .map(|material| material.0.clone()),
                     client_credentials_password: py_config
                         .tls_client_credentials_password
                         .as_deref(),
-                    trust_material: py_config.tls_trust_material.as_deref(),
+                    trust_material: py_config
+                        .tls_trust_material
+                        .as_ref()
+                        .map(|material| material.0.clone()),
                     handshake_timeout_ms: py_config.tls_handshake_timeout_ms,
                     crl_fetch_timeout_ms: py_config.tls_crl_fetch_timeout_ms,
                 },
@@ -2679,6 +2769,67 @@ mod tests {
     }
 
     #[test]
+    fn request_error_adapters_attach_sdk_identifiers_as_attributes() {
+        Python::initialize();
+        Python::attach(|py| {
+            for count in 0..=2 {
+                let ids: Vec<std::sync::Arc<str>> = ["sdk-synthetic-a", "sdk-synthetic-z"]
+                    .into_iter()
+                    .take(count)
+                    .map(std::sync::Arc::from)
+                    .collect();
+                for timeout in [false, true] {
+                    let core = if timeout {
+                        BlpError::RequestTimeout {
+                            request_id: Some("req-label".into()),
+                            bloomberg_request_ids: ids.clone(),
+                        }
+                    } else {
+                        BlpError::RequestFailure {
+                            service: "//synthetic/refdata".into(),
+                            operation: Some("SyntheticRequest".into()),
+                            cid: None,
+                            label: Some("synthetic failure".into()),
+                            request_id: Some("req-label".into()),
+                            bloomberg_request_ids: ids.clone(),
+                            source: None,
+                        }
+                    };
+                    let error = blp_error_to_pyerr(core);
+                    assert_eq!(error.is_instance_of::<BlpTimeoutError>(py), timeout);
+                    let value = error.value(py);
+                    assert_eq!(
+                        value
+                            .getattr("request_id")
+                            .unwrap()
+                            .extract::<String>()
+                            .unwrap(),
+                        "req-label"
+                    );
+                    let singular = value
+                        .getattr("bloomberg_request_id")
+                        .unwrap()
+                        .extract::<Option<String>>()
+                        .unwrap();
+                    assert_eq!(
+                        singular.as_deref(),
+                        (count == 1).then_some("sdk-synthetic-a")
+                    );
+                    let actual = value
+                        .getattr("bloomberg_request_ids")
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap();
+                    assert_eq!(
+                        actual,
+                        ids.iter().map(ToString::to_string).collect::<Vec<_>>()
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
     fn core_error_adapters_preserve_python_classes_and_messages() {
         Python::initialize();
         Python::attach(|py| {
@@ -2707,6 +2858,7 @@ mod tests {
                             cid: Some(xbbg_core::errors::CorrelationContext::U64(42)),
                             label: Some("subcategory=DAILY_CAPACITY_REACHED".into()),
                             request_id: Some("synthetic-request".into()),
+                            bloomberg_request_ids: Vec::new(),
                             source: Some(Box::new(std::io::Error::other("synthetic cause"))),
                         },
                         "BlpLimitError",
@@ -3045,6 +3197,115 @@ mod tests {
     }
 
     #[test]
+    fn py_engine_config_tls_bytes_round_trip_and_share_owned_storage() {
+        Python::initialize();
+        Python::attach(|py| {
+            let credentials = b"\x30\0\xffsynthetic-client";
+            let trust = b"\x30\0\xfesynthetic-trust";
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("tls_client_credentials", PyBytes::new(py, credentials))
+                .unwrap();
+            kwargs
+                .set_item("tls_trust_material", PyBytes::new(py, trust))
+                .unwrap();
+            kwargs
+                .set_item("tls_client_credentials_password", "synthetic-password")
+                .unwrap();
+            kwargs.set_item("tls_handshake_timeout_ms", 0).unwrap();
+            kwargs.set_item("tls_crl_fetch_timeout_ms", 25).unwrap();
+            let config = PyEngineConfig::new(Some(&kwargs)).unwrap();
+            let normalized = EngineConfig::try_from(&config).unwrap();
+            let tls = normalized.tls.as_ref().unwrap();
+            let TlsMaterial::Blob(actual) = &tls.client_credentials else {
+                panic!("expected client blob");
+            };
+            assert_eq!(actual.as_ref(), credentials);
+            let TlsMaterial::Blob(stored) = &config.tls_client_credentials.as_ref().unwrap().0
+            else {
+                panic!("expected stored client blob");
+            };
+            assert!(Arc::ptr_eq(actual, stored));
+            assert_eq!(tls.trust_material, TlsMaterial::Blob(Arc::from(&trust[..])));
+            assert_eq!(tls.handshake_timeout_ms, Some(0));
+            assert_eq!(tls.crl_fetch_timeout_ms, Some(25));
+            assert!(!config.__repr__().contains("synthetic"));
+            assert!(!format!("{tls:?}").contains("synthetic"));
+
+            let config = Py::new(py, config).unwrap();
+            let bound = config.bind(py);
+            assert_eq!(
+                bound
+                    .getattr("tls_client_credentials")
+                    .unwrap()
+                    .cast::<PyBytes>()
+                    .unwrap()
+                    .as_bytes(),
+                credentials
+            );
+            bound
+                .setattr("tls_trust_material", "fixtures/trust.p7")
+                .unwrap();
+            let error = EngineConfig::try_from(&*bound.borrow())
+                .err()
+                .expect("mixed TLS material should fail");
+            assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+            assert!(!error.to_string().contains("synthetic"));
+            bound
+                .setattr("tls_trust_material", PyBytes::new(py, trust))
+                .unwrap();
+            EngineConfig::try_from(&*bound.borrow()).unwrap();
+            bound.setattr("tls_client_credentials", py.None()).unwrap();
+            let error = EngineConfig::try_from(&*bound.borrow())
+                .err()
+                .expect("unpaired TLS material should fail");
+            assert!(error.is_instance_of::<pyo3::exceptions::PyValueError>(py));
+        });
+    }
+
+    #[test]
+    fn py_engine_config_tls_paths_stay_paths_and_reject_non_bytes_sequences() {
+        Python::initialize();
+        Python::attach(|py| {
+            let kwargs = PyDict::new(py);
+            kwargs
+                .set_item("tls_client_credentials", "fixtures/client.p12")
+                .unwrap();
+            kwargs
+                .set_item("tls_trust_material", "fixtures/trust.p7")
+                .unwrap();
+            let config = PyEngineConfig::new(Some(&kwargs)).unwrap();
+            let tls = EngineConfig::try_from(&config).unwrap().tls.unwrap();
+            assert_eq!(
+                tls.client_credentials,
+                TlsMaterial::Path("fixtures/client.p12".into())
+            );
+            assert_eq!(
+                tls.trust_material,
+                TlsMaterial::Path("fixtures/trust.p7".into())
+            );
+            let config = Py::new(py, config).unwrap();
+            assert_eq!(
+                config
+                    .bind(py)
+                    .getattr("tls_client_credentials")
+                    .unwrap()
+                    .extract::<String>()
+                    .unwrap(),
+                "fixtures/client.p12"
+            );
+            kwargs
+                .set_item(
+                    "tls_client_credentials",
+                    pyo3::types::PyList::new(py, [0_u8, 255]).unwrap(),
+                )
+                .unwrap();
+            let error = PyEngineConfig::new(Some(&kwargs)).err().unwrap();
+            assert!(error.is_instance_of::<pyo3::exceptions::PyTypeError>(py));
+        });
+    }
+
+    #[test]
     fn py_engine_config_rejects_negative_tls_timeouts() {
         for with_material in [false, true] {
             for (handshake, crl, field) in [
@@ -3053,8 +3314,9 @@ mod tests {
             ] {
                 let mut config = PyEngineConfig::new(None).expect("default config");
                 if with_material {
-                    config.tls_client_credentials = Some("fixtures/client.p12".to_string());
-                    config.tls_trust_material = Some("fixtures/trust.p7".to_string());
+                    config.tls_client_credentials =
+                        Some(PyTlsMaterial("fixtures/client.p12".into()));
+                    config.tls_trust_material = Some(PyTlsMaterial("fixtures/trust.p7".into()));
                 }
                 config.tls_handshake_timeout_ms = handshake;
                 config.tls_crl_fetch_timeout_ms = crl;
@@ -3132,7 +3394,7 @@ mod tests {
     #[test]
     fn py_engine_config_preserves_tls_pair_and_transport_error_labels() {
         let mut config = PyEngineConfig::new(None).expect("default config");
-        config.tls_client_credentials = Some("fixtures/client.p12".to_string());
+        config.tls_client_credentials = Some(PyTlsMaterial("fixtures/client.p12".into()));
         let err = EngineConfig::try_from(&config).err().expect("unpaired TLS");
         assert!(
             err.to_string()
@@ -3140,14 +3402,14 @@ mod tests {
         );
 
         config.tls_client_credentials = None;
-        config.tls_trust_material = Some("fixtures/trust.p7".to_string());
+        config.tls_trust_material = Some(PyTlsMaterial("fixtures/trust.p7".into()));
         let err = EngineConfig::try_from(&config).err().expect("unpaired TLS");
         assert!(
             err.to_string()
                 .contains("tls_trust_material set without tls_client_credentials")
         );
 
-        config.tls_client_credentials = Some("fixtures/client.p12".to_string());
+        config.tls_client_credentials = Some(PyTlsMaterial("fixtures/client.p12".into()));
         config.zfp_remote = Some("8194".to_string());
         assert!(matches!(
             EngineConfig::try_from(&config)

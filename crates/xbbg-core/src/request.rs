@@ -1,6 +1,7 @@
 //! Bloomberg request building
 
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
+use std::sync::Arc;
 
 use crate::element::Element;
 use crate::errors::{BlpError, Result};
@@ -51,6 +52,24 @@ impl Request {
     /// Get the raw pointer (internal use only)
     pub(crate) fn as_ptr(&self) -> *mut crate::ffi::blpapi_Request_t {
         self.ptr
+    }
+
+    /// Copy the SDK-assigned identifier for Bloomberg support, if available.
+    ///
+    /// This is neither the correlation ID nor xbbg's caller-supplied request
+    /// label. The SDK owns the pointer until this request is destroyed, so the
+    /// identifier is copied before the request is sent or dropped.
+    pub fn bloomberg_request_id(&self) -> Option<Arc<str>> {
+        let mut request_id = std::ptr::null();
+        // SAFETY: the request and output pointer are non-null and valid.
+        let rc = unsafe { crate::ffi::blpapi_Request_getRequestId(self.ptr, &mut request_id) };
+        if rc != 0 || request_id.is_null() {
+            return None;
+        }
+        // SAFETY: successful SDK calls return a NUL-terminated string whose
+        // storage remains valid until this Request is destroyed.
+        let value = unsafe { CStr::from_ptr(request_id) }.to_str().ok()?;
+        (!value.is_empty()).then(|| Arc::from(value))
     }
 
     /// Get the root element of this request for manipulation.
@@ -743,6 +762,74 @@ impl Drop for Request {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sdk_request_identifier_matches_sdk_and_outlives_request() {
+        const SCHEMA: &str = r#"<?xml version="1.0" encoding="UTF-8"?>
+<ServiceDefinition name="synthetic" version="1.0.0.0">
+  <service name="//synthetic/refdata" version="1.0.0.0">
+    <operation name="SyntheticRequest" serviceId="84">
+      <request>SyntheticRequest</request>
+      <response>Response</response>
+      <responseSelection>SyntheticResponse</responseSelection>
+    </operation>
+  </service>
+  <schema>
+    <sequenceType name="SyntheticRequest">
+      <element name="value" type="String" minOccurs="0"/>
+    </sequenceType>
+    <choiceType name="Response">
+      <element name="SyntheticResponse" type="SyntheticResponse"/>
+    </choiceType>
+    <sequenceType name="SyntheticResponse">
+      <element name="value" type="String" minOccurs="0"/>
+    </sequenceType>
+  </schema>
+</ServiceDefinition>"#;
+        let mut raw_service = std::ptr::null_mut();
+        // SAFETY: the schema bytes and output pointer are valid for the call.
+        assert_eq!(
+            unsafe {
+                blpapi_sys::blpapi_TestUtil_deserializeService(
+                    SCHEMA.as_ptr().cast(),
+                    SCHEMA.len(),
+                    &mut raw_service,
+                )
+            },
+            0,
+            "deserialize synthetic request service"
+        );
+        let service = crate::Service::from_raw(raw_service).expect("synthetic service");
+        let request = service
+            .create_request("SyntheticRequest")
+            .expect("synthetic request");
+        let owned = request.bloomberg_request_id();
+        let mut raw_id = std::ptr::null();
+        // SAFETY: the synthetic request and output pointer remain valid.
+        let rc = unsafe { crate::ffi::blpapi_Request_getRequestId(request.as_ptr(), &mut raw_id) };
+        let expected = if rc == 0 && !raw_id.is_null() {
+            // SAFETY: SDK storage is valid while request remains alive.
+            unsafe { CStr::from_ptr(raw_id) }
+                .to_str()
+                .ok()
+                .filter(|id| !id.is_empty())
+                .map(str::to_owned)
+        } else {
+            None
+        };
+        // Booleans deliberately avoid printing SDK-generated identifiers on failure.
+        assert!(
+            owned.as_deref() == expected.as_deref(),
+            "accessor matches SDK availability"
+        );
+        drop(request);
+        // SAFETY: deserializeService transferred one service reference to this test.
+        unsafe { blpapi_sys::blpapi_Service_release(raw_service) };
+        assert!(
+            owned.as_deref() == expected.as_deref(),
+            "owned ID survives request destruction"
+        );
+    }
 
     #[test]
     fn parse_datetime_accepts_zero_offset_suffix() {

@@ -62,6 +62,10 @@ export interface DelayedDataInfo {
 
 export interface ResultMetadata {
   metadata: Record<string, string>;
+  /** SDK-assigned support ID; absent for a result composed from multiple requests. */
+  bloombergRequestId?: string;
+  /** All SDK support IDs, sorted and deduplicated, including the singular case. */
+  bloombergRequestIds?: string[];
   eidData?: Record<string, number[]>;
   /** Present when an `onDelayed` check ran; tickers Bloomberg returned no flag for are absent. */
   delayed?: Record<string, DelayedDataInfo>;
@@ -82,10 +86,16 @@ export type AuthConfig =
   | { method: 'manual'; appName: string; userId: string; ipAddress: string }
   | { method: 'token'; token: string };
 
+/**
+ * Both materials must be file paths, or both must be DER-encoded bytes.
+ * `Buffer` is accepted as a `Uint8Array`; blobs are never written to temporary files.
+ */
 export interface TlsConfig {
-  clientCredentials?: string;
+  /** File path, or DER PKCS#12 client credentials. */
+  clientCredentials?: string | Uint8Array;
   clientCredentialsPassword?: string;
-  trustMaterial?: string;
+  /** File path, or DER PKCS#7 trusted certificates. */
+  trustMaterial?: string | Uint8Array;
   handshakeTimeoutMs?: number;
   crlFetchTimeoutMs?: number;
 }

@@ -19,7 +19,12 @@ const CORE_EXCEPTION_STUBS: &str = r#"class BlpError(builtins.Exception): ...
 
 class BlpSessionError(BlpError): ...
 
-class BlpRequestError(BlpError): ...
+class BlpRequestError(BlpError):
+    service: typing.Optional[builtins.str]
+    operation: typing.Optional[builtins.str]
+    request_id: typing.Optional[builtins.str]
+    bloomberg_request_id: typing.Optional[builtins.str]
+    bloomberg_request_ids: builtins.list[builtins.str]
 
 class BlpLimitError(BlpRequestError): ...
 
@@ -33,7 +38,10 @@ class BlpSubscriptionDataLossError(BlpRequestError):
 
 class BlpValidationError(BlpError): ...
 
-class BlpTimeoutError(BlpError): ...
+class BlpTimeoutError(BlpError):
+    request_id: typing.Optional[builtins.str]
+    bloomberg_request_id: typing.Optional[builtins.str]
+    bloomberg_request_ids: builtins.list[builtins.str]
 
 class BlpInternalError(BlpError): ...
 

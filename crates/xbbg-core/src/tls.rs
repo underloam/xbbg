@@ -34,20 +34,24 @@ impl TlsOptions {
         Ok(Self { ptr })
     }
 
+    /// Build TLS options directly from DER PKCS#12 credentials and PKCS#7 trust
+    /// material, rejecting lengths that cannot be represented by the SDK.
     pub fn from_blobs(
         client_credentials: &[u8],
         client_credentials_password: &str,
         trust_material: &[u8],
     ) -> Result<Self> {
+        let credentials_len = blob_len(client_credentials.len(), "client credentials")?;
+        let trust_len = blob_len(trust_material.len(), "trust material")?;
         let password = cstring(client_credentials_password, "client credentials password")?;
 
         let ptr = unsafe {
             ffi::blpapi_TlsOptions_createFromBlobs(
                 client_credentials.as_ptr() as *const i8,
-                client_credentials.len() as i32,
+                credentials_len,
                 password.as_ptr(),
                 trust_material.as_ptr() as *const i8,
-                trust_material.len() as i32,
+                trust_len,
             )
         };
 
@@ -82,8 +86,42 @@ impl Drop for TlsOptions {
     }
 }
 
-fn cstring(value: &str, field: &str) -> Result<CString> {
-    CString::new(value).map_err(|e| BlpError::InvalidArgument {
-        detail: format!("invalid {field}: {e}"),
+fn blob_len(len: usize, field: &str) -> Result<i32> {
+    i32::try_from(len).map_err(|_| BlpError::InvalidArgument {
+        detail: format!("{field} blob exceeds the SDK maximum length"),
     })
+}
+
+fn cstring(value: &str, field: &str) -> Result<CString> {
+    CString::new(value).map_err(|_| BlpError::InvalidArgument {
+        detail: format!("invalid {field}: contains a NUL byte"),
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blob_lengths_fit_sdk_signed_integer() {
+        for len in [0, 1, i32::MAX as usize] {
+            assert_eq!(blob_len(len, "synthetic").unwrap(), len as i32);
+        }
+        for len in [i32::MAX as usize + 1, usize::MAX] {
+            assert!(matches!(
+                blob_len(len, "synthetic"),
+                Err(BlpError::InvalidArgument { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn password_validation_does_not_disclose_secret() {
+        let password = "synthetic-before\0synthetic-after";
+        let error = cstring(password, "client credentials password").unwrap_err();
+        for rendered in [error.to_string(), format!("{error:?}")] {
+            assert!(!rendered.contains("synthetic-before"));
+            assert!(!rendered.contains("synthetic-after"));
+        }
+    }
 }

@@ -7,6 +7,7 @@ use arrow_array::builder::{Date32Builder, Float64Builder, StringBuilder};
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::NaiveDate;
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 
@@ -98,6 +99,8 @@ pub async fn recipe_vol_surface(
         ..Default::default()
     };
     let batch = engine.request(params).await?;
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&batch);
     let rows = build_vol_surface_rows(
         &batch,
         &specs,
@@ -105,8 +108,9 @@ pub async fn recipe_vol_surface(
         include_derived,
         risk_free_rate,
         &dividend_yield_field,
-    )?;
-    build_surface_batch(&rows)
+    )
+    .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    build_surface_batch(&rows, request_ids)
 }
 
 pub(crate) fn expand_surface_specs(
@@ -498,7 +502,10 @@ fn append_derived_rows(
     }
 }
 
-fn build_surface_batch(rows: &[SurfaceRow]) -> Result<RecordBatch> {
+fn build_surface_batch(
+    rows: &[SurfaceRow],
+    request_ids: BloombergRequestIds,
+) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
     let mut date = Date32Builder::new();
     let mut metric = StringBuilder::new();
@@ -530,7 +537,7 @@ fn build_surface_batch(rows: &[SurfaceRow]) -> Result<RecordBatch> {
         Field::new("value", DataType::Float64, false),
     ]));
 
-    RecordBatch::try_new(
+    let batch = RecordBatch::try_new(
         schema,
         vec![
             Arc::new(ticker.finish()),
@@ -543,13 +550,72 @@ fn build_surface_batch(rows: &[SurfaceRow]) -> Result<RecordBatch> {
             Arc::new(value.finish()),
         ],
     )
-    .map_err(Into::into)
+    .map_err(|error| {
+        crate::error::RecipeError::from(error)
+            .with_bloomberg_request_ids(request_ids.iter().cloned())
+    })?;
+    Ok(request_ids.attach(batch))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow_array::{Date32Array, StringArray};
+    use xbbg_async::engine::state::{
+        METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+    };
+
+    #[test]
+    fn surface_reconstruction_preserves_source_request_id() {
+        let schema = Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, false),
+            Field::new("date", DataType::Date32, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, false),
+        ])
+        .with_metadata(HashMap::from([(
+            METADATA_KEY_BLOOMBERG_REQUEST_ID.to_string(),
+            "synthetic_surface_request".to_string(),
+        )]));
+        let source = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(StringArray::from(vec!["SYNTH Index"])),
+                Arc::new(Date32Array::from(vec![0])),
+                Arc::new(StringArray::from(vec!["SYNTH_VOL"])),
+                Arc::new(StringArray::from(vec!["25"])),
+            ],
+        )
+        .unwrap();
+        let mut request_ids = BloombergRequestIds::default();
+        request_ids.collect(&source);
+        let specs = vec![parse_field_spec(
+            "SYNTH_VOL|implied_volatility|1M|moneyness|100",
+        )];
+        let rows =
+            build_vol_surface_rows(&source, &specs, true, false, None, "SYNTH_YIELD").unwrap();
+        drop(source);
+        let result = build_surface_batch(&rows, request_ids).unwrap();
+
+        assert_eq!((result.num_rows(), result.num_columns()), (1, 8));
+        assert_eq!(rows[0].value, 0.25);
+        assert_eq!(
+            result
+                .schema_ref()
+                .metadata()
+                .get(METADATA_KEY_BLOOMBERG_REQUEST_ID),
+            Some(&"synthetic_surface_request".to_string())
+        );
+        assert!(
+            !result
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_BLOOMBERG_REQUEST_IDS)
+        );
+
+        let local = build_surface_batch(&[], BloombergRequestIds::default()).unwrap();
+        assert!(local.schema_ref().metadata().is_empty());
+    }
 
     #[test]
     fn preset_expansion_is_tidy_metadata() {

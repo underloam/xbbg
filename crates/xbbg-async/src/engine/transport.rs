@@ -14,9 +14,13 @@
 //! (B-PIPE over TLS).
 
 use std::fmt;
+use std::sync::Arc;
 
 use xbbg_core::BlpError;
 use xbbg_core::zfp::ZfpRemote;
+
+const TLS_MATERIAL_PAIR_ERROR: &str =
+    "tls_client_credentials and tls_trust_material must both be file paths or both be blobs";
 
 /// A SOCKS5 proxy applied to a single [`ServerAddr`].
 ///
@@ -106,29 +110,104 @@ impl fmt::Display for Transport {
     }
 }
 
+/// A file path or in-memory DER-encoded TLS material.
+///
+/// Blobs use shared immutable storage so cloning an engine configuration does
+/// not copy credentials. Blob contents are never included in `Debug` output.
+#[derive(Clone, PartialEq, Eq)]
+pub enum TlsMaterial {
+    Path(String),
+    Blob(Arc<[u8]>),
+}
+
+impl TlsMaterial {
+    pub(crate) fn is_blob(&self) -> bool {
+        matches!(self, Self::Blob(_))
+    }
+}
+
+impl From<String> for TlsMaterial {
+    fn from(path: String) -> Self {
+        Self::Path(path)
+    }
+}
+
+impl From<&str> for TlsMaterial {
+    fn from(path: &str) -> Self {
+        Self::Path(path.to_owned())
+    }
+}
+
+impl fmt::Debug for TlsMaterial {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Path(path) => f.debug_tuple("Path").field(path).finish(),
+            Self::Blob(_) => f.write_str("Blob(<redacted>)"),
+        }
+    }
+}
+
 /// TLS material used to build a `xbbg_core::tls::TlsOptions` at session start.
 ///
-/// Held as owned strings (paths + password) rather than an FFI wrapper so the
-/// config stays `Clone` and one `EngineConfig` can spawn many sessions.
-#[derive(Clone, Debug)]
+/// Both values must be file paths, or both must be DER blobs (PKCS#12 client
+/// credentials and PKCS#7 trust material). No temporary files are created.
+#[derive(Clone)]
 pub struct TlsConfig {
-    pub client_credentials: String,
+    pub client_credentials: TlsMaterial,
     pub client_credentials_password: String,
-    pub trust_material: String,
+    pub trust_material: TlsMaterial,
     pub handshake_timeout_ms: Option<i32>,
     pub crl_fetch_timeout_ms: Option<i32>,
 }
 
+impl fmt::Debug for TlsConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("TlsConfig")
+            .field("client_credentials", &self.client_credentials)
+            .field("client_credentials_password", &"<redacted>")
+            .field("trust_material", &self.trust_material)
+            .field("handshake_timeout_ms", &self.handshake_timeout_ms)
+            .field("crl_fetch_timeout_ms", &self.crl_fetch_timeout_ms)
+            .finish()
+    }
+}
+
 impl TlsConfig {
+    /// Validate the representation pair without opening files or calling the SDK.
+    pub fn validate(&self) -> Result<(), BlpError> {
+        if self.client_credentials.is_blob() != self.trust_material.is_blob() {
+            return Err(BlpError::InvalidArgument {
+                detail: TLS_MATERIAL_PAIR_ERROR.into(),
+            });
+        }
+        Ok(())
+    }
+
     /// Construct a live `TlsOptions` for use with the SDK. Called once per
     /// session start; the returned handle is consumed by either
     /// `ZfpUtil::getOptionsForLeasedLines` or `SessionOptions::set_tls_options`.
     pub fn build(&self) -> Result<xbbg_core::tls::TlsOptions, BlpError> {
-        let mut tls = xbbg_core::tls::TlsOptions::from_files(
-            &self.client_credentials,
-            &self.client_credentials_password,
-            &self.trust_material,
-        )?;
+        let mut tls = match (&self.client_credentials, &self.trust_material) {
+            (TlsMaterial::Path(credentials), TlsMaterial::Path(trust)) => {
+                xbbg_core::tls::TlsOptions::from_files(
+                    credentials,
+                    &self.client_credentials_password,
+                    trust,
+                )?
+            }
+            (TlsMaterial::Blob(credentials), TlsMaterial::Blob(trust)) => {
+                xbbg_core::tls::TlsOptions::from_blobs(
+                    credentials,
+                    &self.client_credentials_password,
+                    trust,
+                )?
+            }
+            _ => {
+                return Err(BlpError::InvalidArgument {
+                    detail: TLS_MATERIAL_PAIR_ERROR.into(),
+                });
+            }
+        };
         if let Some(ms) = self.handshake_timeout_ms {
             tls.set_tls_handshake_timeout_ms(ms);
         }
@@ -142,6 +221,79 @@ impl TlsConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn blob_config() -> TlsConfig {
+        TlsConfig {
+            client_credentials: TlsMaterial::Blob(Arc::from(&b"synthetic-client-secret"[..])),
+            client_credentials_password: "synthetic-password-secret".into(),
+            trust_material: TlsMaterial::Blob(Arc::from(&b"synthetic-trust-secret"[..])),
+            handshake_timeout_ms: Some(0),
+            crl_fetch_timeout_ms: Some(25),
+        }
+    }
+
+    #[test]
+    fn tls_config_debug_redacts_password_and_blobs() {
+        let config = blob_config();
+        let debug = format!("{config:?}");
+        for secret in [
+            "synthetic-client-secret",
+            "synthetic-password-secret",
+            "synthetic-trust-secret",
+        ] {
+            assert!(!debug.contains(secret));
+            assert!(!debug.contains(&format!("{:?}", secret.as_bytes())));
+        }
+        let mut paths = config;
+        paths.client_credentials = "fixtures/client.p12".into();
+        paths.trust_material = "fixtures/trust.p7".into();
+        assert!(!format!("{paths:?}").contains("synthetic-password-secret"));
+    }
+
+    #[test]
+    fn tls_config_clone_shares_blob_storage() {
+        let config = blob_config();
+        let cloned = config.clone();
+        for (original, copied) in [
+            (&config.client_credentials, &cloned.client_credentials),
+            (&config.trust_material, &cloned.trust_material),
+        ] {
+            let (TlsMaterial::Blob(original), TlsMaterial::Blob(copied)) = (original, copied)
+            else {
+                panic!("expected blob material");
+            };
+            assert!(Arc::ptr_eq(original, copied));
+        }
+    }
+
+    #[test]
+    fn tls_config_rejects_mixed_pairs_before_sdk_construction() {
+        for credentials_are_blob in [false, true] {
+            let mut config = blob_config();
+            if credentials_are_blob {
+                config.trust_material = "fixtures/trust.p7".into();
+            } else {
+                config.client_credentials = "fixtures/client.p12".into();
+            }
+            assert!(matches!(
+                config.validate(),
+                Err(BlpError::InvalidArgument { .. })
+            ));
+            assert!(matches!(
+                config.build(),
+                Err(BlpError::InvalidArgument { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn tls_config_accepts_matching_pairs_without_loading_material() {
+        let mut config = blob_config();
+        config.validate().unwrap();
+        config.client_credentials = "fixtures/client.p12".into();
+        config.trust_material = "fixtures/trust.p7".into();
+        config.validate().unwrap();
+    }
 
     #[test]
     fn default_is_direct_localhost() {

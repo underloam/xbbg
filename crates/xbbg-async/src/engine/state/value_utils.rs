@@ -31,6 +31,11 @@ pub const METADATA_KEY_DELAYED: &str = "xbbg.delayed";
 /// Schema-metadata key carrying non-null conversion misses
 /// (JSON: `{"<field>": count}`). No values or security identifiers are recorded.
 pub const METADATA_KEY_TYPE_MISSES: &str = "xbbg.type_misses";
+/// One SDK-assigned support identifier, stored as plain text.
+pub const METADATA_KEY_BLOOMBERG_REQUEST_ID: &str = "xbbg.bloomberg_request_id";
+/// Multiple SDK-assigned identifiers, sorted and deduplicated as a JSON array.
+/// The singular and plural keys are mutually exclusive.
+pub const METADATA_KEY_BLOOMBERG_REQUEST_IDS: &str = "xbbg.bloomberg_request_ids";
 
 /// Delayed-data status for one security, from `IS_DELAYED_STREAM` and
 /// `EXCHANGE_DELAY`.
@@ -45,6 +50,80 @@ pub struct DelayedMeta {
 /// Read the `xbbg.delayed` status map from a request result.
 pub fn delayed_metadata(batch: &RecordBatch) -> Option<BTreeMap<String, DelayedMeta>> {
     ResponseMetadata::parse_json(batch.schema_ref().metadata().get(METADATA_KEY_DELAYED))
+}
+
+/// ID-only provenance for derived results; never retains source data or batches.
+#[derive(Clone, Debug, Default)]
+pub struct BloombergRequestIds {
+    ids: smallvec::SmallVec<[Arc<str>; 1]>,
+}
+
+impl BloombergRequestIds {
+    /// Collect the SDK support identifiers attached to a contributing result.
+    pub fn collect(&mut self, batch: &RecordBatch) {
+        let metadata = batch.schema_ref().metadata();
+        if let Some(id) = metadata.get(METADATA_KEY_BLOOMBERG_REQUEST_ID)
+            && let Err(index) = self
+                .ids
+                .binary_search_by(|existing| existing.as_ref().cmp(id))
+        {
+            self.ids.insert(index, Arc::from(id.as_str()));
+        }
+        if let Some(values) = ResponseMetadata::parse_json::<Vec<String>>(
+            metadata.get(METADATA_KEY_BLOOMBERG_REQUEST_IDS),
+        ) {
+            self.extend(values.into_iter().map(Arc::from));
+        }
+    }
+
+    /// Merge owned/shared IDs, deduplicating without copying their strings.
+    pub fn extend(&mut self, ids: impl IntoIterator<Item = Arc<str>>) {
+        for id in ids {
+            if let Err(index) = self.ids.binary_search(&id) {
+                self.ids.insert(index, id);
+            }
+        }
+    }
+
+    /// Borrow the sorted identifiers for composition or error enrichment.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<str>> {
+        self.ids.iter()
+    }
+
+    /// Whether the SDK supplied no support identifiers for these contributors.
+    pub fn is_empty(&self) -> bool {
+        self.ids.is_empty()
+    }
+
+    /// Attach provenance without touching array buffers or other metadata keys.
+    pub fn attach(mut self, mut batch: RecordBatch) -> RecordBatch {
+        if self.is_empty() {
+            return batch;
+        }
+        self.collect(&batch);
+        self.attach_metadata(batch.schema_metadata_mut());
+        batch
+    }
+
+    fn attach_metadata(self, metadata: &mut HashMap<String, String>) {
+        if self.is_empty() {
+            return;
+        }
+        metadata.remove(METADATA_KEY_BLOOMBERG_REQUEST_ID);
+        metadata.remove(METADATA_KEY_BLOOMBERG_REQUEST_IDS);
+        if self.ids.len() == 1 {
+            metadata.insert(
+                METADATA_KEY_BLOOMBERG_REQUEST_ID.into(),
+                self.ids[0].to_string(),
+            );
+        } else {
+            let ids: Vec<&str> = self.ids.iter().map(AsRef::as_ref).collect();
+            metadata.insert(
+                METADATA_KEY_BLOOMBERG_REQUEST_IDS.into(),
+                serde_json::to_string(&ids).expect("string identifiers serialize"),
+            );
+        }
+    }
 }
 
 /// `securityError` details captured for batch metadata.
@@ -134,9 +213,9 @@ pub(super) struct SecurityDiagnostics<'a> {
 /// responses carry `eidData` / `securityError` / `fieldExceptions` next to the
 /// field data, and dropping them silently is exactly the failure mode a
 /// market-data consumer cannot detect. Collected during message processing
-/// and attached to the final [`RecordBatch`] as Arrow schema metadata (JSON
-/// values under the `xbbg.*` keys above) so every output format — long, wide,
-/// typed — and every binding surface sees them without shape changes.
+/// and attached to the final [`RecordBatch`] as Arrow schema metadata under
+/// `xbbg.*` keys (JSON maps/ID arrays, or plain text for one SDK request ID),
+/// so every output format and binding surface sees them without shape changes.
 #[derive(Debug, Default)]
 pub(crate) struct ResponseMetadata {
     eid_data: BTreeMap<String, Vec<i64>>,
@@ -144,6 +223,7 @@ pub(crate) struct ResponseMetadata {
     field_exceptions: BTreeMap<String, Vec<FieldExceptionMeta>>,
     delayed: BTreeMap<String, DelayedMeta>,
     type_misses: BTreeMap<String, u64>,
+    bloomberg_request_ids: BloombergRequestIds,
     /// Record `fieldData` delay status (bdp requests made with `on_delayed`).
     capture_delayed: bool,
     /// Status fields xbbg appended to the wire request; their exceptions are
@@ -152,6 +232,41 @@ pub(crate) struct ResponseMetadata {
 }
 
 impl ResponseMetadata {
+    /// Fast path for a single captured SDK identifier: no tree or JSON work.
+    pub(crate) fn attach_bloomberg_request_id(mut batch: RecordBatch, id: &str) -> RecordBatch {
+        batch
+            .schema_metadata_mut()
+            .insert(METADATA_KEY_BLOOMBERG_REQUEST_ID.into(), id.to_owned());
+        batch
+    }
+
+    pub(crate) fn with_bloomberg_request_ids(ids: impl IntoIterator<Item = Arc<str>>) -> Self {
+        let mut bloomberg_request_ids = BloombergRequestIds::default();
+        bloomberg_request_ids.extend(ids);
+        Self {
+            bloomberg_request_ids,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn bloomberg_request_ids(batch: &RecordBatch) -> Vec<Arc<str>> {
+        let mut metadata = Self::default();
+        metadata.collect_bloomberg_request_ids(batch);
+        metadata.bloomberg_request_ids.ids.into_vec()
+    }
+
+    pub(crate) fn collect_bloomberg_request_ids(&mut self, batch: &RecordBatch) {
+        self.bloomberg_request_ids.collect(batch);
+    }
+
+    pub(crate) fn request_ids(&self) -> impl Iterator<Item = Arc<str>> + '_ {
+        self.bloomberg_request_ids.iter().cloned()
+    }
+
+    pub(crate) fn extend_request_ids(&mut self, ids: impl IntoIterator<Item = Arc<str>>) {
+        self.bloomberg_request_ids.extend(ids);
+    }
+
     /// Count only rejected non-null inputs; allocate a field name on its first miss.
     pub(crate) fn record_type_miss(&mut self, field: &str) {
         if let Some(count) = self.type_misses.get_mut(field) {
@@ -334,6 +449,7 @@ impl ResponseMetadata {
             && self.field_exceptions.is_empty()
             && self.delayed.is_empty()
             && self.type_misses.is_empty()
+            && self.bloomberg_request_ids.is_empty()
     }
 
     /// Attach the collected diagnostics to `batch` as schema metadata.
@@ -360,6 +476,7 @@ impl ResponseMetadata {
         );
         Self::insert_json(metadata, METADATA_KEY_DELAYED, &self.delayed);
         Self::insert_json(metadata, METADATA_KEY_TYPE_MISSES, &self.type_misses);
+        self.bloomberg_request_ids.attach_metadata(metadata);
         batch
     }
 
@@ -394,6 +511,7 @@ impl ResponseMetadata {
         let mut merged = Self::default();
         for batch in batches {
             merged.collect_type_misses(batch);
+            merged.collect_bloomberg_request_ids(batch);
             let metadata = batch.schema_ref().metadata();
             if let Some(map) =
                 Self::parse_json::<BTreeMap<String, Vec<i64>>>(metadata.get(METADATA_KEY_EID_DATA))
@@ -503,6 +621,7 @@ pub(crate) fn top_level_response_error(
         cid: None,
         label,
         request_id: None,
+        bloomberg_request_ids: Vec::new(),
         source: None,
     })
 }
@@ -1668,6 +1787,51 @@ mod tests {
             vec![Arc::new(StringArray::from(vec!["IBM US Equity"]))],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn request_provenance_unions_unique_ids_and_preserves_other_metadata() {
+        let first = ResponseMetadata::attach_bloomberg_request_id(tiny_batch(), "sdk-synthetic-z");
+        let second = ResponseMetadata::attach_bloomberg_request_id(tiny_batch(), "sdk-synthetic-a");
+        let combined = ResponseMetadata::union_of(&[first.clone(), second.clone(), first.clone()])
+            .attach(tiny_batch());
+        let metadata = combined.schema_ref().metadata();
+        assert!(!metadata.contains_key(METADATA_KEY_BLOOMBERG_REQUEST_ID));
+        assert_eq!(
+            metadata[METADATA_KEY_BLOOMBERG_REQUEST_IDS],
+            r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+        );
+        let duplicate =
+            ResponseMetadata::union_of(&[first.clone(), first.clone()]).attach(tiny_batch());
+        assert_eq!(
+            duplicate.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
+            "sdk-synthetic-z"
+        );
+        assert!(
+            !duplicate
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_BLOOMBERG_REQUEST_IDS)
+        );
+
+        let shared: Arc<str> = Arc::from("sdk-synthetic-z");
+        let mut ids = BloombergRequestIds::default();
+        ids.extend([Arc::clone(&shared), Arc::clone(&shared)]);
+        assert!(!ids.ids.spilled(), "one support ID stays inline");
+        assert!(Arc::ptr_eq(ids.iter().next().unwrap(), &shared));
+        let mut output = second;
+        output
+            .schema_metadata_mut()
+            .insert("synthetic.source".into(), "preserved".into());
+        let output = ids.attach(output);
+        assert_eq!(
+            output.schema_ref().metadata()["synthetic.source"],
+            "preserved"
+        );
+        assert_eq!(
+            output.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_IDS],
+            r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+        );
     }
 
     #[test]

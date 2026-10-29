@@ -215,6 +215,7 @@ where
                 cid: None,
                 label: None,
                 request_id: request_id.map(str::to_owned),
+                bloomberg_request_ids: Vec::new(),
                 source: Some(source.into()),
             }),
             None => empty_batch(),

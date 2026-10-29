@@ -1,4 +1,5 @@
 use std::fmt;
+use std::sync::Arc;
 
 use thiserror::Error;
 
@@ -51,6 +52,8 @@ pub enum BlpError {
         cid: Option<CorrelationContext>,
         label: Option<String>,
         request_id: Option<String>,
+        /// SDK-assigned IDs, separate from the xbbg request label above.
+        bloomberg_request_ids: Vec<Arc<str>>,
         #[source]
         source: Option<Box<dyn std::error::Error + Send + Sync>>,
     },
@@ -60,6 +63,13 @@ pub enum BlpError {
 
     #[error("operation timed out")]
     Timeout,
+
+    /// A sent data request timed out; lifecycle timeouts use `Timeout`.
+    #[error("operation timed out")]
+    RequestTimeout {
+        request_id: Option<String>,
+        bloomberg_request_ids: Vec<Arc<str>>,
+    },
 
     #[error("request template terminated")]
     TemplateTerminated { cid: Option<CorrelationContext> },
@@ -98,6 +108,42 @@ pub enum BlpError {
         message: String,
         errors: Vec<ValidationError>,
     },
+}
+
+impl BlpError {
+    /// SDK support IDs retained by a failed data request (not correlation IDs).
+    pub fn bloomberg_request_ids(&self) -> &[Arc<str>] {
+        match self {
+            Self::RequestFailure {
+                bloomberg_request_ids,
+                ..
+            }
+            | Self::RequestTimeout {
+                bloomberg_request_ids,
+                ..
+            } => bloomberg_request_ids,
+            _ => &[],
+        }
+    }
+
+    /// Union IDs when composing multiple underlying data requests.
+    pub fn extend_bloomberg_request_ids(&mut self, ids: impl IntoIterator<Item = Arc<str>>) {
+        match self {
+            Self::RequestFailure {
+                bloomberg_request_ids,
+                ..
+            }
+            | Self::RequestTimeout {
+                bloomberg_request_ids,
+                ..
+            } => {
+                bloomberg_request_ids.extend(ids);
+                bloomberg_request_ids.sort_unstable();
+                bloomberg_request_ids.dedup();
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Individual validation error with optional suggestion.

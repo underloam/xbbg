@@ -62,6 +62,12 @@ use super::{
     SlabKey, WorkerHealth, attach_auth_context, build_session_options,
 };
 
+/// Submission result retained by the future/stream after the SDK request drops.
+#[derive(Default)]
+pub(crate) struct RequestSubmission {
+    pub(crate) ticket: Option<RequestTicket>,
+    pub(crate) bloomberg_request_id: Option<Arc<str>>,
+}
 fn iter_named_request_parameters(
     params: &RequestParams,
 ) -> impl Iterator<Item = (&str, &str)> + '_ {
@@ -1444,23 +1450,23 @@ impl AsyncRequestWorker {
         self.shared.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Submit a unified request. Failures are delivered through `reply`;
-    /// `Some(ticket)` is returned only when the request is in flight and
-    /// cancellable.
+    /// Submit a unified request. Failures are delivered through `reply`.
+    /// The returned submission retains any SDK support ID, including on send
+    /// failure; its ticket is set only for a sent, cancellable request.
     pub(crate) async fn submit(
         &self,
-        request: PreparedRequest,
+        request: &PreparedRequest,
         reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
-    ) -> Option<RequestTicket> {
+    ) -> RequestSubmission {
         if self.is_shutting_down() {
             let _ = reply.send(Err(Self::shutdown_error()));
-            return None;
+            return RequestSubmission::default();
         }
         let params = request.params();
         let t0 = Instant::now();
         if let Err(error) = self.ensure_service(&params.service).await {
             let _ = reply.send(Err(error));
-            return None;
+            return RequestSubmission::default();
         }
         xbbg_log::debug!(
             worker_id = self.id,
@@ -1474,26 +1480,28 @@ impl AsyncRequestWorker {
             fields = ?params.fields,
             "creating request state"
         );
-        let state = create_request_state(&request, reply);
+        let state = create_request_state(request, reply);
         self.dispatch_prepared(request, state)
     }
 
     /// Submit a unified streaming request.
     pub(crate) async fn submit_stream(
         &self,
-        request: PreparedRequest,
+        request: &PreparedRequest,
         stream: mpsc::Sender<Result<RecordBatch, BlpError>>,
-    ) -> Option<RequestTicket> {
+    ) -> RequestSubmission {
         if self.is_shutting_down() {
             send_stream_error(stream, Self::shutdown_error());
-            return None;
+            return RequestSubmission::default();
         }
         let params = request.params();
-        let state = create_stream_request_state(&request, stream)?;
+        let Some(state) = create_stream_request_state(request, stream) else {
+            return RequestSubmission::default();
+        };
 
         if let Err(error) = self.ensure_service(&params.service).await {
             state.fail(error);
-            return None;
+            return RequestSubmission::default();
         }
 
         self.dispatch_prepared(request, state)
@@ -1504,18 +1512,19 @@ impl AsyncRequestWorker {
     /// thread before this returns still finds its slot.
     fn dispatch_prepared(
         &self,
-        request: PreparedRequest,
+        request: &PreparedRequest,
         state: UnifiedRequestState,
-    ) -> Option<RequestTicket> {
+    ) -> RequestSubmission {
         let lifecycle = self.shared.lifecycle.read();
         if self.is_shutting_down() {
             state.fail(Self::shutdown_error());
-            return None;
+            return RequestSubmission::default();
         }
         let generation = self.shared.next_generation();
         let key = self.shared.insert_slot(generation, state);
         let dispatch_key = DispatchKey::with_generation(key, generation);
         let cid = dispatch_key.to_correlation_id();
+        let mut submission = RequestSubmission::default();
 
         let send_result = (|| -> Result<CorrelationId, BlpError> {
             let params = request.params();
@@ -1531,7 +1540,8 @@ impl AsyncRequestWorker {
                 end_date = ?params.end_date,
                 "building request"
             );
-            let blp_request = build_request_from_params(self.id, &service, &request)?;
+            let blp_request = build_request_from_params(self.id, &service, request)?;
+            submission.bloomberg_request_id = blp_request.bloomberg_request_id();
             self.session.send_request_with_label(
                 &blp_request,
                 Some(&cid),
@@ -1545,7 +1555,7 @@ impl AsyncRequestWorker {
                 if let Some(slot) = self.shared.take_slot(dispatch_key) {
                     slot.cell.fail(error);
                 }
-                return None;
+                return submission;
             }
         };
 
@@ -1571,7 +1581,7 @@ impl AsyncRequestWorker {
             );
             drop(lifecycle);
             self.signal_shutdown();
-            return None;
+            return submission;
         }
 
         let params = request.params();
@@ -1582,7 +1592,8 @@ impl AsyncRequestWorker {
             operation = %request.effective_operation(),
             "request sent"
         );
-        Some(RequestTicket { key, generation })
+        submission.ticket = Some(RequestTicket { key, generation });
+        submission
     }
 
     /// Cancel an in-flight request (caller dropped the awaitable). The
@@ -1631,12 +1642,18 @@ impl AsyncRequestWorker {
                 error = %error,
                 "timeout_request: Bloomberg cancel failed; quarantining worker"
             );
-            slot.cell.fail(BlpError::Timeout);
+            slot.cell.fail(BlpError::RequestTimeout {
+                request_id: None,
+                bloomberg_request_ids: Vec::new(),
+            });
             self.shared.health.store(2, Ordering::Release);
             self.signal_shutdown();
             return;
         }
-        slot.cell.fail(BlpError::Timeout);
+        slot.cell.fail(BlpError::RequestTimeout {
+            request_id: None,
+            bloomberg_request_ids: Vec::new(),
+        });
         xbbg_log::warn!(
             worker_id = self.id,
             key = ticket.key,

@@ -24,7 +24,7 @@ mod subscription_types;
 mod transport;
 mod worker;
 
-pub use transport::{ServerAddr, Socks5Proxy, TlsConfig, Transport};
+pub use transport::{ServerAddr, Socks5Proxy, TlsConfig, TlsMaterial, Transport};
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -700,6 +700,9 @@ impl EngineConfig {
                 detail: "bql_app_name must be non-empty when configured".to_string(),
             });
         }
+        if let Some(tls) = &self.tls {
+            tls.validate()?;
+        }
         Ok(())
     }
 }
@@ -896,9 +899,8 @@ impl Engine {
         };
         let batch = match delay_lookup {
             Some(securities) => {
-                let (batch, status) =
-                    tokio::try_join!(response, delayed::lookup(self, securities))?;
-                state::ResponseMetadata::with_delayed(status).attach(batch)
+                delayed::combine(&output_params, response, delayed::lookup(self, securities))
+                    .await?
             }
             None => response.await?,
         };

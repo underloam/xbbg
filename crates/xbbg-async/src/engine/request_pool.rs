@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use xbbg_core::BlpError;
 
+use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
 
@@ -88,6 +89,68 @@ impl Drop for RequestCancelGuard {
     }
 }
 
+/// Enrich only data-request outcomes; pre-dispatch failures have no SDK ID.
+fn enrich_request_error(
+    mut error: BlpError,
+    service: &str,
+    operation: &str,
+    request_id: Option<&str>,
+    ids: &[Arc<str>],
+) -> BlpError {
+    match &mut error {
+        BlpError::RequestFailure {
+            request_id: label, ..
+        }
+        | BlpError::RequestTimeout {
+            request_id: label, ..
+        } => {
+            if label.is_none() {
+                *label = request_id.map(str::to_owned);
+            }
+            error.extend_bloomberg_request_ids(ids.iter().cloned());
+            error
+        }
+        BlpError::Internal { .. } if !ids.is_empty() => BlpError::RequestFailure {
+            service: service.to_owned(),
+            operation: Some(operation.to_owned()),
+            cid: None,
+            label: None,
+            request_id: request_id.map(str::to_owned),
+            bloomberg_request_ids: ids.to_vec(),
+            source: Some(Box::new(error)),
+        },
+        _ => error,
+    }
+}
+
+pub(super) fn enrich_async_request_error(
+    error: BlpAsyncError,
+    params: &super::RequestParams,
+    ids: &[Arc<str>],
+) -> BlpAsyncError {
+    match error {
+        BlpAsyncError::Blp(error) => enrich_request_error(
+            error,
+            &params.service,
+            params.effective_operation(),
+            params.request_id.as_deref(),
+            ids,
+        )
+        .into(),
+        error if !ids.is_empty() => BlpError::RequestFailure {
+            service: params.service.clone(),
+            operation: Some(params.effective_operation().to_owned()),
+            cid: None,
+            label: None,
+            request_id: params.request_id.clone(),
+            bloomberg_request_ids: ids.to_vec(),
+            source: Some(Box::new(error)),
+        }
+        .into(),
+        error => error,
+    }
+}
+
 /// Owned streaming Bloomberg request.
 ///
 /// The cancellation guard cannot be separated from the receiver: dropping or
@@ -97,6 +160,10 @@ pub struct RequestStream {
     rx: mpsc::Receiver<Result<RecordBatch, BlpError>>,
     cancel_guard: Option<RequestCancelGuard>,
     output_timezone: Option<String>,
+    bloomberg_request_id: Option<Arc<str>>,
+    request_context: Option<(String, String, Option<String>)>,
+    /// Identical chunk schemas share the final timezone-adjusted ID-bearing schema.
+    metadata_schema: Option<(arrow_schema::SchemaRef, arrow_schema::SchemaRef)>,
 }
 
 impl RequestStream {
@@ -108,11 +175,15 @@ impl RequestStream {
             rx,
             cancel_guard,
             output_timezone: None,
+            bloomberg_request_id: None,
+            request_context: None,
+            metadata_schema: None,
         }
     }
 
     pub(crate) fn with_output_timezone(mut self, timezone: Option<String>) -> Self {
         self.output_timezone = timezone;
+        self.metadata_schema = None;
         self
     }
 
@@ -123,17 +194,51 @@ impl RequestStream {
         self.cancel_guard = None;
     }
 
-    fn map_item(&self, item: Result<RecordBatch, BlpError>) -> Result<RecordBatch, BlpError> {
-        let Some(timezone) = self.output_timezone.as_deref() else {
-            return item;
-        };
-        item.and_then(|batch| {
-            super::intraday_timezone::apply_output_timezone_batch(batch, timezone).map_err(
-                |error| BlpError::Internal {
-                    detail: format!("intraday output timezone: {error}"),
-                },
-            )
-        })
+    fn map_item(&mut self, item: Result<RecordBatch, BlpError>) -> Result<RecordBatch, BlpError> {
+        match item {
+            Ok(mut batch) => {
+                let source_schema = self.bloomberg_request_id.as_ref().map(|_| batch.schema());
+                let cached_schema = match (&source_schema, &self.metadata_schema) {
+                    (Some(schema), Some((source, attached)))
+                        if Arc::ptr_eq(source, schema) || source.as_ref() == schema.as_ref() =>
+                    {
+                        Some(Arc::clone(attached))
+                    }
+                    _ => None,
+                };
+                let cache_miss = cached_schema.is_none();
+                if let Some(timezone) = self.output_timezone.as_deref() {
+                    batch = super::intraday_timezone::apply_output_timezone_batch(
+                        batch,
+                        timezone,
+                        cached_schema,
+                    )
+                    .map_err(|error| BlpError::Internal {
+                        detail: format!("intraday output timezone: {error}"),
+                    })?;
+                } else if let Some(schema) = cached_schema {
+                    batch = batch.with_schema(schema).expect("same fields");
+                }
+                if cache_miss
+                    && let (Some(id), Some(source_schema)) =
+                        (&self.bloomberg_request_id, source_schema)
+                {
+                    batch = ResponseMetadata::attach_bloomberg_request_id(batch, id);
+                    self.metadata_schema = Some((source_schema, batch.schema()));
+                }
+                Ok(batch)
+            }
+            Err(error) => match &self.request_context {
+                Some((service, operation, label)) => Err(enrich_request_error(
+                    error,
+                    service,
+                    operation,
+                    label.as_deref(),
+                    self.bloomberg_request_id.as_slice(),
+                )),
+                None => Err(error),
+            },
+        }
     }
 
     /// Receive the next response batch.
@@ -377,6 +482,7 @@ impl RequestWorkerPool {
         let params = request.params();
         let max_attempts = 1 + self.config.retry_policy.max_retries as usize;
         let mut last_error = None;
+        let mut bloomberg_request_ids = smallvec::SmallVec::<[Arc<str>; 1]>::new();
 
         for attempt in 0..max_attempts {
             if attempt > 0 {
@@ -405,9 +511,13 @@ impl RequestWorkerPool {
 
             // Failures inside submit are routed through the reply channel;
             // a ticket means the request is in flight and cancellable.
-            let ticket = worker.submit(request.clone(), reply_tx).await;
-            let mut cancel_guard =
-                ticket.map(|ticket| RequestCancelGuard::new(Arc::clone(&worker), ticket));
+            let submission = worker.submit(&request, reply_tx).await;
+            if let Some(id) = submission.bloomberg_request_id {
+                bloomberg_request_ids.push(id);
+            }
+            let mut cancel_guard = submission
+                .ticket
+                .map(|ticket| RequestCancelGuard::new(Arc::clone(&worker), ticket));
 
             let reply_result = reply_rx.await;
             if let Some(guard) = &mut cancel_guard {
@@ -415,21 +525,46 @@ impl RequestWorkerPool {
             }
 
             match reply_result {
-                Ok(Ok(batch)) => return Ok(batch),
+                Ok(Ok(batch)) => {
+                    return Ok(match bloomberg_request_ids.as_slice() {
+                        [] => batch,
+                        [id] => ResponseMetadata::attach_bloomberg_request_id(batch, id),
+                        _ => ResponseMetadata::with_bloomberg_request_ids(bloomberg_request_ids)
+                            .attach(batch),
+                    });
+                }
                 Ok(Err(error)) if self.is_retryable(&error) && attempt + 1 < max_attempts => {
                     last_error = Some(BlpAsyncError::Blp(error));
                     continue;
                 }
-                Ok(Err(error)) => return Err(BlpAsyncError::Blp(error)),
+                Ok(Err(error)) => {
+                    return Err(BlpAsyncError::Blp(enrich_request_error(
+                        error,
+                        &params.service,
+                        request.effective_operation(),
+                        params.request_id.as_deref(),
+                        &bloomberg_request_ids,
+                    )));
+                }
                 Err(_) if attempt + 1 < max_attempts => {
                     last_error = Some(BlpAsyncError::ChannelClosed);
                     continue;
                 }
-                Err(_) => return Err(BlpAsyncError::ChannelClosed),
+                Err(_) => {
+                    return Err(enrich_async_request_error(
+                        BlpAsyncError::ChannelClosed,
+                        params,
+                        &bloomberg_request_ids,
+                    ));
+                }
             }
         }
 
-        Err(last_error.unwrap_or(BlpAsyncError::ChannelClosed))
+        Err(enrich_async_request_error(
+            last_error.unwrap_or(BlpAsyncError::ChannelClosed),
+            params,
+            &bloomberg_request_ids,
+        ))
     }
 
     /// Dispatch a prepared streaming request to an available worker.
@@ -450,11 +585,18 @@ impl RequestWorkerPool {
             operation = %params.operation,
             "dispatching stream request"
         );
-        let ticket = worker.submit_stream(request, stream_tx).await;
-        let cancel_guard =
-            ticket.map(|ticket| RequestCancelGuard::new(Arc::clone(&worker), ticket));
-
-        Ok(RequestStream::new(stream_rx, cancel_guard))
+        let submission = worker.submit_stream(&request, stream_tx).await;
+        let cancel_guard = submission
+            .ticket
+            .map(|ticket| RequestCancelGuard::new(Arc::clone(&worker), ticket));
+        let mut stream = RequestStream::new(stream_rx, cancel_guard);
+        stream.bloomberg_request_id = submission.bloomberg_request_id;
+        stream.request_context = Some((
+            params.service.clone(),
+            request.effective_operation().to_owned(),
+            params.request_id.clone(),
+        ));
+        Ok(stream)
     }
 
     /// Get the number of workers in the pool.
@@ -532,6 +674,363 @@ impl Drop for RequestWorkerPool {
 mod tests {
     use super::*;
     use crate::engine::RetryPolicy;
+
+    #[test]
+    fn stream_preserves_sdk_id_labels_buffers_and_shared_schema() {
+        use super::super::state::METADATA_KEY_BLOOMBERG_REQUEST_ID;
+        let schema = Arc::new(arrow_schema::Schema::new(vec![arrow_schema::Field::new(
+            "row",
+            arrow_schema::DataType::Int64,
+            false,
+        )]));
+        let source = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(arrow_array::Int64Array::from(vec![1_i64, 2]))],
+        )
+        .unwrap();
+        let (tx, rx) = mpsc::channel(3);
+        tx.try_send(Ok(source.clone())).unwrap();
+        tx.try_send(Ok(source.clone())).unwrap();
+        tx.try_send(Err(BlpError::RequestTimeout {
+            request_id: None,
+            bloomberg_request_ids: Vec::new(),
+        }))
+        .unwrap();
+        let mut stream = RequestStream::new(rx, None);
+        stream.bloomberg_request_id = Some(Arc::from("sdk-synthetic-stream"));
+        stream.request_context = Some((
+            "//synthetic/refdata".into(),
+            "SyntheticRequest".into(),
+            Some("req-label".into()),
+        ));
+        let first = stream.try_recv().unwrap().unwrap();
+        let second = stream.try_recv().unwrap().unwrap();
+        assert_eq!(
+            first.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
+            "sdk-synthetic-stream"
+        );
+        assert!(Arc::ptr_eq(first.schema_ref(), second.schema_ref()));
+        assert!(Arc::ptr_eq(first.column(0), source.column(0)));
+        assert!(!first.schema_ref().metadata().contains_key("request_id"));
+        let error = stream.try_recv().unwrap().unwrap_err();
+        match error {
+            BlpError::RequestTimeout {
+                request_id,
+                bloomberg_request_ids,
+            } => {
+                assert_eq!(request_id.as_deref(), Some("req-label"));
+                assert_eq!(
+                    bloomberg_request_ids.as_slice(),
+                    [Arc::<str>::from("sdk-synthetic-stream")]
+                );
+            }
+            other => panic!("expected request timeout, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_utc_stream_shares_final_schema_and_preserves_timestamp_buffers() {
+        use super::super::state::METADATA_KEY_BLOOMBERG_REQUEST_ID;
+        use arrow_array::{Array, ArrayRef, Int64Array, TimestampMicrosecondArray};
+        use arrow_schema::{DataType, Schema, TimeUnit};
+
+        let instants = ["2024-11-03T05:30:00Z", "2024-11-03T06:30:00Z"].map(|text| {
+            chrono::DateTime::parse_from_rfc3339(text)
+                .unwrap()
+                .timestamp_micros()
+        });
+        let first_source = RecordBatch::try_from_iter(vec![
+            (
+                "time",
+                Arc::new(
+                    TimestampMicrosecondArray::from(vec![
+                        Some(instants[0]),
+                        None,
+                        Some(instants[1]),
+                    ])
+                    .with_timezone("UTC"),
+                ) as ArrayRef,
+            ),
+            (
+                "value",
+                Arc::new(Int64Array::from(vec![1_i64, 2, 3])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let second_source = RecordBatch::try_new(
+            first_source.schema(),
+            vec![
+                Arc::new(
+                    TimestampMicrosecondArray::from(vec![
+                        Some(instants[1]),
+                        None,
+                        Some(instants[0]),
+                    ])
+                    .with_timezone("UTC"),
+                ) as ArrayRef,
+                Arc::clone(first_source.column(1)),
+            ],
+        )
+        .unwrap();
+        let equal_schema_source = second_source
+            .clone()
+            .with_schema(Arc::new(Schema::clone(second_source.schema_ref())))
+            .unwrap();
+        assert!(!Arc::ptr_eq(
+            second_source.schema_ref(),
+            equal_schema_source.schema_ref()
+        ));
+        let sources = [first_source, second_source, equal_schema_source];
+        let (tx, rx) = mpsc::channel(sources.len());
+        for source in &sources {
+            tx.try_send(Ok(source.clone())).unwrap();
+        }
+        let mut stream =
+            RequestStream::new(rx, None).with_output_timezone(Some("America/New_York".into()));
+        stream.bloomberg_request_id = Some(Arc::from("sdk-synthetic-intraday"));
+        let outputs: Vec<_> = sources
+            .iter()
+            .map(|_| stream.try_recv().unwrap().unwrap())
+            .collect();
+
+        for (source, output) in sources.iter().zip(&outputs) {
+            assert!(Arc::ptr_eq(outputs[0].schema_ref(), output.schema_ref()));
+            assert_eq!(
+                output.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
+                "sdk-synthetic-intraday"
+            );
+            assert_eq!(
+                output.schema_ref().field(0).data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into()))
+            );
+            let times = output
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            let source_times = source
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .unwrap();
+            assert_eq!(times.data_type(), output.schema_ref().field(0).data_type());
+            assert_eq!(times.values(), source_times.values());
+            assert_eq!(times.values().as_ptr(), source_times.values().as_ptr());
+            assert_eq!(
+                times.nulls().unwrap().buffer().as_ptr(),
+                source_times.nulls().unwrap().buffer().as_ptr()
+            );
+            assert!(times.is_null(1));
+            assert!(Arc::ptr_eq(output.column(1), source.column(1)));
+            assert_eq!(source_times.timezone(), Some("UTC"));
+        }
+        let times = outputs[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<TimestampMicrosecondArray>()
+            .unwrap();
+        let timezone = times.timezone().unwrap().parse().unwrap();
+        assert_eq!(
+            times
+                .value_as_datetime_with_tz(0, timezone)
+                .unwrap()
+                .to_rfc3339(),
+            "2024-11-03T01:30:00-04:00"
+        );
+        assert_eq!(
+            times
+                .value_as_datetime_with_tz(2, timezone)
+                .unwrap()
+                .to_rfc3339(),
+            "2024-11-03T01:30:00-05:00"
+        );
+    }
+
+    #[test]
+    fn non_utc_stream_preserves_chunk_diagnostics_and_schema_changes() {
+        use super::super::state::{METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_TYPE_MISSES};
+        use arrow_array::{ArrayRef, Int64Array, TimestampMicrosecondArray};
+        use arrow_schema::{DataType, TimeUnit};
+
+        let make_batch = |field, misses| {
+            let mut batch = RecordBatch::try_from_iter(vec![
+                (
+                    "time",
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![Some(1_i64), None])
+                            .with_timezone("UTC"),
+                    ) as ArrayRef,
+                ),
+                (
+                    field,
+                    Arc::new(Int64Array::from(vec![1_i64, 2])) as ArrayRef,
+                ),
+            ])
+            .unwrap();
+            batch
+                .schema_metadata_mut()
+                .insert(METADATA_KEY_TYPE_MISSES.into(), misses);
+            batch
+        };
+        let sources = [
+            make_batch("value", r#"{"value":1}"#.to_string()),
+            make_batch("value", r#"{"value":2}"#.to_string()),
+            make_batch("changed", r#"{"changed":3}"#.to_string()),
+        ];
+        let (tx, rx) = mpsc::channel(sources.len());
+        for source in &sources {
+            tx.try_send(Ok(source.clone())).unwrap();
+        }
+        let mut stream =
+            RequestStream::new(rx, None).with_output_timezone(Some("America/New_York".into()));
+        stream.bloomberg_request_id = Some(Arc::from("sdk-synthetic-intraday"));
+        let outputs: Vec<_> = sources
+            .iter()
+            .map(|_| stream.try_recv().unwrap().unwrap())
+            .collect();
+
+        for (source, output) in sources.iter().zip(&outputs) {
+            assert_eq!(
+                output.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES],
+                source.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES]
+            );
+            assert_eq!(
+                output.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
+                "sdk-synthetic-intraday"
+            );
+            assert_eq!(
+                output.schema_ref().field(0).data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, Some("America/New_York".into()))
+            );
+            assert_eq!(output.schema_ref().field(1), source.schema_ref().field(1));
+            assert!(Arc::ptr_eq(output.column(1), source.column(1)));
+        }
+        assert!(!Arc::ptr_eq(
+            outputs[0].schema_ref(),
+            outputs[1].schema_ref()
+        ));
+        assert!(!Arc::ptr_eq(
+            outputs[1].schema_ref(),
+            outputs[2].schema_ref()
+        ));
+        assert!(outputs[2].column_by_name("changed").is_some());
+        assert!(outputs[2].column_by_name("value").is_none());
+    }
+
+    #[test]
+    fn request_failures_keep_sdk_ids_distinct_from_existing_labels() {
+        let error = BlpError::RequestFailure {
+            service: "//synthetic/refdata".into(),
+            operation: Some("SyntheticRequest".into()),
+            cid: None,
+            label: Some("synthetic failure".into()),
+            request_id: Some("existing-label".into()),
+            bloomberg_request_ids: vec![Arc::from("sdk-synthetic-a")],
+            source: None,
+        };
+        let error = enrich_request_error(
+            error,
+            "//synthetic/refdata",
+            "SyntheticRequest",
+            Some("new-label"),
+            &[Arc::from("sdk-synthetic-b"), Arc::from("sdk-synthetic-a")],
+        );
+        match error {
+            BlpError::RequestFailure {
+                request_id,
+                bloomberg_request_ids,
+                ..
+            } => {
+                assert_eq!(request_id.as_deref(), Some("existing-label"));
+                assert_eq!(
+                    bloomberg_request_ids,
+                    vec![
+                        Arc::<str>::from("sdk-synthetic-a"),
+                        Arc::from("sdk-synthetic-b"),
+                    ]
+                );
+            }
+            other => panic!("expected request failure, got {other:?}"),
+        }
+        // REQUEST_STATUS and immediate send failures arrive as core Internal errors.
+        let status_failure = enrich_request_error(
+            BlpError::Internal {
+                detail: "synthetic SDK failure".into(),
+            },
+            "//synthetic/refdata",
+            "SyntheticRequest",
+            Some("req-label"),
+            &[Arc::from("sdk-synthetic-status")],
+        );
+        assert!(matches!(&status_failure, BlpError::RequestFailure { .. }));
+        assert_eq!(
+            status_failure.bloomberg_request_ids(),
+            [Arc::<str>::from("sdk-synthetic-status")]
+        );
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Ok(RecordBatch::new_empty(Arc::new(
+            arrow_schema::Schema::empty(),
+        ))))
+        .unwrap();
+        let mut stream = RequestStream::new(rx, None);
+        assert!(
+            stream
+                .try_recv()
+                .unwrap()
+                .unwrap()
+                .schema_ref()
+                .metadata()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn lifecycle_timeout_keeps_its_classification_with_other_sdk_ids() {
+        let error = enrich_request_error(
+            BlpError::Timeout,
+            "//synthetic/refdata",
+            "SyntheticRequest",
+            Some("req-label"),
+            &[Arc::from("sdk-synthetic-prior-attempt")],
+        );
+        assert!(matches!(error, BlpError::Timeout));
+
+        let params = super::super::RequestParams {
+            service: "//synthetic/refdata".into(),
+            operation: "SyntheticRequest".into(),
+            request_id: Some("req-label".into()),
+            ..Default::default()
+        };
+        let sibling_ids = [Arc::<str>::from("sdk-synthetic-sibling")];
+        let error = enrich_async_request_error(BlpError::Timeout.into(), &params, &sibling_ids);
+        assert!(matches!(error, BlpAsyncError::Blp(BlpError::Timeout)));
+
+        let error = enrich_async_request_error(
+            BlpError::RequestTimeout {
+                request_id: None,
+                bloomberg_request_ids: vec![Arc::from("sdk-synthetic-sent")],
+            }
+            .into(),
+            &params,
+            &sibling_ids,
+        );
+        match error {
+            BlpAsyncError::Blp(BlpError::RequestTimeout {
+                request_id,
+                bloomberg_request_ids,
+            }) => {
+                assert_eq!(request_id.as_deref(), Some("req-label"));
+                assert_eq!(
+                    bloomberg_request_ids,
+                    vec![
+                        Arc::<str>::from("sdk-synthetic-sent"),
+                        Arc::from("sdk-synthetic-sibling"),
+                    ]
+                );
+            }
+            other => panic!("expected sent request timeout, got {other:?}"),
+        }
+    }
 
     fn pool_with_retry_policy(retry_policy: RetryPolicy) -> RequestWorkerPool {
         let config = Arc::new(EngineConfig {

@@ -166,6 +166,7 @@ fn test_blp_async_error_from_blp_error_request_failure() {
         cid: None,
         label: Some("invalid security".to_string()),
         request_id: Some("req-123".to_string()),
+        bloomberg_request_ids: Vec::new(),
         source: None,
     };
 
@@ -304,6 +305,7 @@ fn test_blp_async_error_transparently_preserves_display_and_source_chain() {
             cid: None,
             label: Some("synthetic request failure".into()),
             request_id: None,
+            bloomberg_request_ids: Vec::new(),
             source: source(),
         },
     ] {
@@ -329,6 +331,7 @@ fn test_blp_async_error_blp_preserves_context() {
         cid: None,
         label: Some("field not found: INVALID_FIELD".to_string()),
         request_id: Some("correlation-456".to_string()),
+        bloomberg_request_ids: Vec::new(),
         source: None,
     };
 

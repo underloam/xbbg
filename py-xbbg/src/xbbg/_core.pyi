@@ -108,7 +108,12 @@ class BlpError(builtins.Exception): ...
 
 class BlpSessionError(BlpError): ...
 
-class BlpRequestError(BlpError): ...
+class BlpRequestError(BlpError):
+    service: typing.Optional[builtins.str]
+    operation: typing.Optional[builtins.str]
+    request_id: typing.Optional[builtins.str]
+    bloomberg_request_id: typing.Optional[builtins.str]
+    bloomberg_request_ids: builtins.list[builtins.str]
 
 class BlpLimitError(BlpRequestError): ...
 
@@ -122,7 +127,10 @@ class BlpSubscriptionDataLossError(BlpRequestError):
 
 class BlpValidationError(BlpError): ...
 
-class BlpTimeoutError(BlpError): ...
+class BlpTimeoutError(BlpError):
+    request_id: typing.Optional[builtins.str]
+    bloomberg_request_id: typing.Optional[builtins.str]
+    bloomberg_request_ids: builtins.list[builtins.str]
 
 class BlpInternalError(BlpError): ...
 
@@ -238,6 +246,10 @@ class ArrowTable:
     def schema(self) -> ArrowSchema: ...
     @property
     def metadata(self) -> builtins.dict[builtins.str, builtins.str]: ...
+    @property
+    def bloomberg_request_id(self) -> typing.Optional[builtins.str]: ...
+    @property
+    def bloomberg_request_ids(self) -> builtins.list[builtins.str]: ...
     @property
     def eid_data(self) -> typing.Optional[builtins.dict[builtins.str, builtins.list[builtins.int]]]: ...
     @property
@@ -813,17 +825,33 @@ class PyEngineConfig:
     @token.setter
     def token(self, value: typing.Optional[builtins.str]) -> None: ...
     @property
-    def tls_client_credentials(self) -> typing.Optional[builtins.str]: ...
+    def tls_client_credentials(self) -> typing.Optional[builtins.str | builtins.bytes]:
+        r"""
+        Client credentials: file path (`str`) or DER PKCS#12 material (`bytes`).
+        Must use the same representation as `tls_trust_material`.
+        """
     @tls_client_credentials.setter
-    def tls_client_credentials(self, value: typing.Optional[builtins.str]) -> None: ...
+    def tls_client_credentials(self, value: typing.Optional[builtins.str | builtins.bytes]) -> None:
+        r"""
+        Client credentials: file path (`str`) or DER PKCS#12 material (`bytes`).
+        Must use the same representation as `tls_trust_material`.
+        """
     @property
     def tls_client_credentials_password(self) -> typing.Optional[builtins.str]: ...
     @tls_client_credentials_password.setter
     def tls_client_credentials_password(self, value: typing.Optional[builtins.str]) -> None: ...
     @property
-    def tls_trust_material(self) -> typing.Optional[builtins.str]: ...
+    def tls_trust_material(self) -> typing.Optional[builtins.str | builtins.bytes]:
+        r"""
+        Trust material: file path (`str`) or DER PKCS#7 material (`bytes`).
+        Must be supplied together with `tls_client_credentials`.
+        """
     @tls_trust_material.setter
-    def tls_trust_material(self, value: typing.Optional[builtins.str]) -> None: ...
+    def tls_trust_material(self, value: typing.Optional[builtins.str | builtins.bytes]) -> None:
+        r"""
+        Trust material: file path (`str`) or DER PKCS#7 material (`bytes`).
+        Must be supplied together with `tls_client_credentials`.
+        """
     @property
     def tls_handshake_timeout_ms(self) -> typing.Optional[builtins.int]: ...
     @tls_handshake_timeout_ms.setter

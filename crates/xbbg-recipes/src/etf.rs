@@ -30,8 +30,8 @@ use arrow_array::builder::{Date32Builder, Float64Builder, Int32Builder, StringBu
 use arrow_schema::{DataType, Field, Schema};
 use chrono::NaiveDate;
 use xbbg_async::engine::state::{
-    FieldExceptionMeta, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
-    SecurityErrorMeta,
+    BloombergRequestIds, FieldExceptionMeta, METADATA_KEY_FIELD_EXCEPTIONS,
+    METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
 };
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -124,9 +124,21 @@ pub async fn recipe_etf_nav_relationships(
     if etfs.is_empty() {
         return build_relationships_batch(&[]);
     }
-    let resolutions =
-        resolve_etf_nav_relationships(engine, &etfs, ResolveMode::Relationships).await?;
-    build_relationships_batch(&resolutions)
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let resolutions = resolve_etf_nav_relationships(
+            engine,
+            &etfs,
+            ResolveMode::Relationships,
+            &mut request_ids,
+        )
+        .await?;
+        build_relationships_batch(&resolutions)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Fetch current NAV/iNAV levels for `etfs`.
@@ -139,29 +151,39 @@ pub async fn recipe_etf_nav_snapshot(engine: &Engine, etfs: Vec<String>) -> Resu
     if etfs.is_empty() {
         return build_snapshot_batch(&[], &HashMap::new());
     }
-    let resolutions = resolve_etf_nav_relationships(engine, &etfs, ResolveMode::Snapshot).await?;
-    ensure_targets_valid(&resolutions)?;
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let resolutions =
+            resolve_etf_nav_relationships(engine, &etfs, ResolveMode::Snapshot, &mut request_ids)
+                .await?;
+        ensure_targets_valid(&resolutions, &request_ids)?;
 
-    let fallback_sources = missing_nav_sources(&resolutions);
-    let mut fallback_values: HashMap<String, f64> = HashMap::new();
-    if !fallback_sources.is_empty() {
-        let batch = engine
-            .request(build_snapshot_fallback_request(fallback_sources.clone()))
-            .await?;
-        let diagnostics = parse_response_diagnostics(&batch)?;
-        check_value_source_diagnostics(&fallback_sources, &diagnostics)?;
-        let values = strict_refdata_value_map(&batch)?;
-        for source in &fallback_sources {
-            let value = values
-                .get(source)
-                .and_then(|fields| fields.get(FIELD_FUND_NET_ASSET_VAL))
-                .and_then(|value| parse_f64_like(value));
-            if let Some(value) = value {
-                fallback_values.insert(source.clone(), value);
+        let fallback_sources = missing_nav_sources(&resolutions);
+        let mut fallback_values: HashMap<String, f64> = HashMap::new();
+        if !fallback_sources.is_empty() {
+            let batch = engine
+                .request(build_snapshot_fallback_request(fallback_sources.clone()))
+                .await?;
+            request_ids.collect(&batch);
+            let diagnostics = parse_response_diagnostics(&batch)?;
+            check_value_source_diagnostics(&fallback_sources, &diagnostics)?;
+            let values = strict_refdata_value_map(&batch)?;
+            for source in &fallback_sources {
+                let value = values
+                    .get(source)
+                    .and_then(|fields| fields.get(FIELD_FUND_NET_ASSET_VAL))
+                    .and_then(|value| parse_f64_like(value));
+                if let Some(value) = value {
+                    fallback_values.insert(source.clone(), value);
+                }
             }
         }
+        build_snapshot_batch(&resolutions, &fallback_values)
     }
-    build_snapshot_batch(&resolutions, &fallback_values)
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Fetch daily NAV/iNAV history for `etfs` between `start_date` and
@@ -182,30 +204,44 @@ pub async fn recipe_etf_nav_history(
     if etfs.is_empty() {
         return build_history_batch(&[]);
     }
-    let resolutions =
-        resolve_etf_nav_relationships(engine, &etfs, ResolveMode::Relationships).await?;
-    ensure_targets_valid(&resolutions)?;
-
-    let px_targets = px_history_targets(&resolutions);
-    let fallback_sources = missing_nav_sources(&resolutions);
-
-    // Relationship and target validation have completed, so these disjoint
-    // value requests can run concurrently. Results are unwrapped in request
-    // order below so PX_LAST retains deterministic error precedence.
-    let (px_result, fund_result) = tokio::join!(
-        request_history_series(engine, px_targets, FIELD_PX_LAST, &start, &end),
-        request_history_series(
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let resolutions = resolve_etf_nav_relationships(
             engine,
-            fallback_sources,
-            FIELD_FUND_NET_ASSET_VAL,
-            &start,
-            &end
+            &etfs,
+            ResolveMode::Relationships,
+            &mut request_ids,
         )
-    );
-    let (px_history, fund_history) = ordered_history_results(px_result, fund_result)?;
+        .await?;
+        ensure_targets_valid(&resolutions, &request_ids)?;
 
-    let rows = build_history_rows(&resolutions, &px_history, &fund_history);
-    build_history_batch(&rows)
+        let px_targets = px_history_targets(&resolutions);
+        let fallback_sources = missing_nav_sources(&resolutions);
+
+        // Relationship and target validation have completed, so these disjoint
+        // value requests can run concurrently. Results are unwrapped in request
+        // order below so PX_LAST retains deterministic error precedence.
+        let (px_result, fund_result) = tokio::join!(
+            request_history_series(engine, px_targets, FIELD_PX_LAST, &start, &end),
+            request_history_series(
+                engine,
+                fallback_sources,
+                FIELD_FUND_NET_ASSET_VAL,
+                &start,
+                &end
+            )
+        );
+        let (px_history, fund_history, history_ids) =
+            ordered_history_results(px_result, fund_result)?;
+        request_ids.extend(history_ids.iter().cloned());
+
+        let rows = build_history_rows(&resolutions, &px_history, &fund_history);
+        build_history_batch(&rows)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Shared resolver: one relationship BDP plus one target validation BDP.
@@ -213,6 +249,7 @@ async fn resolve_etf_nav_relationships(
     engine: &Engine,
     etfs: &[String],
     mode: ResolveMode,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Vec<EtfNavResolution>> {
     let inputs = prepare_etf_inputs(etfs)?;
     let sources = stable_unique(&inputs);
@@ -220,6 +257,7 @@ async fn resolve_etf_nav_relationships(
     let relationship_batch = engine
         .request(build_relationship_request(sources.clone()))
         .await?;
+    request_ids.collect(&relationship_batch);
     let relationship_diagnostics = parse_response_diagnostics(&relationship_batch)?;
     check_source_diagnostics(&sources, &relationship_diagnostics)?;
     let relationship_values = strict_refdata_value_map(&relationship_batch)?;
@@ -232,6 +270,7 @@ async fn resolve_etf_nav_relationships(
         let validation_batch = engine
             .request(build_validation_request(validation_targets.clone(), mode))
             .await?;
+        request_ids.collect(&validation_batch);
         let validation_diagnostics = parse_response_diagnostics(&validation_batch)?;
         let validation_values = strict_refdata_value_map(&validation_batch)?;
         for target in &validation_targets {
@@ -457,7 +496,10 @@ fn build_resolutions(
 
 /// Aggregate every non-null validation error in input order, NAV before
 /// iNAV, and abort before any value request is issued.
-fn ensure_targets_valid(resolutions: &[EtfNavResolution]) -> Result<()> {
+fn ensure_targets_valid(
+    resolutions: &[EtfNavResolution],
+    request_ids: &BloombergRequestIds,
+) -> Result<()> {
     let mut failures: Vec<String> = Vec::new();
     for resolution in resolutions {
         let legs = [
@@ -480,7 +522,8 @@ fn ensure_targets_valid(resolutions: &[EtfNavResolution]) -> Result<()> {
         Err(RecipeError::Other(format!(
             "ETF NAV target validation failed: {}",
             failures.join("; ")
-        )))
+        ))
+        .with_bloomberg_request_ids(request_ids.iter().cloned()))
     }
 }
 
@@ -639,9 +682,9 @@ async fn request_history_series(
     field: &str,
     start_date: &str,
     end_date: &str,
-) -> Result<HistorySeries> {
+) -> Result<(HistorySeries, BloombergRequestIds)> {
     if securities.is_empty() {
-        return Ok(HistorySeries::new());
+        return Ok((HistorySeries::new(), BloombergRequestIds::default()));
     }
 
     let batch = engine
@@ -652,18 +695,45 @@ async fn request_history_series(
             end_date,
         ))
         .await?;
-    let diagnostics = parse_response_diagnostics(&batch)?;
-    check_value_source_diagnostics(&securities, &diagnostics)?;
-    strict_history_value_map(&batch)
+    parse_history_series(&batch, &securities)
+}
+
+fn parse_history_series(
+    batch: &RecordBatch,
+    securities: &[String],
+) -> Result<(HistorySeries, BloombergRequestIds)> {
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(batch);
+    let result = (|| {
+        let diagnostics = parse_response_diagnostics(batch)?;
+        check_value_source_diagnostics(securities, &diagnostics)?;
+        strict_history_value_map(batch)
+    })();
+    let history =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok((history, request_ids))
 }
 
 fn ordered_history_results(
-    px_result: Result<HistorySeries>,
-    fund_result: Result<HistorySeries>,
-) -> Result<(HistorySeries, HistorySeries)> {
-    let px_history = px_result?;
-    let fund_history = fund_result?;
-    Ok((px_history, fund_history))
+    px_result: Result<(HistorySeries, BloombergRequestIds)>,
+    fund_result: Result<(HistorySeries, BloombergRequestIds)>,
+) -> Result<(HistorySeries, HistorySeries, BloombergRequestIds)> {
+    match (px_result, fund_result) {
+        (Ok((px_history, mut request_ids)), Ok((fund_history, fund_ids))) => {
+            request_ids.extend(fund_ids.iter().cloned());
+            Ok((px_history, fund_history, request_ids))
+        }
+        (Err(error), Ok((_, fund_ids))) => {
+            Err(error.with_bloomberg_request_ids(fund_ids.iter().cloned()))
+        }
+        (Ok((_, px_ids)), Err(error)) => {
+            Err(error.with_bloomberg_request_ids(px_ids.iter().cloned()))
+        }
+        (Err(px_error), Err(fund_error)) => {
+            Err(px_error
+                .with_bloomberg_request_ids(fund_error.bloomberg_request_ids().iter().cloned()))
+        }
+    }
 }
 
 // --- Response parsing -----------------------------------------------------
@@ -1113,6 +1183,9 @@ fn build_history_batch(rows: &[HistoryRow]) -> Result<RecordBatch> {
 mod tests {
     use super::*;
     use arrow_array::{Array, Date32Array, Float64Array, Int32Array, StringArray};
+    use xbbg_async::engine::state::{
+        METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+    };
 
     const QQQ: &str = "QQQ US Equity";
     const AT1: &str = "AT1 LN Equity";
@@ -1281,6 +1354,9 @@ mod tests {
         let history = build_history_batch(&[]).unwrap();
         assert_eq!(history.num_rows(), 0);
         assert_eq!(history.schema(), history_schema());
+        for batch in [&relationships, &snapshot, &history] {
+            assert!(batch.schema_ref().metadata().is_empty());
+        }
     }
 
     #[test]
@@ -1422,14 +1498,229 @@ mod tests {
 
     #[test]
     fn concurrent_history_errors_keep_px_last_precedence() {
-        let px_result: Result<HistorySeries> =
-            Err(RecipeError::Other("PX_LAST request failed".to_string()));
-        let fund_result: Result<HistorySeries> = Err(RecipeError::Other(
+        let px_error = RecipeError::Other("PX_LAST request failed".to_string());
+        let message = px_error.to_string();
+        let px_result: Result<(HistorySeries, BloombergRequestIds)> = Err(px_error);
+        let fund_result: Result<(HistorySeries, BloombergRequestIds)> = Err(RecipeError::Other(
             "FUND_NET_ASSET_VAL request failed".to_string(),
         ));
 
         let error = ordered_history_results(px_result, fund_result).unwrap_err();
-        assert_eq!(error.to_string(), "Recipe error: PX_LAST request failed");
+        assert_eq!(error.to_string(), message);
+        assert!(matches!(error, RecipeError::Other(_)));
+    }
+
+    fn synthetic_history_failure(label: &str, id: &str) -> RecipeError {
+        RecipeError::from(xbbg_async::BlpAsyncError::from(
+            xbbg_core::BlpError::RequestFailure {
+                service: "//synthetic/refdata".into(),
+                operation: Some("SyntheticHistoricalDataRequest".into()),
+                cid: None,
+                label: Some(label.into()),
+                request_id: Some(label.into()),
+                bloomberg_request_ids: vec![Arc::from(id), Arc::from("synthetic_shared")],
+                source: None,
+            },
+        ))
+    }
+
+    #[test]
+    fn concurrent_history_failures_merge_both_requests_and_prior_lookups() {
+        let px_error = synthetic_history_failure("synthetic_px_label", "synthetic_px");
+        let message = px_error.to_string();
+        let error = ordered_history_results(
+            Err(px_error),
+            Err(synthetic_history_failure(
+                "synthetic_fund_label",
+                "synthetic_fund",
+            )),
+        )
+        .unwrap_err()
+        .with_bloomberg_request_ids([
+            Arc::from("synthetic_relationship"),
+            Arc::from("synthetic_validation"),
+        ]);
+        assert_eq!(error.to_string(), message);
+        assert_eq!(
+            error
+                .bloomberg_request_ids()
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>(),
+            [
+                "synthetic_fund",
+                "synthetic_px",
+                "synthetic_relationship",
+                "synthetic_shared",
+                "synthetic_validation",
+            ]
+        );
+        let RecipeError::Engine(engine) = error else {
+            panic!("request failures must retain their engine variant");
+        };
+        let xbbg_async::BlpAsyncError::Blp(xbbg_core::BlpError::RequestFailure {
+            request_id,
+            label,
+            ..
+        }) = *engine
+        else {
+            panic!("request failure kind must survive");
+        };
+        assert_eq!(request_id.as_deref(), Some("synthetic_px_label"));
+        assert_eq!(label.as_deref(), Some("synthetic_px_label"));
+    }
+
+    #[test]
+    fn concurrent_history_failure_retains_completed_success_in_either_order() {
+        for px_fails in [true, false] {
+            let failure = synthetic_history_failure("synthetic_failure_label", "synthetic_failure");
+            let message = failure.to_string();
+            let mut success_ids = BloombergRequestIds::default();
+            success_ids.extend([
+                Arc::from("synthetic_success"),
+                Arc::from("synthetic_shared"),
+            ]);
+            let success = Ok((HistorySeries::new(), success_ids));
+            let (px_result, fund_result) = if px_fails {
+                (Err(failure), success)
+            } else {
+                (success, Err(failure))
+            };
+            let error = ordered_history_results(px_result, fund_result).unwrap_err();
+            assert_eq!(error.to_string(), message);
+            assert!(matches!(&error, RecipeError::Engine(_)));
+            assert_eq!(
+                error
+                    .bloomberg_request_ids()
+                    .iter()
+                    .map(AsRef::as_ref)
+                    .collect::<Vec<_>>(),
+                ["synthetic_failure", "synthetic_shared", "synthetic_success"]
+            );
+        }
+    }
+
+    #[test]
+    fn history_response_parse_failure_keeps_its_support_id() {
+        let source = with_metadata(
+            &history_batch(&[(
+                "SYNTH_HISTORY Index",
+                FIELD_PX_LAST,
+                Some(3.0),
+                date(2026, 1, 2),
+            )]),
+            &[
+                (
+                    METADATA_KEY_BLOOMBERG_REQUEST_ID,
+                    "synthetic_history_response",
+                ),
+                (METADATA_KEY_SECURITY_ERRORS, "synthetic invalid metadata"),
+            ],
+        );
+        let error = parse_history_series(&source, &["SYNTH_HISTORY Index".into()]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid xbbg.security_errors metadata")
+        );
+        assert_eq!(
+            error
+                .bloomberg_request_ids()
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>(),
+            ["synthetic_history_response"]
+        );
+        let (source, _) = error.into_request_context();
+        assert!(matches!(source, RecipeError::Other(_)));
+    }
+
+    #[test]
+    fn target_validation_rejection_keeps_relationship_and_validation_ids() {
+        let mut request_ids = BloombergRequestIds::default();
+        request_ids.extend([
+            Arc::from("synthetic_relationship"),
+            Arc::from("synthetic_validation"),
+        ]);
+        let resolutions = [resolution(
+            0,
+            "SYNTH_ETF ZZ Equity",
+            Some(target("SYNTH_NAV Index", Some("NAME is missing"), None)),
+            None,
+        )];
+        let message = ensure_targets_valid(&resolutions, &BloombergRequestIds::default())
+            .unwrap_err()
+            .to_string();
+        let error = ensure_targets_valid(&resolutions, &request_ids).unwrap_err();
+        assert_eq!(error.to_string(), message);
+        assert_eq!(
+            error
+                .bloomberg_request_ids()
+                .iter()
+                .map(AsRef::as_ref)
+                .collect::<Vec<_>>(),
+            ["synthetic_relationship", "synthetic_validation"]
+        );
+        let (source, _) = error.into_request_context();
+        assert!(matches!(source, RecipeError::Other(_)));
+    }
+
+    #[test]
+    fn history_reconstruction_unions_lookup_and_value_request_ids() {
+        let etf = "SYNTH_ETF ZZ Equity";
+        let inav = "SYNTH_INAV Index";
+        let day = date(2026, 1, 2);
+        let lookup = with_metadata(
+            &refdata_batch(&[(etf, FIELD_ETF_INAV_TICKER, Some(inav))]),
+            &[(
+                METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+                r#"["synthetic_relationship","synthetic_validation"]"#,
+            )],
+        );
+        let px_source = with_metadata(
+            &history_batch(&[(inav, FIELD_PX_LAST, Some(3.0), day)]),
+            &[(
+                METADATA_KEY_BLOOMBERG_REQUEST_IDS,
+                r#"["synthetic_px","synthetic_shared","synthetic_px"]"#,
+            )],
+        );
+        let fund_source = with_metadata(
+            &history_batch(&[(etf, FIELD_FUND_NET_ASSET_VAL, Some(2.0), day)]),
+            &[(METADATA_KEY_BLOOMBERG_REQUEST_ID, "synthetic_shared")],
+        );
+        let mut request_ids = BloombergRequestIds::default();
+        request_ids.collect(&lookup);
+        let mut px_ids = BloombergRequestIds::default();
+        px_ids.collect(&px_source);
+        let mut fund_ids = BloombergRequestIds::default();
+        fund_ids.collect(&fund_source);
+        let (px_history, fund_history, history_ids) = ordered_history_results(
+            Ok((strict_history_value_map(&px_source).unwrap(), px_ids)),
+            Ok((strict_history_value_map(&fund_source).unwrap(), fund_ids)),
+        )
+        .unwrap();
+        request_ids.extend(history_ids.iter().cloned());
+        drop((lookup, px_source, fund_source));
+        let resolutions = [resolution(0, etf, None, Some(target(inav, None, None)))];
+        let rows = build_history_rows(&resolutions, &px_history, &fund_history);
+        let result = request_ids.attach(build_history_batch(&rows).unwrap());
+
+        assert_eq!(result.num_rows(), 1);
+        assert_eq!(f64_at(&result, "nav_value", 0), Some(2.0));
+        assert_eq!(f64_at(&result, "inav_value", 0), Some(3.0));
+        assert_eq!(
+            result.schema_ref().metadata().get(METADATA_KEY_BLOOMBERG_REQUEST_IDS),
+            Some(
+                &r#"["synthetic_px","synthetic_relationship","synthetic_shared","synthetic_validation"]"#
+                    .to_string()
+            )
+        );
+        assert!(
+            !result
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_BLOOMBERG_REQUEST_ID)
+        );
     }
 
     #[test]
@@ -1764,7 +2055,8 @@ mod tests {
             Some(target(QQQ_NAV, Some("NAME is missing"), None)),
             None,
         )];
-        let error = ensure_targets_valid(&resolutions).unwrap_err();
+        let error =
+            ensure_targets_valid(&resolutions, &BloombergRequestIds::default()).unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(
@@ -1804,7 +2096,8 @@ mod tests {
                 Some(target(AT1_INAV, Some("NAME is missing"), None)),
             ),
         ];
-        let error = ensure_targets_valid(&resolutions).unwrap_err();
+        let error =
+            ensure_targets_valid(&resolutions, &BloombergRequestIds::default()).unwrap_err();
         assert_eq!(
             error.to_string(),
             format!(

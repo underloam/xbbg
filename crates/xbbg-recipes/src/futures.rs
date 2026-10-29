@@ -3,6 +3,9 @@
 //! These recipes resolve generic futures tickers to specific contract tickers,
 //! determine active contracts, and handle CDX series resolution.
 //!
+//! Derived tables retain the SDK request IDs used for contract selection and
+//! values, including metadata and historical-chain lookups.
+//!
 //! # Recipes
 //!
 //! - [`recipe_fut_ticker`]: Resolve generic ticker to specific contract
@@ -16,6 +19,7 @@ use arrow_array::builder::{Float64Builder, Int32Builder, StringBuilder};
 use arrow_array::{Array, Date32Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{Datelike, Duration, NaiveDate};
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::resolvers::cdx::{
@@ -63,16 +67,30 @@ pub async fn recipe_fut_ticker(
     let freq = parse_roll_frequency(freq.as_deref());
     let candidate_tickers = futures_candidate_tickers(&gen_ticker, dt_parsed, freq, idx)?;
     options.format = None;
-    let maturities = request_futures_maturities(engine, candidate_tickers, &options).await?;
-    let mut valid_contracts = valid_futures_contracts(maturities, dt_parsed);
-    if valid_contracts.len() <= idx {
-        valid_contracts =
-            request_futures_chain_maturities(engine, &gen_ticker, dt_parsed, freq, &options)
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let maturities =
+            request_futures_maturities(engine, candidate_tickers, &options, &mut request_ids)
                 .await?;
+        let mut valid_contracts = valid_futures_contracts(maturities, dt_parsed);
+        if valid_contracts.len() <= idx {
+            valid_contracts = request_futures_chain_maturities(
+                engine,
+                &gen_ticker,
+                dt_parsed,
+                freq,
+                &options,
+                &mut request_ids,
+            )
+            .await?;
+        }
+        let (selected, _) = select_futures_contract(&valid_contracts, &gen_ticker, &dt, idx)?;
+        build_single_ticker_batch(selected)
     }
-    let (selected, _) = select_futures_contract(&valid_contracts, &gen_ticker, &dt, idx)?;
-
-    build_single_ticker_batch(selected)
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Resolve the most active futures contract around a reference date.
@@ -107,24 +125,40 @@ pub async fn recipe_active_futures(
     let dt_parsed = parse_date(&dt)?;
     options.format = None;
 
+    let mut request_ids = BloombergRequestIds::default();
     if let Ok(Some(mapped_ticker)) =
-        bloomberg_current_generic_ticker(engine, &gen_ticker, dt_parsed, &options).await
+        bloomberg_current_generic_ticker(engine, &gen_ticker, dt_parsed, &options, &mut request_ids)
+            .await
+            .inspect_err(|error| {
+                request_ids.extend(error.bloomberg_request_ids().iter().cloned());
+            })
     {
-        return build_single_ticker_batch(mapped_ticker);
+        let batch = build_single_ticker_batch(mapped_ticker)
+            .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+        return Ok(request_ids.attach(batch));
     }
 
-    let front_gen = with_generic_index(&gen_ticker, 1)?;
-    let second_gen = with_generic_index(&gen_ticker, 2)?;
-    let second_idx = contract_index(&second_gen)?;
+    let front_gen = with_generic_index(&gen_ticker, 1)
+        .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    let second_gen = with_generic_index(&gen_ticker, 2)
+        .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    let second_idx = contract_index(&second_gen).map_err(|error| {
+        RecipeError::from(error).with_bloomberg_request_ids(request_ids.iter().cloned())
+    })?;
     let freq = parse_roll_frequency(freq.as_deref());
-    let front_candidate_count = futures_candidate_count(&front_gen, 0)?;
-    let candidate_tickers = futures_candidate_tickers(&front_gen, dt_parsed, freq, second_idx)?;
+    let front_candidate_count = futures_candidate_count(&front_gen, 0)
+        .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    let candidate_tickers = futures_candidate_tickers(&front_gen, dt_parsed, freq, second_idx)
+        .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
     let front_candidate_tickers = candidate_tickers
         .iter()
         .take(front_candidate_count)
         .cloned()
         .collect::<Vec<_>>();
-    let maturities = request_futures_maturities(engine, candidate_tickers, &options).await?;
+    let maturities =
+        request_futures_maturities(engine, candidate_tickers, &options, &mut request_ids)
+            .await
+            .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
     let front_contracts =
         valid_futures_contracts_for_candidates(&maturities, &front_candidate_tickers, dt_parsed);
     let second_contracts = valid_futures_contracts(maturities, dt_parsed);
@@ -137,8 +171,18 @@ pub async fn recipe_active_futures(
         second_idx,
     );
     if pair.as_ref().map_or(true, |(_, second)| second.is_none())
-        && let Ok(chain) =
-            request_futures_chain_maturities(engine, &front_gen, dt_parsed, freq, &options).await
+        && let Ok(chain) = request_futures_chain_maturities(
+            engine,
+            &front_gen,
+            dt_parsed,
+            freq,
+            &options,
+            &mut request_ids,
+        )
+        .await
+        .inspect_err(|error| {
+            request_ids.extend(error.bloomberg_request_ids().iter().cloned());
+        })
     {
         // A missing bulk field must not discard an otherwise usable front.
         if chain.len() > second_idx || pair.is_err() {
@@ -152,13 +196,18 @@ pub async fn recipe_active_futures(
             );
         }
     }
-    let ((front_ticker, front_maturity), second_contract) = pair?;
+    let ((front_ticker, front_maturity), second_contract) =
+        pair.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
     let Some((second_ticker, _)) = second_contract else {
-        return build_single_ticker_batch(front_ticker);
+        let batch = build_single_ticker_batch(front_ticker)
+            .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+        return Ok(request_ids.attach(batch));
     };
 
     if before_futures_roll_month(dt_parsed, front_maturity) {
-        return build_single_ticker_batch(front_ticker);
+        let batch = build_single_ticker_batch(front_ticker)
+            .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+        return Ok(request_ids.attach(batch));
     }
 
     let volume_params = futures_history_request(
@@ -167,8 +216,10 @@ pub async fn recipe_active_futures(
         dt_parsed,
         &options,
     );
-    let volume_batch = engine.request(volume_params).await?;
-    active_futures_volume_batch(&volume_batch, front_ticker, second_ticker)
+    let volume_batch = engine.request(volume_params).await.map_err(|error| {
+        RecipeError::from(error).with_bloomberg_request_ids(request_ids.iter().cloned())
+    })?;
+    active_futures_volume_batch(&volume_batch, front_ticker, second_ticker, request_ids)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -214,67 +265,78 @@ pub async fn recipe_futures_curve(
         ..Default::default()
     };
     let chain_batch = engine.request(chain_params).await?;
-    let mut contracts = extract_chain_contracts(&chain_batch, max_contracts)?;
-    if contracts.is_empty() {
-        return Err(RecipeError::Other(format!(
-            "Bloomberg returned no futures contracts for '{gen_ticker}' using field '{chain_field}'"
-        )));
-    }
-
-    let mut request_fields = fields.unwrap_or_else(|| {
-        vec![
-            "PX_BID".to_string(),
-            "PX_ASK".to_string(),
-            "LAST_TRADEABLE_DT".to_string(),
-        ]
-    });
-    ensure_field(&mut request_fields, "PX_BID");
-    ensure_field(&mut request_fields, "PX_ASK");
-    ensure_field(&mut request_fields, "LAST_TRADEABLE_DT");
-
-    let metadata_params = RequestParams {
-        service: Service::RefData.to_string(),
-        operation: Operation::ReferenceData.to_string(),
-        securities: Some(
-            contracts
-                .iter()
-                .map(|contract| contract.ticker.clone())
-                .collect(),
-        ),
-        fields: Some(request_fields.clone()),
-        ..Default::default()
-    };
-    let metadata_batch = engine.request(metadata_params).await?;
-    let metadata = extract_refdata_values(&metadata_batch)?;
-
-    for contract in &mut contracts {
-        if contract.expiry.is_none() {
-            contract.expiry = metadata
-                .get(&contract.ticker)
-                .and_then(|fields| fields.get("LAST_TRADEABLE_DT"))
-                .and_then(|value| parse_any_date(value));
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&chain_batch);
+    let result: Result<_> = async {
+        let mut contracts = extract_chain_contracts(&chain_batch, max_contracts)?;
+        drop(chain_batch);
+        if contracts.is_empty() {
+            return Err(RecipeError::Other(format!(
+                "Bloomberg returned no futures contracts for '{gen_ticker}' using field '{chain_field}'"
+            )));
         }
+
+        let mut request_fields = fields.unwrap_or_else(|| {
+            vec![
+                "PX_BID".to_string(),
+                "PX_ASK".to_string(),
+                "LAST_TRADEABLE_DT".to_string(),
+            ]
+        });
+        ensure_field(&mut request_fields, "PX_BID");
+        ensure_field(&mut request_fields, "PX_ASK");
+        ensure_field(&mut request_fields, "LAST_TRADEABLE_DT");
+
+        let metadata_params = RequestParams {
+            service: Service::RefData.to_string(),
+            operation: Operation::ReferenceData.to_string(),
+            securities: Some(
+                contracts
+                    .iter()
+                    .map(|contract| contract.ticker.clone())
+                    .collect(),
+            ),
+            fields: Some(request_fields.clone()),
+            ..Default::default()
+        };
+        let metadata_batch = engine.request(metadata_params).await?;
+        request_ids.collect(&metadata_batch);
+        let metadata = extract_refdata_values(&metadata_batch)?;
+        drop(metadata_batch);
+
+        for contract in &mut contracts {
+            if contract.expiry.is_none() {
+                contract.expiry = metadata
+                    .get(&contract.ticker)
+                    .and_then(|fields| fields.get("LAST_TRADEABLE_DT"))
+                    .and_then(|value| parse_any_date(value));
+            }
+        }
+
+        contracts.sort_by(|left, right| {
+            left.expiry
+                .cmp(&right.expiry)
+                .then(left.order.cmp(&right.order))
+                .then(left.ticker.cmp(&right.ticker))
+        });
+
+        let extra_fields = request_fields
+            .iter()
+            .filter(|field| {
+                !matches!(
+                    field.to_ascii_uppercase().as_str(),
+                    "PX_BID" | "PX_ASK" | "LAST_TRADEABLE_DT"
+                )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let rows = build_futures_curve_rows(&gen_ticker, &contracts, &metadata, &extra_fields);
+        build_futures_curve_batch(&rows, &extra_fields)
     }
-
-    contracts.sort_by(|left, right| {
-        left.expiry
-            .cmp(&right.expiry)
-            .then(left.order.cmp(&right.order))
-            .then(left.ticker.cmp(&right.ticker))
-    });
-
-    let extra_fields = request_fields
-        .iter()
-        .filter(|field| {
-            !matches!(
-                field.to_ascii_uppercase().as_str(),
-                "PX_BID" | "PX_ASK" | "LAST_TRADEABLE_DT"
-            )
-        })
-        .cloned()
-        .collect::<Vec<_>>();
-    let rows = build_futures_curve_rows(&gen_ticker, &contracts, &metadata, &extra_fields);
-    build_futures_curve_batch(&rows, &extra_fields)
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Bloomberg field carrying a CDS index series' first accrual date.
@@ -294,11 +356,17 @@ pub async fn recipe_cdx_ticker_with_options(
     dt: String,
     versionless: bool,
 ) -> Result<RecordBatch> {
-    let resolved = resolve_cdx_series_at(engine, &gen_ticker, parse_date(&dt)?).await?;
-    build_single_ticker_batch(build_resolved_cdx_ticker_with_options(
-        &resolved.info,
-        versionless,
-    ))
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let resolved =
+            resolve_cdx_series_at(engine, &gen_ticker, parse_date(&dt)?, &mut request_ids).await?;
+        let ticker = build_resolved_cdx_ticker_with_options(&resolved.info, versionless);
+        build_single_ticker_batch(ticker)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Resolve the latest CDX series that had started *and* traded by a date.
@@ -318,46 +386,50 @@ pub async fn recipe_active_cdx_with_options(
     versionless: bool,
 ) -> Result<RecordBatch> {
     let dt_parsed = parse_date(&dt)?;
-    let current = resolve_cdx_series_at(engine, &gen_ticker, dt_parsed).await?;
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let current = resolve_cdx_series_at(engine, &gen_ticker, dt_parsed, &mut request_ids).await?;
 
-    let Some(previous_alias) = current.info.previous_alias() else {
-        return build_single_ticker_batch(build_resolved_cdx_ticker_with_options(
-            &current.info,
-            versionless,
-        ));
-    };
-    let previous = resolve_specific_cdx(engine, &previous_alias).await?;
-    let current_ticker = build_resolved_cdx_ticker_with_options(&current.info, false);
-    let previous_ticker = build_resolved_cdx_ticker_with_options(&previous, false);
+        let Some(previous_alias) = current.info.previous_alias() else {
+            let ticker = build_resolved_cdx_ticker_with_options(&current.info, versionless);
+            return build_single_ticker_batch(ticker);
+        };
+        let previous = resolve_specific_cdx(engine, &previous_alias, &mut request_ids).await?;
+        let current_ticker = build_resolved_cdx_ticker_with_options(&current.info, false);
+        let previous_ticker = build_resolved_cdx_ticker_with_options(&previous, false);
 
-    let start_date = cdx_activity_window_start(dt_parsed, lookback_days, current.accrual_start)?;
-    let price_params = RequestParams {
-        service: Service::RefData.to_string(),
-        operation: Operation::HistoricalData.to_string(),
-        securities: Some(vec![current_ticker.clone(), previous_ticker.clone()]),
-        fields: Some(vec!["PX_LAST".to_string()]),
-        start_date: Some(fmt_date(start_date, None)),
-        end_date: Some(fmt_date(dt_parsed, None)),
-        ..Default::default()
-    };
+        let start_date = cdx_activity_window_start(dt_parsed, lookback_days, current.accrual_start)?;
+        let price_params = RequestParams {
+            service: Service::RefData.to_string(),
+            operation: Operation::HistoricalData.to_string(),
+            securities: Some(vec![current_ticker.clone(), previous_ticker.clone()]),
+            fields: Some(vec!["PX_LAST".to_string()]),
+            start_date: Some(fmt_date(start_date, None)),
+            end_date: Some(fmt_date(dt_parsed, None)),
+            ..Default::default()
+        };
 
-    let price_batch = engine.request(price_params).await?;
-    let selected = if has_history_value(&price_batch, &current_ticker, "PX_LAST")? {
-        &current.info
-    } else if has_history_value(&price_batch, &previous_ticker, "PX_LAST")? {
-        &previous
-    } else {
-        return Err(RecipeError::Other(format!(
-            "neither '{current_ticker}' nor '{previous_ticker}' reported PX_LAST between {} and {}",
-            fmt_date(start_date, None),
-            fmt_date(dt_parsed, None)
-        )));
-    };
+        let price_batch = engine.request(price_params).await?;
+        request_ids.collect(&price_batch);
+        let selected = if has_history_value(&price_batch, &current_ticker, "PX_LAST")? {
+            &current.info
+        } else if has_history_value(&price_batch, &previous_ticker, "PX_LAST")? {
+            &previous
+        } else {
+            return Err(RecipeError::Other(format!(
+                "neither '{current_ticker}' nor '{previous_ticker}' reported PX_LAST between {} and {}",
+                fmt_date(start_date, None),
+                fmt_date(dt_parsed, None)
+            )));
+        };
 
-    build_single_ticker_batch(build_resolved_cdx_ticker_with_options(
-        selected,
-        versionless,
-    ))
+        let ticker = build_resolved_cdx_ticker_with_options(selected, versionless);
+        build_single_ticker_batch(ticker)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Start of the window used to decide whether a series has traded.
@@ -405,6 +477,7 @@ async fn resolve_cdx_series_at(
     engine: &Engine,
     gen_ticker: &str,
     dt: NaiveDate,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<CdxSeriesAt> {
     let parsed = parse_cdx_ticker(gen_ticker)?;
     if !parsed.is_generic {
@@ -414,6 +487,7 @@ async fn resolve_cdx_series_at(
     }
 
     let batch = request_cdx_metadata(engine, &[gen_ticker.to_string()]).await?;
+    request_ids.collect(&batch);
     let series = required_cdx_number(&batch, gen_ticker, "ROLLING_SERIES")?;
     let accrual_start = required_cdx_date(&batch, gen_ticker, CDX_ACCRUAL_FIELD)?;
 
@@ -424,6 +498,7 @@ async fn resolve_cdx_series_at(
             accrual_start,
         });
     }
+    drop(batch);
 
     let mut window = cdx_prior_series_window(series, accrual_start, dt).ok_or_else(|| {
         RecipeError::InvalidArgument(format!(
@@ -433,7 +508,9 @@ async fn resolve_cdx_series_at(
 
     loop {
         let (lo, hi) = window;
-        if let Some(resolved) = resolve_cdx_ladder(engine, gen_ticker, lo, hi, dt).await? {
+        if let Some(resolved) =
+            resolve_cdx_ladder(engine, gen_ticker, lo, hi, dt, request_ids).await?
+        {
             return Ok(resolved);
         }
         window = cdx_next_series_window(lo).ok_or_else(|| {
@@ -454,11 +531,13 @@ async fn resolve_cdx_ladder(
     lo: u32,
     hi: u32,
     dt: NaiveDate,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Option<CdxSeriesAt>> {
     let aliases = (lo..=hi)
         .map(|series| Ok(gen_to_specific(gen_ticker, series)?))
         .collect::<Result<Vec<String>>>()?;
     let batch = request_cdx_metadata(engine, &aliases).await?;
+    request_ids.collect(&batch);
     pick_cdx_ladder_series(&batch, gen_ticker, &aliases, lo, dt)
 }
 
@@ -516,7 +595,11 @@ async fn request_cdx_metadata(engine: &Engine, securities: &[String]) -> Result<
     Ok(engine.request(params).await?)
 }
 
-async fn resolve_specific_cdx(engine: &Engine, ticker: &str) -> Result<ResolvedCdxInfo> {
+async fn resolve_specific_cdx(
+    engine: &Engine,
+    ticker: &str,
+    request_ids: &mut BloombergRequestIds,
+) -> Result<ResolvedCdxInfo> {
     let parsed = parse_cdx_ticker(ticker)?;
     if parsed.is_generic {
         return Err(RecipeError::InvalidArgument(format!(
@@ -527,6 +610,7 @@ async fn resolve_specific_cdx(engine: &Engine, ticker: &str) -> Result<ResolvedC
         .series_num
         .ok_or_else(|| RecipeError::Other(format!("missing parsed CDX series for '{ticker}'")))?;
     let batch = request_cdx_metadata(engine, &[ticker.to_string()]).await?;
+    request_ids.collect(&batch);
     let version = required_cdx_number(&batch, ticker, "VERSION")?;
     ResolvedCdxInfo::resolve(parsed, series, version).map_err(Into::into)
 }
@@ -599,10 +683,12 @@ async fn request_futures_maturities(
     engine: &Engine,
     candidate_tickers: Vec<String>,
     options: &RequestParams,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Vec<(String, NaiveDate)>> {
     let maturity_batch = engine
         .request(futures_maturity_request(candidate_tickers, options))
         .await?;
+    request_ids.collect(&maturity_batch);
     extract_refdata_date_values(&maturity_batch, "LAST_TRADEABLE_DT")
 }
 
@@ -632,10 +718,12 @@ async fn request_futures_chain_maturities(
     dt: NaiveDate,
     freq: RollFrequency,
     options: &RequestParams,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Vec<(String, NaiveDate)>> {
     let batch = engine
         .request(futures_chain_request(gen_ticker, dt, options))
         .await?;
+    request_ids.collect(&batch);
     extract_futures_chain_maturities(&batch, dt, freq)
 }
 
@@ -723,20 +811,27 @@ fn active_futures_volume_batch(
     batch: &RecordBatch,
     front_ticker: String,
     second_ticker: String,
+    mut request_ids: BloombergRequestIds,
 ) -> Result<RecordBatch> {
-    if batch.num_rows() == 0 {
-        return build_single_ticker_batch(front_ticker);
-    }
-    let front_volume = latest_history_numeric_point(batch, &front_ticker, "VOLUME")?;
-    let second_volume = latest_history_numeric_point(batch, &second_ticker, "VOLUME")?;
-    let selected = match (front_volume, second_volume) {
-        (Some((_, f)), Some((_, s))) if s > f => second_ticker,
-        (Some(_), Some(_)) => front_ticker,
-        (Some(_), None) => front_ticker,
-        (None, Some(_)) => second_ticker,
-        (None, None) => front_ticker,
-    };
-    build_single_ticker_batch(selected)
+    request_ids.collect(batch);
+    let result = (|| {
+        if batch.num_rows() == 0 {
+            return build_single_ticker_batch(front_ticker);
+        }
+        let front_volume = latest_history_numeric_point(batch, &front_ticker, "VOLUME")?;
+        let second_volume = latest_history_numeric_point(batch, &second_ticker, "VOLUME")?;
+        let selected = match (front_volume, second_volume) {
+            (Some((_, f)), Some((_, s))) if s > f => second_ticker,
+            (Some(_), Some(_)) => front_ticker,
+            (Some(_), None) => front_ticker,
+            (None, Some(_)) => second_ticker,
+            (None, None) => front_ticker,
+        };
+        build_single_ticker_batch(selected)
+    })();
+    let output =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(output))
 }
 
 fn valid_futures_contracts(
@@ -802,6 +897,7 @@ async fn bloomberg_current_generic_ticker(
     gen_ticker: &str,
     dt: NaiveDate,
     options: &RequestParams,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Option<String>> {
     let params = futures_history_request(
         vec![gen_ticker.to_string()],
@@ -811,6 +907,7 @@ async fn bloomberg_current_generic_ticker(
     );
 
     let batch = engine.request(params).await?;
+    request_ids.collect(&batch);
     let Some((_, mapped_root)) =
         latest_history_string_point(&batch, gen_ticker, "FUT_CUR_GEN_TICKER")?
     else {
@@ -1730,9 +1827,108 @@ mod tests {
             &batch,
             "ESH24 Index".to_string(),
             "ESM24 Index".to_string(),
+            BloombergRequestIds::default(),
         )
         .unwrap();
         assert_single_ticker(&result, "ESM24 Index");
+    }
+
+    #[test]
+    fn test_active_futures_selection_preserves_maturity_and_volume_request_ids() {
+        let mut maturities = RecordBatch::try_from_iter(vec![
+            (
+                "ticker",
+                Arc::new(StringArray::from(vec!["TESTH24 Index", "TESTM24 Index"]))
+                    as arrow_array::ArrayRef,
+            ),
+            (
+                "field",
+                Arc::new(StringArray::from(vec!["LAST_TRADEABLE_DT"; 2])) as arrow_array::ArrayRef,
+            ),
+            (
+                "value",
+                Arc::new(StringArray::from(vec!["20240320", "20240620"])) as arrow_array::ArrayRef,
+            ),
+        ])
+        .unwrap();
+        maturities.schema_metadata_mut().insert(
+            "xbbg.bloomberg_request_ids".to_string(),
+            r#"["synthetic-maturity-z","synthetic-maturity-a","synthetic-maturity-z"]"#.to_string(),
+        );
+        let mut request_ids = BloombergRequestIds::default();
+        request_ids.collect(&maturities);
+        let contracts = valid_futures_contracts(
+            extract_refdata_date_values(&maturities, "LAST_TRADEABLE_DT").unwrap(),
+            NaiveDate::from_ymd_opt(2024, 3, 12).unwrap(),
+        );
+        drop(maturities);
+        let (front, _) = select_futures_contract(&contracts, "TEST1 Index", "20240312", 0).unwrap();
+        let (second, _) =
+            select_futures_contract(&contracts, "TEST2 Index", "20240312", 1).unwrap();
+        let mut volumes = RecordBatch::try_from_iter(vec![
+            (
+                "ticker",
+                Arc::new(StringArray::from(vec![front.as_str(), second.as_str()]))
+                    as arrow_array::ArrayRef,
+            ),
+            (
+                "field",
+                Arc::new(StringArray::from(vec!["VOLUME"; 2])) as arrow_array::ArrayRef,
+            ),
+            (
+                "date",
+                Arc::new(StringArray::from(vec!["20240312"; 2])) as arrow_array::ArrayRef,
+            ),
+            (
+                "value",
+                Arc::new(arrow_array::Float64Array::from(vec![10.0, 20.0]))
+                    as arrow_array::ArrayRef,
+            ),
+        ])
+        .unwrap();
+        volumes.schema_metadata_mut().insert(
+            "xbbg.bloomberg_request_id".to_string(),
+            "synthetic-volume".to_string(),
+        );
+        for volume_rows in [2, 0] {
+            let output = active_futures_volume_batch(
+                &volumes.slice(0, volume_rows),
+                front.clone(),
+                second.clone(),
+                request_ids.clone(),
+            )
+            .unwrap();
+            assert_single_ticker(&output, if volume_rows == 0 { &front } else { &second });
+            assert_eq!(
+                output.schema().metadata()["xbbg.bloomberg_request_ids"],
+                r#"["synthetic-maturity-a","synthetic-maturity-z","synthetic-volume"]"#
+            );
+            assert!(
+                !output
+                    .schema()
+                    .metadata()
+                    .contains_key("xbbg.bloomberg_request_id")
+            );
+        }
+        let single_request = active_futures_volume_batch(
+            &volumes,
+            front.clone(),
+            second,
+            BloombergRequestIds::default(),
+        )
+        .unwrap();
+        assert_eq!(
+            single_request.schema().metadata()["xbbg.bloomberg_request_id"],
+            "synthetic-volume"
+        );
+        assert!(
+            !single_request
+                .schema()
+                .metadata()
+                .contains_key("xbbg.bloomberg_request_ids")
+        );
+        let local = build_single_ticker_batch(front).unwrap();
+        assert!(local.schema().metadata().is_empty());
     }
 
     #[test]
@@ -1764,6 +1960,7 @@ mod tests {
                 &batch,
                 "ESH24 Index".to_string(),
                 "ESM24 Index".to_string(),
+                BloombergRequestIds::default(),
             )
             .unwrap();
             assert_single_ticker(&result, expected);
@@ -1774,6 +1971,7 @@ mod tests {
                 &empty,
                 "ESH24 Index".to_string(),
                 "ESM24 Index".to_string(),
+                BloombergRequestIds::default(),
             )
             .unwrap(),
             "ESH24 Index",

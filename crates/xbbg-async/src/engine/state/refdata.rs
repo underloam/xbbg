@@ -223,6 +223,7 @@ impl RefDataState {
                 cid: None,
                 label: Some(detail),
                 request_id: None,
+                bloomberg_request_ids: Vec::new(),
                 source: None,
             }));
             return;

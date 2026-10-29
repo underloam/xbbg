@@ -2849,6 +2849,7 @@ dependencies = [
  "xbbg-async",
  "xbbg-ext",
  "xbbg-log",
+ "xbbg_core",
 ]
 
 [[package]]

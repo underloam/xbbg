@@ -1,24 +1,39 @@
+import { isPlainObject } from './objects';
+
 export interface BlpRequestErrorOptions {
   readonly service?: string;
   readonly operation?: string;
   readonly request_id?: string;
+  readonly bloomberg_request_id?: string;
+  readonly bloomberg_request_ids?: readonly string[];
   readonly code?: string | number;
 }
 
-export interface BlpValidationErrorOptions {
+export interface BlpValidationErrorOptions extends Pick<
+  BlpRequestErrorOptions,
+  'bloomberg_request_id' | 'bloomberg_request_ids'
+> {
   readonly element?: string;
   readonly suggestion?: string;
 }
 
-export interface BlpSubscriptionDataLossErrorOptions {
+export interface BlpSubscriptionDataLossErrorOptions extends Pick<
+  BlpRequestErrorOptions,
+  'bloomberg_request_id' | 'bloomberg_request_ids'
+> {
   readonly topic?: string;
   readonly detail?: string;
 }
 
 export class BlpError extends Error {
-  public constructor(message: string) {
+  public readonly bloomberg_request_id?: string;
+  public readonly bloomberg_request_ids?: readonly string[];
+
+  public constructor(message: string, options: BlpRequestErrorOptions = {}) {
     super(message);
     this.name = new.target.name;
+    this.bloomberg_request_id = options.bloomberg_request_id;
+    this.bloomberg_request_ids = options.bloomberg_request_ids;
   }
 }
 
@@ -31,7 +46,7 @@ export class BlpRequestError extends BlpError {
   public readonly code?: string | number;
 
   public constructor(message: string, options: BlpRequestErrorOptions = {}) {
-    super(message);
+    super(message, options);
     this.service = options.service;
     this.operation = options.operation;
     this.request_id = options.request_id;
@@ -47,7 +62,7 @@ export class BlpSubscriptionDataLossError extends BlpError {
   public readonly detail?: string;
 
   public constructor(message: string, options: BlpSubscriptionDataLossErrorOptions = {}) {
-    super(message);
+    super(message, options);
     this.topic = options.topic;
     this.detail = options.detail;
   }
@@ -58,13 +73,20 @@ export class BlpValidationError extends BlpError {
   public readonly suggestion?: string;
 
   public constructor(message: string, options: BlpValidationErrorOptions = {}) {
-    super(message);
+    super(message, options);
     this.element = options.element;
     this.suggestion = options.suggestion;
   }
 }
 
-export class BlpTimeoutError extends BlpError {}
+export class BlpTimeoutError extends BlpError {
+  public readonly request_id?: string;
+
+  public constructor(message: string, options: BlpRequestErrorOptions = {}) {
+    super(message, options);
+    this.request_id = options.request_id;
+  }
+}
 
 export class BlpInternalError extends BlpError {}
 
@@ -84,24 +106,28 @@ function cacheWrappedError(source: unknown, wrapped: BlpError): BlpError {
   return wrapped;
 }
 
-function fromCode(code: string, msg: string): BlpError {
+function fromCode(code: string, msg: string, context: BlpRequestErrorOptions = {}): BlpError {
+  const requestOptions = { ...parseRequestOptions(msg), ...context };
   switch (code) {
     case 'SESSION':
-      return new BlpSessionError(msg);
+      return new BlpSessionError(msg, requestOptions);
     case 'REQUEST':
-      return new BlpRequestError(msg, parseRequestOptions(msg));
+      return new BlpRequestError(msg, requestOptions);
     case 'LIMIT':
-      return new BlpLimitError(msg, parseRequestOptions(msg));
+      return new BlpLimitError(msg, requestOptions);
     case 'DATALOSS':
-      return new BlpSubscriptionDataLossError(msg, parseSubscriptionDataLossOptions(msg));
+      return new BlpSubscriptionDataLossError(msg, {
+        ...parseSubscriptionDataLossOptions(msg),
+        ...context,
+      });
     case 'VALIDATION':
-      return new BlpValidationError(msg, parseValidationOptions(msg));
+      return new BlpValidationError(msg, { ...parseValidationOptions(msg), ...context });
     case 'TIMEOUT':
-      return new BlpTimeoutError(msg);
+      return new BlpTimeoutError(msg, requestOptions);
     case 'INTERNAL':
-      return new BlpInternalError(msg);
+      return new BlpInternalError(msg, requestOptions);
     default:
-      return new BlpError(msg);
+      return new BlpError(msg, requestOptions);
   }
 }
 
@@ -122,7 +148,8 @@ export function wrapError(napiError: unknown): BlpError {
   const nativeCode = codeMatch?.[1];
   const matchedPrefix = codeMatch?.[0];
   if (nativeCode !== undefined && matchedPrefix !== undefined) {
-    return cacheWrappedError(napiError, fromCode(nativeCode, msg.slice(matchedPrefix.length)));
+    const decoded = decodeRequestContext(msg.slice(matchedPrefix.length));
+    return cacheWrappedError(napiError, fromCode(nativeCode, decoded.message, decoded.options));
   }
 
   // Session errors
@@ -167,7 +194,7 @@ export function wrapError(napiError: unknown): BlpError {
 
   // Timeout errors
   if (msg.includes('Request timed out')) {
-    return cacheWrappedError(napiError, new BlpTimeoutError(msg));
+    return cacheWrappedError(napiError, new BlpTimeoutError(msg, parseRequestOptions(msg)));
   }
 
   // Internal errors
@@ -176,6 +203,39 @@ export function wrapError(napiError: unknown): BlpError {
   }
 
   return cacheWrappedError(napiError, new BlpError(msg));
+}
+
+function decodeRequestContext(message: string): {
+  message: string;
+  options: BlpRequestErrorOptions;
+} {
+  const prefix = '[XBBG_CONTEXT]';
+  const newline = message.indexOf('\n');
+  if (!message.startsWith(prefix) || newline === -1) {
+    return { message, options: {} };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(message.slice(prefix.length, newline));
+  } catch {
+    return { message, options: {} };
+  }
+  if (!isPlainObject(parsed)) {
+    return { message, options: {} };
+  }
+  const ids = parsed.bloomberg_request_ids;
+  const options: BlpRequestErrorOptions = {
+    service: typeof parsed.service === 'string' ? parsed.service : undefined,
+    operation: typeof parsed.operation === 'string' ? parsed.operation : undefined,
+    request_id: typeof parsed.request_id === 'string' ? parsed.request_id : undefined,
+    bloomberg_request_id:
+      typeof parsed.bloomberg_request_id === 'string' ? parsed.bloomberg_request_id : undefined,
+    bloomberg_request_ids:
+      Array.isArray(ids) && ids.every((id): id is string => typeof id === 'string')
+        ? ids
+        : undefined,
+  };
+  return { message: message.slice(newline + 1), options };
 }
 
 function parseRequestOptions(msg: string): BlpRequestErrorOptions {

@@ -10,7 +10,7 @@ use arrow_array::RecordBatch;
 use arrow_array::{Array, TimestampMicrosecondArray};
 use arrow_schema::ArrowError;
 use arrow_schema::Field;
-use arrow_schema::{DataType, TimeUnit};
+use arrow_schema::{DataType, SchemaRef, TimeUnit};
 use chrono::{DateTime, NaiveDate, NaiveDateTime, TimeZone, Utc};
 use chrono_tz::Tz;
 
@@ -213,31 +213,43 @@ pub(crate) async fn apply_intraday_output_timezone(
     };
 
     let iana = resolve_tz_label(engine, label, params.security.as_deref()).await?;
-    apply_output_timezone_batch(batch, &iana).map_err(|e| BlpAsyncError::ConfigError {
+    apply_output_timezone_batch(batch, &iana, None).map_err(|e| BlpAsyncError::ConfigError {
         detail: format!("intraday output timezone: {e}"),
     })
 }
 
+/// Relabel the timestamp wrapper, reusing a final schema cached for the same
+/// source schema and timezone when available.
 pub(crate) fn apply_output_timezone_batch(
     batch: RecordBatch,
     iana: &str,
+    output_schema: Option<SchemaRef>,
 ) -> Result<RecordBatch, ArrowError> {
     if iana == "UTC" {
-        return Ok(batch);
+        return match output_schema {
+            Some(schema) => batch.with_schema(schema),
+            None => Ok(batch),
+        };
     }
 
     let schema = batch.schema();
-    let Some(ti) = schema.fields().iter().position(|f| f.name() == "time") else {
-        return Ok(batch);
+    let ti = schema
+        .fields()
+        .iter()
+        .position(|f| f.name() == "time")
+        .filter(|&ti| {
+            matches!(
+                batch.column(ti).data_type(),
+                DataType::Timestamp(TimeUnit::Microsecond, Some(_))
+            )
+        });
+    let Some(ti) = ti else {
+        return match output_schema {
+            Some(schema) => batch.with_schema(schema),
+            None => Ok(batch),
+        };
     };
-
     let col = batch.column(ti);
-    let DataType::Timestamp(unit, Some(_)) = col.data_type() else {
-        return Ok(batch);
-    };
-    if *unit != TimeUnit::Microsecond {
-        return Ok(batch);
-    }
 
     let ts = col
         .as_any()
@@ -246,14 +258,26 @@ pub(crate) fn apply_output_timezone_batch(
             ArrowError::ComputeError("time column: expected TimestampMicrosecondArray".to_string())
         })?;
 
-    let new_ts = ts.clone().with_timezone(iana);
-    let new_field = Field::new("time", new_ts.data_type().clone(), true);
-    let mut fields: Vec<_> = schema.fields().to_vec();
-    fields[ti] = std::sync::Arc::new(new_field);
-    let new_schema = arrow_schema::Schema::new_with_metadata(fields, schema.metadata().clone());
-    let mut cols = batch.columns().to_vec();
+    let timezone = output_schema
+        .as_ref()
+        .and_then(|schema| match schema.field(ti).data_type() {
+            DataType::Timestamp(TimeUnit::Microsecond, Some(timezone)) => Some(timezone.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| iana.into());
+    let new_ts = ts.clone().with_timezone(timezone);
+    let new_schema = output_schema.unwrap_or_else(|| {
+        let new_field = Field::new("time", new_ts.data_type().clone(), true);
+        let mut fields: Vec<_> = schema.fields().to_vec();
+        fields[ti] = std::sync::Arc::new(new_field);
+        std::sync::Arc::new(arrow_schema::Schema::new_with_metadata(
+            fields,
+            schema.metadata().clone(),
+        ))
+    });
+    let (_, mut cols, _) = batch.into_parts();
     cols[ti] = std::sync::Arc::new(new_ts) as arrow_array::ArrayRef;
-    RecordBatch::try_new(std::sync::Arc::new(new_schema), cols)
+    RecordBatch::try_new(new_schema, cols)
 }
 
 /// Resolve `output_tz` to an IANA name when relabeling is needed (`None` = keep UTC metadata).

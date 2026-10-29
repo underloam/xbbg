@@ -29,6 +29,7 @@ impl Display for BlpErrorDisplay<'_> {
             label,
             request_id,
             source,
+            ..
         } = self.0
         else {
             return Display::fmt(self.0, formatter);
@@ -80,17 +81,28 @@ pub struct SubscriptionDataLossContext {
     pub detail: String,
 }
 
+/// Owned request context moved into host exception attributes.
+#[derive(Debug)]
+pub struct RequestErrorContext {
+    pub service: Option<String>,
+    pub operation: Option<String>,
+    pub request_id: Option<String>,
+    pub bloomberg_request_ids: Vec<std::sync::Arc<str>>,
+}
+
 /// A classified error ready for a host adapter to turn into an exception.
 #[derive(Debug)]
 pub struct ErrorPresentation {
     pub kind: ErrorKind,
     pub message: String,
     pub data_loss: Option<SubscriptionDataLossContext>,
+    pub request_context: Option<RequestErrorContext>,
 }
 
 impl ErrorPresentation {
     /// Consume a core error, retaining its domain context in the message.
     pub fn from_blp(error: BlpError, style: ErrorStyle) -> Self {
+        let mut request_context = None;
         let (kind, message) = match error {
             BlpError::SessionStart { source, label } => (
                 ErrorKind::Session,
@@ -111,12 +123,45 @@ impl ErrorPresentation {
                 } else {
                     ErrorKind::Request
                 };
-                (kind, blp_error_display(&error).to_string())
+                let message = blp_error_display(&error).to_string();
+                let BlpError::RequestFailure {
+                    service,
+                    operation,
+                    request_id,
+                    bloomberg_request_ids,
+                    ..
+                } = error
+                else {
+                    unreachable!()
+                };
+                request_context = Some(RequestErrorContext {
+                    service: Some(service),
+                    operation,
+                    request_id,
+                    bloomberg_request_ids,
+                });
+                (kind, message)
             }
             BlpError::InvalidArgument { detail } => {
                 (ErrorKind::Validation, format!("Invalid argument: {detail}"))
             }
             BlpError::Timeout => (ErrorKind::Timeout, "Request timed out".into()),
+            BlpError::RequestTimeout {
+                request_id,
+                bloomberg_request_ids,
+            } => {
+                let mut message = "Request timed out".to_owned();
+                if let Some(label) = &request_id {
+                    write!(message, " [request_id={label}]").expect("writing to a String");
+                }
+                request_context = Some(RequestErrorContext {
+                    service: None,
+                    operation: None,
+                    request_id,
+                    bloomberg_request_ids,
+                });
+                (ErrorKind::Timeout, message)
+            }
             BlpError::TemplateTerminated { cid } => {
                 let mut message = "Request template terminated".to_string();
                 if let Some(cid) = cid {
@@ -147,6 +192,7 @@ impl ErrorPresentation {
                     kind: ErrorKind::DataLoss,
                     message,
                     data_loss: Some(SubscriptionDataLossContext { topic, detail }),
+                    request_context: None,
                 };
             }
             BlpError::Internal { detail } => {
@@ -198,6 +244,7 @@ impl ErrorPresentation {
             kind,
             message,
             data_loss: None,
+            request_context,
         }
     }
 
@@ -229,6 +276,7 @@ impl ErrorPresentation {
             kind,
             message,
             data_loss: None,
+            request_context: None,
         }
     }
 }
@@ -282,6 +330,37 @@ mod tests {
     use xbbg_core::errors::{CorrelationContext, ValidationError};
 
     #[test]
+    fn request_and_timeout_context_keep_sdk_ids_separate_from_labels() {
+        for style in [ErrorStyle::Python, ErrorStyle::JavaScript] {
+            for error in [
+                BlpError::RequestFailure {
+                    service: "//synthetic/refdata".into(),
+                    operation: Some("SyntheticRequest".into()),
+                    cid: None,
+                    label: Some("synthetic failure".into()),
+                    request_id: Some("req-label".into()),
+                    bloomberg_request_ids: vec![std::sync::Arc::from("sdk-synthetic")],
+                    source: None,
+                },
+                BlpError::RequestTimeout {
+                    request_id: Some("req-label".into()),
+                    bloomberg_request_ids: vec![std::sync::Arc::from("sdk-synthetic")],
+                },
+            ] {
+                let presentation = ErrorPresentation::from_blp(error, style);
+                let context = presentation.request_context.unwrap();
+                assert_eq!(context.request_id.as_deref(), Some("req-label"));
+                assert_eq!(
+                    context.bloomberg_request_ids.as_slice(),
+                    [std::sync::Arc::<str>::from("sdk-synthetic")]
+                );
+                assert!(presentation.message.contains("[request_id=req-label]"));
+                assert!(!presentation.message.contains("[request_id=sdk-synthetic]"));
+            }
+        }
+    }
+
+    #[test]
     fn optional_label_and_source_keep_identical_separators_and_fallback() {
         let source = std::io::Error::other("synthetic cause");
         for (base, label, with_source, expected) in [
@@ -318,6 +397,7 @@ mod tests {
                         cid: Some(CorrelationContext::U64(42)),
                         label: label.map(str::to_owned),
                         request_id: Some("synthetic-request".into()),
+                        bloomberg_request_ids: Vec::new(),
                         source: Some(Box::new(std::io::Error::other("synthetic cause"))),
                     },
                     style,
@@ -371,6 +451,7 @@ mod tests {
                         cid: None,
                         label: None,
                         request_id: None,
+                        bloomberg_request_ids: Vec::new(),
                         source: None,
                     },
                     ErrorKind::Request,

@@ -18,8 +18,8 @@ from . import _core
 # Rust base exceptions that are not extended — re-exported as-is.
 BlpError = _core.BlpError
 BlpSessionError = _core.BlpSessionError
-BlpTimeoutError = _core.BlpTimeoutError
 BlpInternalError = _core.BlpInternalError
+BlpTimeoutError = _core.BlpTimeoutError
 
 
 class BlpSubscriptionWarning(UserWarning):
@@ -53,7 +53,12 @@ def _warn_at_user_frame(message: str, category: type[Warning]) -> None:
 
 
 class BlpRequestError(_core.BlpRequestError):
-    """Bloomberg request-level error with extended request context attributes."""
+    """Request failure with separate xbbg labels and SDK support identifiers.
+
+    ``request_id`` remains xbbg's label. ``bloomberg_request_id`` is the SDK
+    identifier for one request; ``bloomberg_request_ids`` lists all known IDs
+    for composed requests, leaving the singular attribute ``None``.
+    """
 
     def __init__(
         self,
@@ -62,12 +67,22 @@ class BlpRequestError(_core.BlpRequestError):
         service: str | None = None,
         operation: str | None = None,
         request_id: str | None = None,
+        bloomberg_request_id: str | None = None,
+        bloomberg_request_ids: list[str] | None = None,
         code: int | None = None,
     ) -> None:
         super().__init__(message)
         self.service = service
         self.operation = operation
         self.request_id = request_id
+        self.bloomberg_request_id = bloomberg_request_id
+        self.bloomberg_request_ids = (
+            bloomberg_request_ids
+            if bloomberg_request_ids is not None
+            else [bloomberg_request_id]
+            if bloomberg_request_id is not None
+            else []
+        )
         self.code = code
 
 
@@ -144,6 +159,8 @@ class BlpValidationError(_core.BlpValidationError):
         self.element = element
         self.suggestion = suggestion
         self.valid_values = valid_values
+        self.bloomberg_request_id: str | None = None
+        self.bloomberg_request_ids: list[str] = []
 
     @classmethod
     def from_rust_error(cls, message: str) -> BlpValidationError:

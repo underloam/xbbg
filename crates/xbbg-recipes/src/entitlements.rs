@@ -15,7 +15,8 @@ use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use xbbg_async::DelayedPolicy;
 use xbbg_async::engine::state::{
-    DelayedMeta, METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta, delayed_metadata,
+    BloombergRequestIds, DelayedMeta, METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
+    delayed_metadata,
 };
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -101,24 +102,32 @@ pub async fn recipe_delay_status(
             ..Default::default()
         })
         .await?;
-    let mut rows = delay_status_rows(
-        &tickers,
-        &refdata_value_map(&batch)?,
-        &delayed_metadata(&batch).unwrap_or_default(),
-        &security_error_messages(&batch),
-    );
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&batch);
+    let result: Result<_> = async {
+        let mut rows = delay_status_rows(
+            &tickers,
+            &refdata_value_map(&batch)?,
+            &delayed_metadata(&batch).unwrap_or_default(),
+            &security_error_messages(&batch),
+        );
 
-    if check_identity {
-        let eids = identity_eids(&rows);
-        if !eids.is_empty() {
-            let check = engine.check_entitlements(IDENTITY_SERVICE, &eids).await?;
-            // `false` with nothing listed means the identity is not authorized
-            // for the service at all, so no EID is entitled.
-            let denied_all = !check.entitled && check.failed_eids.is_empty();
-            apply_identity_check(&mut rows, &check.failed_eids, denied_all);
+        if check_identity {
+            let eids = identity_eids(&rows);
+            if !eids.is_empty() {
+                let check = engine.check_entitlements(IDENTITY_SERVICE, &eids).await?;
+                // `false` with nothing listed means the identity is not authorized
+                // for the service at all, so no EID is entitled.
+                let denied_all = !check.entitled && check.failed_eids.is_empty();
+                apply_identity_check(&mut rows, &check.failed_eids, denied_all);
+            }
         }
+        build_delay_status_batch(&rows)
     }
-    build_delay_status_batch(&rows)
+    .await;
+    let output =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(output))
 }
 
 fn delay_status_rows(

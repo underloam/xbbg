@@ -1,6 +1,6 @@
 //! Arrow table carrier data and pure table operations.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -17,6 +17,8 @@ use crate::error::{ArrowCoreError, Result};
 use crate::scalar::{CellValue, InferredKind, build_array_for_kind, cell_matches, infer_kind};
 
 const TYPE_MISSES_METADATA_KEY: &str = "xbbg.type_misses";
+const BLOOMBERG_REQUEST_ID_METADATA_KEY: &str = "xbbg.bloomberg_request_id";
+const BLOOMBERG_REQUEST_IDS_METADATA_KEY: &str = "xbbg.bloomberg_request_ids";
 
 /// Sort direction for Arrow table sorting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -470,9 +472,28 @@ fn table_schema(batches: &[RecordBatch]) -> Result<SchemaRef> {
         .first()
         .map(|batch| batch.schema())
         .unwrap_or_else(|| Arc::new(Schema::empty()));
+    if batches.len() == 1
+        && !schema.metadata().contains_key(TYPE_MISSES_METADATA_KEY)
+        && !schema
+            .metadata()
+            .contains_key(BLOOMBERG_REQUEST_IDS_METADATA_KEY)
+    {
+        return Ok(schema);
+    }
     let mut misses = BTreeMap::<String, u64>::new();
     let mut has_misses = false;
+    let mut request_ids = BTreeSet::<String>::new();
     for batch in batches {
+        let metadata = batch.schema_ref().metadata();
+        if let Some(id) = metadata.get(BLOOMBERG_REQUEST_ID_METADATA_KEY) {
+            request_ids.insert(id.clone());
+        }
+        if let Some(raw) = metadata.get(BLOOMBERG_REQUEST_IDS_METADATA_KEY) {
+            let ids: Vec<String> = serde_json::from_str(raw).map_err(|_| {
+                arrow_schema::ArrowError::ParseError("invalid Bloomberg request ID metadata".into())
+            })?;
+            request_ids.extend(ids);
+        }
         let Some(raw) = batch.schema_ref().metadata().get(TYPE_MISSES_METADATA_KEY) else {
             continue;
         };
@@ -487,17 +508,54 @@ fn table_schema(batches: &[RecordBatch]) -> Result<SchemaRef> {
             })?;
         }
     }
-    if !has_misses {
+    if !has_misses && request_ids.is_empty() {
+        return Ok(schema);
+    }
+    if !has_misses
+        && request_ids.len() == 1
+        && schema.metadata().get(BLOOMBERG_REQUEST_ID_METADATA_KEY) == request_ids.first()
+        && !schema
+            .metadata()
+            .contains_key(BLOOMBERG_REQUEST_IDS_METADATA_KEY)
+    {
         return Ok(schema);
     }
     let mut metadata = schema.metadata().clone();
-    metadata.insert(
-        TYPE_MISSES_METADATA_KEY.into(),
-        serde_json::to_string(&misses).map_err(|_| {
-            arrow_schema::ArrowError::ParseError("cannot encode conversion-miss metadata".into())
-        })?,
-    );
+    if has_misses {
+        metadata.insert(
+            TYPE_MISSES_METADATA_KEY.into(),
+            serde_json::to_string(&misses).map_err(|_| {
+                arrow_schema::ArrowError::ParseError(
+                    "cannot encode conversion-miss metadata".into(),
+                )
+            })?,
+        );
+    }
+    if !request_ids.is_empty() {
+        metadata.remove(BLOOMBERG_REQUEST_ID_METADATA_KEY);
+        metadata.remove(BLOOMBERG_REQUEST_IDS_METADATA_KEY);
+        if request_ids.len() == 1 {
+            metadata.insert(
+                BLOOMBERG_REQUEST_ID_METADATA_KEY.into(),
+                request_ids.into_iter().next().expect("one ID"),
+            );
+        } else {
+            metadata.insert(
+                BLOOMBERG_REQUEST_IDS_METADATA_KEY.into(),
+                serde_json::to_string(&request_ids).expect("string identifiers serialize"),
+            );
+        }
+    }
     Ok(Arc::new(schema.as_ref().clone().with_metadata(metadata)))
+}
+
+fn aggregatable_metadata_key(key: &str) -> bool {
+    matches!(
+        key,
+        TYPE_MISSES_METADATA_KEY
+            | BLOOMBERG_REQUEST_ID_METADATA_KEY
+            | BLOOMBERG_REQUEST_IDS_METADATA_KEY
+    )
 }
 
 fn compatible_schema(expected: &Schema, actual: &Schema) -> bool {
@@ -505,12 +563,12 @@ fn compatible_schema(expected: &Schema, actual: &Schema) -> bool {
         && expected
             .metadata()
             .iter()
-            .filter(|(key, _)| key.as_str() != TYPE_MISSES_METADATA_KEY)
+            .filter(|(key, _)| !aggregatable_metadata_key(key))
             .all(|(key, value)| actual.metadata().get(key) == Some(value))
         && actual
             .metadata()
             .keys()
-            .filter(|key| key.as_str() != TYPE_MISSES_METADATA_KEY)
+            .filter(|key| !aggregatable_metadata_key(key))
             .all(|key| expected.metadata().contains_key(key))
 }
 
@@ -610,6 +668,53 @@ mod tests {
             vec![Arc::new(Int64Array::from(vec![None, Some(7)]))],
         )
         .unwrap()
+    }
+
+    #[test]
+    fn native_table_composition_preserves_distinct_sdk_ids() {
+        let mut first = diagnostic_batch(None);
+        first.schema_metadata_mut().insert(
+            BLOOMBERG_REQUEST_ID_METADATA_KEY.into(),
+            "sdk-synthetic-z".into(),
+        );
+        let first_schema = first.schema();
+        let first = TableData::try_new(vec![first]).unwrap();
+        assert!(
+            Arc::ptr_eq(&first.schema, &first_schema),
+            "single ID reuses the schema"
+        );
+        let mut second = diagnostic_batch(None);
+        second.schema_metadata_mut().insert(
+            BLOOMBERG_REQUEST_ID_METADATA_KEY.into(),
+            "sdk-synthetic-a".into(),
+        );
+        let second = TableData::try_new(vec![second]).unwrap();
+        let combined = TableData::concat_tables(&[first.clone(), second]).unwrap();
+        assert!(
+            !combined
+                .schema
+                .metadata()
+                .contains_key(BLOOMBERG_REQUEST_ID_METADATA_KEY)
+        );
+        assert_eq!(
+            combined.schema.metadata()[BLOOMBERG_REQUEST_IDS_METADATA_KEY],
+            r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+        );
+        assert_eq!(combined.schema.metadata()["source"], "synthetic");
+        assert!(Arc::ptr_eq(
+            combined.batches[0].column(0),
+            first.batches[0].column(0)
+        ));
+        let nested = TableData::concat_tables(&[combined, first]).unwrap();
+        assert_eq!(
+            nested.schema.metadata()[BLOOMBERG_REQUEST_IDS_METADATA_KEY],
+            r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+        );
+        let mut malformed = diagnostic_batch(None);
+        malformed
+            .schema_metadata_mut()
+            .insert(BLOOMBERG_REQUEST_IDS_METADATA_KEY.into(), "[1]".into());
+        assert!(TableData::try_new(vec![malformed]).is_err());
     }
 
     #[test]

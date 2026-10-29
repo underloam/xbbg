@@ -6,6 +6,7 @@ use std::sync::Arc;
 use arrow_array::builder::{Int32Builder, StringBuilder};
 use arrow_array::{Array, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 
@@ -65,9 +66,16 @@ pub async fn recipe_resolve_isins(engine: &Engine, isins: Vec<String>) -> Result
         ..Default::default()
     };
     let batch = engine.request(params).await?;
-    let values = refdata_value_map(&batch)?;
-    let rows = build_resolve_isin_rows(&isins, &lookups, &values);
-    build_resolve_isins_batch(&rows)
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&batch);
+    let result = (|| {
+        let values = refdata_value_map(&batch)?;
+        let rows = build_resolve_isin_rows(&isins, &lookups, &values);
+        build_resolve_isins_batch(&rows)
+    })();
+    let output =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(output))
 }
 
 /// Resolve bond ISINs to parent equity tickers and issuer equity ISINs.
@@ -88,43 +96,52 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
         ..Default::default()
     };
     let bond_batch = engine.request(params).await?;
-    let bond_values = refdata_value_map(&bond_batch)?;
+    let mut request_ids = BloombergRequestIds::default();
+    request_ids.collect(&bond_batch);
+    let result: Result<_> = async {
+        let bond_values = refdata_value_map(&bond_batch)?;
 
-    let mut rows = build_issuer_rows_without_isin(&bond_isins, &lookups, &bond_values);
-    let parent_tickers = rows
-        .iter()
-        .filter_map(|row| row.parent_ticker.clone())
-        .collect::<Vec<_>>();
+        let mut rows = build_issuer_rows_without_isin(&bond_isins, &lookups, &bond_values);
+        let parent_tickers = rows
+            .iter()
+            .filter_map(|row| row.parent_ticker.clone())
+            .collect::<Vec<_>>();
 
-    if !parent_tickers.is_empty() {
-        let params = RequestParams {
-            service: Service::RefData.to_string(),
-            operation: Operation::ReferenceData.to_string(),
-            securities: Some(parent_tickers),
-            fields: Some(vec!["ID_ISIN".to_string()]),
-            ..Default::default()
-        };
-        let parent_batch = engine.request(params).await?;
-        let parent_values = refdata_value_map(&parent_batch)?;
-        for row in &mut rows {
-            let Some(parent_ticker) = row.parent_ticker.as_ref() else {
-                continue;
+        if !parent_tickers.is_empty() {
+            let params = RequestParams {
+                service: Service::RefData.to_string(),
+                operation: Operation::ReferenceData.to_string(),
+                securities: Some(parent_tickers),
+                fields: Some(vec!["ID_ISIN".to_string()]),
+                ..Default::default()
             };
-            row.issuer_equity_isin = parent_values
-                .get(parent_ticker)
-                .and_then(|fields| fields.get("ID_ISIN"))
-                .and_then(|value| clean_bloomberg_text(value));
-            if row.issuer_equity_isin.is_some() {
-                row.status = "resolved".to_string();
-                row.error = None;
-            } else {
-                row.status = "unresolved".to_string();
-                row.error = Some("issuer equity ISIN was not returned".to_string());
+            let parent_batch = engine.request(params).await?;
+            request_ids.collect(&parent_batch);
+            let parent_values = refdata_value_map(&parent_batch)?;
+            for row in &mut rows {
+                let Some(parent_ticker) = row.parent_ticker.as_ref() else {
+                    continue;
+                };
+                row.issuer_equity_isin = parent_values
+                    .get(parent_ticker)
+                    .and_then(|fields| fields.get("ID_ISIN"))
+                    .and_then(|value| clean_bloomberg_text(value));
+                if row.issuer_equity_isin.is_some() {
+                    row.status = "resolved".to_string();
+                    row.error = None;
+                } else {
+                    row.status = "unresolved".to_string();
+                    row.error = Some("issuer equity ISIN was not returned".to_string());
+                }
             }
         }
-    }
 
-    build_issuer_isins_batch(&rows)
+        build_issuer_isins_batch(&rows)
+    }
+    .await;
+    let output =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(output))
 }
 
 pub(crate) fn isin_lookup_ticker(isin: &str) -> String {

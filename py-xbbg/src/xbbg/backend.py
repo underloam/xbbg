@@ -17,6 +17,7 @@ import atexit
 from dataclasses import dataclass
 from enum import Enum
 import functools
+import json
 import logging
 import os
 import sys
@@ -500,6 +501,8 @@ _XBBG_METADATA_ATTRS = {
     "xbbg.field_exceptions": ("field_exceptions", "xbbg_field_exceptions"),
     "xbbg.delayed": ("delayed", "xbbg_delayed"),
     "xbbg.type_misses": ("type_misses", "xbbg_type_misses"),
+    "xbbg.bloomberg_request_id": ("bloomberg_request_id", "xbbg_bloomberg_request_id"),
+    "xbbg.bloomberg_request_ids": ("bloomberg_request_ids", "xbbg_bloomberg_request_ids"),
 }
 
 
@@ -512,13 +515,20 @@ def _attach_xbbg_metadata_attrs(dataframe: Any, table: Any) -> Any:
     """
     attrs = getattr(dataframe, "attrs", None)
     metadata = getattr(table, "metadata", None)
+    schema_metadata = metadata is None
+    if schema_metadata:
+        metadata = getattr(getattr(table, "schema", None), "metadata", None)
     if attrs is None or not metadata:
         return dataframe
 
     for metadata_key, (source_attr, frame_attr) in _XBBG_METADATA_ATTRS.items():
-        if metadata_key not in metadata:
+        raw = metadata.get(metadata_key.encode() if schema_metadata else metadata_key)
+        if raw is None:
             continue
         value = getattr(table, source_attr, None)
+        if value is None:
+            raw = raw.decode() if isinstance(raw, bytes) else raw
+            value = raw if metadata_key == "xbbg.bloomberg_request_id" else json.loads(raw)
         if value is not None:
             attrs[frame_attr] = value
     return dataframe

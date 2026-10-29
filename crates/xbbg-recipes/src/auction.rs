@@ -2,6 +2,7 @@
 //!
 //! Routing lookups are cached process-wide for 12 hours, but every workflow still
 //! validates its venue topics. Snapshot validation is part of the data request.
+//! Results retain the SDK request IDs behind cached routes and fresh venue data.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex, MutexGuard};
@@ -11,6 +12,7 @@ use arrow_array::builder::{Int32Builder, StringBuilder};
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::{DateTime, NaiveDateTime, NaiveTime, Timelike};
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::state::typed_builder::{ArrowType, TypedBuilder};
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -40,6 +42,8 @@ struct VenueCacheKey {
 
 struct CachedVenue {
     decision: VenueDecision,
+    // Validation is refreshed on each use; only the routing provenance is cached.
+    request_ids: Option<Arc<BloombergRequestIds>>,
     expires_at: Instant,
 }
 
@@ -123,6 +127,7 @@ impl VenueCache {
                 Arc::clone(&row.cache_key),
                 CachedVenue {
                     decision: row.decision.clone(),
+                    request_ids: row.request_ids.as_ref().map(Arc::clone),
                     expires_at: now + VENUE_CACHE_TTL,
                 },
             );
@@ -175,6 +180,7 @@ fn pcs_overrides_fingerprint(overrides: &HashMap<String, String>) -> PcsOverride
 struct VenueLookup {
     key: Arc<VenueCacheKey>,
     cached: Option<VenueDecision>,
+    request_ids: Option<Arc<BloombergRequestIds>>,
     generation: u64,
 }
 
@@ -203,11 +209,13 @@ fn plan_venue_lookups(
             Some((key, entry)) => VenueLookup {
                 key: Arc::clone(key),
                 cached: Some(entry.decision.clone()),
+                request_ids: entry.request_ids.as_ref().map(Arc::clone),
                 generation: cache.generation,
             },
             None => VenueLookup {
                 key: Arc::new(key),
                 cached: None,
+                request_ids: None,
                 generation: cache.generation,
             },
         })
@@ -243,6 +251,7 @@ struct VenueRow {
     cache_key: Arc<VenueCacheKey>,
     cache_hit: bool,
     cache_generation: u64,
+    request_ids: Option<Arc<BloombergRequestIds>>,
     decision: VenueDecision,
     venue_figi: Option<String>,
     exch_code: Option<String>,
@@ -260,22 +269,30 @@ pub async fn recipe_resolve_venues(
     securities: Vec<String>,
     pcs_overrides: HashMap<String, String>,
 ) -> Result<RecordBatch> {
-    let mut rows = lookup_venues(engine, &securities, &pcs_overrides).await?;
-    let topics = venue_topics(&rows);
-    if !topics.is_empty() {
-        let values = request_reference(
-            engine,
-            topics,
-            ["PRICING_SOURCE", "EXCH_CODE", "ID_BB_GLOBAL"]
-                .map(str::to_string)
-                .to_vec(),
-            None,
-        )
-        .await?;
-        validate_rows(&mut rows, &values);
-        venue_cache().record_validation(&rows, Instant::now());
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let mut rows = lookup_venues(engine, &securities, &pcs_overrides, &mut request_ids).await?;
+        let topics = venue_topics(&rows);
+        if !topics.is_empty() {
+            let values = request_reference(
+                engine,
+                topics,
+                ["PRICING_SOURCE", "EXCH_CODE", "ID_BB_GLOBAL"]
+                    .map(str::to_string)
+                    .to_vec(),
+                None,
+                &mut request_ids,
+            )
+            .await?;
+            validate_rows(&mut rows, &values);
+            venue_cache().record_validation(&rows, Instant::now());
+        }
+        build_resolve_venues_batch(&rows)
     }
-    build_resolve_venues_batch(&rows)
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 /// Fetch auction fields only from validated venues, keeping failed rows as null data.
@@ -293,37 +310,51 @@ pub async fn recipe_auction_snapshot(
     pcs_overrides: HashMap<String, String>,
 ) -> Result<RecordBatch> {
     let fields = snapshot_fields(fields);
-    let mut rows = lookup_venues(engine, &securities, &pcs_overrides).await?;
-    let field_types = engine.resolve_field_types(&fields, None, "string").await?;
-    let topics = venue_topics(&rows);
-    let values = if topics.is_empty() {
-        ReferenceValues::new()
-    } else {
-        let mut request_fields = unique_strings(fields.iter().map(String::as_str));
-        for field in ["PRICING_SOURCE", "EXCH_CODE"] {
-            if !request_fields
-                .iter()
-                .any(|existing| existing.eq_ignore_ascii_case(field))
-            {
-                request_fields.push(field.to_string());
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let mut rows = lookup_venues(engine, &securities, &pcs_overrides, &mut request_ids).await?;
+        let field_types = engine.resolve_field_types(&fields, None, "string").await?;
+        let topics = venue_topics(&rows);
+        let values = if topics.is_empty() {
+            ReferenceValues::new()
+        } else {
+            let mut request_fields = unique_strings(fields.iter().map(String::as_str));
+            for field in ["PRICING_SOURCE", "EXCH_CODE"] {
+                if !request_fields
+                    .iter()
+                    .any(|existing| existing.eq_ignore_ascii_case(field))
+                {
+                    request_fields.push(field.to_string());
+                }
             }
-        }
-        let mut request_types = field_types.clone();
-        // The validation strings also force the refdata long `value` column to
-        // remain text, preserving Y/N and time-only values for final coercion.
-        for field in &request_fields {
-            if field.eq_ignore_ascii_case("PRICING_SOURCE")
-                || field.eq_ignore_ascii_case("EXCH_CODE")
-            {
-                request_types.insert(field.clone(), "string".to_string());
+            let mut request_types = field_types.clone();
+            // The validation strings also force the refdata long `value` column to
+            // remain text, preserving Y/N and time-only values for final coercion.
+            for field in &request_fields {
+                if field.eq_ignore_ascii_case("PRICING_SOURCE")
+                    || field.eq_ignore_ascii_case("EXCH_CODE")
+                {
+                    request_types.insert(field.clone(), "string".to_string());
+                }
             }
-        }
-        let values = request_reference(engine, topics, request_fields, Some(request_types)).await?;
-        validate_rows(&mut rows, &values);
-        venue_cache().record_validation(&rows, Instant::now());
-        values
-    };
-    build_snapshot_batch(&rows, &fields, &field_types, &values)
+            let values = request_reference(
+                engine,
+                topics,
+                request_fields,
+                Some(request_types),
+                &mut request_ids,
+            )
+            .await?;
+            validate_rows(&mut rows, &values);
+            venue_cache().record_validation(&rows, Instant::now());
+            values
+        };
+        build_snapshot_batch(&rows, &fields, &field_types, &values)
+    }
+    .await;
+    let batch =
+        result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(batch))
 }
 
 fn snapshot_fields(fields: Vec<String>) -> Vec<String> {
@@ -339,6 +370,7 @@ async fn request_reference(
     securities: Vec<String>,
     fields: Vec<String>,
     field_types: Option<HashMap<String, String>>,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<ReferenceValues> {
     let batch = engine
         .request(RequestParams {
@@ -353,6 +385,7 @@ async fn request_reference(
             ..Default::default()
         })
         .await?;
+    request_ids.collect(&batch);
     refdata_value_map(&batch)
 }
 
@@ -360,16 +393,24 @@ async fn lookup_venues(
     engine: &Engine,
     securities: &[String],
     pcs_overrides: &HashMap<String, String>,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<Vec<VenueRow>> {
     // Input and override normalization can be expensive; do it before taking
     // the process-wide mutex, which protects only expiry/probes and cache updates.
     let keys = venue_cache_keys(securities, pcs_overrides);
-    let lookups = plan_venue_lookups(keys, &mut venue_cache(), Instant::now());
+    let mut lookups = plan_venue_lookups(keys, &mut venue_cache(), Instant::now());
+    for ids in lookups
+        .iter()
+        .filter_map(|lookup| lookup.request_ids.as_ref())
+    {
+        request_ids.extend(ids.iter().cloned());
+    }
     let missing = routing_lookups(&lookups);
     let values = if missing.is_empty() {
         ReferenceValues::new()
     } else {
-        request_reference(
+        let mut routing_ids = BloombergRequestIds::default();
+        let result = request_reference(
             engine,
             missing,
             ROUTING_FIELDS
@@ -377,8 +418,18 @@ async fn lookup_venues(
                 .map(|field| (*field).to_string())
                 .collect(),
             None,
+            &mut routing_ids,
         )
-        .await?
+        .await;
+        request_ids.extend(routing_ids.iter().cloned());
+        let values = result?;
+        let routing_ids = Arc::new(routing_ids);
+        for lookup in &mut lookups {
+            if lookup.cached.is_none() {
+                lookup.request_ids = Some(Arc::clone(&routing_ids));
+            }
+        }
+        values
     };
     Ok(build_venue_rows(
         securities,
@@ -443,6 +494,7 @@ fn build_venue_rows(
                 cache_key: lookup.key,
                 cache_hit,
                 cache_generation: lookup.generation,
+                request_ids: lookup.request_ids,
                 decision,
                 venue_figi: None,
                 exch_code: None,
@@ -764,6 +816,46 @@ mod tests {
             )]),
         );
         cache.record_validation(&rows, now);
+    }
+
+    #[test]
+    fn venue_cache_shares_routing_request_ids_with_cached_decisions() {
+        let now = Instant::now();
+        let securities = ["SYNTH ZZ Equity".to_string()];
+        let overrides = HashMap::new();
+        let routing = HashMap::from([(securities[0].clone(), equity_fields("SYNTH", "Z1"))]);
+        let mut rows = uncached_rows(&securities, &routing, &overrides);
+        let mut ids = BloombergRequestIds::default();
+        ids.extend([Arc::<str>::from("synthetic_routing_request")]);
+        let ids = Arc::new(ids);
+        rows[0].request_ids = Some(Arc::clone(&ids));
+        validate_rows(
+            &mut rows,
+            &HashMap::from([(
+                "SYNTH Z1 Equity".to_string(),
+                fields(&[("EXCH_CODE", "Z1")]),
+            )]),
+        );
+        let mut cache = VenueCache::new(1);
+        cache.record_validation(&rows, now);
+        drop(rows);
+        let lookups =
+            plan_venue_lookups(venue_cache_keys(&securities, &overrides), &mut cache, now);
+
+        assert!(routing_lookups(&lookups).is_empty());
+        assert!(Arc::ptr_eq(lookups[0].request_ids.as_ref().unwrap(), &ids));
+        let cached = build_venue_rows(&securities, lookups, &HashMap::new(), &overrides);
+        assert!(Arc::ptr_eq(cached[0].request_ids.as_ref().unwrap(), &ids));
+        assert_eq!(
+            cached[0]
+                .request_ids
+                .as_ref()
+                .unwrap()
+                .iter()
+                .next()
+                .map(AsRef::as_ref),
+            Some("synthetic_routing_request")
+        );
     }
 
     #[test]

@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **In-memory TLS credentials (#366).** Python accepts `str | bytes`, Node accepts paths or `Buffer`/`Uint8Array`, and Rust uses `TlsMaterial::Path`/`Blob`. Matching DER PKCS#12/PKCS#7 blob pairs go directly to the SDK without temporary files; immutable storage is shared across session configuration clones. Passwords and blobs are redacted, SDK lengths are checked, and Node snapshots mutable bytes before async startup while rejecting shared/detached backing.
+- **Bloomberg support RequestIds (#365).** Results retain the SDK-assigned ID separately from xbbg labels and correlation IDs. Native tables, Arrow/pandas, Node Arrow/JSON, streams, shards, and derived recipe compositions preserve singular or sorted unique plural IDs; request/timeout exceptions and composed recipe failures retain available SDK context without changing error precedence.
+
+### Changed
+
+- **BREAKING (Rust): TLS configuration fields use `TlsMaterial` rather than `String`.** `BlpError::RequestFailure` includes SDK-ID context, `BlpError::RequestTimeout` distinguishes sent-request timeouts from lifecycle timeouts, and `RecipeError` can carry contributor context without changing its source classification.
+
+### Fixed
+
+- **Public Python exception boundaries preserve SDK context.** Native recipe and delayed-status failures normalize to their public exception classes; timeout exceptions keep their existing native identity and catchability.
+- **Streaming and sharding avoid redundant schema reconstruction.** Non-UTC streams reuse the final timezone-adjusted, ID-bearing schema when chunk metadata matches, and same-field shards do not rebuild batches merely because their request IDs differ.
+
 ## [1.6.1] - 2026-10-29
 
 ### Changed

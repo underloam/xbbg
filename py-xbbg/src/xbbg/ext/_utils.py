@@ -46,8 +46,14 @@ async def _call_native_recipe(
     recipe = getattr(_core, recipe_name)
     if request_options is not None:
         kwargs["request_options"] = _recipe_request_options(request_options)
-    engine = _engine._get_engine()
-    batch = await recipe(engine, *args, **kwargs)
+    try:
+        engine = _engine._get_engine()
+        batch = await recipe(engine, *args, **kwargs)
+    except Exception as exc:
+        mapped = _engine._normalize_engine_exception(exc)
+        if mapped is exc:
+            raise
+        raise mapped from exc
     return _convert_result_backend(batch, backend)
 
 

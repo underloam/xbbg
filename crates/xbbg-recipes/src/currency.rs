@@ -3,6 +3,9 @@
 //! Adjusts data columns by fetching FX rates from Bloomberg and applying
 //! conversion factors via Arrow compute operations.
 //!
+//! Converted results retain input request IDs together with the currency and FX
+//! requests used to choose and apply the conversion.
+//!
 //! # Recipes
 //!
 //! - [`recipe_adjust_ccy`]: Convert data values to a target currency
@@ -16,6 +19,7 @@ use arrow_array::{
     OffsetSizeTrait, RecordBatch, StringArray, StringViewArray, builder::GenericStringBuilder,
 };
 use arrow_schema::{DataType, Field, Schema};
+use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 use xbbg_ext::transforms::currency::{FxConversionInfo, build_fx_pair, same_currency};
@@ -78,26 +82,53 @@ pub async fn recipe_adjust_ccy(
     if tickers.is_empty() {
         return Ok(data);
     }
-    let Some(date_keys) = extract_date_keys(&data)? else {
+    let Some(date_keys) = extract_date_keys(&data)
+        .map_err(|error| error.with_bloomberg_request_ids_from_batch(&data))?
+    else {
         return Ok(data);
     };
     if !date_keys.iter().any(Option::is_some) {
         return Ok(data);
     }
 
-    let ticker_currencies = fetch_ticker_currencies(engine, &tickers, &options).await?;
-    let (fx_by_ticker, fx_pairs) = build_fx_requirements(&tickers, &ticker_currencies, &target_ccy);
-    if fx_pairs.is_empty() {
-        return Ok(data);
-    }
-    let (fx_start, fx_end) = resolve_fx_query_dates(&date_keys, &start_date, &end_date);
-    let fx_rates = fetch_fx_rates(engine, &fx_pairs, &fx_start, &fx_end, &options).await?;
+    let mut request_ids = BloombergRequestIds::default();
+    let result: Result<_> = async {
+        let ticker_currencies =
+            fetch_ticker_currencies(engine, &tickers, &options, &mut request_ids).await?;
+        let (fx_by_ticker, fx_pairs) =
+            build_fx_requirements(&tickers, &ticker_currencies, &target_ccy);
+        if fx_pairs.is_empty() {
+            return Ok(None);
+        }
+        let (fx_start, fx_end) = resolve_fx_query_dates(&date_keys, &start_date, &end_date);
+        let fx_rates = fetch_fx_rates(
+            engine,
+            &fx_pairs,
+            &fx_start,
+            &fx_end,
+            &options,
+            &mut request_ids,
+        )
+        .await?;
 
-    if long {
+        Ok(Some((fx_by_ticker, fx_rates)))
+    }
+    .await;
+    let conversion = result.map_err(|error| {
+        error
+            .with_bloomberg_request_ids_from_batch(&data)
+            .with_bloomberg_request_ids(request_ids.iter().cloned())
+    })?;
+    let Some((fx_by_ticker, fx_rates)) = conversion else {
+        return Ok(request_ids.attach(data));
+    };
+    let converted = if long {
         apply_long_fx_conversion(data, &date_keys, &fx_by_ticker, &fx_rates)
     } else {
         apply_fx_conversion(data, &column_tickers, &date_keys, &fx_by_ticker, &fx_rates)
     }
+    .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
+    Ok(request_ids.attach(converted))
 }
 
 fn decode_currency_dictionaries(data: RecordBatch) -> Result<RecordBatch> {
@@ -113,7 +144,9 @@ fn decode_currency_dictionaries(data: RecordBatch) -> Result<RecordBatch> {
     let mut columns = data.columns().to_vec();
     for (idx, field) in schema.fields().iter().enumerate() {
         if let DataType::Dictionary(_, value_type) = field.data_type() {
-            columns[idx] = arrow_cast::cast(data.column(idx), value_type)?;
+            columns[idx] = arrow_cast::cast(data.column(idx), value_type).map_err(|error| {
+                RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data)
+            })?;
             fields[idx] = Arc::new(
                 field
                     .as_ref()
@@ -127,7 +160,7 @@ fn decode_currency_dictionaries(data: RecordBatch) -> Result<RecordBatch> {
         Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
         columns,
     )
-    .map_err(Into::into)
+    .map_err(|error| RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data))
 }
 
 pub async fn recipe_currency_conversion(
@@ -235,8 +268,10 @@ async fn fetch_ticker_currencies(
     engine: &Engine,
     tickers: &[String],
     options: &RequestParams,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<HashMap<String, String>> {
     let batch = engine.request(currency_request(tickers, options)).await?;
+    request_ids.collect(&batch);
     parse_currency_batch(&batch)
 }
 
@@ -293,10 +328,12 @@ async fn fetch_fx_rates(
     start_date: &str,
     end_date: &str,
     options: &RequestParams,
+    request_ids: &mut BloombergRequestIds,
 ) -> Result<FxRatesByPair> {
     let batch = engine
         .request(fx_request(fx_pairs, start_date, end_date, options))
         .await?;
+    request_ids.collect(&batch);
     parse_fx_rate_batch(&batch)
 }
 
@@ -376,6 +413,7 @@ fn apply_long_fx_conversion(
 ) -> Result<RecordBatch> {
     let tickers = data.column_by_name("ticker").ok_or_else(|| {
         RecipeError::InvalidArgument("currency data requires a ticker column".into())
+            .with_bloomberg_request_ids_from_batch(&data)
     })?;
     let schema = data.schema();
     let value_idx = ["value", "value_f64", "value_i64", "value_str"]
@@ -383,13 +421,16 @@ fn apply_long_fx_conversion(
         .find_map(|name| schema.index_of(name).ok())
         .ok_or_else(|| {
             RecipeError::InvalidArgument("currency data requires a value column".into())
+                .with_bloomberg_request_ids_from_batch(&data)
         })?;
     let source_values = data.column(value_idx);
     if source_values.data_type() == &DataType::Null {
         return Ok(data);
     }
     let values = if source_values.data_type() == &DataType::Utf8View {
-        arrow_cast::cast(source_values, &DataType::Utf8)?
+        arrow_cast::cast(source_values, &DataType::Utf8).map_err(|error| {
+            RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data)
+        })?
     } else {
         source_values.clone()
     };
@@ -410,7 +451,9 @@ fn apply_long_fx_conversion(
             fx_rates,
         ))
     } else if values.data_type().is_numeric() {
-        let numeric = arrow_cast::cast(&values, &DataType::Float64)?;
+        let numeric = arrow_cast::cast(&values, &DataType::Float64).map_err(|error| {
+            RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data)
+        })?;
         let numeric = numeric
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -432,7 +475,8 @@ fn apply_long_fx_conversion(
         return Err(RecipeError::InvalidArgument(format!(
             "currency value column must be numeric or text, got {:?}",
             values.data_type()
-        )));
+        ))
+        .with_bloomberg_request_ids_from_batch(&data));
     };
     let missing = converted.null_count().saturating_sub(values.null_count());
     if missing > 0 {
@@ -456,7 +500,7 @@ fn apply_long_fx_conversion(
         Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
         columns,
     )
-    .map_err(Into::into)
+    .map_err(|error| RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data))
 }
 
 fn convert_long_strings<O: OffsetSizeTrait>(
@@ -524,7 +568,8 @@ fn apply_fx_conversion(
     if date_keys.len() != data.num_rows() {
         return Err(RecipeError::Other(
             "input date column length does not match row count".to_string(),
-        ));
+        )
+        .with_bloomberg_request_ids_from_batch(&data));
     }
 
     let schema = data.schema();
@@ -553,9 +598,12 @@ fn apply_fx_conversion(
                 "currency column '{}' must be numeric, got {:?}",
                 field.name(),
                 input_col.data_type()
-            )));
+            ))
+            .with_bloomberg_request_ids_from_batch(&data));
         }
-        let numeric = arrow_cast::cast(&input_col, &DataType::Float64)?;
+        let numeric = arrow_cast::cast(&input_col, &DataType::Float64).map_err(|error| {
+            RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data)
+        })?;
         let values = numeric
             .as_any()
             .downcast_ref::<Float64Array>()
@@ -582,6 +630,7 @@ fn apply_fx_conversion(
                 field.name(),
                 fx_info.fx_pair
             ))
+            .with_bloomberg_request_ids_from_batch(&data)
         })?;
         fields[idx] = Arc::new(
             field
@@ -598,7 +647,7 @@ fn apply_fx_conversion(
         Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
         new_columns,
     )
-    .map_err(Into::into)
+    .map_err(|error| RecipeError::from(error).with_bloomberg_request_ids_from_batch(&data))
 }
 
 fn build_fx_rate_array(

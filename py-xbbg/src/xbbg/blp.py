@@ -529,8 +529,14 @@ async def adelay_status(
     """
     from . import _core
 
-    engine = _engine._get_engine()
-    batch = await _core.recipe_delay_status(engine, _request_options._normalize_tickers(tickers), check_identity)
+    try:
+        engine = _engine._get_engine()
+        batch = await _core.recipe_delay_status(engine, _request_options._normalize_tickers(tickers), check_identity)
+    except Exception as exc:
+        mapped = _engine._normalize_engine_exception(exc)
+        if mapped is exc:
+            raise
+        raise mapped from exc
     return _backend._convert_result_backend(batch, backend)
 
 

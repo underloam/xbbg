@@ -100,7 +100,62 @@ class TestPythonExceptionHierarchy:
         assert err.service == "//blp/refdata"
         assert err.operation == "ReferenceDataRequest"
         assert err.request_id == "req-123"
+        assert err.bloomberg_request_id is None
+        assert err.bloomberg_request_ids == []
         assert err.code == 42
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("entrypoint", "native_name", "public_name"),
+        [
+            ("recipe", "BlpRequestError", "BlpRequestError"),
+            ("recipe", "BlpLimitError", "BlpLimitError"),
+            ("recipe", "BlpTimeoutError", "BlpTimeoutError"),
+            ("recipe", "BlpValidationError", "BlpValidationError"),
+            ("delay_status", "BlpRequestError", "BlpRequestError"),
+            ("delay_status", "BlpTimeoutError", "BlpTimeoutError"),
+            ("identity", "BlpTimeoutError", "BlpTimeoutError"),
+        ],
+    )
+    @pytest.mark.parametrize("ids", [[], ["sdk-synthetic-a"], ["sdk-synthetic-a", "sdk-synthetic-z"]])
+    async def test_public_native_errors_preserve_support_context(
+        self, monkeypatch, entrypoint, native_name, public_name, ids
+    ):
+        from types import SimpleNamespace
+
+        from xbbg import _core, _engine, blp, exceptions
+        from xbbg.ext.fixed_income import ayas
+
+        native = getattr(_core, native_name)("synthetic failure")
+        native.service = "//synthetic/refdata"
+        native.operation = "SyntheticRequest"
+        native.request_id = "req-label"
+        native.bloomberg_request_id = ids[0] if len(ids) == 1 else None
+        native.bloomberg_request_ids = ids
+
+        async def fail_native(*_args, **_kwargs):
+            raise native
+
+        engine = SimpleNamespace(seat_type=fail_native)
+        monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
+        if entrypoint == "recipe":
+            monkeypatch.setattr(_core, "recipe_yas", fail_native)
+            call = ayas("SYNTHETIC Govt")
+        elif entrypoint == "delay_status":
+            monkeypatch.setattr(_core, "recipe_delay_status", fail_native)
+            call = blp.adelay_status("SYNTHETIC Equity")
+        else:
+            call = blp.aseat_type()
+
+        with pytest.raises(getattr(exceptions, public_name)) as raised:
+            await call
+        public = raised.value
+        if native_name != "BlpValidationError":
+            assert public.request_id == "req-label"
+        assert public.bloomberg_request_id == (ids[0] if len(ids) == 1 else None)
+        assert public.bloomberg_request_ids == ids
+        if native_name == "BlpTimeoutError":
+            assert public is native
 
     def test_subscription_data_loss_preserves_gap_context(self):
         from xbbg.exceptions import BlpSubscriptionDataLossError

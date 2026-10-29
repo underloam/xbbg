@@ -212,6 +212,29 @@ class TestConvertBackendPandas:
         assert "xbbg_field_exceptions" not in frame.attrs
         assert frame.attrs["xbbg_delayed"] == {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
 
+    @pytest.mark.parametrize(
+        ("metadata", "expected"),
+        [
+            (
+                {b"xbbg.bloomberg_request_id": b"sdk-synthetic-a"},
+                {"xbbg_bloomberg_request_id": "sdk-synthetic-a"},
+            ),
+            (
+                {b"xbbg.bloomberg_request_ids": b'["sdk-synthetic-a","sdk-synthetic-z"]'},
+                {"xbbg_bloomberg_request_ids": ["sdk-synthetic-a", "sdk-synthetic-z"]},
+            ),
+        ],
+    )
+    def test_pyarrow_and_pandas_conversions_keep_sdk_provenance(self, metadata, expected):
+        pa = pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+        table = pa.table({"row": [1, 2]}).replace_schema_metadata(metadata)
+        converted = convert_backend_frame(table, Backend.PYARROW)
+        assert converted.schema.metadata == metadata
+        frame = convert_backend_frame(table, Backend.PANDAS)
+        assert frame.attrs == expected
+        assert frame["row"].tolist() == [1, 2]
+
     def test_convert_pandas_falls_back_when_pyarrow_import_raises(
         self, arrow_table: Any, monkeypatch: pytest.MonkeyPatch
     ):

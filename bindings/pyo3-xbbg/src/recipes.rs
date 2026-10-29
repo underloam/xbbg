@@ -16,13 +16,23 @@ use crate::{PyEngine, native_arrow::record_batch_to_arrow_record_batch};
 
 /// Convert a RecipeError to a Python exception.
 fn recipe_err(e: xbbg_recipes::RecipeError) -> PyErr {
-    match e {
+    let (source, request_ids) = e.into_request_context();
+    let error = match source {
         xbbg_recipes::RecipeError::Engine(error) => crate::blp_async_error_to_pyerr(*error),
         xbbg_recipes::RecipeError::InvalidArgument(message) => {
             PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
         }
         other => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(other.to_string()),
+    };
+    if !request_ids.is_empty() {
+        let _ = Python::try_attach(|py| {
+            let ids: Vec<&str> = request_ids.iter().map(AsRef::as_ref).collect();
+            let value = error.value(py);
+            value.setattr("bloomberg_request_id", (ids.len() == 1).then(|| ids[0]))?;
+            value.setattr("bloomberg_request_ids", ids)
+        });
     }
+    error
 }
 
 fn recipe_request_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<RequestParams> {
@@ -830,6 +840,7 @@ mod tests {
                         cid: Some(CorrelationContext::U64(42)),
                         label: Some(label.into()),
                         request_id: Some("synthetic-request".into()),
+                        bloomberg_request_ids: Vec::new(),
                         source: None,
                     },
                 ))));
@@ -920,6 +931,54 @@ mod tests {
                     .to_string()
                     .contains("synthetic recipe failure")
             );
+        });
+    }
+
+    #[test]
+    fn contextual_recipe_errors_preserve_original_types_messages_and_sdk_ids() {
+        Python::initialize();
+        Python::attach(|py| {
+            let sources: [fn() -> RecipeError; 4] = [
+                || RecipeError::Other("synthetic recipe rejection".into()),
+                || RecipeError::InvalidArgument("synthetic recipe argument".into()),
+                || {
+                    RecipeError::from(BlpAsyncError::ConfigError {
+                        detail: "synthetic engine validation".into(),
+                    })
+                },
+                || RecipeError::from(BlpAsyncError::from(BlpError::Timeout)),
+            ];
+            for count in [1, 2] {
+                for source in sources {
+                    let plain = recipe_err(source());
+                    let expected_type = plain.value(py).get_type();
+                    let expected_message = plain.value(py).to_string();
+                    let ids = ["synthetic_a", "synthetic_z"];
+                    let error = recipe_err(source().with_bloomberg_request_ids(
+                        ids.iter().take(count).map(|id| std::sync::Arc::from(*id)),
+                    ));
+                    let value = error.value(py);
+                    assert!(value.get_type().is(&expected_type));
+                    assert_eq!(value.to_string(), expected_message);
+                    assert_eq!(
+                        value
+                            .getattr("bloomberg_request_ids")
+                            .unwrap()
+                            .extract::<Vec<String>>()
+                            .unwrap(),
+                        ids[..count]
+                    );
+                    assert_eq!(
+                        value
+                            .getattr("bloomberg_request_id")
+                            .unwrap()
+                            .extract::<Option<String>>()
+                            .unwrap()
+                            .as_deref(),
+                        (count == 1).then_some(ids[0])
+                    );
+                }
+            }
         });
     }
 }

@@ -168,6 +168,8 @@ npm run bench:subscription-replay -- --fixture tmp/xbtusd-ticks.jsonl --batch-ro
 
 ## Usage
 
+TLS `clientCredentials` and `trustMaterial` accept either two file paths or two `Buffer`/`Uint8Array` values containing DER PKCS#12 credentials and DER PKCS#7 trust material. Ordinary byte views, including nonzero-offset slices, are copied into immutable Rust-owned storage synchronously before async startup; session configuration clones share that storage. SharedArrayBuffer-backed, detached, non-Uint8, missing, and mixed path/blob inputs are rejected without displaying their contents. No temporary credential files are created.
+
 ```typescript
 import * as xbbg from '@xbbg/core';
 import { bdp, ovr } from '@xbbg/core';
@@ -271,6 +273,12 @@ if (eids.length > 0) {
 ```
 
 `eidData` belongs to the outer result container, not to individual rows. The outer result also exposes the raw schema metadata through `metadata`.
+
+## Bloomberg support RequestIds
+
+Arrow/JSON result containers expose `bloombergRequestId` for one SDK-assigned ID and `bloombergRequestIds` for all available IDs. Raw metadata uses `xbbg.bloomberg_request_id` as a plain string, or the mutually exclusive `xbbg.bloomberg_request_ids` as a sorted, deduplicated JSON array for composed results. Streams and shards retain their provenance; derived recipes union contributing data-request IDs without retaining input batches for diagnostics.
+
+Request/timeout errors expose `bloomberg_request_id` and `bloomberg_request_ids`; other recipe error kinds retain their classification while carrying available contributor IDs. These are Bloomberg's support identifiers, not the xbbg `request_id` label or SDK correlation IDs. No SDK ID means no fabricated substitute. Cached field/exchange introspection is excluded, and Polars frames have no stable metadata side channel.
 
 ## Delayed data
 
