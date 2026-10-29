@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-10-29
+
 ### Changed
 
 - **The Python LangGraph adapter requires xbbg 1.6.0 or newer.** `py-xbbg-langgraph` now declares `xbbg>=1.6.0,<2`, the first release with the `adelay_status()` function and `on_delayed` request parameter behind its `xbbg_delay_status` tool and `on_delayed` arguments; xbbg 1.5 has neither.
@@ -1753,7 +1755,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.6.0...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.6.1...HEAD
+[1.6.1]: https://github.com/underloam/xbbg/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/underloam/xbbg/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/underloam/xbbg/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/underloam/xbbg/compare/v1.4.12...v1.5.0

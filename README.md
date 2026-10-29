@@ -20,7 +20,7 @@
 ---
 
 <!-- xbbg:latest-release-start -->
-Latest release: xbbg==1.6.0 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v1.6.0))
+Latest release: xbbg==1.6.1 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v1.6.1))
 <!-- xbbg:latest-release-end -->
 
 > This `main` branch is the Rust-powered v1 release. For the legacy pure-Python line, use [`release/0.x`](https://github.com/underloam/xbbg/tree/release/0.x).
