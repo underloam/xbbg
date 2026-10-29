@@ -1511,17 +1511,8 @@ mod tests {
     }
 
     fn synthetic_history_failure(label: &str, id: &str) -> RecipeError {
-        RecipeError::from(xbbg_async::BlpAsyncError::from(
-            xbbg_core::BlpError::RequestFailure {
-                service: "//synthetic/refdata".into(),
-                operation: Some("SyntheticHistoricalDataRequest".into()),
-                cid: None,
-                label: Some(label.into()),
-                request_id: Some(label.into()),
-                bloomberg_request_ids: vec![Arc::from(id), Arc::from("synthetic_shared")],
-                source: None,
-            },
-        ))
+        RecipeError::Other(label.into())
+            .with_bloomberg_request_ids([Arc::from(id), Arc::from("synthetic_shared")])
     }
 
     #[test]
@@ -1555,19 +1546,11 @@ mod tests {
                 "synthetic_validation",
             ]
         );
-        let RecipeError::Engine(engine) = error else {
-            panic!("request failures must retain their engine variant");
-        };
-        let xbbg_async::BlpAsyncError::Blp(xbbg_core::BlpError::RequestFailure {
-            request_id,
-            label,
-            ..
-        }) = *engine
-        else {
-            panic!("request failure kind must survive");
-        };
-        assert_eq!(request_id.as_deref(), Some("synthetic_px_label"));
-        assert_eq!(label.as_deref(), Some("synthetic_px_label"));
+        let (source, _) = error.into_request_context();
+        assert!(matches!(
+            source,
+            RecipeError::Other(label) if label == "synthetic_px_label"
+        ));
     }
 
     #[test]
@@ -1588,7 +1571,6 @@ mod tests {
             };
             let error = ordered_history_results(px_result, fund_result).unwrap_err();
             assert_eq!(error.to_string(), message);
-            assert!(matches!(&error, RecipeError::Engine(_)));
             assert_eq!(
                 error
                     .bloomberg_request_ids()
@@ -1597,6 +1579,8 @@ mod tests {
                     .collect::<Vec<_>>(),
                 ["synthetic_failure", "synthetic_shared", "synthetic_success"]
             );
+            let (source, _) = error.into_request_context();
+            assert!(matches!(source, RecipeError::Other(_)));
         }
     }
 

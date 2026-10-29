@@ -15,7 +15,6 @@ include = ["src/**/*.rs", "Cargo.toml", "README.md"]
 
 [dependencies]
 xbbg-async = { workspace = true }
-xbbg_core = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-log = { workspace = true }
 arrow-array = { workspace = true, features = ["chrono-tz"] }

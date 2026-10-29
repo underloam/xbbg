@@ -49,14 +49,8 @@ impl RecipeError {
             return source;
         }
         if let Self::Engine(error) = &mut source
-            && let xbbg_async::BlpAsyncError::Blp(core) = error.as_mut()
-            && matches!(
-                core,
-                xbbg_core::BlpError::RequestFailure { .. }
-                    | xbbg_core::BlpError::RequestTimeout { .. }
-            )
+            && error.try_extend_bloomberg_request_ids(request_ids.iter().cloned())
         {
-            core.extend_bloomberg_request_ids(request_ids.iter().cloned());
             return source;
         }
         Self::RequestContext {
@@ -116,7 +110,6 @@ pub type Result<T> = std::result::Result<T, RecipeError>;
 mod tests {
     use super::*;
     use xbbg_async::BlpAsyncError;
-    use xbbg_core::BlpError;
 
     #[test]
     fn recipe_context_merges_without_nesting_or_changing_display() {
@@ -141,44 +134,8 @@ mod tests {
     }
 
     #[test]
-    fn sent_engine_failures_merge_ids_in_place() {
-        for core in [
-            BlpError::RequestFailure {
-                service: "//blp/refdata".into(),
-                operation: Some("HistoricalDataRequest".into()),
-                cid: None,
-                label: Some("category=LIMIT".into()),
-                request_id: Some("synthetic_label".into()),
-                bloomberg_request_ids: vec![Arc::from("synthetic_request")],
-                source: None,
-            },
-            BlpError::RequestTimeout {
-                request_id: Some("synthetic_label".into()),
-                bloomberg_request_ids: vec![Arc::from("synthetic_request")],
-            },
-        ] {
-            let error = RecipeError::from(BlpAsyncError::from(core));
-            let message = error.to_string();
-            let error = error.with_bloomberg_request_ids([
-                Arc::from("synthetic_lookup"),
-                Arc::from("synthetic_request"),
-            ]);
-            assert_eq!(error.to_string(), message);
-            assert!(matches!(&error, RecipeError::Engine(_)));
-            assert_eq!(
-                error
-                    .bloomberg_request_ids()
-                    .iter()
-                    .map(AsRef::as_ref)
-                    .collect::<Vec<_>>(),
-                ["synthetic_lookup", "synthetic_request"]
-            );
-        }
-    }
-
-    #[test]
-    fn lifecycle_timeout_keeps_original_variant_with_prior_request_context() {
-        let source = RecipeError::from(BlpAsyncError::from(BlpError::Timeout));
+    fn non_request_engine_failure_keeps_its_original_kind() {
+        let source = RecipeError::from(BlpAsyncError::ChannelClosed);
         let message = source.to_string();
         let error = source.with_bloomberg_request_ids([Arc::from("synthetic_completed_request")]);
         assert_eq!(error.to_string(), message);
@@ -186,7 +143,7 @@ mod tests {
         let RecipeError::Engine(engine) = source else {
             panic!("the engine classification must survive");
         };
-        assert!(matches!(*engine, BlpAsyncError::Blp(BlpError::Timeout)));
+        assert!(matches!(*engine, BlpAsyncError::ChannelClosed));
         assert_eq!(
             request_ids.iter().map(AsRef::as_ref).collect::<Vec<_>>(),
             ["synthetic_completed_request"]
