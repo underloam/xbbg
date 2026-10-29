@@ -12,6 +12,7 @@ use crate::request_builder::RequestBuilder;
 use crate::schema::SchemaCache;
 use crate::services::{ExtractorType, Format, Operation, Service};
 
+use super::state::typed_builder::ArrowType;
 use super::state::{LongMode, OutputFormat};
 use super::{OverridePairs, RequestParams, SecurityOverridePairs};
 
@@ -192,12 +193,14 @@ pub(crate) struct PreparedRequest {
     params: RequestParams,
     shape: PlannedRequestShape,
     operation: Operation,
+    field_types: HashMap<String, ArrowType>,
     raw: bool,
 }
 
 #[derive(Clone, Debug)]
 pub(crate) struct PreparedRequestBuilder {
     params: RequestParams,
+    field_types: HashMap<String, ArrowType>,
     operation: Operation,
     raw: bool,
 }
@@ -210,10 +213,11 @@ impl PreparedRequestBuilder {
         normalize_request_params(&mut params);
         let (operation, raw) = effective_operation(&params)?;
         apply_request_defaults_for_operation(&mut params, &operation);
-        validate_request_params_with_operation(&params, &operation, raw)?;
+        let field_types = validate_request_params_with_operation(&params, &operation, raw)?;
         route_request_params(&mut params, schema_cache, &operation)?;
         Ok(Self {
             params,
+            field_types,
             operation,
             raw,
         })
@@ -247,8 +251,13 @@ impl PreparedRequestBuilder {
             .push(("clientContext.appName".to_string(), app_name.to_owned()));
     }
 
-    pub(crate) fn set_field_types(&mut self, field_types: HashMap<String, String>) {
+    pub(crate) fn set_field_types(
+        &mut self,
+        field_types: HashMap<String, String>,
+    ) -> Result<(), BlpAsyncError> {
+        self.field_types = parse_field_types(Some(&field_types))?;
         self.params.field_types = Some(field_types);
+        Ok(())
     }
 
     pub(crate) fn set_intraday_datetimes(&mut self, start_datetime: String, end_datetime: String) {
@@ -261,6 +270,7 @@ impl PreparedRequestBuilder {
         Ok(PreparedRequest {
             params: self.params,
             shape,
+            field_types: self.field_types,
             operation: self.operation,
             raw: self.raw,
         })
@@ -281,6 +291,10 @@ impl PreparedRequest {
 
     pub(crate) fn params(&self) -> &RequestParams {
         &self.params
+    }
+
+    pub(crate) fn field_types(&self) -> &HashMap<String, ArrowType> {
+        &self.field_types
     }
     /// Construct a shard without cloning the original full security vector.
     ///
@@ -328,6 +342,7 @@ impl PreparedRequest {
                 format: params.format.clone(),
             },
             shape: self.shape,
+            field_types: self.field_types.clone(),
             operation: self.operation.clone(),
             raw: self.raw,
         }
@@ -355,6 +370,17 @@ impl PreparedRequest {
     pub(crate) fn is_excel_get_grid_request(&self) -> bool {
         matches!(self.operation(), Operation::ExcelGetGrid)
     }
+}
+
+pub(super) fn parse_field_types(
+    field_types: Option<&HashMap<String, String>>,
+) -> Result<HashMap<String, ArrowType>, BlpAsyncError> {
+    field_types
+        .into_iter()
+        .flatten()
+        .map(|(field, name)| ArrowType::parse(name).map(|kind| (field.clone(), kind)))
+        .collect::<Result<_, _>>()
+        .map_err(Into::into)
 }
 
 pub(crate) fn apply_request_defaults(params: &mut RequestParams) {
@@ -388,7 +414,7 @@ fn validate_request_params_with_operation(
     params: &RequestParams,
     operation: &Operation,
     raw: bool,
-) -> Result<(), BlpAsyncError> {
+) -> Result<HashMap<String, ArrowType>, BlpAsyncError> {
     if params.service.is_empty() {
         return Err(BlpAsyncError::ConfigError {
             detail: "service is required".to_string(),
@@ -400,9 +426,10 @@ fn validate_request_params_with_operation(
     validate_return_eids(params, operation)?;
     validate_on_delayed(params, operation, raw)?;
     PlannedRequestShape::from_params(operation, raw, params)?;
+    let field_types = parse_field_types(params.field_types.as_ref())?;
 
     if raw {
-        return Ok(());
+        return Ok(field_types);
     }
 
     match operation {
@@ -423,7 +450,7 @@ fn validate_request_params_with_operation(
         | Operation::RawRequest
         | Operation::Custom(_) => {}
     }
-    Ok(())
+    Ok(field_types)
 }
 
 /// `returnEids` is supported by Bloomberg's reference, historical, intraday
@@ -1117,6 +1144,78 @@ mod tests {
         assert_eq!(params.field_types.as_ref(), Some(&field_types));
         assert_eq!(params.format.as_deref(), Some("long_typed"));
         assert_eq!(params.validate_fields, Some(false));
+    }
+
+    #[test]
+    fn prepares_supported_field_type_aliases_without_silent_fallbacks() {
+        for (names, expected) in [
+            (
+                &["float64", "float", "double", "f64"][..],
+                ArrowType::Float64,
+            ),
+            (&["int64", "int", "integer", "i64"][..], ArrowType::Int64),
+            (&["int32", "i32"][..], ArrowType::Int32),
+            (&["string"][..], ArrowType::String),
+            (&["bool", "boolean"][..], ArrowType::Bool),
+            (&["date32", "date"][..], ArrowType::Date32),
+            (
+                &["timestamp", "datetime", "timestamp_us"][..],
+                ArrowType::TimestampMicros,
+            ),
+            (
+                &["time64", "time", "time64_us"][..],
+                ArrowType::Time64Micros,
+            ),
+        ] {
+            for name in names {
+                let params = RequestParams {
+                    field_types: Some(HashMap::from([(
+                        "SYNTHETIC_FIELD".to_string(),
+                        name.to_ascii_uppercase(),
+                    )])),
+                    ..refdata_params()
+                };
+                let prepared = PreparedRequest::prepare(params, &empty_schema()).unwrap();
+                assert_eq!(prepared.field_types()["SYNTHETIC_FIELD"], expected);
+                let shard = prepared.for_security_shard(vec!["SYNTHETIC".into()], None);
+                assert_eq!(shard.field_types(), prepared.field_types());
+            }
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_manual_field_types_during_request_preparation() {
+        for invalid in ["decimal_nonsense", "", "utf8", "str"] {
+            let params = RequestParams {
+                field_types: Some(HashMap::from([(
+                    "SYNTHETIC_FIELD".to_string(),
+                    invalid.to_string(),
+                )])),
+                ..refdata_params()
+            };
+            assert!(matches!(
+                params.validate(),
+                Err(BlpAsyncError::Blp(
+                    xbbg_core::BlpError::InvalidArgument { .. }
+                ))
+            ));
+            assert!(matches!(
+                PreparedRequestBuilder::prepare(params, &empty_schema()),
+                Err(BlpAsyncError::Blp(
+                    xbbg_core::BlpError::InvalidArgument { .. }
+                ))
+            ));
+        }
+        let mut builder =
+            PreparedRequestBuilder::prepare(refdata_params(), &empty_schema()).unwrap();
+        assert!(
+            builder
+                .set_field_types(HashMap::from([(
+                    "SYNTHETIC_FIELD".into(),
+                    "decimal_nonsense".into(),
+                )]))
+                .is_err()
+        );
     }
 
     #[test]

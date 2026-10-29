@@ -219,14 +219,30 @@ impl IntradayBarResponse {
             };
 
             builders.ticker.append_value(&self.ticker);
-            Self::append_time_field(&bar, &self.names.time, &mut builders.time);
-            Self::append_f64_field(&bar, &self.names.open, &mut builders.open);
-            Self::append_f64_field(&bar, &self.names.high, &mut builders.high);
-            Self::append_f64_field(&bar, &self.names.low, &mut builders.low);
-            Self::append_f64_field(&bar, &self.names.close, &mut builders.close);
-            Self::append_f64_field(&bar, &self.names.volume, &mut builders.volume);
-            Self::append_i32_field(&bar, &self.names.num_events, &mut builders.num_events);
-            Self::append_f64_field(&bar, &self.names.value, &mut builders.value);
+            if Self::append_time_field(&bar, &self.names.time, &mut builders.time) {
+                self.response_meta.record_type_miss("time");
+            }
+            if Self::append_f64_field(&bar, &self.names.open, &mut builders.open) {
+                self.response_meta.record_type_miss("open");
+            }
+            if Self::append_f64_field(&bar, &self.names.high, &mut builders.high) {
+                self.response_meta.record_type_miss("high");
+            }
+            if Self::append_f64_field(&bar, &self.names.low, &mut builders.low) {
+                self.response_meta.record_type_miss("low");
+            }
+            if Self::append_f64_field(&bar, &self.names.close, &mut builders.close) {
+                self.response_meta.record_type_miss("close");
+            }
+            if Self::append_f64_field(&bar, &self.names.volume, &mut builders.volume) {
+                self.response_meta.record_type_miss("volume");
+            }
+            if Self::append_i32_field(&bar, &self.names.num_events, &mut builders.num_events) {
+                self.response_meta.record_type_miss("numEvents");
+            }
+            if Self::append_f64_field(&bar, &self.names.value, &mut builders.value) {
+                self.response_meta.record_type_miss("value");
+            }
         }
         true
     }
@@ -265,49 +281,46 @@ impl IntradayBarResponse {
         element: &Element<'_>,
         field_name: &Name,
         builder: &mut TimestampMicrosecondBuilder,
-    ) {
-        if let Some(field_elem) = element.get(field_name) {
-            if let Some(value) = field_elem.get_timestamp_us(0) {
-                builder.append_value(value);
-            } else {
-                builder.append_null();
-            }
-        } else {
-            builder.append_null();
-        }
+    ) -> bool {
+        let field = element.get(field_name).filter(|field| !field.is_null());
+        let value = field.as_ref().and_then(|field| field.get_timestamp_us(0));
+        builder.append_option(value);
+        value.is_none() && field.is_some()
     }
 
-    fn append_f64_field(element: &Element<'_>, field_name: &Name, builder: &mut Float64Builder) {
-        if let Some(field_elem) = element.get(field_name) {
-            if let Some(value) = field_elem.get_value(0).and_then(|value| value.as_f64()) {
-                builder.append_value(value);
-            } else {
-                builder.append_null();
-            }
-        } else {
-            builder.append_null();
-        }
+    fn append_f64_field(
+        element: &Element<'_>,
+        field_name: &Name,
+        builder: &mut Float64Builder,
+    ) -> bool {
+        let value = element.get(field_name).and_then(|field| field.get_value(0));
+        let converted = value.as_ref().and_then(Value::as_f64);
+        builder.append_option(converted);
+        converted.is_none() && value.is_some_and(|value| !value.is_null())
     }
 
-    fn append_i32_field(element: &Element<'_>, field_name: &Name, builder: &mut Int32Builder) {
-        if let Some(field_elem) = element.get(field_name) {
-            match field_elem.get_value(0) {
-                Some(Value::Int32(value)) => builder.append_value(value),
-                Some(Value::Int64(value)) => builder.append_value(value as i32),
-                Some(Value::Byte(value)) => builder.append_value(value as i32),
-                Some(Value::Bool(value)) => builder.append_value(if value { 1 } else { 0 }),
-                Some(Value::Float64(value))
-                    if value.is_finite()
-                        && value.fract() == 0.0
-                        && value >= i32::MIN as f64
-                        && value <= i32::MAX as f64 =>
-                {
-                    builder.append_value(value as i32);
-                }
-                _ => builder.append_null(),
+    fn append_i32_field(
+        element: &Element<'_>,
+        field_name: &Name,
+        builder: &mut Int32Builder,
+    ) -> bool {
+        let value = element.get(field_name).and_then(|field| field.get_value(0));
+        let converted = match value.as_ref() {
+            Some(Value::Int32(value)) => Some(*value),
+            Some(Value::Int64(value)) => i32::try_from(*value).ok(),
+            Some(Value::Byte(value)) => Some(i32::from(*value)),
+            Some(Value::Bool(value)) => Some(i32::from(*value)),
+            Some(Value::Float64(value))
+                if value.is_finite()
+                    && value.fract() == 0.0
+                    && *value >= i32::MIN as f64
+                    && *value <= i32::MAX as f64 =>
+            {
+                Some(*value as i32)
             }
-        } else {
-            builder.append_null();
-        }
+            _ => None,
+        };
+        builder.append_option(converted);
+        converted.is_none() && value.is_some_and(|value| !value.is_null())
     }
 }

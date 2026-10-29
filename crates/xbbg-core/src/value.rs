@@ -96,7 +96,7 @@ impl<'a> Value<'a> {
                 if v.is_finite()
                     && v.fract() == 0.0
                     && *v >= i64::MIN as f64
-                    && *v <= i64::MAX as f64 =>
+                    && *v < -(i64::MIN as f64) =>
             {
                 Some(*v as i64)
             }
@@ -190,7 +190,7 @@ impl OwnedValue {
                 if v.is_finite()
                     && v.fract() == 0.0
                     && *v >= i64::MIN as f64
-                    && *v <= i64::MAX as f64 =>
+                    && *v < -(i64::MIN as f64) =>
             {
                 Some(*v as i64)
             }
@@ -228,6 +228,26 @@ mod tests {
         assert_eq!(Value::String("hello").as_str(), Some("hello"));
         assert_eq!(Value::Bool(true).as_bool(), Some(true));
         assert!(Value::Null.is_null());
+    }
+
+    #[test]
+    fn floating_integer_conversion_rejects_the_rounded_i64_upper_bound() {
+        let upper = -(i64::MIN as f64);
+        let below_upper = f64::from_bits(upper.to_bits() - 1);
+        let below_lower = f64::from_bits((i64::MIN as f64).to_bits() + 1);
+        for (input, expected) in [
+            (upper, None),
+            (below_upper, Some(i64::MAX - 1023)),
+            (i64::MIN as f64, Some(i64::MIN)),
+            (below_lower, None),
+            (42.5, None),
+            (f64::INFINITY, None),
+            (f64::NEG_INFINITY, None),
+            (f64::NAN, None),
+        ] {
+            assert_eq!(Value::Float64(input).as_i64(), expected);
+            assert_eq!(OwnedValue::Float64(input).as_i64(), expected);
+        }
     }
 
     #[test]

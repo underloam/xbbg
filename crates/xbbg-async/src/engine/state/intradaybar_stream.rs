@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 
 use super::histdata_stream::ResponseStream;
 use super::intradaybar::IntradayBarResponse;
-use super::value_utils::top_level_response_error;
+use super::value_utils::{ResponseMetadata, top_level_response_error};
 use xbbg_core::{BlpError, Message};
 
 /// Streaming state for an intraday bar request (bdib).
@@ -21,6 +21,7 @@ use xbbg_core::{BlpError, Message};
 pub struct IntradayBarStreamState {
     response: IntradayBarResponse,
     stream: ResponseStream,
+    type_misses: ResponseMetadata,
 }
 
 impl IntradayBarStreamState {
@@ -29,6 +30,7 @@ impl IntradayBarStreamState {
         Self {
             response: IntradayBarResponse::new(ticker),
             stream: ResponseStream::new(stream, "IntradayBarRequest"),
+            type_misses: ResponseMetadata::default(),
         }
     }
 
@@ -42,7 +44,11 @@ impl IntradayBarStreamState {
             return;
         }
         if self.response.process_message(msg) {
-            self.stream.send(self.response.finish_batch());
+            let batch = self.response.finish_batch();
+            if let Ok(batch) = &batch {
+                self.type_misses.collect_type_misses(batch);
+            }
+            self.stream.send(batch);
         }
     }
 
@@ -54,6 +60,13 @@ impl IntradayBarStreamState {
     /// Fail the stream, preserving the terminal error even when the channel is full.
     pub fn fail(mut self, error: BlpError) {
         self.stream.send(Err(error));
+    }
+}
+
+impl Drop for IntradayBarStreamState {
+    fn drop(&mut self) {
+        // Summarize once on completion, failure, or cancellation after partial output.
+        self.type_misses.warn_type_misses();
     }
 }
 
@@ -98,6 +111,64 @@ mod tests {
             &[],
             |formatter| formatter.json(&serde_json::json!({"barData": data}).to_string()),
         )
+    }
+
+    #[test]
+    fn bar_decoders_reject_int64_values_outside_int32_and_preserve_stream_miss_counts() {
+        use crate::engine::state::METADATA_KEY_TYPE_MISSES;
+
+        let first = response(
+            EventType::PartialResponse,
+            serde_json::json!({
+                "barTickData": [
+                    {"numEvents": i64::from(i32::MAX) + 1},
+                    {"numEvents": i64::from(i32::MIN) - 1}
+                ]
+            }),
+        );
+        let last = response(
+            EventType::Response,
+            serde_json::json!({
+                "barTickData": [{"numEvents": i32::MAX}, {"numEvents": i32::MIN}, {}]
+            }),
+        );
+        let (reply, mut result) = oneshot::channel();
+        let mut accumulated =
+            IntradayBarState::new("SYNTHETIC_SECURITY".into(), "TRADE".into(), 1, reply);
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut stream = IntradayBarStreamState::new("SYNTHETIC_SECURITY".into(), sender);
+        accumulated.on_partial(&first.event().messages().next().unwrap());
+        stream.on_partial(&first.event().messages().next().unwrap());
+        accumulated.finish(&last.event().messages().next().unwrap());
+        stream.finish(&last.event().messages().next().unwrap());
+        let expected = result.try_recv().unwrap().unwrap();
+        let chunks = [
+            receiver.try_recv().unwrap().unwrap(),
+            receiver.try_recv().unwrap().unwrap(),
+        ];
+        assert!(
+            !chunks[1]
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_TYPE_MISSES)
+        );
+        let combined = arrow_select::concat::concat_batches(&chunks[0].schema(), &chunks).unwrap();
+        let combined = ResponseMetadata::union_of(&chunks).attach(combined);
+        assert_eq!(combined, expected);
+        let counts = combined
+            .column_by_name("numEvents")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int32Array>()
+            .unwrap();
+        assert_eq!(
+            counts.iter().collect::<Vec<_>>(),
+            [None, None, Some(i32::MAX), Some(i32::MIN), None,]
+        );
+        let misses: serde_json::Value =
+            serde_json::from_str(&combined.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES])
+                .unwrap();
+        assert_eq!(misses, serde_json::json!({"numEvents": 2}));
     }
 
     #[test]

@@ -77,6 +77,26 @@ def test_default_field_cache_calls_do_not_warn(monkeypatch):
     _CASE.assertEqual(recorded, [])
 
 
+@pytest.mark.parametrize("api", ["sync", "async", "cache"])
+def test_resolver_validation_failures_are_catchable_as_public_errors(monkeypatch, api):
+    from xbbg import BlpValidationError, _core, aresolve_field_types, cache_field_types, resolve_field_types
+
+    class RejectedTypesEngine(FakeEngine):
+        async def resolve_field_types(self, fields, overrides, default_type):
+            raise _core.BlpValidationError("synthetic invalid field type")
+
+    monkeypatch.setattr(engine_module, "_get_engine", lambda: RejectedTypesEngine())
+    fields = ["SYNTHETIC_FIELD"]
+    overrides = {"SYNTHETIC_FIELD": "unsupported_type"}
+    with pytest.raises(BlpValidationError):
+        if api == "sync":
+            resolve_field_types(fields, overrides)
+        elif api == "async":
+            asyncio.run(aresolve_field_types(fields, overrides))
+        else:
+            asyncio.run(cache_field_types(fields))
+
+
 def test_query_api_argument_is_rejected():
     from xbbg import FieldTypeCache
 

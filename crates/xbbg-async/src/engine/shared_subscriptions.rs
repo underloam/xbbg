@@ -1947,6 +1947,7 @@ impl SubscriptionHandle {
                 rows.iter().map(|row| row.3).collect::<Vec<_>>(),
             )),
         ];
+        let mut response_meta = super::state::ResponseMetadata::default();
         for (name, kind, _) in field_order {
             let arrow_type = arrow_kind(kind);
             schema.push(Field::new(
@@ -1967,11 +1968,14 @@ impl SubscriptionHandle {
                         })
                         .map(|value| &value.value);
                 let value = value.filter(|value| !zero_as_null || !is_numeric_zero(value));
-                builder.append_value(value.map(core_value));
+                if builder.append_value(value.map(core_value)) {
+                    response_meta.record_type_miss(name.as_ref());
+                }
             }
             arrays.push(builder.finish());
         }
         RecordBatch::try_new(Arc::new(Schema::new(schema)), arrays)
+            .map(|batch| response_meta.attach(batch))
             .map_err(|error| BlpAsyncError::Internal(error.to_string()))
     }
 

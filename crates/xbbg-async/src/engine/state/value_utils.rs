@@ -28,6 +28,9 @@ pub const METADATA_KEY_FIELD_EXCEPTIONS: &str = "xbbg.field_exceptions";
 /// made with `on_delayed`
 /// (JSON: `{"<ticker>": {"delayed": bool, "delay_minutes": int | null}}`).
 pub const METADATA_KEY_DELAYED: &str = "xbbg.delayed";
+/// Schema-metadata key carrying non-null conversion misses
+/// (JSON: `{"<field>": count}`). No values or security identifiers are recorded.
+pub const METADATA_KEY_TYPE_MISSES: &str = "xbbg.type_misses";
 
 /// Delayed-data status for one security, from `IS_DELAYED_STREAM` and
 /// `EXCHANGE_DELAY`.
@@ -140,6 +143,7 @@ pub(crate) struct ResponseMetadata {
     security_errors: BTreeMap<String, SecurityErrorMeta>,
     field_exceptions: BTreeMap<String, Vec<FieldExceptionMeta>>,
     delayed: BTreeMap<String, DelayedMeta>,
+    type_misses: BTreeMap<String, u64>,
     /// Record `fieldData` delay status (bdp requests made with `on_delayed`).
     capture_delayed: bool,
     /// Status fields xbbg appended to the wire request; their exceptions are
@@ -148,6 +152,42 @@ pub(crate) struct ResponseMetadata {
 }
 
 impl ResponseMetadata {
+    /// Count only rejected non-null inputs; allocate a field name on its first miss.
+    pub(crate) fn record_type_miss(&mut self, field: &str) {
+        if let Some(count) = self.type_misses.get_mut(field) {
+            *count += 1;
+        } else {
+            self.type_misses.insert(field.to_owned(), 1);
+        }
+    }
+
+    /// Accumulate per-batch deltas, never a cumulative count copied to every chunk.
+    pub(crate) fn collect_type_misses(&mut self, batch: &RecordBatch) {
+        if let Some(counts) = Self::parse_json::<BTreeMap<String, u64>>(
+            batch.schema_ref().metadata().get(METADATA_KEY_TYPE_MISSES),
+        ) {
+            for (field, count) in counts {
+                *self.type_misses.entry(field).or_default() += count;
+            }
+        }
+    }
+
+    /// Emit a single value-free summary at the logical request boundary.
+    pub(crate) fn warn_type_misses(&self) {
+        if !self.type_misses.is_empty() {
+            xbbg_log::warn!(
+                type_misses = ?self.type_misses,
+                "Field type conversions rejected non-null values; see xbbg.type_misses metadata"
+            );
+        }
+    }
+
+    pub(crate) fn warn_batch_type_misses(batch: &RecordBatch) {
+        let mut diagnostics = Self::default();
+        diagnostics.collect_type_misses(batch);
+        diagnostics.warn_type_misses();
+    }
+
     /// Record `IS_DELAYED_STREAM` / `EXCHANGE_DELAY` from each security's
     /// `fieldData`, dropping exceptions for the `hidden_fields` xbbg added.
     pub(crate) fn capture_delayed(&mut self, hidden_fields: Vec<&'static str>) {
@@ -293,36 +333,34 @@ impl ResponseMetadata {
             && self.security_errors.is_empty()
             && self.field_exceptions.is_empty()
             && self.delayed.is_empty()
+            && self.type_misses.is_empty()
     }
 
     /// Attach the collected diagnostics to `batch` as schema metadata.
-    /// Infallible by design: a metadata failure must never turn a good data
-    /// batch into an error, so serialization problems only log.
-    pub(crate) fn attach(self, batch: RecordBatch) -> RecordBatch {
+    /// Nonempty maps replace that key rather than adding to existing metadata:
+    /// a union already includes the first batch, whose schema concat retains.
+    /// Empty maps leave previously attached builder diagnostics intact.
+    /// Only schema metadata is mutated; arrays and row count are unchanged.
+    /// Serialization problems only log rather than invalidating the data batch.
+    pub(crate) fn attach(self, mut batch: RecordBatch) -> RecordBatch {
         if self.is_empty() {
             return batch;
         }
-        let mut metadata = batch.schema_ref().metadata().clone();
-        Self::insert_json(&mut metadata, METADATA_KEY_EID_DATA, &self.eid_data);
+        let metadata = batch.schema_metadata_mut();
+        Self::insert_json(metadata, METADATA_KEY_EID_DATA, &self.eid_data);
         Self::insert_json(
-            &mut metadata,
+            metadata,
             METADATA_KEY_SECURITY_ERRORS,
             &self.security_errors,
         );
         Self::insert_json(
-            &mut metadata,
+            metadata,
             METADATA_KEY_FIELD_EXCEPTIONS,
             &self.field_exceptions,
         );
-        Self::insert_json(&mut metadata, METADATA_KEY_DELAYED, &self.delayed);
-        let schema = Arc::new(batch.schema_ref().as_ref().clone().with_metadata(metadata));
-        match batch.clone().with_schema(schema) {
-            Ok(with_meta) => with_meta,
-            Err(err) => {
-                xbbg_log::warn!(error = %err, "failed to attach response metadata to batch");
-                batch
-            }
-        }
+        Self::insert_json(metadata, METADATA_KEY_DELAYED, &self.delayed);
+        Self::insert_json(metadata, METADATA_KEY_TYPE_MISSES, &self.type_misses);
+        batch
     }
 
     fn insert_json<T: serde::Serialize>(
@@ -351,9 +389,11 @@ impl ResponseMetadata {
     /// concatenation (which keeps only the first batch's schema) does not
     /// silently drop diagnostics from later shards. Shards partition
     /// securities, so per-ticker entries never conflict.
+    /// Conversion misses are per-batch deltas and sum across shards or chunks.
     pub(crate) fn union_of(batches: &[RecordBatch]) -> Self {
         let mut merged = Self::default();
         for batch in batches {
+            merged.collect_type_misses(batch);
             let metadata = batch.schema_ref().metadata();
             if let Some(map) =
                 Self::parse_json::<BTreeMap<String, Vec<i64>>>(metadata.get(METADATA_KEY_EID_DATA))
@@ -564,6 +604,7 @@ pub(crate) struct LongStringColumns {
     field: StringBuilder,
     value: TypedBuilder,
     row_count: usize,
+    response_meta: ResponseMetadata,
 }
 
 impl LongStringColumns {
@@ -582,6 +623,7 @@ impl LongStringColumns {
             field: StringBuilder::new(),
             value: TypedBuilder::new(value_type),
             row_count: 0,
+            response_meta: ResponseMetadata::default(),
         }
     }
 
@@ -597,7 +639,9 @@ impl LongStringColumns {
     ) {
         self.ticker.append_value(ticker);
         self.field.append_value(field_name);
-        self.append_value(value);
+        if self.value.append_value(value) {
+            self.response_meta.record_type_miss(field_name);
+        }
         self.row_count += 1;
     }
 
@@ -613,15 +657,10 @@ impl LongStringColumns {
             append_date32_value(date, date_value);
         }
         self.field.append_value(field_name);
-        self.append_value(value);
-        self.row_count += 1;
-    }
-
-    fn append_value(&mut self, value: Option<Value<'_>>) {
-        match value {
-            Some(value) => self.value.append_value(Some(value)),
-            None => self.value.append_null(),
+        if self.value.append_value(value) {
+            self.response_meta.record_type_miss(field_name);
         }
+        self.row_count += 1;
     }
 
     pub(crate) fn finish_refdata(mut self) -> Result<RecordBatch, BlpError> {
@@ -635,11 +674,11 @@ impl LongStringColumns {
             Arc::new(self.field.finish()),
             self.value.finish(),
         ];
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|e| {
-            BlpError::Internal {
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .map(|batch| self.response_meta.attach(batch))
+            .map_err(|e| BlpError::Internal {
                 detail: format!("build long ReferenceData RecordBatch: {e}"),
-            }
-        })
+            })
     }
 
     pub(crate) fn finish_histdata(mut self) -> Result<RecordBatch, BlpError> {
@@ -660,11 +699,11 @@ impl LongStringColumns {
             Arc::new(self.field.finish()),
             self.value.finish(),
         ];
-        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays).map_err(|e| {
-            BlpError::Internal {
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
+            .map(|batch| self.response_meta.attach(batch))
+            .map_err(|e| BlpError::Internal {
                 detail: format!("build long HistoricalData RecordBatch: {e}"),
-            }
-        })
+            })
     }
 }
 
@@ -672,7 +711,7 @@ fn append_date32_value(builder: &mut Date32Builder, value: Option<Value<'_>>) {
     match value {
         Some(Value::Date32(days)) => builder.append_value(days),
         Some(Value::TimestampMicros(micros)) => {
-            builder.append_value((micros / 86_400_000_000) as i32)
+            builder.append_value(micros.div_euclid(86_400_000_000) as i32)
         }
         _ => builder.append_null(),
     }
@@ -931,7 +970,7 @@ fn append_date32_value_ref(builder: &mut Date32Builder, value: Option<&Value<'_>
     match value {
         Some(Value::Date32(days)) => builder.append_value(*days),
         Some(Value::TimestampMicros(micros)) => {
-            builder.append_value((micros / 86_400_000_000) as i32)
+            builder.append_value(micros.div_euclid(86_400_000_000) as i32)
         }
         _ => builder.append_null(),
     }
@@ -941,6 +980,7 @@ struct WideFieldColumn {
     name: String,
     type_hint: Option<ArrowType>,
     builder: Option<TypedBuilder>,
+    type_misses: u64,
 }
 
 pub(crate) struct WideColumns {
@@ -980,6 +1020,7 @@ impl WideColumns {
                     name: name.clone(),
                     type_hint: field_types.get(name).copied(),
                     builder: None,
+                    type_misses: 0,
                 })
                 .collect(),
             row_count: 0,
@@ -1051,14 +1092,13 @@ impl WideColumns {
         };
 
         if let Some(builder) = column.builder.as_mut() {
-            match value {
-                Some(value) => builder.append_value(Some(value)),
-                None => builder.append_null(),
+            if builder.append_value(value) {
+                column.type_misses += 1;
             }
             return;
         }
 
-        if let Some(value) = value {
+        if let Some(value) = value.filter(|value| !value.is_null()) {
             let arrow_type = column
                 .type_hint
                 .unwrap_or_else(|| ArrowType::from_value(&value));
@@ -1069,7 +1109,9 @@ impl WideColumns {
             for _ in 0..self.row_count {
                 builder.append_null();
             }
-            builder.append_value(Some(value));
+            if builder.append_value(Some(value)) {
+                column.type_misses += 1;
+            }
             column.builder = Some(builder);
         }
     }
@@ -1126,7 +1168,13 @@ impl WideColumns {
             arrays.push(Arc::new(date.finish()));
         }
 
+        let mut diagnostics = ResponseMetadata::default();
         for column in &mut self.fields {
+            if column.type_misses > 0 {
+                diagnostics
+                    .type_misses
+                    .insert(column.name.clone(), std::mem::take(&mut column.type_misses));
+            }
             let mut empty_builder;
             let builder = if let Some(builder) = column.builder.as_mut() {
                 builder
@@ -1142,9 +1190,11 @@ impl WideColumns {
         }
         self.row_count = 0;
 
-        RecordBatch::try_new(schema, arrays).map_err(|e| BlpError::Internal {
-            detail: format!("build wide RecordBatch: {e}"),
-        })
+        RecordBatch::try_new(schema, arrays)
+            .map(|batch| diagnostics.attach(batch))
+            .map_err(|e| BlpError::Internal {
+                detail: format!("build wide RecordBatch: {e}"),
+            })
     }
 }
 
@@ -1568,7 +1618,8 @@ mod tests {
         let fields = vec!["SYNTHETIC_TIME".to_string()];
         let hint = ArrowType::parse(
             BlpFieldType::from_metadata(Some("Datetime"), Some("Time")).to_arrow_type_str(),
-        );
+        )
+        .unwrap();
         let hints = HashMap::from([("SYNTHETIC_TIME".to_string(), hint)]);
         let names = [Name::get_or_intern("SYNTHETIC_TIME")];
         for historical in [false, true] {

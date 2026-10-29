@@ -589,7 +589,7 @@ fn build_snapshot_batch(
             .or_else(|| field_types.get(&key))
             .map(String::as_str)
             .unwrap_or("string");
-        let mut arrow_type = ArrowType::parse(hint);
+        let mut arrow_type = ArrowType::parse(hint).map_err(xbbg_async::BlpAsyncError::from)?;
         if arrow_type == ArrowType::Int32 {
             arrow_type = ArrowType::Int64;
         }

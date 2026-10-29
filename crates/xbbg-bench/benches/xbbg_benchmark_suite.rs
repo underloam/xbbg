@@ -1229,6 +1229,22 @@ impl ReplayState {
     }
 }
 
+fn parse_benchmark_types(
+    field_types: Option<HashMap<String, String>>,
+) -> Option<HashMap<String, ArrowType>> {
+    field_types.map(|types| {
+        types
+            .into_iter()
+            .map(|(field, kind)| {
+                (
+                    field,
+                    ArrowType::parse(&kind).expect("benchmark field type"),
+                )
+            })
+            .collect()
+    })
+}
+
 fn make_refdata_state(
     fields: Vec<String>,
 ) -> (
@@ -1251,7 +1267,7 @@ fn make_refdata_state_with_types(
             fields,
             OutputFormat::Long,
             LongMode::String,
-            field_types,
+            parse_benchmark_types(field_types),
             false,
             tx,
         )),
@@ -1272,7 +1288,7 @@ fn make_refdata_output_wide_state(
             fields,
             OutputFormat::Wide,
             LongMode::String,
-            field_types,
+            parse_benchmark_types(field_types),
             false,
             tx,
         )),
@@ -1302,7 +1318,7 @@ fn make_histdata_state_with_types(
             fields,
             OutputFormat::Long,
             LongMode::String,
-            field_types,
+            parse_benchmark_types(field_types),
             tx,
         )),
         rx,
@@ -1322,7 +1338,7 @@ fn make_histdata_output_wide_state(
             fields,
             OutputFormat::Wide,
             LongMode::String,
-            field_types,
+            parse_benchmark_types(field_types),
             tx,
         )),
         rx,
@@ -1800,7 +1816,7 @@ impl BenchBdtickState {
     }
 
     fn append_tick(&mut self, tick: &Element<'_>) {
-        self.ticker_builder.append_str(&self.ticker);
+        assert!(!self.ticker_builder.append_str(&self.ticker));
         self.seen_fields.clear();
         self.seen_fields.resize(self.tick_fields.len(), false);
 

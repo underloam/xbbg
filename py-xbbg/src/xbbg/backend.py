@@ -499,6 +499,7 @@ _XBBG_METADATA_ATTRS = {
     "xbbg.security_errors": ("security_errors", "xbbg_security_errors"),
     "xbbg.field_exceptions": ("field_exceptions", "xbbg_field_exceptions"),
     "xbbg.delayed": ("delayed", "xbbg_delayed"),
+    "xbbg.type_misses": ("type_misses", "xbbg_type_misses"),
 }
 
 

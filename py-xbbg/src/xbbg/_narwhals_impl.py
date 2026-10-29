@@ -15,7 +15,7 @@ from typing import Any, Literal, overload
 from narwhals._utils import Implementation, Version
 
 from xbbg._arrow import ensure_arrow_table, is_arrow_record_batch, is_arrow_table, native_schema
-from xbbg.backend import Backend, _import_backend_module, _to_polars_frame
+from xbbg.backend import Backend, _attach_xbbg_metadata_attrs, _import_backend_module, _to_polars_frame
 
 
 def _arrow_table_class() -> type[Any]:
@@ -184,9 +184,10 @@ class XbbgDataFrame:
         except ImportError:
             # Slow fallback for installations without pyarrow: materializes one
             # Python dict per cell path instead of consuming the Arrow C stream.
-            return pd.DataFrame.from_records(self.native.to_pylist(), columns=self.columns)
-
-        return pa.table(self.native).to_pandas(split_blocks=True)
+            frame = pd.DataFrame.from_records(self.native.to_pylist(), columns=self.columns)
+        else:
+            frame = pa.table(self.native).to_pandas(split_blocks=True)
+        return _attach_xbbg_metadata_attrs(frame, self.native)
 
     def to_arrow(self) -> Any:
         pa = _import_backend_module(Backend.PYARROW, feature="XbbgDataFrame.to_arrow()")

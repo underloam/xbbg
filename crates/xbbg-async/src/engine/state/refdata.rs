@@ -112,16 +112,11 @@ impl RefDataState {
         fields: Vec<String>,
         format: OutputFormat,
         long_mode: LongMode,
-        field_types: Option<HashMap<String, String>>,
+        field_types: Option<HashMap<String, ArrowType>>,
         include_security_errors: bool,
         reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
     ) -> Self {
-        // Convert string types to ArrowType
-        let arrow_types: HashMap<String, ArrowType> = field_types
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(k, v)| (k, ArrowType::parse(&v)))
-            .collect();
+        let arrow_types = field_types.unwrap_or_default();
         let field_lookup_names: Vec<Name> = fields
             .iter()
             .map(|field| Name::get_or_intern(field))
@@ -493,6 +488,220 @@ mod tests {
     use xbbg_core::EventType;
     use xbbg_core::test_support::TestEvent;
 
+    fn conversion_response(
+        historical: bool,
+        event_type: EventType,
+        mut rows: Vec<serde_json::Value>,
+    ) -> TestEvent {
+        let (message_type, securities_array, rows_array) = if historical {
+            ("HistoricalDataResponse", "", "maxOccurs=\"unbounded\"")
+        } else {
+            ("ReferenceDataResponse", "maxOccurs=\"unbounded\"", "")
+        };
+        let schema = format!(
+            r#"<ServiceDefinition name="xbbg.test.conversions.{message_type}" version="1.0.0.0">
+            <service name="//xbbg/test/conversions/{message_type}" version="1.0.0.0">
+                <event name="{message_type}" eventType="ConversionResponse"/>
+            </service>
+            <schema>
+                <sequenceType name="ConversionResponse">
+                    <element name="securityData" type="ConversionSecurity" {securities_array}/>
+                </sequenceType>
+                <sequenceType name="ConversionSecurity">
+                    <element name="security" type="String"/>
+                    <element name="fieldData" type="ConversionRow" {rows_array}/>
+                </sequenceType>
+                <sequenceType name="ConversionRow">
+                    <element name="date" type="Date" minOccurs="0"/>
+                    <element name="TEXT" type="String" minOccurs="0"/>
+                    <element name="COUNT" type="Int64" minOccurs="0"/>
+                    <element name="FLOAT" type="Float64" minOccurs="0"/>
+                    <element name="EMPTY" type="String" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#
+        );
+        let data = if historical {
+            for row in &mut rows {
+                row["date"] = serde_json::json!("1970-01-02");
+            }
+            serde_json::json!({
+                "securityData": {"security": "SYNTHETIC_SECURITY", "fieldData": rows}
+            })
+        } else {
+            serde_json::json!({
+                "securityData": rows.into_iter().map(|row| serde_json::json!({
+                    "security": "SYNTHETIC_SECURITY", "fieldData": row
+                })).collect::<Vec<_>>()
+            })
+        };
+        TestEvent::with_schema(&schema, event_type, message_type, &[], |formatter| {
+            formatter.json(&data.to_string());
+        })
+    }
+
+    fn conversion_batch(historical: bool, format: &str, hints: &[(&str, &str)]) -> RecordBatch {
+        use crate::engine::RequestParams;
+        use crate::engine::request_plan::PreparedRequest;
+        use crate::schema::SchemaCache;
+        use crate::services::{Operation, Service};
+
+        let prepared = PreparedRequest::prepare(
+            RequestParams {
+                service: Service::RefData.to_string(),
+                operation: if historical {
+                    Operation::HistoricalData
+                } else {
+                    Operation::ReferenceData
+                }
+                .to_string(),
+                securities: Some(vec!["SYNTHETIC_SECURITY".into()]),
+                fields: Some(
+                    hints
+                        .iter()
+                        .map(|(field, _)| (*field).to_string())
+                        .collect(),
+                ),
+                field_types: Some(
+                    hints
+                        .iter()
+                        .map(|(field, kind)| ((*field).to_string(), (*kind).to_string()))
+                        .collect(),
+                ),
+                start_date: historical.then(|| "19700102".into()),
+                end_date: historical.then(|| "19700102".into()),
+                format: Some(format.to_string()),
+                ..Default::default()
+            },
+            &SchemaCache::new(),
+        )
+        .unwrap();
+        let first = conversion_response(
+            historical,
+            EventType::PartialResponse,
+            vec![serde_json::json!({
+                "TEXT": "synthetic incompatible text",
+                "COUNT": i64::from(i32::MAX) + 1,
+                "FLOAT": -(i64::MIN as f64),
+                "EMPTY": null
+            })],
+        );
+        let last = conversion_response(
+            historical,
+            EventType::Response,
+            vec![
+                serde_json::json!({
+                    "TEXT": "synthetic incompatible text",
+                    "COUNT": i64::from(i32::MIN) - 1,
+                    "FLOAT": i64::MIN as f64,
+                    "EMPTY": null
+                }),
+                serde_json::json!({"COUNT": i32::MAX, "FLOAT": 42.5}),
+            ],
+        );
+        let (sender, mut receiver) = oneshot::channel();
+        let fields = prepared.params().fields.clone().unwrap();
+        let hints = Some(prepared.field_types().clone());
+        let format = if format == "semi_long" {
+            OutputFormat::Wide
+        } else {
+            OutputFormat::Long
+        };
+        if historical {
+            let mut state =
+                HistDataState::with_format(fields, format, LongMode::String, hints, sender);
+            state.on_partial(&first.event().messages().next().unwrap());
+            state.finish(&last.event().messages().next().unwrap());
+        } else {
+            let mut state =
+                RefDataState::with_format(fields, format, LongMode::String, hints, false, sender);
+            state.on_partial(&first.event().messages().next().unwrap());
+            state.finish(&last.event().messages().next().unwrap());
+        }
+        receiver.try_recv().unwrap().unwrap()
+    }
+
+    #[test]
+    fn wide_decoders_keep_declared_types_and_report_exact_non_null_conversion_misses() {
+        use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+        use arrow_array::{Int32Array, Int64Array};
+
+        for historical in [false, true] {
+            let batch = conversion_batch(
+                historical,
+                "semi_long",
+                &[
+                    ("TEXT", "timestamp"),
+                    ("COUNT", "int32"),
+                    ("FLOAT", "int64"),
+                    ("EMPTY", "int64"),
+                    ("ABSENT", "date32"),
+                ],
+            );
+            assert_eq!(batch.num_rows(), 3);
+            assert_eq!(
+                batch.column_by_name("TEXT").unwrap().data_type(),
+                &DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+            );
+            assert_eq!(batch.column_by_name("TEXT").unwrap().null_count(), 3);
+            let counts = batch
+                .column_by_name("COUNT")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .unwrap();
+            assert_eq!(
+                counts.iter().collect::<Vec<_>>(),
+                [None, None, Some(i32::MAX)]
+            );
+            let integers = batch
+                .column_by_name("FLOAT")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap();
+            assert_eq!(
+                integers.iter().collect::<Vec<_>>(),
+                [None, Some(i64::MIN), None]
+            );
+            assert_eq!(batch.column_by_name("EMPTY").unwrap().null_count(), 3);
+            assert_eq!(batch.column_by_name("ABSENT").unwrap().null_count(), 3);
+            let misses: serde_json::Value =
+                serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES])
+                    .unwrap();
+            assert_eq!(
+                misses,
+                serde_json::json!({"COUNT": 2, "FLOAT": 2, "TEXT": 2})
+            );
+        }
+    }
+
+    #[test]
+    fn numeric_long_decoders_report_original_fields_and_ignore_missing_values() {
+        use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+
+        for historical in [false, true] {
+            let batch = conversion_batch(
+                historical,
+                "long",
+                &[
+                    ("TEXT", "float64"),
+                    ("EMPTY", "float64"),
+                    ("ABSENT", "float64"),
+                ],
+            );
+            assert_eq!(
+                batch.column_by_name("value").unwrap().data_type(),
+                &DataType::Float64
+            );
+            assert_eq!(batch.column_by_name("value").unwrap().null_count(), 9);
+            let misses: serde_json::Value =
+                serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES])
+                    .unwrap();
+            assert_eq!(misses, serde_json::json!({"TEXT": 2}));
+        }
+    }
+
     fn temporal_response(historical: bool) -> TestEvent {
         let (message_type, securities_array, data_array) = if historical {
             ("HistoricalDataResponse", "", "maxOccurs=\"unbounded\"")
@@ -564,9 +773,11 @@ mod tests {
             .map(|(field, ftype)| {
                 (
                     field.clone(),
-                    BlpFieldType::from_metadata(Some("Datetime"), Some(ftype))
-                        .to_arrow_type_str()
-                        .to_string(),
+                    ArrowType::parse(
+                        BlpFieldType::from_metadata(Some("Datetime"), Some(ftype))
+                            .to_arrow_type_str(),
+                    )
+                    .unwrap(),
                 )
             })
             .collect();

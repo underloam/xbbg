@@ -566,6 +566,17 @@ as_duckdb = blp.bdh("SPX Index", "PX_LAST", "2024-01-01", "2024-12-31", backend=
 
 Output shape is controlled with `format=`, including `long`, `long_typed`, `long_metadata`, and `semi_long`.
 
+`field_types` accepts `float64`, `int64`, `int32`, `string`, `bool`, `date32`, `timestamp`, and `time64`, plus their supported aliases. Unknown type names raise `BlpValidationError` before a data request is sent. Text-delivered fields remain strings when their dictionary metadata combines `Datetime` with a textual field kind; stale field-type caches are refreshed automatically.
+
+If a non-null value cannot fit the output column's type, xbbg retains the declared schema, writes a null, and emits one request-level warning containing only field names and failure counts. Missing or already-null values do not count. Counts are available as:
+
+- Native Python: `table.type_misses`.
+- PyArrow: JSON in `table.schema.metadata[b"xbbg.type_misses"]`.
+- pandas: `frame.attrs["xbbg_type_misses"]`, including direct native and Narwhals conversions.
+- Node Arrow/JSON: JSON in `result.metadata["xbbg.type_misses"]`.
+
+Counts describe source conversion attempts, not a recount of nulls after local dataframe operations. Slices and filters retain source-batch diagnostics. Concatenation sums the supplied batch maps, so combining reused views of the same response can repeat their shared diagnostics. Polars and DuckDB have no stable diagnostic-metadata side channel; use native Arrow, PyArrow, or pandas when the counts are required.
+
 - Native `ArrowTable`, `ArrowRecordBatch`, and `ArrowColumn` slices can retain their source allocations. Use `.compact()` when retaining a small result should release that backing storage: it returns an independent copy of the logical values with right-sized buffers, preserving schema, nulls, and physical batch/chunk boundaries. Native zero-column tables retain their row count.
 - Polars conversion preserves Arrow chunks rather than implicitly rechunking. The supported floor is **Polars >=0.20.4**; older supported versions use PyArrow when available or schema-aware per-batch materialization, while capsule-capable versions consume the native Arrow stream. Install `xbbg[polars]` to include the timezone data required on Windows.
 - `backend="polars_lazy"` returns a Polars `LazyFrame`; `backend="narwhals_lazy"` returns a genuine Narwhals lazy frame backed by Polars and requires Polars. Bloomberg retrieval and Arrow-to-Polars conversion have already happened: only subsequent local dataframe operations are deferred, with no Bloomberg query pushdown.

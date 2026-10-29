@@ -14,7 +14,8 @@ use tokio::sync::mpsc::error::TrySendError;
 
 use super::histdata::HistDataResponse;
 use super::refdata::{LongMode, OutputFormat};
-use super::value_utils::top_level_response_error;
+use super::typed_builder::ArrowType;
+use super::value_utils::{ResponseMetadata, top_level_response_error};
 use xbbg_core::{BlpError, Message};
 
 /// Nonblocking SDK-callback delivery with one terminal notification on overflow.
@@ -89,6 +90,7 @@ impl ResponseStream {
 pub struct HistDataStreamState {
     response: HistDataResponse,
     stream: ResponseStream,
+    type_misses: ResponseMetadata,
 }
 
 impl HistDataStreamState {
@@ -101,7 +103,7 @@ impl HistDataStreamState {
     /// Unhinted fields use their observed Bloomberg scalar types.
     pub fn with_types(
         fields: Vec<String>,
-        field_types: Option<HashMap<String, String>>,
+        field_types: Option<HashMap<String, ArrowType>>,
         stream: mpsc::Sender<Result<RecordBatch, BlpError>>,
     ) -> Self {
         Self {
@@ -112,6 +114,7 @@ impl HistDataStreamState {
                 field_types,
             ),
             stream: ResponseStream::new(stream, "HistoricalDataRequest"),
+            type_misses: ResponseMetadata::default(),
         }
     }
 
@@ -127,7 +130,11 @@ impl HistDataStreamState {
         }
         let _ = self.response.process_message(msg);
         if !self.response.is_empty() {
-            self.stream.send(self.response.finish_batch());
+            let batch = self.response.finish_batch();
+            if let Ok(batch) = &batch {
+                self.type_misses.collect_type_misses(batch);
+            }
+            self.stream.send(batch);
         }
     }
 
@@ -142,14 +149,55 @@ impl HistDataStreamState {
     }
 }
 
+impl Drop for HistDataStreamState {
+    fn drop(&mut self) {
+        // Summarize once on completion, failure, or cancellation after partial output.
+        self.type_misses.warn_type_misses();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::engine::state::{HistDataState, LongMode, OutputFormat};
     use arrow_array::{Array, Int64Array, StringArray};
+    use std::sync::{Arc, LazyLock, Mutex};
     use tokio::sync::oneshot;
     use xbbg_core::EventType;
     use xbbg_core::test_support::TestEvent;
+
+    fn capture_warnings(action: impl FnOnce(&Arc<Mutex<Vec<u8>>>)) -> String {
+        static DEFAULT_SUBSCRIBER: LazyLock<()> = LazyLock::new(|| {
+            // Parallel decoder tests may first register the warning callsite on
+            // an unobserved thread. Keep a no-output default subscriber alive so
+            // that tracing does not cache that callsite as globally disabled.
+            tracing::subscriber::set_global_default(tracing_subscriber::registry())
+                .expect("install test tracing registry");
+        });
+        LazyLock::force(&DEFAULT_SUBSCRIBER);
+        #[derive(Clone)]
+        struct Capture(Arc<Mutex<Vec<u8>>>);
+        impl std::io::Write for Capture {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let output = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::WARN)
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || Capture(Arc::clone(&output)))
+            .finish();
+        tracing::subscriber::with_default(subscriber, || action(&logs));
+        let bytes = logs.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
 
     fn response(event_type: EventType, security: serde_json::Value) -> TestEvent {
         // TestUtil materializes declared fields even when JSON omits them.
@@ -225,12 +273,222 @@ mod tests {
     }
 
     #[test]
+    fn streamed_conversion_diagnostics_are_deltas_with_one_value_free_request_warning() {
+        use crate::engine::RequestParams;
+        use crate::engine::request_plan::PreparedRequest;
+        use crate::engine::state::METADATA_KEY_TYPE_MISSES;
+        use crate::schema::SchemaCache;
+        use crate::services::{Operation, Service};
+
+        let prepared = PreparedRequest::prepare(
+            RequestParams {
+                service: Service::RefData.to_string(),
+                operation: Operation::HistoricalData.to_string(),
+                securities: Some(vec!["SYNTHETIC_SECURITY".into()]),
+                fields: Some(vec!["COUNT".into(), "TEXT".into(), "MISSING".into()]),
+                start_date: Some("19700102".into()),
+                end_date: Some("19700102".into()),
+                field_types: Some(HashMap::from([
+                    ("COUNT".into(), "int32".into()),
+                    ("TEXT".into(), "timestamp".into()),
+                    ("MISSING".into(), "int64".into()),
+                ])),
+                format: Some("semi_long".into()),
+                ..Default::default()
+            },
+            &SchemaCache::new(),
+        )
+        .unwrap();
+        let fields = prepared.params().fields.clone().unwrap();
+        let hints = Some(prepared.field_types().clone());
+        let (reply, mut result) = oneshot::channel();
+        let mut accumulated = HistDataState::with_format(
+            fields.clone(),
+            OutputFormat::Wide,
+            LongMode::String,
+            hints.clone(),
+            reply,
+        );
+        let (sender, mut receiver) = mpsc::channel(2);
+        let mut stream = HistDataStreamState::with_types(fields, hints, sender);
+        let first = response(
+            EventType::PartialResponse,
+            serde_json::json!({
+                "security": "SYNTHETIC_SECURITY",
+                "fieldData": [{
+                    "date": "1970-01-02", "COUNT": i64::from(i32::MAX) + 1,
+                    "TEXT": "synthetic_sensitive_value"
+                }]
+            }),
+        );
+        let last = response(
+            EventType::Response,
+            serde_json::json!({
+                "security": "SYNTHETIC_SECURITY",
+                "fieldData": [
+                    {"date": "1970-01-02", "COUNT": i32::MAX, "TEXT": "synthetic_sensitive_value"},
+                    {"date": "1970-01-02", "COUNT": null, "TEXT": null}
+                ]
+            }),
+        );
+        let warning = capture_warnings(|logs| {
+            accumulated.on_partial(&first.event().messages().next().unwrap());
+            stream.on_partial(&first.event().messages().next().unwrap());
+            assert!(
+                logs.lock().unwrap().is_empty(),
+                "no per-chunk conversion warning"
+            );
+            accumulated.finish(&last.event().messages().next().unwrap());
+            stream.finish(&last.event().messages().next().unwrap());
+        });
+        let expected = result.try_recv().unwrap().unwrap();
+        let chunks = [
+            receiver.try_recv().unwrap().unwrap(),
+            receiver.try_recv().unwrap().unwrap(),
+        ];
+        let misses = |batch: &RecordBatch| -> serde_json::Value {
+            serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES]).unwrap()
+        };
+        assert_eq!(
+            misses(&chunks[0]),
+            serde_json::json!({"COUNT": 1, "TEXT": 1})
+        );
+        assert_eq!(misses(&chunks[1]), serde_json::json!({"TEXT": 1}));
+        let combined = arrow_select::concat::concat_batches(&chunks[0].schema(), &chunks).unwrap();
+        let combined = ResponseMetadata::union_of(&chunks).attach(combined);
+        assert_eq!(
+            misses(&combined),
+            serde_json::json!({"COUNT": 1, "TEXT": 2})
+        );
+        assert_eq!(combined, expected);
+        assert_eq!(
+            warning.matches("Field type conversions rejected").count(),
+            1
+        );
+        assert!(warning.contains("\"COUNT\": 1"));
+        assert!(warning.contains("\"TEXT\": 2"));
+        assert!(!warning.contains("SYNTHETIC_SECURITY"));
+        assert!(!warning.contains("synthetic_sensitive_value"));
+    }
+
+    #[test]
+    fn failed_and_cancelled_streams_summarize_delivered_misses_exactly_once() {
+        use crate::engine::state::{IntradayBarStreamState, METADATA_KEY_TYPE_MISSES};
+
+        for bars in [false, true] {
+            for fail in [false, true] {
+                let (sender, mut receiver) = mpsc::channel(2);
+                let warning = capture_warnings(|logs| {
+                    let error = BlpError::Internal {
+                        detail: "synthetic terminal failure".into(),
+                    };
+                    if bars {
+                        let schema = r#"<ServiceDefinition name="xbbg.test.bar_failure" version="1.0.0.0">
+                        <service name="//xbbg/test/bar_failure" version="1.0.0.0">
+                            <event name="IntradayBarResponse" eventType="FailureBarResponse"/>
+                        </service>
+                        <schema>
+                            <sequenceType name="FailureBarResponse">
+                                <element name="barData" type="FailureBarData"/>
+                            </sequenceType>
+                            <sequenceType name="FailureBarData">
+                                <element name="barTickData" type="FailureBarRow" maxOccurs="unbounded"/>
+                            </sequenceType>
+                            <sequenceType name="FailureBarRow">
+                                <element name="numEvents" type="Int64"/>
+                            </sequenceType>
+                        </schema>
+                        </ServiceDefinition>"#;
+                        let event = TestEvent::with_schema(
+                            schema,
+                            EventType::PartialResponse,
+                            "IntradayBarResponse",
+                            &[],
+                            |formatter| {
+                                formatter.json(&serde_json::json!({
+                                "barData": {"barTickData": [{"numEvents": i64::from(i32::MAX) + 1}]}
+                            }).to_string())
+                            },
+                        );
+                        let mut stream =
+                            IntradayBarStreamState::new("SYNTHETIC_SECURITY".into(), sender);
+                        stream.on_partial(&event.event().messages().next().unwrap());
+                        assert!(logs.lock().unwrap().is_empty());
+                        if fail {
+                            stream.fail(error);
+                        } else {
+                            drop(stream);
+                        }
+                    } else {
+                        let event = response(
+                            EventType::PartialResponse,
+                            serde_json::json!({
+                                "security": "SYNTHETIC_SECURITY",
+                                "fieldData": [{
+                                    "date": "1970-01-02", "COUNT": i64::from(i32::MAX) + 1,
+                                    "TEXT": "synthetic_sensitive_value"
+                                }]
+                            }),
+                        );
+                        let mut stream = HistDataStreamState::with_types(
+                            vec!["COUNT".into(), "TEXT".into()],
+                            Some(HashMap::from([
+                                ("COUNT".into(), ArrowType::Int32),
+                                ("TEXT".into(), ArrowType::TimestampMicros),
+                            ])),
+                            sender,
+                        );
+                        stream.on_partial(&event.event().messages().next().unwrap());
+                        assert!(logs.lock().unwrap().is_empty());
+                        if fail {
+                            stream.fail(error);
+                        } else {
+                            drop(stream);
+                        }
+                    }
+                });
+                let chunk = receiver.try_recv().unwrap().unwrap();
+                let misses: serde_json::Value =
+                    serde_json::from_str(&chunk.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES])
+                        .unwrap();
+                assert_eq!(
+                    misses,
+                    if bars {
+                        serde_json::json!({"numEvents": 1})
+                    } else {
+                        serde_json::json!({"COUNT": 1, "TEXT": 1})
+                    }
+                );
+                if fail {
+                    assert!(receiver.try_recv().unwrap().is_err());
+                }
+                assert!(matches!(
+                    receiver.try_recv(),
+                    Err(mpsc::error::TryRecvError::Disconnected)
+                ));
+                assert_eq!(
+                    warning.matches("Field type conversions rejected").count(),
+                    1
+                );
+                assert!(warning.contains(if bars {
+                    "\"numEvents\": 1"
+                } else {
+                    "\"COUNT\": 1"
+                }));
+                assert!(!warning.contains("SYNTHETIC_SECURITY"));
+                assert!(!warning.contains("synthetic_sensitive_value"));
+                assert!(!warning.contains("2147483648"));
+            }
+        }
+    }
+
+    #[test]
     fn streaming_history_matches_wide_oneshot_types_and_nulls() {
         let fields = vec!["COUNT".into(), "TEXT".into(), "MISSING".into()];
         let hints = HashMap::from([
-            ("COUNT".into(), "int64".into()),
-            ("TEXT".into(), "string".into()),
-            ("MISSING".into(), "bool".into()),
+            ("COUNT".into(), ArrowType::Int64),
+            ("TEXT".into(), ArrowType::String),
+            ("MISSING".into(), ArrowType::Bool),
         ]);
         let (reply, mut result) = oneshot::channel();
         let mut oneshot = HistDataState::with_format(
@@ -289,7 +547,7 @@ mod tests {
     fn streaming_history_honors_overrides_and_retains_inferred_types_between_chunks() {
         for hints in [
             None,
-            Some(HashMap::from([("COUNT".into(), "string".into())])),
+            Some(HashMap::from([("COUNT".into(), ArrowType::String)])),
         ] {
             let fields = vec!["COUNT".into(), "TEXT".into()];
             let (reply, mut result) = oneshot::channel();
@@ -380,8 +638,8 @@ mod tests {
         );
         let fields = vec!["COUNT".into(), "TEXT".into()];
         let hints = Some(HashMap::from([
-            ("COUNT".into(), "int64".into()),
-            ("TEXT".into(), "string".into()),
+            ("COUNT".into(), ArrowType::Int64),
+            ("TEXT".into(), ArrowType::String),
         ]));
         let (reply, mut result) = oneshot::channel();
         let mut oneshot = HistDataState::with_format(

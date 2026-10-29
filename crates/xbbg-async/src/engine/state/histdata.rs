@@ -83,7 +83,7 @@ impl HistDataState {
     /// Create a new histdata state with optional field type overrides (defaults to Long format).
     pub fn with_types(
         fields: Vec<String>,
-        field_types: Option<HashMap<String, String>>,
+        field_types: Option<HashMap<String, ArrowType>>,
         reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
     ) -> Self {
         Self::with_format(
@@ -100,7 +100,7 @@ impl HistDataState {
         fields: Vec<String>,
         format: OutputFormat,
         long_mode: LongMode,
-        field_types: Option<HashMap<String, String>>,
+        field_types: Option<HashMap<String, ArrowType>>,
         reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
     ) -> Self {
         Self {
@@ -156,14 +156,9 @@ impl HistDataResponse {
         fields: Vec<String>,
         format: OutputFormat,
         long_mode: LongMode,
-        field_types: Option<HashMap<String, String>>,
+        field_types: Option<HashMap<String, ArrowType>>,
     ) -> Self {
-        // Hints override the observed Bloomberg scalar type in both delivery modes.
-        let arrow_types: HashMap<String, ArrowType> = field_types
-            .unwrap_or_default()
-            .into_iter()
-            .map(|(k, v)| (k, ArrowType::parse(&v)))
-            .collect();
+        let arrow_types = field_types.unwrap_or_default();
         let field_lookup_names: Vec<Name> = fields
             .iter()
             .map(|field| Name::get_or_intern(field))

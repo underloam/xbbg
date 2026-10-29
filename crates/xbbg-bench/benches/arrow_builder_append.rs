@@ -64,7 +64,7 @@ impl ColumnSet {
             .indices
             .get(field)
             .expect("benchmark field should have a type hint");
-        self.builders[idx].append_value(Some(value));
+        assert!(!self.builders[idx].append_value(Some(value)));
         self.present[idx] = true;
     }
 
@@ -288,7 +288,7 @@ where
 fn bench_dense_float64(rows: usize) -> usize {
     let mut builder = TypedBuilder::new(ArrowType::Float64);
     for row in 0..rows {
-        builder.append_value(Some(Value::Float64(row as f64 * 0.25)));
+        assert!(!builder.append_value(Some(Value::Float64(row as f64 * 0.25))));
     }
 
     let array = builder.finish();
@@ -302,7 +302,7 @@ fn bench_sparse_float64_null(rows: usize) -> usize {
         if row % 10 == 0 {
             builder.append_null();
         } else {
-            builder.append_value(Some(Value::Float64(row as f64 * 0.5)));
+            assert!(!builder.append_value(Some(Value::Float64(row as f64 * 0.5))));
         }
     }
 
@@ -317,7 +317,7 @@ fn bench_clustered_float64_null(rows: usize) -> usize {
         if row < rows / 2 {
             builder.append_null();
         } else {
-            builder.append_value(Some(Value::Float64(row as f64 * 0.5)));
+            assert!(!builder.append_value(Some(Value::Float64(row as f64 * 0.5))));
         }
     }
     let array = builder.finish();
@@ -329,7 +329,7 @@ fn bench_dense_string(rows: usize, values: &[String]) -> usize {
     let mut builder = TypedBuilder::new(ArrowType::String);
 
     for row in 0..rows {
-        builder.append_value(Some(Value::String(values[row % values.len()].as_str())));
+        assert!(!builder.append_value(Some(Value::String(values[row % values.len()].as_str()))));
     }
 
     let array = builder.finish();
@@ -399,7 +399,7 @@ fn bench_record_batch_finalization(rows: usize, field_names: &[String]) -> usize
     for (col, name) in field_names.iter().enumerate() {
         let mut builder = TypedBuilder::new(ArrowType::Float64);
         for row in 0..rows {
-            builder.append_value(Some(Value::Float64(row as f64 + col as f64)));
+            assert!(!builder.append_value(Some(Value::Float64(row as f64 + col as f64))));
         }
         fields.push(Field::new(name.clone(), DataType::Float64, true));
         arrays.push(builder.finish());

@@ -115,7 +115,7 @@ impl FieldInfoState {
                 continue;
             }
 
-            // apiflds uses Datetime for Date, Time and full timestamps; ftype
+            // apiflds uses Datetime for temporal and textual fields; ftype
             // disambiguates those without overriding other concrete datatypes.
             let datatype = field_info.get_by_str("datatype");
             let ftype = field_info.get_by_str("ftype");
@@ -213,7 +213,13 @@ mod tests {
                 {"fieldInfo":{"mnemonic":"SYNTHETIC_STAMP","datatype":"Datetime","ftype":"Datetime"}},
                 {"fieldInfo":{"mnemonic":"SYNTHETIC_MIXED","datatype":"Datetime","ftype":"DateOrTime"}},
                 {"fieldInfo":{"mnemonic":"SYNTHETIC_PRICE","datatype":"Double","ftype":"Price"}},
-                {"fieldInfo":{"mnemonic":"SYNTHETIC_FALLBACK","ftype":"Time"}}
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_FALLBACK","ftype":"Time"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_CHARACTER","datatype":"Datetime","ftype":"Character"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_STRING","datatype":"Datetime","ftype":"String"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_CHARACTER_FALLBACK","ftype":"Character"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_STRING_FALLBACK","ftype":"String"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_CONCRETE_NUMBER","datatype":"Double","ftype":"Character"}},
+                {"fieldInfo":{"mnemonic":"SYNTHETIC_CONCRETE_STRING","datatype":"String","ftype":"Datetime"}}
             ]}"#);
             },
         );
@@ -234,23 +240,42 @@ mod tests {
                 Some("timestamp"),
                 Some("string"),
                 Some("float64"),
-                Some("time64")
+                Some("time64"),
+                Some("string"),
+                Some("string"),
+                Some("string"),
+                Some("string"),
+                Some("float64"),
+                Some("string")
             ]
         );
         let dir = tempfile::tempdir().unwrap();
-        let resolver = FieldTypeResolver::with_cache_path(dir.path().join("field_cache.json"));
+        let path = dir.path().join("field_cache.json");
+        let resolver = FieldTypeResolver::with_cache_path(path.clone());
         resolver.insert_from_response(&batch);
-        assert_eq!(
-            resolver.get_arrow_type("SYNTHETIC_TIME").as_deref(),
-            Some("time64")
-        );
-        assert_eq!(
-            resolver.get_arrow_type("SYNTHETIC_DATE").as_deref(),
-            Some("date32")
-        );
-        assert_eq!(
-            resolver.get_arrow_type("SYNTHETIC_STAMP").as_deref(),
-            Some("timestamp")
-        );
+        let fields = batch
+            .column_by_name("field")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            assert_eq!(
+                resolver.get_arrow_type(fields.value(i)).as_deref(),
+                Some(types.value(i)),
+                "in-memory metadata type for {}",
+                fields.value(i)
+            );
+        }
+        resolver.save_to_disk().unwrap();
+        let reloaded = FieldTypeResolver::with_cache_path(path);
+        for i in 0..batch.num_rows() {
+            assert_eq!(
+                reloaded.get_arrow_type(fields.value(i)).as_deref(),
+                Some(types.value(i)),
+                "persisted metadata type for {}",
+                fields.value(i)
+            );
+        }
     }
 }

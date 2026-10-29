@@ -1,6 +1,6 @@
 //! Arrow table carrier data and pure table operations.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -15,6 +15,8 @@ use arrow_select::take::take_record_batch;
 use crate::column::{ColumnData, compact_array};
 use crate::error::{ArrowCoreError, Result};
 use crate::scalar::{CellValue, InferredKind, build_array_for_kind, cell_matches, infer_kind};
+
+const TYPE_MISSES_METADATA_KEY: &str = "xbbg.type_misses";
 
 /// Sort direction for Arrow table sorting.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,9 +54,9 @@ pub struct TableData {
 }
 
 impl TableData {
-    /// Create a table from record batches that all share one schema.
+    /// Create a table from compatible batches, summing conversion-miss diagnostics.
     pub fn try_new(batches: Vec<RecordBatch>) -> Result<Self> {
-        let schema = table_schema(&batches);
+        let schema = table_schema(&batches)?;
         for batch in &batches {
             ensure_compatible_schema(&schema, batch)?;
         }
@@ -83,7 +85,7 @@ impl TableData {
         let mut expected_schema: Option<SchemaRef> = None;
         for table in tables {
             if let Some(schema) = &expected_schema {
-                if table.schema != *schema {
+                if !compatible_schema(schema, &table.schema) {
                     return Err(ArrowCoreError::IncompatibleTableSchemas);
                 }
             } else {
@@ -463,15 +465,57 @@ fn interleave_record_batches(
     RecordBatch::try_new_with_options(schema, columns, &options).map_err(Into::into)
 }
 
-fn table_schema(batches: &[RecordBatch]) -> SchemaRef {
-    batches
+fn table_schema(batches: &[RecordBatch]) -> Result<SchemaRef> {
+    let schema = batches
         .first()
         .map(|batch| batch.schema())
-        .unwrap_or_else(|| Arc::new(Schema::empty()))
+        .unwrap_or_else(|| Arc::new(Schema::empty()));
+    let mut misses = BTreeMap::<String, u64>::new();
+    let mut has_misses = false;
+    for batch in batches {
+        let Some(raw) = batch.schema_ref().metadata().get(TYPE_MISSES_METADATA_KEY) else {
+            continue;
+        };
+        has_misses = true;
+        let counts: BTreeMap<String, u64> = serde_json::from_str(raw).map_err(|_| {
+            arrow_schema::ArrowError::ParseError("invalid conversion-miss metadata".into())
+        })?;
+        for (field, count) in counts {
+            let total = misses.entry(field).or_default();
+            *total = total.checked_add(count).ok_or_else(|| {
+                arrow_schema::ArrowError::ComputeError("conversion-miss count overflow".into())
+            })?;
+        }
+    }
+    if !has_misses {
+        return Ok(schema);
+    }
+    let mut metadata = schema.metadata().clone();
+    metadata.insert(
+        TYPE_MISSES_METADATA_KEY.into(),
+        serde_json::to_string(&misses).map_err(|_| {
+            arrow_schema::ArrowError::ParseError("cannot encode conversion-miss metadata".into())
+        })?,
+    );
+    Ok(Arc::new(schema.as_ref().clone().with_metadata(metadata)))
+}
+
+fn compatible_schema(expected: &Schema, actual: &Schema) -> bool {
+    expected.fields() == actual.fields()
+        && expected
+            .metadata()
+            .iter()
+            .filter(|(key, _)| key.as_str() != TYPE_MISSES_METADATA_KEY)
+            .all(|(key, value)| actual.metadata().get(key) == Some(value))
+        && actual
+            .metadata()
+            .keys()
+            .filter(|key| key.as_str() != TYPE_MISSES_METADATA_KEY)
+            .all(|key| expected.metadata().contains_key(key))
 }
 
 fn ensure_compatible_schema(expected: &SchemaRef, batch: &RecordBatch) -> Result<()> {
-    if batch.schema_ref() != expected {
+    if !compatible_schema(expected, batch.schema_ref()) {
         return Err(ArrowCoreError::IncompatibleSchemas);
     }
     Ok(())
@@ -549,6 +593,73 @@ mod tests {
     use arrow_array::{DictionaryArray, Float64Array, Int64Array, RecordBatch, StringArray};
 
     use super::*;
+
+    fn diagnostic_batch(count: Option<u64>) -> RecordBatch {
+        let mut metadata = HashMap::from([("source".into(), "synthetic".into())]);
+        if let Some(count) = count {
+            metadata.insert(
+                TYPE_MISSES_METADATA_KEY.into(),
+                serde_json::json!({"SYNTHETIC_FIELD": count}).to_string(),
+            );
+        }
+        RecordBatch::try_new(
+            Arc::new(
+                Schema::new(vec![Field::new("SYNTHETIC_FIELD", DataType::Int64, true)])
+                    .with_metadata(metadata),
+            ),
+            vec![Arc::new(Int64Array::from(vec![None, Some(7)]))],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn composition_sums_batch_misses_without_recounting_nested_table_totals() {
+        let first =
+            TableData::try_new(vec![diagnostic_batch(Some(1)), diagnostic_batch(Some(2))]).unwrap();
+        let last =
+            TableData::try_new(vec![diagnostic_batch(None), diagnostic_batch(Some(1))]).unwrap();
+        let combined = TableData::concat_tables(&[first.clone(), last]).unwrap();
+        assert_eq!(combined.num_rows(), 8);
+        let counts: serde_json::Value =
+            serde_json::from_str(&combined.schema.metadata()[TYPE_MISSES_METADATA_KEY]).unwrap();
+        assert_eq!(counts, serde_json::json!({"SYNTHETIC_FIELD": 4}));
+        let nested = TableData::concat_tables(&[combined, first]).unwrap();
+        let counts: serde_json::Value =
+            serde_json::from_str(&nested.schema.metadata()[TYPE_MISSES_METADATA_KEY]).unwrap();
+        assert_eq!(counts, serde_json::json!({"SYNTHETIC_FIELD": 7}));
+        assert_eq!(
+            nested.batches[0].schema_ref().metadata()[TYPE_MISSES_METADATA_KEY],
+            r#"{"SYNTHETIC_FIELD":1}"#
+        );
+        assert_eq!(nested.schema.metadata()["source"], "synthetic");
+        let mut incompatible = diagnostic_batch(Some(1));
+        incompatible
+            .schema_metadata_mut()
+            .insert("source".into(), "different".into());
+        assert!(TableData::try_new(vec![diagnostic_batch(Some(1)), incompatible]).is_err());
+    }
+
+    #[test]
+    fn composition_rejects_invalid_or_overflowing_conversion_counts() {
+        for raw in [
+            "not JSON",
+            r#"{"SYNTHETIC_FIELD":-1}"#,
+            r#"{"SYNTHETIC_FIELD":"1"}"#,
+        ] {
+            let mut batch = diagnostic_batch(None);
+            batch
+                .schema_metadata_mut()
+                .insert(TYPE_MISSES_METADATA_KEY.into(), raw.into());
+            assert!(TableData::try_new(vec![batch]).is_err());
+        }
+        assert!(
+            TableData::try_new(vec![
+                diagnostic_batch(Some(u64::MAX)),
+                diagnostic_batch(Some(1)),
+            ])
+            .is_err()
+        );
+    }
 
     fn sample_table() -> TableData {
         let schema = Arc::new(Schema::new(vec![

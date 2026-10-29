@@ -205,3 +205,83 @@ impl BulkDataState {
         idx
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+    use super::*;
+    use arrow_array::Int64Array;
+    use xbbg_core::EventType;
+    use xbbg_core::test_support::TestEvent;
+
+    fn response(datatype: &str, event_type: EventType, rows: serde_json::Value) -> TestEvent {
+        let schema = format!(
+            r#"<ServiceDefinition name="xbbg.test.bulk.{datatype}" version="1.0.0.0">
+            <service name="//xbbg/test/bulk/{datatype}" version="1.0.0.0">
+                <event name="ReferenceDataResponse" eventType="BulkResponse{datatype}"/>
+            </service>
+            <schema>
+                <sequenceType name="BulkResponse{datatype}">
+                    <element name="securityData" type="BulkSecurity{datatype}" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="BulkSecurity{datatype}">
+                    <element name="security" type="String"/>
+                    <element name="fieldData" type="BulkFields{datatype}"/>
+                </sequenceType>
+                <sequenceType name="BulkFields{datatype}">
+                    <element name="BULK" type="BulkRow{datatype}" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="BulkRow{datatype}">
+                    <element name="VALUE" type="{datatype}" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#
+        );
+        TestEvent::with_schema(
+            &schema,
+            event_type,
+            "ReferenceDataResponse",
+            &[],
+            |formatter| {
+                formatter.json(
+                    &serde_json::json!({"securityData": [{
+                        "security": "SYNTHETIC_SECURITY", "fieldData": {"BULK": rows}
+                    }]})
+                    .to_string(),
+                );
+            },
+        )
+    }
+
+    #[test]
+    fn bulk_column_type_changes_report_non_null_losses_without_counting_null_rows() {
+        let first = response(
+            "Int64",
+            EventType::PartialResponse,
+            serde_json::json!([{"VALUE": 7}, {"VALUE": null}]),
+        );
+        let last = response(
+            "String",
+            EventType::Response,
+            serde_json::json!([{"VALUE": "synthetic incompatible text"}, {}]),
+        );
+        let (reply, mut result) = oneshot::channel();
+        let mut state = BulkDataState::new("BULK".into(), reply);
+        state.on_partial(&first.event().messages().next().unwrap());
+        state.finish(&last.event().messages().next().unwrap());
+        let batch = result.try_recv().unwrap().unwrap();
+        let values = batch
+            .column_by_name("VALUE")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(
+            values.iter().collect::<Vec<_>>(),
+            [Some(7), None, None, None]
+        );
+        let misses: serde_json::Value =
+            serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES]).unwrap();
+        assert_eq!(misses, serde_json::json!({"VALUE": 1}));
+    }
+}

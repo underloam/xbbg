@@ -64,6 +64,7 @@ impl BlpFieldType {
     }
 
     /// Resolve apiflds metadata, whose generic Datetime datatype needs the ftype.
+    /// Textual ftypes remain strings even when the generic datatype is Datetime.
     pub fn from_metadata(datatype: Option<&str>, ftype: Option<&str>) -> Self {
         let datatype = datatype.map(str::trim).filter(|value| !value.is_empty());
         if let Some(datatype) = datatype.filter(|value| !value.eq_ignore_ascii_case("Datetime")) {
@@ -73,6 +74,8 @@ impl BlpFieldType {
             Self::Date => Self::Date,
             Self::Time => Self::Time,
             Self::DateOrTime => Self::DateOrTime,
+            Self::Character => Self::Character,
+            Self::String => Self::String,
             _ => Self::Datetime,
         }
     }
@@ -132,11 +135,12 @@ pub struct FieldInfo {
 
 const DEFAULT_MAX_FIELD_CACHE_ENTRIES: usize = 65_536;
 const MAX_FIELD_CACHE_FILE_BYTES: u64 = 64 * 1024 * 1024;
-// Bump when metadata interpretation changes. Legacy unversioned snapshots can
-// contain Datetime -> string / Time -> timestamp mappings; any non-current
-// entry discards the whole snapshot. The next metadata query atomically saves
-// a current-version snapshot at the same configured path.
-const FIELD_CACHE_SCHEMA_VERSION: u32 = 2;
+// Bump when metadata interpretation changes. Earlier snapshots can contain
+// Datetime -> string / Time -> timestamp mappings, or textual ftypes incorrectly
+// mapped to timestamp under the generic Datetime datatype (version 2). Any
+// non-current entry discards the whole snapshot. The next metadata query
+// atomically saves a current-version snapshot at the same configured path.
+const FIELD_CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// Keep the public FieldInfo unchanged while versioning every persisted entry.
 #[derive(Serialize, Deserialize)]
@@ -838,6 +842,11 @@ mod tests {
                 (Some("Date"), BlpFieldType::Date),
                 (Some("time"), BlpFieldType::Time),
                 (Some("DateOrTime"), BlpFieldType::DateOrTime),
+                (Some("Character"), BlpFieldType::Character),
+                (Some(" char "), BlpFieldType::Character),
+                (Some("String"), BlpFieldType::String),
+                (Some("LONGCHARACTER"), BlpFieldType::String),
+                (Some("StringOrReal"), BlpFieldType::String),
                 (Some("Datetime"), BlpFieldType::Datetime),
                 (Some("Other"), BlpFieldType::Datetime),
                 (None, BlpFieldType::Datetime),
@@ -849,6 +858,24 @@ mod tests {
             BlpFieldType::from_metadata(Some("Double"), Some("Time")),
             BlpFieldType::Double
         );
+        assert_eq!(
+            BlpFieldType::from_metadata(Some("Double"), Some("Character")),
+            BlpFieldType::Double
+        );
+        assert_eq!(
+            BlpFieldType::from_metadata(Some("String"), Some("Datetime")),
+            BlpFieldType::String
+        );
+        for (datatype, expected) in [
+            ("Date", BlpFieldType::Date),
+            ("Time", BlpFieldType::Time),
+            ("DateOrTime", BlpFieldType::DateOrTime),
+        ] {
+            assert_eq!(
+                BlpFieldType::from_metadata(Some(datatype), Some("Character")),
+                expected
+            );
+        }
         assert_eq!(
             BlpFieldType::Time.to_arrow_type(),
             DataType::Time64(TimeUnit::Microsecond)
@@ -862,26 +889,38 @@ mod tests {
     }
 
     #[test]
-    fn stale_field_cache_entries_are_refetched_instead_of_reused_as_strings() {
-        for schema_version in [None, Some(1), Some(FIELD_CACHE_SCHEMA_VERSION + 1)] {
+    fn stale_field_cache_entries_are_refetched_instead_of_reused() {
+        for schema_version in [None, Some(1), Some(2), Some(FIELD_CACHE_SCHEMA_VERSION + 1)] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("field_cache.json");
-            let mut entry = serde_json::to_value(field_info("SYNTHETIC_TIME", "string")).unwrap();
+            let mut entries = [
+                serde_json::to_value(field_info("SYNTHETIC_TIME", "string")).unwrap(),
+                serde_json::to_value(field_info("SYNTHETIC_TEXT", "timestamp")).unwrap(),
+            ];
             if let Some(version) = schema_version {
-                entry["schema_version"] = serde_json::json!(version);
+                for entry in &mut entries {
+                    entry["schema_version"] = serde_json::json!(version);
+                }
             }
-            fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+            fs::write(&path, serde_json::to_vec(&entries).unwrap()).unwrap();
             let resolver = FieldTypeResolver::with_cache_path(path.clone());
-            let fields = vec!["SYNTHETIC_TIME".to_string()];
+            let fields = vec!["SYNTHETIC_TIME".to_string(), "SYNTHETIC_TEXT".to_string()];
             assert_eq!(resolver.get_uncached_fields(&fields), fields);
             assert!(resolver.resolve_cached_types(&fields, None).is_empty());
 
-            resolver.insert(field_info("SYNTHETIC_TIME", "time64"));
+            resolver.insert_many([
+                field_info("SYNTHETIC_TIME", "time64"),
+                field_info("SYNTHETIC_TEXT", "string"),
+            ]);
             resolver.save_to_disk().unwrap();
             let current = FieldTypeResolver::with_cache_path(path);
             assert_eq!(
                 current.get_arrow_type("SYNTHETIC_TIME").as_deref(),
                 Some("time64")
+            );
+            assert_eq!(
+                current.get_arrow_type("SYNTHETIC_TEXT").as_deref(),
+                Some("string")
             );
         }
     }

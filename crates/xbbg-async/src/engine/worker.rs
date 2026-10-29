@@ -1717,7 +1717,7 @@ fn create_stream_request_state(
         PlannedRequestShape::HistData(_) => {
             UnifiedRequestState::HistDataStream(HistDataStreamState::with_types(
                 params.fields.clone().unwrap_or_default(),
-                params.field_types.clone(),
+                Some(request.field_types().clone()),
                 stream,
             ))
         }
@@ -1749,7 +1749,7 @@ fn create_request_state(
 ) -> UnifiedRequestState {
     let params = request.params();
     let fields = params.fields.clone().unwrap_or_default();
-    let field_types = params.field_types.clone();
+    let field_types = Some(request.field_types().clone());
 
     match request.shape() {
         PlannedRequestShape::RefData(output) => {

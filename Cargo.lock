@@ -2734,6 +2734,7 @@ dependencies = [
  "arrow-schema",
  "arrow-select",
  "chrono",
+ "serde_json",
  "thiserror 2.0.21",
 ]
 

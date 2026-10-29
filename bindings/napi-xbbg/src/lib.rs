@@ -41,6 +41,7 @@ use xbbg_async::subscription_consumer::{
 
 #[napi_derive::module_init]
 fn init_async_runtime() {
+    xbbg_log::init();
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(2)
         .enable_all()

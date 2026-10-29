@@ -111,6 +111,7 @@ impl SubscriptionTypeResolver {
         manual_overrides: Option<&HashMap<String, String>>,
         default_type: &str,
     ) -> Result<HashMap<String, String>, BlpAsyncError> {
+        super::request_plan::parse_field_types(manual_overrides)?;
         let mut uncached = self.cache.get_uncached_fields(fields);
         if let Some(overrides) = manual_overrides {
             uncached.retain(|field| {
@@ -173,17 +174,15 @@ impl SubscriptionTypeResolver {
 
 fn field_kind(arrow_type: &str) -> FieldKind {
     match ArrowType::parse(arrow_type) {
-        ArrowType::Float64 => FieldKind::F64,
-        ArrowType::Int64 => FieldKind::I64,
-        ArrowType::Int32 => FieldKind::I32,
-        ArrowType::Bool => FieldKind::Bool,
-        ArrowType::Date32 => FieldKind::Date32,
-        ArrowType::Time64Micros => FieldKind::Time64Micros,
-        ArrowType::TimestampMicros => FieldKind::TimestampMicros,
-        ArrowType::String if arrow_type.eq_ignore_ascii_case("string") => FieldKind::Str,
-        // ArrowType::parse deliberately defaults unsupported types to String;
-        // a subscription must instead wait for an observed value to type them.
-        ArrowType::String => FieldKind::Unknown,
+        Ok(ArrowType::Float64) => FieldKind::F64,
+        Ok(ArrowType::Int64) => FieldKind::I64,
+        Ok(ArrowType::Int32) => FieldKind::I32,
+        Ok(ArrowType::Bool) => FieldKind::Bool,
+        Ok(ArrowType::Date32) => FieldKind::Date32,
+        Ok(ArrowType::Time64Micros) => FieldKind::Time64Micros,
+        Ok(ArrowType::TimestampMicros) => FieldKind::TimestampMicros,
+        Ok(ArrowType::String) => FieldKind::Str,
+        Err(_) => FieldKind::Unknown,
     }
 }
 
@@ -229,6 +228,31 @@ mod tests {
             ),
         ])
         .expect("synthetic field metadata")
+    }
+
+    #[tokio::test]
+    async fn invalid_manual_types_fail_before_the_metadata_transport_is_called() {
+        let (_directory, cache) = local_cache();
+        let queried = Arc::new(AtomicBool::new(false));
+        let called = Arc::clone(&queried);
+        let resolver = SubscriptionTypeResolver::with_query(cache, Handle::current(), move |_| {
+            called.store(true, Ordering::SeqCst);
+            Box::pin(std::future::ready(Ok(metadata(&[]))))
+        });
+        let fields = vec!["SYNTHETIC_FIELD".to_string()];
+        let overrides = HashMap::from([(
+            "SYNTHETIC_FIELD".to_string(),
+            "decimal_nonsense".to_string(),
+        )]);
+        assert!(matches!(
+            resolver
+                .resolve_types(&fields, Some(&overrides), "string")
+                .await,
+            Err(BlpAsyncError::Blp(
+                xbbg_core::BlpError::InvalidArgument { .. }
+            ))
+        ));
+        assert!(!queried.load(Ordering::SeqCst));
     }
 
     #[tokio::test]

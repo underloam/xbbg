@@ -701,6 +701,107 @@ mod tests {
     }
 
     #[test]
+    fn sharded_decoders_sum_conversion_misses_without_recounting_first_shard_metadata() {
+        use state::{
+            DelayedMeta, LongMode, METADATA_KEY_EID_DATA, METADATA_KEY_TYPE_MISSES, OutputFormat,
+            RefDataState,
+        };
+        use tokio::sync::oneshot;
+        use xbbg_core::EventType;
+        use xbbg_core::test_support::TestEvent;
+
+        let prepared = PreparedRequest::prepare(
+            RequestParams {
+                service: Service::RefData.to_string(),
+                operation: Operation::ReferenceData.to_string(),
+                securities: Some(
+                    ["SYNTHETIC_A", "SYNTHETIC_B", "SYNTHETIC_C", "SYNTHETIC_D"]
+                        .map(str::to_string)
+                        .to_vec(),
+                ),
+                fields: Some(vec!["TEXT".into()]),
+                field_types: Some(HashMap::from([("TEXT".into(), "timestamp".into())])),
+                format: Some("semi_long".into()),
+                ..Default::default()
+            },
+            &empty_schema(),
+        )
+        .unwrap();
+        let schema = r#"<ServiceDefinition name="xbbg.test.shard_conversions" version="1.0.0.0">
+            <service name="//xbbg/test/shard_conversions" version="1.0.0.0">
+                <event name="ReferenceDataResponse" eventType="ShardConversionResponse"/>
+            </service>
+            <schema>
+                <sequenceType name="ShardConversionResponse">
+                    <element name="securityData" type="ShardConversionSecurity" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="ShardConversionSecurity">
+                    <element name="security" type="String"/>
+                    <element name="eidData" type="Int32" maxOccurs="unbounded"/>
+                    <element name="fieldData" type="ShardConversionRow"/>
+                </sequenceType>
+                <sequenceType name="ShardConversionRow">
+                    <element name="TEXT" type="String"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let batches = sharded_requests(&shard_config(), &prepared)
+            .unwrap()
+            .into_iter()
+            .map(|shard| {
+                let securities = shard.params().securities.as_ref().unwrap();
+                let data = serde_json::json!({"securityData": securities.iter()
+                    .map(|security| serde_json::json!({
+                        "security": security, "eidData": [1],
+                        "fieldData": {"TEXT": "synthetic incompatible text"}
+                    })).collect::<Vec<_>>()});
+                let event = TestEvent::with_schema(
+                    schema,
+                    EventType::Response,
+                    "ReferenceDataResponse",
+                    &[],
+                    |formatter| formatter.json(&data.to_string()),
+                );
+                let (reply, mut result) = oneshot::channel();
+                RefDataState::with_format(
+                    shard.params().fields.clone().unwrap(),
+                    OutputFormat::Wide,
+                    LongMode::String,
+                    Some(shard.field_types().clone()),
+                    false,
+                    reply,
+                )
+                .finish(&event.event().messages().next().unwrap());
+                let batch = result.try_recv().unwrap().unwrap();
+                let misses: serde_json::Value =
+                    serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES])
+                        .unwrap();
+                assert_eq!(misses, serde_json::json!({"TEXT": 2}));
+                batch
+            })
+            .collect();
+        let combined = concat_sharded_batches(batches).unwrap();
+        let combined = state::ResponseMetadata::with_delayed(std::collections::BTreeMap::from([(
+            "SYNTHETIC_A".into(),
+            DelayedMeta {
+                delayed: false,
+                delay_minutes: None,
+            },
+        )]))
+        .attach(combined);
+        assert_eq!(combined.num_rows(), 4);
+        assert_eq!(combined.column_by_name("TEXT").unwrap().null_count(), 4);
+        let metadata = combined.schema_ref().metadata();
+        let misses: serde_json::Value =
+            serde_json::from_str(&metadata[METADATA_KEY_TYPE_MISSES]).unwrap();
+        assert_eq!(misses, serde_json::json!({"TEXT": 4}));
+        let eids: serde_json::Value =
+            serde_json::from_str(&metadata[METADATA_KEY_EID_DATA]).unwrap();
+        assert_eq!(eids.as_object().unwrap().len(), 4);
+        assert!(metadata.contains_key(state::METADATA_KEY_DELAYED));
+    }
+
+    #[test]
     fn test_concat_sharded_batches_rejects_non_null_type_mismatch() {
         let err = concat_sharded_batches(vec![
             px_last_batch(

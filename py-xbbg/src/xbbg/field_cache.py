@@ -65,12 +65,18 @@ async def aresolve_field_types(
     Returns:
         Dict mapping field names to Arrow type strings.
     """
-    engine = _engine._get_engine()
-    return await engine.resolve_field_types(
-        list(fields),
-        overrides if overrides else None,
-        "string",
-    )
+    try:
+        engine = _engine._get_engine()
+        return await engine.resolve_field_types(
+            list(fields),
+            overrides if overrides else None,
+            "string",
+        )
+    except Exception as exc:
+        normalized = _engine._normalize_engine_exception(exc)
+        if normalized is exc:
+            raise
+        raise normalized from exc
 
 
 async def cache_field_types(fields: Sequence[str]) -> None:
@@ -79,8 +85,7 @@ async def cache_field_types(fields: Sequence[str]) -> None:
     Args:
         fields: List of field mnemonics to cache.
     """
-    engine = _engine._get_engine()
-    await engine.resolve_field_types(list(fields), None, "string")
+    await aresolve_field_types(fields)
 
 
 async def get_field_info(fields: Sequence[str]) -> list[FieldInfo]:

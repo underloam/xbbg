@@ -182,7 +182,7 @@ impl IntradayTickState {
                 continue;
             };
 
-            self.ticker_builder.append_str(&self.ticker);
+            assert!(!self.ticker_builder.append_str(&self.ticker));
             self.seen_fields.clear();
             self.seen_fields.resize(self.tick_fields.len(), false);
             self.append_tick_fields(&tick);

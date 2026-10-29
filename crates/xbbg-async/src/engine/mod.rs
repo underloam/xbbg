@@ -874,7 +874,9 @@ impl Engine {
     ) -> Result<RecordBatch, BlpAsyncError> {
         let prepared = self.prepare_request_builder(params)?.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
-        self.request_pool.request(prepared).await
+        let batch = self.request_pool.request(prepared).await?;
+        state::ResponseMetadata::warn_batch_type_misses(&batch);
+        Ok(batch)
     }
 
     pub async fn request(&self, params: RequestParams) -> Result<RecordBatch, BlpAsyncError> {
@@ -902,6 +904,7 @@ impl Engine {
         };
         let batch =
             intraday_timezone::apply_intraday_output_timezone(self, batch, &output_params).await?;
+        state::ResponseMetadata::warn_batch_type_misses(&batch);
         delayed::enforce(&output_params, &operation, batch)
     }
 
@@ -967,7 +970,7 @@ impl Engine {
             if added > 0 {
                 xbbg_log::debug!(field_count = added, "using cached field type hints");
             }
-            builder.set_field_types(resolved);
+            builder.set_field_types(resolved)?;
         }
         Ok(())
     }

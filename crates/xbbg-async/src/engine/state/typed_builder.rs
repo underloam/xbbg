@@ -17,7 +17,9 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use indexmap::IndexMap;
 use xbbg_core::{BlpError, Value};
 
-use super::value_utils::{format_date32, format_time64_micros, format_timestamp_micros};
+use super::value_utils::{
+    ResponseMetadata, format_date32, format_time64_micros, format_timestamp_micros,
+};
 
 /// Arrow type identifier (subset of Arrow types we support).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -33,18 +35,26 @@ pub enum ArrowType {
 }
 
 impl ArrowType {
-    /// Parse from type string (e.g., "float64", "int64", "string").
-    pub fn parse(s: &str) -> Self {
-        match s.to_lowercase().as_str() {
+    /// Parse a supported field type name without silently changing its meaning.
+    pub fn parse(s: &str) -> Result<Self, BlpError> {
+        Ok(match s.trim().to_ascii_lowercase().as_str() {
             "float64" | "float" | "double" | "f64" => ArrowType::Float64,
             "int64" | "int" | "integer" | "i64" => ArrowType::Int64,
             "int32" | "i32" => ArrowType::Int32,
+            "string" => ArrowType::String,
             "bool" | "boolean" => ArrowType::Bool,
             "date32" | "date" => ArrowType::Date32,
             "timestamp" | "datetime" | "timestamp_us" => ArrowType::TimestampMicros,
             "time64" | "time" | "time64_us" => ArrowType::Time64Micros,
-            _ => ArrowType::String, // Default to string
-        }
+            _ => {
+                return Err(BlpError::InvalidArgument {
+                    detail:
+                        "unsupported field type; expected float64, int64, int32, string, bool, \
+                             date32, timestamp, or time64 (or a supported alias)"
+                            .to_string(),
+                });
+            }
+        })
     }
 
     /// Infer ArrowType from a xbbg_core::Value.
@@ -123,13 +133,9 @@ impl TypedBuilder {
         }
     }
 
-    /// Append a value from xbbg_core::Value, converting as needed.
-    pub fn append_value(&mut self, value: Option<Value<'_>>) {
-        let _ = self.append_value_report_miss(value);
-    }
-
-    /// Append a value and report whether a non-null value could not be converted.
-    pub fn append_value_report_miss(&mut self, value: Option<Value<'_>>) -> bool {
+    /// Append a value, returning whether a non-null value could not be converted.
+    #[must_use]
+    pub fn append_value(&mut self, value: Option<Value<'_>>) -> bool {
         match self {
             TypedBuilder::Float64(b) => match value {
                 Some(Value::Null) | None => {
@@ -169,7 +175,7 @@ impl TypedBuilder {
                 Some(v) => {
                     if let Some(v) = match v {
                         Value::Int32(i) => Some(i),
-                        Value::Int64(i) => Some(i as i32),
+                        Value::Int64(i) => i32::try_from(i).ok(),
                         Value::Byte(i) => Some(i as i32),
                         Value::Bool(b) => Some(if b { 1 } else { 0 }),
                         Value::Float64(f)
@@ -257,7 +263,7 @@ impl TypedBuilder {
                 Some(v) => {
                     if let Some(days) = match v {
                         Value::Date32(d) => Some(d),
-                        Value::TimestampMicros(ts) => Some((ts / 86_400_000_000) as i32),
+                        Value::TimestampMicros(ts) => Some(ts.div_euclid(86_400_000_000) as i32),
                         _ => None,
                     } {
                         b.append_value(days);
@@ -277,7 +283,7 @@ impl TypedBuilder {
                     if let Some(micros) = match v {
                         Value::TimestampMicros(ts) => Some(ts),
                         Value::Datetime(dt) => Some(dt.to_micros()),
-                        Value::Date32(d) => Some(d as i64 * 86_400_000_000),
+                        Value::Date32(d) => i64::from(d).checked_mul(86_400_000_000),
                         _ => None,
                     } {
                         b.append_value(micros);
@@ -295,7 +301,7 @@ impl TypedBuilder {
                 }
                 Some(v) => {
                     if let Some(micros) = match v {
-                        Value::Time64Micros(ts) => Some(ts),
+                        Value::Time64Micros(ts) if (0..86_400_000_000).contains(&ts) => Some(ts),
                         Value::TimestampMicros(ts) => {
                             // Extract time-of-day from full timestamp
                             Some(ts.rem_euclid(86_400_000_000))
@@ -313,12 +319,10 @@ impl TypedBuilder {
         }
     }
 
-    /// Append a string value directly.
-    pub fn append_str(&mut self, s: &str) {
-        match self {
-            TypedBuilder::String(b) => b.append_value(s),
-            _ => self.append_value(Some(Value::String(s))),
-        }
+    /// Append a string, returning whether the declared type rejects it.
+    #[must_use]
+    pub fn append_str(&mut self, s: &str) -> bool {
+        self.append_value(Some(Value::String(s)))
     }
 
     /// Append a null value.
@@ -420,6 +424,8 @@ pub struct ColumnSet {
     type_hints: IndexMap<String, ArrowType>,
     /// Current row count
     row_count: usize,
+    /// Non-null values rejected by the selected column types.
+    response_meta: ResponseMetadata,
 }
 
 impl ColumnSet {
@@ -453,6 +459,7 @@ impl ColumnSet {
             columns: IndexMap::new(),
             type_hints: IndexMap::new(),
             row_count: 0,
+            response_meta: ResponseMetadata::default(),
         }
     }
 
@@ -463,6 +470,7 @@ impl ColumnSet {
             columns: IndexMap::new(),
             type_hints: hints.into_iter().collect(),
             row_count: 0,
+            response_meta: ResponseMetadata::default(),
         }
     }
 
@@ -477,7 +485,9 @@ impl ColumnSet {
     /// or using type hints if available.
     pub fn append(&mut self, name: &str, value: Value<'_>) {
         if let Some(builder) = self.columns.get_mut(name) {
-            builder.append_value(Some(value));
+            if builder.append_value(Some(value)) {
+                self.response_meta.record_type_miss(name);
+            }
             return;
         }
 
@@ -493,7 +503,9 @@ impl ColumnSet {
         for _ in 0..self.row_count {
             builder.append_null();
         }
-        builder.append_value(Some(value));
+        if builder.append_value(Some(value)) {
+            self.response_meta.record_type_miss(name);
+        }
         self.columns.insert(name.to_string(), builder);
     }
 
@@ -565,9 +577,11 @@ impl ColumnSet {
         }
 
         let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays).map_err(|e| BlpError::Internal {
-            detail: format!("build RecordBatch: {e}"),
-        })
+        RecordBatch::try_new(schema, arrays)
+            .map(|batch| self.response_meta.attach(batch))
+            .map_err(|e| BlpError::Internal {
+                detail: format!("build RecordBatch: {e}"),
+            })
     }
 
     /// Build with a specific column order.
@@ -601,9 +615,11 @@ impl ColumnSet {
         }
 
         let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays).map_err(|e| BlpError::Internal {
-            detail: format!("build RecordBatch: {e}"),
-        })
+        RecordBatch::try_new(schema, arrays)
+            .map(|batch| self.response_meta.attach(batch))
+            .map_err(|e| BlpError::Internal {
+                detail: format!("build RecordBatch: {e}"),
+            })
     }
 }
 
@@ -619,10 +635,83 @@ mod tests {
 
     #[test]
     fn test_arrow_type_parse() {
-        assert_eq!(ArrowType::parse("float64"), ArrowType::Float64);
-        assert_eq!(ArrowType::parse("INT64"), ArrowType::Int64);
-        assert_eq!(ArrowType::parse("string"), ArrowType::String);
-        assert_eq!(ArrowType::parse("unknown"), ArrowType::String);
+        assert_eq!(ArrowType::parse("float64").unwrap(), ArrowType::Float64);
+        assert_eq!(ArrowType::parse("INT64").unwrap(), ArrowType::Int64);
+        assert_eq!(ArrowType::parse("string").unwrap(), ArrowType::String);
+    }
+
+    #[test]
+    fn typed_builder_rejects_lossy_integer_boundaries_without_counting_nulls() {
+        use arrow_array::{Array, Int32Array, Int64Array};
+
+        let mut int32 = TypedBuilder::new(ArrowType::Int32);
+        for input in [
+            Value::Int64(i64::from(i32::MAX) + 1),
+            Value::Int64(i64::from(i32::MIN) - 1),
+            Value::Float64(f64::from(i32::MAX) + 1.0),
+            Value::Float64(f64::from(i32::MIN) - 1.0),
+            Value::Float64(1.5),
+        ] {
+            assert!(int32.append_value(Some(input)));
+        }
+        assert!(!int32.append_value(Some(Value::Int64(i64::from(i32::MAX)))));
+        assert!(!int32.append_value(Some(Value::Int64(i64::from(i32::MIN)))));
+        assert!(!int32.append_value(Some(Value::Null)));
+        assert!(!int32.append_value(None));
+        let array = int32.finish();
+        let integers = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        assert_eq!(integers.null_count(), 7);
+        assert_eq!(integers.value(5), i32::MAX);
+        assert_eq!(integers.value(6), i32::MIN);
+
+        let upper = -(i64::MIN as f64);
+        let mut int64 = TypedBuilder::new(ArrowType::Int64);
+        assert!(int64.append_value(Some(Value::Float64(upper))));
+        assert!(!int64.append_value(Some(Value::Float64(f64::from_bits(upper.to_bits() - 1)))));
+        assert!(!int64.append_value(Some(Value::Float64(i64::MIN as f64))));
+        let array = int64.finish();
+        let integers = array.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert!(integers.is_null(0));
+        assert_eq!(integers.value(1), i64::MAX - 1023);
+        assert_eq!(integers.value(2), i64::MIN);
+    }
+
+    #[test]
+    fn temporal_conversions_handle_negative_epochs_and_reject_out_of_range_values() {
+        use arrow_array::{Array, Date32Array, Time64MicrosecondArray};
+
+        let mut date = TypedBuilder::new(ArrowType::Date32);
+        assert!(!date.append_value(Some(Value::TimestampMicros(-1))));
+        let array = date.finish();
+        assert_eq!(
+            array
+                .as_any()
+                .downcast_ref::<Date32Array>()
+                .unwrap()
+                .value(0),
+            -1
+        );
+
+        let mut timestamp = TypedBuilder::new(ArrowType::TimestampMicros);
+        assert!(timestamp.append_value(Some(Value::Date32(i32::MAX))));
+        assert!(timestamp.append_value(Some(Value::Date32(i32::MIN))));
+        assert!(!timestamp.append_value(Some(Value::Date32(0))));
+
+        let mut time = TypedBuilder::new(ArrowType::Time64Micros);
+        assert!(time.append_value(Some(Value::Time64Micros(-1))));
+        assert!(time.append_value(Some(Value::Time64Micros(86_400_000_000))));
+        assert!(!time.append_value(Some(Value::Time64Micros(0))));
+        assert!(!time.append_value(Some(Value::Time64Micros(86_399_999_999))));
+        assert!(!time.append_value(Some(Value::TimestampMicros(-1))));
+        let array = time.finish();
+        let times = array
+            .as_any()
+            .downcast_ref::<Time64MicrosecondArray>()
+            .unwrap();
+        assert_eq!(times.null_count(), 2);
+        assert_eq!(times.value(2), 0);
+        assert_eq!(times.value(3), 86_399_999_999);
+        assert_eq!(times.value(4), 86_399_999_999);
     }
 
     #[test]
@@ -757,12 +846,12 @@ mod tests {
         use arrow_array::StringArray;
 
         let mut builder = TypedBuilder::new(ArrowType::String);
-        builder.append_value(Some(Value::Float64(123.45)));
-        builder.append_value(Some(Value::Int64(-42)));
-        builder.append_value(Some(Value::Int32(7)));
-        builder.append_value(Some(Value::Bool(true)));
-        builder.append_value(Some(Value::Bool(false)));
-        builder.append_value(Some(Value::Byte(255)));
+        assert!(!builder.append_value(Some(Value::Float64(123.45))));
+        assert!(!builder.append_value(Some(Value::Int64(-42))));
+        assert!(!builder.append_value(Some(Value::Int32(7))));
+        assert!(!builder.append_value(Some(Value::Bool(true))));
+        assert!(!builder.append_value(Some(Value::Bool(false))));
+        assert!(!builder.append_value(Some(Value::Byte(255))));
 
         let array = builder.finish();
         let strings = array.as_any().downcast_ref::<StringArray>().unwrap();

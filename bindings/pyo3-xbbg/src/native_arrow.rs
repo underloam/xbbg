@@ -36,7 +36,7 @@ use xbbg_arrow::{
 };
 use xbbg_async::engine::state::{
     METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS,
+    METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
 };
 
 fn core_err_to_py(err: ArrowCoreError) -> PyErr {
@@ -1274,6 +1274,11 @@ impl ArrowTable {
         parse_metadata_json(py, self.data.schema.metadata(), METADATA_KEY_DELAYED)
     }
 
+    #[getter]
+    fn type_misses(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        parse_metadata_json(py, self.data.schema.metadata(), METADATA_KEY_TYPE_MISSES)
+    }
+
     #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_stream__<'py>(
         &self,
@@ -1326,7 +1331,7 @@ impl ArrowTable {
         PyTable::try_new(self.data.batches.clone(), self.data.schema.clone())?.into_pyarrow(py)
     }
 
-    fn to_pandas<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    fn to_pandas<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         ensure_optional_module(
             py,
             "pyarrow",
@@ -1339,10 +1344,12 @@ impl ArrowTable {
             "pip install xbbg[pandas]",
             "ArrowTable.to_pandas()",
         )?;
-        let table = self.to_pyarrow(py)?;
+        let table = slf.to_pyarrow(py)?;
         let kwargs = PyDict::new(py);
         kwargs.set_item("split_blocks", true)?;
-        table.call_method("to_pandas", (), Some(&kwargs))
+        let frame = table.call_method("to_pandas", (), Some(&kwargs))?;
+        py.import("xbbg.backend")?
+            .call_method1("_attach_xbbg_metadata_attrs", (frame, slf))
     }
 
     fn to_polars<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
