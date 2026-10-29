@@ -25,6 +25,9 @@ dependencies = [
     "xbbg>=1.6.0,<2",
     # LangGraph 1.2 requires this floor; includes GHSA-pjwx-r37v-7724 hardening.
     "langchain-core>=1.4.0,<2",
+    # LangSmith >=0.9 calls deprecated asyncio.iscoroutinefunction at import.
+    # Keep strict-warning Python 3.14 users on the compatible dependency line.
+    "langsmith<0.9; python_version >= '3.14'",
     "pydantic>=2.10,<3",
 ]
 
