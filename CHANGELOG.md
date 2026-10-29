@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.7.0] - 2026-10-29
+
 ### Added
 
 - **In-memory TLS credentials (#366).** Python accepts `str | bytes`, Node accepts paths or `Buffer`/`Uint8Array`, and Rust uses `TlsMaterial::Path`/`Blob`. Matching DER PKCS#12/PKCS#7 blob pairs go directly to the SDK without temporary files; immutable storage is shared across session configuration clones. Passwords and blobs are redacted, SDK lengths are checked, and Node snapshots mutable bytes before async startup while rejecting shared/detached backing.
@@ -1769,7 +1771,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.6.1...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/underloam/xbbg/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/underloam/xbbg/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/underloam/xbbg/compare/v1.5.1...v1.6.0
 [1.5.1]: https://github.com/underloam/xbbg/compare/v1.5.0...v1.5.1
