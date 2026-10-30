@@ -3,6 +3,7 @@
 
 mod cache_io;
 pub mod config;
+pub mod diagnostics;
 pub mod engine;
 pub mod error_presentation;
 mod errors;

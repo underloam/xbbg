@@ -985,21 +985,15 @@ async fn test_security_error_and_field_exception_metadata() {
         .expect("bogus ticker recorded");
     assert!(!bad.category.is_empty() || !bad.message.is_empty());
 
-    #[derive(serde::Deserialize, Debug)]
-    struct FieldExc {
-        field: String,
-        #[allow(dead_code)]
-        category: String,
-        #[allow(dead_code)]
-        code: i32,
-        #[allow(dead_code)]
-        subcategory: String,
-        #[allow(dead_code)]
-        message: String,
-    }
-    let field_excs: std::collections::BTreeMap<String, Vec<FieldExc>> =
-        parse_meta_map(&batch, "xbbg.field_exceptions")
-            .expect("xbbg.field_exceptions metadata present");
+    let field_excs = xbbg_async::diagnostics::FieldExceptions::from_json(
+        batch
+            .schema_ref()
+            .metadata()
+            .get("xbbg.field_exceptions")
+            .expect("xbbg.field_exceptions metadata present"),
+    )
+    .expect("valid field-exception metadata")
+    .expanded();
     println!("field_exceptions: {field_excs:?}");
     let ibm_excs = field_excs
         .get("IBM US Equity")

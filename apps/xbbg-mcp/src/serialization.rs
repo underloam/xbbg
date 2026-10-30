@@ -13,6 +13,9 @@ use arrow::util::display::{ArrayFormatter, FormatOptions};
 use rmcp::ErrorData;
 use serde::Serialize;
 use serde_json::{Map, Number, Value, json};
+use xbbg_async::diagnostics::{
+    FieldExceptionMeta, FieldExceptions, METADATA_KEY_FIELD_ERRORS, METADATA_KEY_FIELD_EXCEPTIONS,
+};
 use xbbg_core::EntitlementCheck;
 
 use crate::request_adapter::MAX_ENTITLEMENT_EIDS;
@@ -29,9 +32,10 @@ const BLOCKING_STRING_BYTES_THRESHOLD: usize = 256 * 1024;
 const MAX_INLINE_METADATA_ENTRIES: usize = 16;
 
 const EID_METADATA_KEY: &str = "xbbg.eid_data";
-const PRIORITY_METADATA_KEYS: [&str; 4] = [
+const PRIORITY_METADATA_KEYS: [&str; 5] = [
     "xbbg.security_errors",
-    "xbbg.field_exceptions",
+    METADATA_KEY_FIELD_ERRORS,
+    METADATA_KEY_FIELD_EXCEPTIONS,
     "xbbg.delayed",
     EID_METADATA_KEY,
 ];
@@ -604,6 +608,13 @@ fn build_metadata(
                 properties_remaining.saturating_sub(1),
                 value_budget,
             )?
+        } else if key == METADATA_KEY_FIELD_EXCEPTIONS {
+            bounded_field_exceptions(
+                raw,
+                limits,
+                properties_remaining.saturating_sub(1),
+                value_budget,
+            )?
         } else {
             bounded_metadata_entry(
                 raw,
@@ -687,6 +698,171 @@ fn bounded_metadata_entry(
         value_stats: bounded.value_stats,
         special_truncated: false,
     })
+}
+
+fn bounded_field_exceptions(
+    raw: &str,
+    limits: &ResultLimits,
+    max_properties: usize,
+    max_output_bytes: usize,
+) -> Result<MetadataEntry, ErrorData> {
+    const OCCURRENCE_PROPERTIES: usize = 6; // array item plus all five record members
+
+    // Validate the entire compact envelope, including occurrences beyond the output prefix.
+    // Invalid dictionary indices must never be presented as empty, successful diagnostics.
+    let Ok(exceptions) = FieldExceptions::from_json(raw) else {
+        let include_marker = max_properties > 0 && max_output_bytes >= 16;
+        return Ok(MetadataEntry {
+            value: if include_marker {
+                json!({"invalid": true})
+            } else {
+                json!({})
+            },
+            counts: Some(json!({
+                "returned_properties": usize::from(include_marker),
+                "known_omitted_properties": 0,
+                "property_count_complete": false,
+                "valid": false,
+            })),
+            returned_properties: usize::from(include_marker),
+            known_omitted_properties: 0,
+            property_count_complete: false,
+            value_stats: ValueStats::default(),
+            special_truncated: true,
+        });
+    };
+
+    // Count borrowed occurrences, not expanded records. Even a small dictionary can describe
+    // far more expanded string bytes than either the inspection or output budget permits.
+    let total_properties = exceptions.securities().fold(0usize, |total, security| {
+        total.saturating_add(1).saturating_add(
+            exceptions
+                .for_security(security)
+                .count()
+                .saturating_mul(OCCURRENCE_PROPERTIES),
+        )
+    });
+    let mut bounded = Map::new();
+    let mut bytes = 2usize;
+    let mut returned_properties = 0usize;
+    let mut value_stats = ValueStats::default();
+
+    for security in exceptions.securities() {
+        if returned_properties == max_properties {
+            break;
+        }
+        if !identity_string_fits(security, limits) {
+            continue;
+        }
+        let fixed_bytes = usize::from(!bounded.is_empty())
+            .saturating_add(serialized_len(security)?)
+            .saturating_add(1)
+            .saturating_add(2); // array delimiters
+        let mut candidate_bytes = bytes.saturating_add(fixed_bytes);
+        if candidate_bytes > max_output_bytes {
+            continue;
+        }
+
+        let mut kept = Vec::new();
+        let mut security_properties = 1usize;
+        let mut security_stats = ValueStats::default();
+        for exception in exceptions.for_security(security) {
+            if max_properties.saturating_sub(returned_properties + security_properties)
+                < OCCURRENCE_PROPERTIES
+            {
+                break;
+            }
+            let separator = usize::from(!kept.is_empty());
+            let record_budget = max_output_bytes
+                .saturating_sub(candidate_bytes)
+                .saturating_sub(separator);
+            let Some(record) = bounded_field_exception(exception, limits, record_budget)? else {
+                // Stop instead of allocating a rejected expansion for every repeated occurrence.
+                break;
+            };
+            candidate_bytes = candidate_bytes
+                .saturating_add(separator)
+                .saturating_add(record.bytes);
+            security_properties += OCCURRENCE_PROPERTIES;
+            security_stats.merge(record.value_stats);
+            kept.push(record.value);
+        }
+        if kept.is_empty() && exceptions.for_security(security).next().is_some() {
+            continue;
+        }
+
+        bytes = candidate_bytes;
+        returned_properties += security_properties;
+        value_stats.merge(security_stats);
+        bounded.insert(security.to_string(), Value::Array(kept));
+    }
+
+    let known_omitted_properties = total_properties.saturating_sub(returned_properties);
+    Ok(MetadataEntry {
+        value: Value::Object(bounded),
+        counts: Some(json!({
+            "returned_properties": returned_properties,
+            "known_omitted_properties": known_omitted_properties,
+            "property_count_complete": true,
+            "valid": true,
+        })),
+        returned_properties,
+        known_omitted_properties,
+        property_count_complete: true,
+        value_stats,
+        special_truncated: known_omitted_properties > 0,
+    })
+}
+
+fn bounded_field_exception(
+    exception: &FieldExceptionMeta,
+    limits: &ResultLimits,
+    max_bytes: usize,
+) -> Result<Option<BoundedMetadataValue>, ErrorData> {
+    let fields = [
+        ("category", exception.category.as_str()),
+        ("field", exception.field.as_str()),
+        ("message", exception.message.as_str()),
+        ("subcategory", exception.subcategory.as_str()),
+    ];
+    if !identity_string_fits("code", limits)
+        || fields
+            .iter()
+            .any(|(key, _)| !identity_string_fits(key, limits))
+    {
+        return Ok(None);
+    }
+
+    // Reserve every member before clipping strings so byte pressure cannot split a record.
+    // Borrow the interned text: never clone a full payload just to truncate it again.
+    let mut bytes = 2usize
+        .saturating_add(serialized_len("code")?)
+        .saturating_add(1)
+        .saturating_add(serialized_len(&exception.code)?)
+        .saturating_add(fields.iter().fold(0usize, |total, (key, _)| {
+            total.saturating_add(key.len() + 6)
+        }));
+    if bytes > max_bytes {
+        return Ok(None);
+    }
+
+    let mut bounded = Map::new();
+    let mut value_stats = ValueStats::default();
+    bounded.insert("code".to_string(), Value::Number(exception.code.into()));
+    for (key, value) in fields {
+        let string_budget = max_bytes.saturating_sub(bytes.saturating_sub(2));
+        let value = bounded_json_string(value, limits, string_budget, &mut value_stats);
+        bytes = bytes.saturating_add(serialized_len(&value)?.saturating_sub(2));
+        bounded.insert(key.to_string(), Value::String(value));
+    }
+    Ok(Some(BoundedMetadataValue {
+        value: Value::Object(bounded),
+        bytes,
+        returned_properties: 5,
+        known_omitted_properties: 0,
+        property_count_complete: true,
+        value_stats,
+    }))
 }
 
 fn bounded_eid_metadata(
@@ -1472,6 +1648,352 @@ mod tests {
         );
         assert_eq!(payload["truncated"]["rows"], false);
         assert_eq!(payload["truncated"]["metadata"], false);
+    }
+
+    #[test]
+    fn field_exceptions_project_compact_and_persisted_legacy_records_identically() {
+        let first = json!({
+            "field": "PX_LAST",
+            "category": "BAD_FLD",
+            "code": 9,
+            "subcategory": "NOT_APPLICABLE_TO_REF_DATA",
+            "message": "first refusal",
+        });
+        let second = json!({
+            "field": "PX_VOLUME",
+            "category": "NO_AUTH",
+            "code": 10,
+            "subcategory": "NOT_ENTITLED_FIELD",
+            "message": "second refusal",
+        });
+        let expanded = json!({
+            "A": [first.clone(), second.clone(), first.clone()],
+            "B": [second.clone()],
+        });
+        let compact = json!({
+            "version": 1,
+            "entries": [first, second],
+            "securities": {"B": [1], "A": [0, 1, 0]},
+        });
+
+        for raw in [compact, expanded.clone()] {
+            let batch = batch_with_metadata(
+                vec![],
+                HashMap::from([("xbbg.field_exceptions".to_string(), raw.to_string())]),
+            );
+            let payload = record_batch_to_json(&batch, &limits()).unwrap();
+
+            assert_eq!(payload["metadata"]["xbbg.field_exceptions"], expanded);
+            assert_eq!(
+                payload["metadata_counts"]["xbbg.field_exceptions"],
+                json!({
+                    "returned_properties": 26,
+                    "known_omitted_properties": 0,
+                    "property_count_complete": true,
+                    "valid": true,
+                })
+            );
+            assert_eq!(payload["truncated"]["metadata"], false);
+        }
+    }
+
+    #[test]
+    fn repeated_compact_field_exceptions_obey_atomic_property_limits_with_exact_counts() {
+        const OCCURRENCES: usize = 20_000;
+        let raw = json!({
+            "version": 1,
+            "entries": [{
+                "field": "PX_LAST",
+                "category": "BAD_FLD",
+                "code": 9,
+                "subcategory": "INVALID_FIELD",
+                "message": "x".repeat(8_192),
+            }],
+            "securities": {"A": vec![0; OCCURRENCES]},
+        })
+        .to_string();
+
+        for (max_metadata_properties, expected_records) in [(7, 0), (13, 1), (14, 2)] {
+            let batch = batch_with_metadata(
+                vec![],
+                HashMap::from([("xbbg.field_exceptions".to_string(), raw.clone())]),
+            );
+            let bounded = ResultLimits {
+                max_metadata_properties,
+                max_string_chars: 8_192,
+                max_string_bytes: 8_192,
+                ..limits()
+            };
+            let payload = record_batch_to_json(&batch, &bounded).unwrap();
+            let projected = payload["metadata"]["xbbg.field_exceptions"]
+                .as_object()
+                .unwrap();
+            let returned_records = projected
+                .get("A")
+                .map_or(0, |records| records.as_array().unwrap().len());
+            let returned_properties = if expected_records == 0 {
+                0
+            } else {
+                1 + 6 * expected_records
+            };
+            let omitted_properties = 1 + 6 * OCCURRENCES - returned_properties;
+
+            assert_eq!(returned_records, expected_records);
+            for records in projected.values() {
+                for record in records.as_array().unwrap() {
+                    assert_eq!(record.as_object().unwrap().len(), 5);
+                    assert_eq!(record["field"], "PX_LAST");
+                    assert_eq!(record["code"], 9);
+                    assert_eq!(record["message"].as_str().unwrap().len(), 8_192);
+                }
+            }
+            assert_eq!(
+                payload["metadata_counts"]["xbbg.field_exceptions"],
+                json!({
+                    "returned_properties": returned_properties,
+                    "known_omitted_properties": omitted_properties,
+                    "property_count_complete": true,
+                    "valid": true,
+                })
+            );
+            assert_eq!(
+                payload["truncation_counts"]["known_omitted_metadata_properties"],
+                omitted_properties
+            );
+            assert_eq!(
+                payload["truncation_counts"]["metadata_property_count_complete"],
+                true
+            );
+            assert_eq!(payload["truncated"]["metadata"], true);
+            assert_eq!(payload["truncated"]["values"], false);
+            assert!(returned_properties < max_metadata_properties);
+            assert!(
+                serde_json::to_vec(&payload["metadata"]).unwrap().len()
+                    + serde_json::to_vec(&payload["metadata_counts"])
+                        .unwrap()
+                        .len()
+                    <= bounded.max_metadata_bytes
+            );
+            assert!(serde_json::to_vec(&payload).unwrap().len() <= bounded.max_result_bytes);
+        }
+    }
+
+    #[test]
+    fn repeated_compact_field_exceptions_fit_the_minimum_byte_budget_as_complete_records() {
+        const OCCURRENCES: usize = 10_000;
+        let batch = batch_with_metadata(
+            vec![],
+            HashMap::from([(
+                "xbbg.field_exceptions".to_string(),
+                json!({
+                    "version": 1,
+                    "entries": [{
+                        "field": "PX_LAST",
+                        "category": "BAD_FLD",
+                        "code": 9,
+                        "subcategory": "INVALID_FIELD",
+                        "message": "\\\n".repeat(1_000),
+                    }],
+                    "securities": {"A": vec![0; OCCURRENCES]},
+                })
+                .to_string(),
+            )]),
+        );
+        let bounded = ResultLimits {
+            max_result_bytes: MIN_RESULT_BYTES,
+            ..limits()
+        };
+        let payload = record_batch_to_json(&batch, &bounded).unwrap();
+        let records = payload["metadata"]["xbbg.field_exceptions"]["A"]
+            .as_array()
+            .unwrap();
+        let returned_properties = 1 + 6 * records.len();
+
+        assert!(!records.is_empty());
+        assert!(records.len() < OCCURRENCES);
+        assert!(records.iter().all(|record| {
+            record.as_object().unwrap().len() == 5
+                && record["code"] == 9
+                && record["message"].as_str().unwrap().ends_with('…')
+        }));
+        assert_eq!(
+            payload["metadata_counts"]["xbbg.field_exceptions"],
+            json!({
+                "returned_properties": returned_properties,
+                "known_omitted_properties": 1 + 6 * OCCURRENCES - returned_properties,
+                "property_count_complete": true,
+                "valid": true,
+            })
+        );
+        assert_eq!(payload["truncated"]["metadata"], true);
+        assert_eq!(payload["truncated"]["values"], true);
+        assert!(
+            payload["truncation_counts"]["known_omitted_value_bytes"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(serde_json::to_vec(&payload).unwrap().len() <= MIN_RESULT_BYTES);
+    }
+
+    #[test]
+    fn malformed_field_exceptions_are_explicitly_invalid_not_partial_diagnostics() {
+        let entry = json!({
+            "field": "PX_LAST",
+            "category": "BAD_FLD",
+            "code": 9,
+            "subcategory": "INVALID_FIELD",
+            "message": "refused",
+        });
+        let mut malformed = vec![
+            "{".to_string(),
+            "null".to_string(),
+            json!({"version": 2, "entries": [entry.clone()], "securities": {"A": [0]}}).to_string(),
+            json!({"version": 1, "securities": {"A": [0]}}).to_string(),
+            json!({
+                "version": 1,
+                "entries": [entry.clone()],
+                "securities": {"A": [0]},
+                "unknown": true,
+            })
+            .to_string(),
+            json!({"A": [{"field": "PX_LAST"}]}).to_string(),
+        ];
+        for index in [json!(-1), json!(1), json!(0.5), json!("0"), Value::Null] {
+            malformed.push(
+                json!({
+                    "version": 1,
+                    "entries": [entry.clone()],
+                    "securities": {"A": [index]},
+                })
+                .to_string(),
+            );
+        }
+
+        for raw in malformed {
+            let batch = batch_with_metadata(
+                vec![],
+                HashMap::from([("xbbg.field_exceptions".to_string(), raw)]),
+            );
+            let payload = record_batch_to_json(&batch, &limits()).unwrap();
+
+            assert_eq!(
+                payload["metadata"]["xbbg.field_exceptions"],
+                json!({"invalid": true})
+            );
+            assert_eq!(
+                payload["metadata_counts"]["xbbg.field_exceptions"],
+                json!({
+                    "returned_properties": 1,
+                    "known_omitted_properties": 0,
+                    "property_count_complete": false,
+                    "valid": false,
+                })
+            );
+            assert_eq!(
+                payload["truncation_counts"]["metadata_property_count_complete"],
+                false
+            );
+            assert_eq!(payload["truncated"]["metadata"], true);
+        }
+    }
+
+    #[test]
+    fn invalid_compact_indices_beyond_the_output_prefix_are_not_hidden_by_truncation() {
+        let mut indices = vec![0; 20_000];
+        indices.push(1);
+        let batch = batch_with_metadata(
+            vec![],
+            HashMap::from([(
+                "xbbg.field_exceptions".to_string(),
+                json!({
+                    "version": 1,
+                    "entries": [{
+                        "field": "PX_LAST",
+                        "category": "BAD_FLD",
+                        "code": 9,
+                        "subcategory": "INVALID_FIELD",
+                        "message": "refused",
+                    }],
+                    "securities": {"A": indices},
+                })
+                .to_string(),
+            )]),
+        );
+        let bounded = ResultLimits {
+            max_metadata_properties: 8,
+            ..limits()
+        };
+        let payload = record_batch_to_json(&batch, &bounded).unwrap();
+
+        assert_eq!(
+            payload["metadata"]["xbbg.field_exceptions"],
+            json!({"invalid": true})
+        );
+        assert_eq!(
+            payload["metadata_counts"]["xbbg.field_exceptions"]["valid"],
+            false
+        );
+        assert_eq!(payload["truncated"]["metadata"], true);
+    }
+
+    #[test]
+    fn field_errors_precede_exception_expansion_and_keep_complete_refusal_records() {
+        let refusal = json!({
+            "category": "BAD_FLD",
+            "code": 9,
+            "subcategory": "INVALID_FIELD",
+            "message": "Unknown field",
+            "source": "apiflds",
+        });
+        let mut metadata = (0..20)
+            .map(|index| (format!("key-{index}"), r#"{"ok":true}"#.to_string()))
+            .collect::<HashMap<_, _>>();
+        metadata.insert(
+            "xbbg.field_errors".to_string(),
+            json!({"rejected_a": refusal.clone(), "rejected_b": refusal.clone()}).to_string(),
+        );
+        metadata.insert(
+            "xbbg.field_exceptions".to_string(),
+            json!({
+                "version": 1,
+                "entries": [{
+                    "field": "PX_LAST",
+                    "category": "BAD_FLD",
+                    "code": 9,
+                    "subcategory": "INVALID_FIELD",
+                    "message": "refused",
+                }],
+                "securities": {"A": [0]},
+            })
+            .to_string(),
+        );
+        let batch = batch_with_metadata(vec![], metadata);
+        let bounded = ResultLimits {
+            max_metadata_properties: 7,
+            ..limits()
+        };
+        let payload = record_batch_to_json(&batch, &bounded).unwrap();
+
+        assert_eq!(
+            payload["metadata"]["xbbg.field_errors"],
+            json!({"rejected_a": refusal})
+        );
+        assert!(payload["metadata"].get("xbbg.field_exceptions").is_none());
+        assert!(payload["metadata"].get("key-0").is_none());
+        assert_eq!(
+            payload["metadata_counts"]["xbbg.field_errors"],
+            json!({
+                "returned_properties": 6,
+                "known_omitted_properties": 1,
+                "property_count_complete": false,
+            })
+        );
+        assert_eq!(
+            payload["truncation_counts"]["omitted_priority_metadata"],
+            json!(["xbbg.field_exceptions"])
+        );
+        assert_eq!(payload["truncated"]["metadata"], true);
     }
 
     #[test]

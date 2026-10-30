@@ -153,7 +153,9 @@ mod tests {
                 .contains_key(METADATA_KEY_TYPE_MISSES)
         );
         let combined = arrow_select::concat::concat_batches(&chunks[0].schema(), &chunks).unwrap();
-        let combined = ResponseMetadata::union_of(&chunks).attach(combined);
+        let combined = ResponseMetadata::union_of(&chunks)
+            .unwrap()
+            .attach(combined);
         assert_eq!(combined, expected);
         let counts = combined
             .column_by_name("numEvents")

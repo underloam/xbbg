@@ -27,17 +27,19 @@ mod worker;
 
 pub use transport::{ServerAddr, Socks5Proxy, TlsConfig, TlsMaterial, Transport};
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow_array::{Array, RecordBatch};
+use arrow_array::RecordBatch;
 use tokio::sync::watch;
 
 use xbbg_core::{AuthConfig, BlpError, SessionOptions, apply_session_identity_options};
 
+use crate::diagnostics::FieldErrorMeta;
 use crate::errors::BlpAsyncError;
+use crate::field_cache::field_errors_from_response;
 use crate::services::{Operation, Service};
 use exchange_cache::ExchangeCache;
 
@@ -83,6 +85,60 @@ pub mod testing {
 const SESSION_STARTUP_TIMEOUT_MS: u32 = 30_000;
 pub type OverridePairs = Vec<(String, String)>;
 pub type SecurityOverridePairs = Vec<(String, OverridePairs)>;
+
+#[derive(Default)]
+struct FieldValidation {
+    invalid_fields: Vec<String>,
+    field_errors: BTreeMap<String, FieldErrorMeta>,
+}
+
+impl FieldValidation {
+    fn from_response(fields: &[String], batch: &RecordBatch) -> Result<Self, BlpAsyncError> {
+        let field_errors =
+            field_errors_from_response(batch).map_err(|error| BlpAsyncError::ConfigError {
+                detail: format!("Invalid FieldInfo error metadata: {error}"),
+            })?;
+        let refused_ids: HashSet<String> = field_errors
+            .keys()
+            .map(|field| field.to_uppercase())
+            .collect();
+        let mut valid_fields = HashSet::with_capacity(batch.num_rows().saturating_mul(2));
+        for column in ["id", "field"] {
+            if let Some(values) = batch
+                .column_by_name(column)
+                .and_then(|column| column.as_any().downcast_ref::<arrow_array::StringArray>())
+            {
+                valid_fields.extend(values.iter().flatten().map(str::to_uppercase));
+            }
+        }
+        let invalid_fields = fields
+            .iter()
+            .filter(|field| {
+                let normalized = field.to_uppercase();
+                refused_ids.contains(&normalized) || !valid_fields.contains(&normalized)
+            })
+            .cloned()
+            .collect();
+        Ok(Self {
+            invalid_fields,
+            field_errors,
+        })
+    }
+
+    fn detail(&self) -> String {
+        let mut detail = format!(
+            "Unknown Bloomberg field(s): {}",
+            self.invalid_fields.join(", ")
+        );
+        if !self.field_errors.is_empty() {
+            detail.push_str("; Bloomberg field errors: ");
+            detail.push_str(
+                &serde_json::to_string(&self.field_errors).expect("field error strings serialize"),
+            );
+        }
+        detail
+    }
+}
 
 fn parse_operation_lossless(operation: &str) -> Operation {
     match Operation::from_str(operation) {
@@ -1055,17 +1111,18 @@ impl Engine {
             return Ok(());
         }
 
-        let invalid_fields = self.validate_fields(fields).await?;
-        if invalid_fields.is_empty() {
+        let validation = self.validate_field_metadata(fields).await?;
+        if validation.invalid_fields.is_empty() {
             return Ok(());
         }
 
-        let detail = format!("Unknown Bloomberg field(s): {}", invalid_fields.join(", "));
+        let detail = validation.detail();
         if validation_mode == ValidationMode::Lenient {
             xbbg_log::warn!(
                 service = %params.service,
                 operation = %prepared.effective_operation(),
-                invalid_fields = ?invalid_fields,
+                invalid_fields = ?validation.invalid_fields,
+                field_errors = ?validation.field_errors,
                 "field validation warning"
             );
             return Ok(());
@@ -1129,7 +1186,8 @@ impl Engine {
     /// Validate Bloomberg field names.
     ///
     /// Queries `//blp/apiflds` for the given fields and returns a list of
-    /// invalid field names (fields that Bloomberg doesn't recognize).
+    /// invalid or refused field names, warning with Bloomberg's refusal details.
+    /// Echoed ids and canonical mnemonics both identify successful responses.
     ///
     /// # Example
     /// ```ignore
@@ -1137,8 +1195,15 @@ impl Engine {
     /// // invalid = ["INVALID_FIELD"]
     /// ```
     pub async fn validate_fields(&self, fields: &[String]) -> Result<Vec<String>, BlpAsyncError> {
+        Ok(self.validate_field_metadata(fields).await?.invalid_fields)
+    }
+
+    async fn validate_field_metadata(
+        &self,
+        fields: &[String],
+    ) -> Result<FieldValidation, BlpAsyncError> {
         if fields.is_empty() {
-            return Ok(Vec::new());
+            return Ok(FieldValidation::default());
         }
 
         // Query //blp/apiflds for the fields
@@ -1153,32 +1218,15 @@ impl Engine {
         let params = self.prepare_request_builder(params)?.finalize()?;
         let batch = self.request_pool.request(params).await?;
 
-        // Get the field column from the response
-        let field_col = batch
-            .column_by_name("field")
-            .and_then(|c| c.as_any().downcast_ref::<arrow_array::StringArray>());
-
-        let valid_fields: std::collections::HashSet<String> = match field_col {
-            Some(col) => (0..col.len())
-                .filter_map(|i| {
-                    if col.is_null(i) {
-                        None
-                    } else {
-                        Some(col.value(i).to_uppercase())
-                    }
-                })
-                .collect(),
-            None => std::collections::HashSet::new(),
-        };
-
-        // Find fields that weren't returned (invalid)
-        let invalid: Vec<String> = fields
-            .iter()
-            .filter(|f| !valid_fields.contains(&f.to_uppercase()))
-            .cloned()
-            .collect();
-
-        Ok(invalid)
+        let validation = FieldValidation::from_response(fields, &batch)?;
+        if !validation.field_errors.is_empty() {
+            xbbg_log::warn!(
+                refused_count = validation.field_errors.len(),
+                field_errors = ?validation.field_errors,
+                "Bloomberg refused field validation ids"
+            );
+        }
+        Ok(validation)
     }
 
     /// Check if field validation is enabled based on validation mode.
@@ -1693,6 +1741,77 @@ mod tests {
         match err {
             BlpAsyncError::ConfigError { detail } => detail,
             other => panic!("expected config error, got {other}"),
+        }
+    }
+
+    #[test]
+    fn field_validation_matches_ids_and_mnemonics_but_explicit_refusals_take_precedence() {
+        let mut batch = RecordBatch::try_from_iter([
+            (
+                "field",
+                Arc::new(arrow_array::StringArray::from(vec![
+                    "CANONICAL",
+                    "REFUSED_ALIAS",
+                ])) as arrow_array::ArrayRef,
+            ),
+            (
+                "id",
+                Arc::new(arrow_array::StringArray::from(vec![
+                    "accepted_alias",
+                    "some_other_alias",
+                ])) as arrow_array::ArrayRef,
+            ),
+        ])
+        .unwrap();
+        batch.schema_metadata_mut().insert(
+            crate::diagnostics::METADATA_KEY_FIELD_ERRORS.to_string(),
+            serde_json::json!({
+                "REFUSED_ALIAS": {
+                    "code": -4,
+                    "category": "NO_AUTH",
+                    "subcategory": "NOT_ENTITLED",
+                    "message": "Field metadata access refused",
+                    "source": "apiflds@synthetic"
+                }
+            })
+            .to_string(),
+        );
+        let requested = [
+            "ACCEPTED_ALIAS",
+            "canonical",
+            "refused_alias",
+            "SOME_OTHER_ALIAS",
+            "UNRETURNED",
+        ]
+        .map(str::to_string);
+        let validation = FieldValidation::from_response(&requested, &batch).unwrap();
+        assert_eq!(validation.invalid_fields, ["refused_alias", "UNRETURNED"]);
+        let detail = validation.detail();
+        assert!(detail.contains("Field metadata access refused"));
+        assert!(detail.contains("apiflds@synthetic"));
+        assert!(detail.contains("NOT_ENTITLED"));
+    }
+
+    #[test]
+    fn field_validation_supports_mnemonic_only_batches_and_rejects_malformed_diagnostics() {
+        let mut batch = RecordBatch::try_from_iter([(
+            "field",
+            Arc::new(arrow_array::StringArray::from(vec!["PX_LAST"])) as arrow_array::ArrayRef,
+        )])
+        .unwrap();
+        let requested = ["px_last", "UNKNOWN"].map(str::to_string);
+        let validation = FieldValidation::from_response(&requested, &batch).unwrap();
+        assert_eq!(validation.invalid_fields, ["UNKNOWN"]);
+        for malformed in ["null", "[]", r#"{"UNKNOWN":{"code":"invalid"}}"#] {
+            batch.schema_metadata_mut().insert(
+                crate::diagnostics::METADATA_KEY_FIELD_ERRORS.to_string(),
+                malformed.to_string(),
+            );
+            assert!(matches!(
+                FieldValidation::from_response(&requested, &batch),
+                Err(BlpAsyncError::ConfigError { detail })
+                    if detail.contains("Invalid FieldInfo error metadata")
+            ));
         }
     }
 

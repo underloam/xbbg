@@ -1,6 +1,6 @@
 import type { Table } from 'apache-arrow';
 
-import { RecordBatchReader, tableToIPC } from 'apache-arrow';
+import { RecordBatchReader, tableFromIPC, tableToIPC } from 'apache-arrow';
 import { createRequire } from 'node:module';
 
 import { FORMAT_BY_NAME } from './_defs_gen';
@@ -10,6 +10,7 @@ import type { NativeArrowZeroCopyBatch } from './napi';
 import { isPlainObject } from './objects';
 import type {
   BackendKind,
+  BloombergFieldError,
   BloombergFieldException,
   BloombergMetadataError,
   DelayedDataInfo,
@@ -53,6 +54,7 @@ function requirePolarsModule(): PolarsModule {
 const METADATA_KEY_EID_DATA = 'xbbg.eid_data';
 const METADATA_KEY_SECURITY_ERRORS = 'xbbg.security_errors';
 const METADATA_KEY_FIELD_EXCEPTIONS = 'xbbg.field_exceptions';
+const METADATA_KEY_FIELD_ERRORS = 'xbbg.field_errors';
 const METADATA_KEY_DELAYED = 'xbbg.delayed';
 const METADATA_KEY_BLOOMBERG_REQUEST_ID = 'xbbg.bloomberg_request_id';
 const METADATA_KEY_BLOOMBERG_REQUEST_IDS = 'xbbg.bloomberg_request_ids';
@@ -128,6 +130,153 @@ function isFieldExceptionRecord(
   );
 }
 
+function parseDiagnosticMetadata(metadata: Record<string, string>, key: string): unknown {
+  const raw = metadata[key];
+  if (raw === undefined) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch (cause) {
+    throw new TypeError(`Invalid ${key} metadata: expected valid JSON`, { cause });
+  }
+}
+
+function isInt32(value: unknown): value is number {
+  return (
+    typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= -2_147_483_648 &&
+    value <= 2_147_483_647
+  );
+}
+
+function isCompactFieldException(value: unknown): value is BloombergFieldException {
+  return (
+    isPlainObject(value) &&
+    typeof value.field === 'string' &&
+    typeof value.category === 'string' &&
+    isInt32(value.code) &&
+    typeof value.subcategory === 'string' &&
+    typeof value.message === 'string'
+  );
+}
+
+type FieldExceptionsProperty =
+  | { value: Record<string, BloombergFieldException[]> | undefined }
+  | { get: () => Record<string, BloombergFieldException[]> };
+
+function validateFieldExceptionIndices(
+  securities: Record<string, unknown>,
+  dictionarySize: number,
+): asserts securities is Record<string, number[]> {
+  for (const [security, indices] of Object.entries(securities)) {
+    if (!Array.isArray(indices)) {
+      throw new TypeError(
+        `Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: expected index array for ${JSON.stringify(security)}`,
+      );
+    }
+    for (const index of indices as readonly unknown[]) {
+      if (
+        typeof index !== 'number' ||
+        !Number.isSafeInteger(index) ||
+        index < 0 ||
+        index >= dictionarySize
+      ) {
+        throw new TypeError(
+          `Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: invalid dictionary index for ${JSON.stringify(security)}`,
+        );
+      }
+    }
+  }
+}
+
+function fieldExceptionsFromMetadata(metadata: Record<string, string>): FieldExceptionsProperty {
+  const parsed = parseDiagnosticMetadata(metadata, METADATA_KEY_FIELD_EXCEPTIONS);
+  if (parsed === undefined) {
+    return { value: undefined };
+  }
+  if (!isPlainObject(parsed)) {
+    throw new TypeError(`Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: expected an object`);
+  }
+  // The reserved pair identifies envelopes even when their member types are malformed.
+  const envelope = Object.hasOwn(parsed, 'entries') && Object.hasOwn(parsed, 'securities');
+  if (!envelope && isFieldExceptionRecord(parsed)) {
+    return { value: parsed };
+  }
+  if (parsed.version !== 1) {
+    throw new TypeError(
+      `Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: unsupported or missing version`,
+    );
+  }
+  const { entries, securities } = parsed;
+  if (
+    Object.keys(parsed).length !== 3 ||
+    !Object.hasOwn(parsed, 'entries') ||
+    !Object.hasOwn(parsed, 'securities') ||
+    !Array.isArray(entries) ||
+    !entries.every(isCompactFieldException) ||
+    !isPlainObject(securities)
+  ) {
+    throw new TypeError(
+      `Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: malformed version 1 envelope`,
+    );
+  }
+  // Validate every occurrence now, without allocating expanded payload objects.
+  validateFieldExceptionIndices(securities, entries.length);
+  let expanded: Record<string, BloombergFieldException[]> | undefined;
+  return {
+    get: () => {
+      expanded ??= Object.fromEntries(
+        Object.entries(securities).map(
+          ([security, indices]): [string, BloombergFieldException[]] => [
+            security,
+            indices.map((index) => {
+              const exception = entries[index];
+              if (exception === undefined) {
+                throw new TypeError(
+                  `Invalid ${METADATA_KEY_FIELD_EXCEPTIONS} metadata: missing dictionary index`,
+                );
+              }
+              // Each expanded occurrence has its own mutable payload.
+              return { ...exception };
+            }),
+          ],
+        ),
+      );
+      return expanded;
+    },
+  };
+}
+
+function isFieldError(value: unknown): value is BloombergFieldError {
+  return (
+    isPlainObject(value) &&
+    typeof value.category === 'string' &&
+    isInt32(value.code) &&
+    typeof value.subcategory === 'string' &&
+    typeof value.message === 'string' &&
+    (value.source === undefined || typeof value.source === 'string')
+  );
+}
+
+function isFieldErrorRecord(value: unknown): value is Record<string, BloombergFieldError> {
+  return isPlainObject(value) && Object.values(value).every(isFieldError);
+}
+
+function fieldErrorsFromMetadata(
+  metadata: Record<string, string>,
+): Record<string, BloombergFieldError> | undefined {
+  const parsed = parseDiagnosticMetadata(metadata, METADATA_KEY_FIELD_ERRORS);
+  if (parsed === undefined) {
+    return undefined;
+  }
+  if (!isFieldErrorRecord(parsed)) {
+    throw new TypeError(`Invalid ${METADATA_KEY_FIELD_ERRORS} metadata: malformed field errors`);
+  }
+  return parsed;
+}
+
 function isDelayedDataInfo(value: unknown): value is DelayedDataInfo {
   if (!isPlainObject(value)) {
     return false;
@@ -196,17 +345,15 @@ function attachResultMetadata<T extends object>(
     METADATA_KEY_SECURITY_ERRORS,
     isMetadataErrorRecord,
   );
-  const fieldExceptions = parseJsonMetadata(
-    metadata,
-    METADATA_KEY_FIELD_EXCEPTIONS,
-    isFieldExceptionRecord,
-  );
+  const fieldExceptions = fieldExceptionsFromMetadata(metadata);
+  const fieldErrors = fieldErrorsFromMetadata(metadata);
   Object.defineProperties(result, {
     bloombergRequestId: { enumerable: true, configurable, value: bloombergRequestId },
     bloombergRequestIds: { enumerable: true, configurable, value: bloombergRequestIds },
     delayed: { enumerable: true, configurable, value: delayed },
     eidData: { enumerable: true, configurable, value: eidData },
-    fieldExceptions: { enumerable: true, configurable, value: fieldExceptions },
+    fieldExceptions: { enumerable: true, configurable, ...fieldExceptions },
+    fieldErrors: { enumerable: true, configurable, value: fieldErrors },
     metadata: { enumerable: true, configurable, value: { ...metadata } },
     securityErrors: { enumerable: true, configurable, value: securityErrors },
   });
@@ -280,7 +427,12 @@ export function nativeArrowToPolars(batch: NativeArrowZeroCopyBatch): unknown {
 }
 
 export function ipcToPolars(buffer: Buffer): unknown {
-  return loadPolars().readIPC(buffer);
+  const reader = RecordBatchReader.from(buffer).open();
+  const metadata = metadataRecordFromMap(reader.schema.metadata);
+  // The supported Polars reader needs file IPC; keep file inputs zero-copy.
+  const ipc = reader.isFile() ? buffer : tableToIPC(tableFromIPC(reader), 'file');
+  const frame = loadPolars().readIPC(Buffer.from(ipc.buffer, ipc.byteOffset, ipc.byteLength));
+  return attachResultMetadata(frame, metadata, true);
 }
 
 function normalizeNativeBackend(backend: BackendKind | undefined): 'arrow' | 'json' {

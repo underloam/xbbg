@@ -6,6 +6,7 @@ import {
   TRUNCATION_REASON_ORDER,
   type ResultTruncationReason,
 } from "./_defs_gen";
+import { buildRawFieldExceptions, rawFieldExceptionsMetadata } from "./result-diagnostics";
 import { buildEntitlementProperty } from "./result-entitlements";
 import {
   addReason,
@@ -24,6 +25,17 @@ import {
 
 const ERROR_KEYS = new Set<string>(ERROR_SHAPE_KEYS);
 const ENTITLEMENT_TRAVERSAL = { buildValue, appendBuiltProperty };
+const DIAGNOSTIC_TRAVERSAL = { buildValue, appendBuiltProperty, jsonStringByteLength };
+const OPTIONAL_METADATA_KEYS: Readonly<Record<string, true | undefined>> = {
+  bloombergRequestId: true,
+  bloombergRequestIds: true,
+  delayed: true,
+  eidData: true,
+  eidDataTruncation: true,
+  fieldErrors: true,
+  fieldExceptions: true,
+  securityErrors: true,
+};
 
 function jsonStringUnit(
   value: string,
@@ -158,7 +170,42 @@ function hasReportedError(value: unknown): boolean {
   if (value === undefined || value === null || value === false || value === "") {
     return false;
   }
+  if (isPlainObject(value)) {
+    for (const key in value) {
+      if (Object.hasOwn(value, key)) {
+        return true;
+      }
+    }
+    return false;
+  }
   return !Array.isArray(value) || value.length > 0;
+}
+
+function hasFieldExceptionOccurrences(value: unknown, state: LimitState): boolean {
+  if (!isPlainObject(value)) {
+    return hasReportedError(value);
+  }
+  for (const security in value) {
+    if (!Object.hasOwn(value, security)) {
+      continue;
+    }
+    if (!consumeVisit(state)) {
+      return true;
+    }
+    const descriptor = ownEnumerableDescriptor(value, security);
+    if (descriptor === undefined) {
+      continue;
+    }
+    if (!("value" in descriptor)) {
+      addReason(state, "accessor_omitted");
+      return true;
+    }
+    const occurrences: unknown = descriptor.value;
+    if (!Array.isArray(occurrences) || occurrences.length > 0) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function primitiveBuilt(
@@ -224,25 +271,71 @@ function buildProperty(
   rowLimit: number,
 ): boolean {
   const descriptor = ownEnumerableDescriptor(source, key);
-  if (descriptor === undefined) {
+  const rawExceptions =
+    key === "fieldExceptions" &&
+    (descriptor === undefined || !("value" in descriptor) || descriptor.value === undefined)
+      ? rawFieldExceptionsMetadata(source)
+      : undefined;
+  if (
+    rawExceptions === undefined &&
+    (descriptor === undefined ||
+      ("value" in descriptor &&
+        descriptor.value === undefined &&
+        OPTIONAL_METADATA_KEYS[key] === true))
+  ) {
     return true;
   }
-  if (key === "eidDataTruncation" && ownEnumerableDescriptor(source, "eidData") !== undefined) {
+  if (
+    !state.inDiagnostics &&
+    key === "eidDataTruncation" &&
+    ownEnumerableDescriptor(source, "eidData") !== undefined
+  ) {
     return true;
   }
   const commaBytes = accumulator.propertyCount === 0 ? 0 : 1;
   const availableForKeyAndChild = maximumJsonBytes - accumulator.byteLength - commaBytes - 1;
   if (availableForKeyAndChild < 4) {
     addReason(state, "max_result_bytes");
+    state.hasErrors ||= rawExceptions !== undefined;
     return false;
   }
   const maximumKeyBytes = availableForKeyAndChild - 2;
   const keyBytes = jsonStringByteLength(key, maximumKeyBytes);
   if (keyBytes > maximumKeyBytes) {
     addReason(state, "max_result_bytes");
+    state.hasErrors ||= rawExceptions !== undefined;
     return false;
   }
   const childBudget = availableForKeyAndChild - keyBytes;
+  if (rawExceptions !== undefined) {
+    const wasInDiagnostics = state.inDiagnostics;
+    state.inDiagnostics = true;
+    let built: BuiltValue | typeof OMIT;
+    try {
+      built = buildRawFieldExceptions(
+        rawExceptions,
+        childBudget,
+        state,
+        depth + 1,
+        DIAGNOSTIC_TRAVERSAL,
+      );
+    } finally {
+      state.inDiagnostics = wasInDiagnostics;
+    }
+    if (built === OMIT) {
+      return true;
+    }
+    if (!appendBuiltProperty(accumulator, key, built, maximumJsonBytes, state)) {
+      return false;
+    }
+    if (state.hasErrors) {
+      rememberErrorDiagnostic(state, key, built.value);
+    }
+    return true;
+  }
+  if (descriptor === undefined) {
+    return true;
+  }
 
   let rawValue: unknown;
   if ("value" in descriptor) {
@@ -251,13 +344,17 @@ function buildProperty(
     addReason(state, "accessor_omitted");
     rawValue = "[Accessor omitted]";
   }
-  const errorKey = ERROR_KEYS.has(key.toLowerCase()) && hasReportedError(rawValue);
+  const errorKey =
+    ERROR_KEYS.has(key.toLowerCase()) &&
+    (key === "fieldExceptions"
+      ? hasFieldExceptionOccurrences(rawValue, state)
+      : hasReportedError(rawValue));
   if (errorKey) {
     state.hasErrors = true;
   }
   const useSharedRows = key === "rows" || (key === "data" && Array.isArray(rawValue));
 
-  if (key === "eidData") {
+  if (!state.inDiagnostics && key === "eidData") {
     return buildEntitlementProperty(
       source,
       rawValue,
@@ -270,7 +367,15 @@ function buildProperty(
     );
   }
 
-  const built = buildValue(rawValue, childBudget, state, depth + 1, rowLimit, useSharedRows);
+  const wasInDiagnostics = state.inDiagnostics;
+  state.inDiagnostics =
+    wasInDiagnostics || key === "diagnostics" || ERROR_KEYS.has(key.toLowerCase());
+  let built: BuiltValue | typeof OMIT;
+  try {
+    built = buildValue(rawValue, childBudget, state, depth + 1, rowLimit, useSharedRows);
+  } finally {
+    state.inDiagnostics = wasInDiagnostics;
+  }
   if (built === OMIT || !appendBuiltProperty(accumulator, key, built, maximumJsonBytes, state)) {
     return false;
   }
@@ -308,10 +413,11 @@ function buildArrayRows(
   const output: unknown[] = [];
   let byteLength = 2;
   let processedRows = 0;
+  const sharedRows = useSharedRows && !state.inDiagnostics;
   const retainedLength = Math.min(
     value.length,
-    rowLimit,
-    useSharedRows ? state.remainingRows : Number.MAX_SAFE_INTEGER,
+    state.inDiagnostics ? Number.MAX_SAFE_INTEGER : rowLimit,
+    sharedRows ? state.remainingRows : Number.MAX_SAFE_INTEGER,
   );
   for (let index = 0; index < retainedLength; index += 1) {
     const commaBytes = index === 0 ? 0 : 1;
@@ -324,25 +430,37 @@ function buildArrayRows(
       addReason(state, "accessor_omitted");
       entry = "[Accessor omitted]";
     }
+    const atomicDiagnostic = state.inDiagnostics && isPlainObject(entry);
+    if (atomicDiagnostic && depth + 2 > MAX_RESULT_DEPTH) {
+      addReason(state, "max_result_depth");
+      break;
+    }
+    const retainedNodesBefore = state.retainedNodes;
+    const omittedPropertiesBefore = state.omittedPropertiesAtLeast;
     const built = buildValue(entry, childBudget, state, depth + 1, rowLimit, false);
-    if (built === OMIT) {
+    if (
+      built === OMIT ||
+      (atomicDiagnostic &&
+        (!isPlainObject(built.value) || state.omittedPropertiesAtLeast > omittedPropertiesBefore))
+    ) {
+      state.retainedNodes = retainedNodesBefore;
       break;
     }
     output.push(built.value);
     byteLength += commaBytes + built.byteLength;
     processedRows = index + 1;
   }
-  if (useSharedRows) {
+  if (sharedRows) {
     state.maximumArrayRows = Math.max(state.maximumArrayRows, processedRows);
   }
-  if (useSharedRows) {
+  if (sharedRows) {
     state.remainingRows -= processedRows;
     state.retainedRows += processedRows;
   }
   if (retainedLength < value.length) {
     addReason(state, "max_rows");
   }
-  if (processedRows < value.length) {
+  if (processedRows < value.length && !state.inDiagnostics) {
     state.omittedRows += value.length - processedRows;
   }
   return { byteLength, value: output };
@@ -679,6 +797,7 @@ export function limitResultWithRowPriority(
     ancestors: new WeakSet<object>(),
     diagnostics: [],
     hasErrors: false,
+    inDiagnostics: false,
     maximumArrayRows: 0,
     limits,
     omittedPropertiesAtLeast: 0,

@@ -58,6 +58,14 @@ Historical streaming honors field-type hints and includes `eidData`,
 Intraday-bar responses use a non-nullable `ticker` column in both delivery modes:
 each row carries the request ticker, including an empty request string.
 
+Response diagnostics use `xbbg_async::diagnostics` for compact field exceptions and
+per-id field metadata errors. `xbbg.field_exceptions` writes a version-1 dictionary
+of unique exception payloads with ordered per-security indices; the shared codec
+also reads historical expanded maps and validates every index before merging.
+FieldInfo tables retain the enclosing echoed `id` alongside the mnemonic and
+preserve refused ids under `xbbg.field_errors`, including metadata-only failures.
+See the [response diagnostic contract](../../README.md#response-diagnostics).
+
 Historical and intraday-bar streams never silently drop a chunk when their
 bounded channel fills. They terminate with an error after previously accepted
 chunks; the SDK callback does not wait for the consumer to drain the channel.

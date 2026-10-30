@@ -12,11 +12,19 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Gap-aware subscription delivery (#271).** Python, Node, and Rust support opt-in `drop_oldest` deltas with exact local-eviction counts, and `delivery="state"`/`delivery: 'state'` for fair, conflated current images. Delivery envelopes preserve gaps across Arrow and dataframe backends; state rows expose continuity validity and ordered invalidation/recovery without building Arrow on incoming updates or scanning quiet topics.
 - **Transactional marked reads and drains.** Native source receipts survive conversion failure, cancellation, and closing views until publication. Frozen drains retain complete epoch/gap/error ordering for backend retry, without retaining exported Arrow buffers.
 - **Offline native verification and benchmarks.** Feature-gated SDK TestUtil drivers exercise real CPython, V8, and Bun paths; CI excludes the drivers from shipped artifacts. Benchmarks compare default queues with a frozen v1.7.0 source and distinguish full adapters from bare overwrite primitives, with privacy-safe provenance.
+- **Field metadata refusal diagnostics (#369).** FieldInfo results append Bloomberg's echoed `id` and always retain per-id `fieldError` details under `xbbg.field_errors`, including on empty results. Native Python tables/batches expose `field_errors`, pandas preserves `xbbg_field_errors`, and Node and bounded tool results expose `fieldErrors`.
 
 ### Changed
 
 - **BREAKING (Rust):** `SubscribeRequest` includes `delivery`, and `OverflowPolicy` adds `DropOldest`. Update full struct literals and exhaustive policy matches. Default sparse-delta behavior and ordinary Python/Node iteration remain unchanged.
 - **LangGraph snapshots explicitly select a strict policy.** Omitting overflow policy selects `drop_newest` independently of engine defaults; callers can still request `block`. Snapshot schemas do not advertise lossy policies they cannot represent.
+- **BREAKING (raw metadata): compact field exceptions (#368).** `xbbg.field_exceptions` now writes a version-1 dictionary envelope with unique full exception payloads and per-security occurrence indices. The engine interns repeated text during extraction and remaps dictionaries across shards and streamed chunks. Public Python/Node exception accessors retain their expanded map shape; readers continue to accept historical stored maps, and bounded tool adapters expand only retained diagnostics.
+- **BREAKING (Rust): shared diagnostic types live in `xbbg_async::diagnostics`.** Import `FieldExceptionMeta` and `METADATA_KEY_FIELD_EXCEPTIONS` from that module instead of `engine::state`; it also provides the compact `FieldExceptions` codec and field-id refusal metadata.
+
+### Fixed
+
+- **Field validation and type lookup retain refused-id reasons (#369).** Validation recognizes echoed ids as well as canonical mnemonics, strict errors include Bloomberg's refusal details, successful aliases enter the type cache, and partial lookup failures warn rather than silently becoming ordinary missing metadata.
+- **macOS CI checks the subscription-delivery benchmark.** The benchmark's production receiver is boxed during untimed queue setup so the heterogeneous receiver enum does not trigger `large_enum_variant`; per-update work is unchanged.
 
 ## [1.7.0] - 2026-10-29
 

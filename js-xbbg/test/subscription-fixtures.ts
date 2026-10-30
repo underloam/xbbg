@@ -1,4 +1,5 @@
 import type {
+  NativeArrowColumn,
   NativeArrowZeroCopyBatch,
   NativeSubscription,
   NativeSubscriptionDeliveryReceipt,
@@ -59,6 +60,25 @@ export function int32ArrowBatch(
     kind: 'zeroCopy',
     metadata,
     numRows: 1,
+  };
+}
+
+export function emptyFieldInfoArrowBatch(
+  metadata: Record<string, string>,
+): NativeArrowZeroCopyBatch {
+  return {
+    columns: ['field', 'type', 'description', 'category', 'id'].map((name): NativeArrowColumn => ({
+      name,
+      type: 'utf8',
+      nullable: name === 'description' || name === 'category',
+      length: 0,
+      nullCount: 0,
+      data: Buffer.alloc(0),
+      offsets: typedBuffer(new Int32Array([0])),
+    })),
+    kind: 'zeroCopy',
+    metadata,
+    numRows: 0,
   };
 }
 

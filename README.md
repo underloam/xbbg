@@ -519,6 +519,26 @@ This opt-in request metadata is separate from a subscription message's top-level
 
 Bloomberg returns EIDs only for exchanges the requester is entitled to, so a security whose data is delayed comes back with none; [`delay_status`](#delayed-data) reports its feed EIDs.
 
+## Response diagnostics
+
+`bflds(fields=...)` and `FieldInfoRequest` tables append an `id` column containing Bloomberg's echoed request identifier, separately from the canonical `field` mnemonic. Refused ids remain available in `xbbg.field_errors` schema metadata, including their category, code, subcategory, message, and source when supplied. A result with no successful rows still retains these diagnostics.
+
+Native Python tables and batches expose `.field_errors` and `.field_exceptions`; pandas retains them in `attrs["xbbg_field_errors"]` and `attrs["xbbg_field_exceptions"]`. Node result containers expose `fieldErrors` and `fieldExceptions`. PyArrow retains the raw UTF-8 JSON in schema metadata.
+
+Raw `xbbg.field_exceptions` metadata uses a versioned dictionary so repeated exceptions do not repeat their text for every security:
+
+```json
+{
+  "version": 1,
+  "entries": [
+    {"field": "SYN_BAD_FIELD", "category": "BAD_FLD", "code": 9, "subcategory": "NOT_APPLICABLE_TO_REF_DATA", "message": "Synthetic field not applicable"}
+  ],
+  "securities": {"SYN_A Equity": [0], "SYN_B Equity": [0, 0]}
+}
+```
+
+Each index identifies a complete entry; per-security order and repeated occurrences are preserved. Public exception accessors still return the expanded `{security: [exception, ...]}` map. Readers also accept historical persisted maps, while unsupported versions and invalid dictionary indices are rejected. Code reading raw JSON must handle the versioned shape rather than assuming the legacy map.
+
 ## Bloomberg support RequestIds
 
 Results retain the SDK-assigned RequestId for Bloomberg support. It is distinct from xbbg's `request_id` label and the SDK correlation ID.

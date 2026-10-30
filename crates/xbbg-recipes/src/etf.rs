@@ -29,9 +29,9 @@ use arrow_array::RecordBatch;
 use arrow_array::builder::{Date32Builder, Float64Builder, Int32Builder, StringBuilder};
 use arrow_schema::{DataType, Field, Schema};
 use chrono::NaiveDate;
+use xbbg_async::diagnostics::{FieldExceptionMeta, FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
 use xbbg_async::engine::state::{
-    BloombergRequestIds, FieldExceptionMeta, METADATA_KEY_FIELD_EXCEPTIONS,
-    METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
+    BloombergRequestIds, METADATA_KEY_SECURITY_ERRORS, SecurityErrorMeta,
 };
 use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -753,11 +753,13 @@ fn parse_response_diagnostics(batch: &RecordBatch) -> Result<ResponseDiagnostics
     };
     let field_exceptions = match metadata.get(METADATA_KEY_FIELD_EXCEPTIONS) {
         None => BTreeMap::new(),
-        Some(raw) => serde_json::from_str(raw).map_err(|err| {
-            RecipeError::Other(format!(
-                "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {err}"
-            ))
-        })?,
+        Some(raw) => FieldExceptions::from_json(raw)
+            .map_err(|err| {
+                RecipeError::Other(format!(
+                    "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {err}"
+                ))
+            })?
+            .expanded(),
     };
     Ok(ResponseDiagnostics {
         security_errors,
@@ -1817,19 +1819,26 @@ mod tests {
         let exceptions = format!(
             r#"{{"{QQQ}": [{{"field": "ETF_INAV_TICKER", "category": "BAD_FLD", "code": 9, "subcategory": "NOT_APPLICABLE_TO_REF_DATA", "message": "Field not applicable"}}]}}"#
         );
-        let batch = with_metadata(
-            &batch,
-            &[
-                (METADATA_KEY_SECURITY_ERRORS, security.as_str()),
-                (METADATA_KEY_FIELD_EXCEPTIONS, exceptions.as_str()),
-            ],
-        );
-        let diagnostics = parse_response_diagnostics(&batch).unwrap();
-        assert_eq!(diagnostics.security_errors[AT1].code, 15);
-        assert_eq!(
-            diagnostics.field_exceptions[QQQ][0].field,
-            "ETF_INAV_TICKER"
-        );
+        let compact = FieldExceptions::from_json(&exceptions)
+            .unwrap()
+            .to_json()
+            .unwrap();
+        for exceptions in [&exceptions, &compact] {
+            let batch = with_metadata(
+                &batch,
+                &[
+                    (METADATA_KEY_SECURITY_ERRORS, security.as_str()),
+                    (METADATA_KEY_FIELD_EXCEPTIONS, exceptions.as_str()),
+                ],
+            );
+            let diagnostics = parse_response_diagnostics(&batch).unwrap();
+            assert_eq!(diagnostics.security_errors[AT1].code, 15);
+            assert_eq!(
+                diagnostics.field_exceptions[QQQ][0].field,
+                "ETF_INAV_TICKER"
+            );
+            assert!(is_not_applicable(&diagnostics.field_exceptions[QQQ][0]));
+        }
     }
 
     fn security_error(message: &str) -> SecurityErrorMeta {

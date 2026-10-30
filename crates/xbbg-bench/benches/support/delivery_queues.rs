@@ -45,7 +45,7 @@ impl Kind {
                     subscription_channel_with_policy(capacity, OverflowPolicy::DropOldest);
                 (
                     Sender::Production(tx),
-                    Receiver::Production(SubscriptionConsumer::from_receiver(rx)),
+                    Receiver::Production(Box::new(SubscriptionConsumer::from_receiver(rx))),
                 )
             }
             Self::AsyncChannel => {
@@ -91,7 +91,8 @@ impl Sender {
 }
 
 enum Receiver {
-    Production(SubscriptionConsumer),
+    // Queue setup is outside every measured phase; keep primitive variants small.
+    Production(Box<SubscriptionConsumer>),
     AsyncChannel(async_channel::Receiver<SubscriptionUpdate>),
     ArrayQueue(Arc<ArrayQueue<SubscriptionUpdate>>),
 }

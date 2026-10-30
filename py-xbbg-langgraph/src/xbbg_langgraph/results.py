@@ -50,6 +50,8 @@ _NATIVE_SCALARS = (
 )
 _NATIVE_VARIABLE = ("Utf8", "LargeUtf8", "Utf8View", "Binary", "LargeBinary", "BinaryView")
 _OMIT = object()
+_OMITTED_DIAGNOSTIC = object()
+_RAW_METADATA_KEYS = frozenset((*_METADATA_KEYS, *(key.encode() for key in _METADATA_KEYS)))
 # Lists under these keys are diagnostics or metadata, which max_rows never truncates.
 _METADATA_CHILD_KEYS = frozenset(
     (*_ERROR_KEYS, "eidData", "eidDataTruncation", "delayed", "failedEids", "diagnostics", "metadata")
@@ -83,6 +85,8 @@ def _row_count(value: Any) -> int | None:
 
 
 def _reported_error(value: Any) -> bool:
+    if isinstance(value, _FieldExceptions):
+        return value.has_errors
     if value is None or value is False:
         return False
     if isinstance(value, (str, bytes, bytearray, list, tuple, dict)):
@@ -121,6 +125,62 @@ def _json_depth_fits(value: str | bytes) -> bool:
         elif code in (93, 125):
             depth -= 1
     return True
+
+
+@dataclass(slots=True)
+class _FieldExceptionRows:
+    entries: list[dict[str, Any]]
+    indices: list[int]
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+    def __getitem__(self, index: int) -> dict[str, Any]:
+        return self.entries[self.indices[index]]
+
+
+@dataclass(slots=True)
+class _FieldExceptions:
+    securities: dict[str, Any]
+    has_errors: bool
+
+
+def _field_exceptions(value: Any) -> _FieldExceptions:
+    """Validate compact references without expanding their repeated payloads."""
+    if not isinstance(value, dict):
+        raise ValueError("field-exception metadata must be an object")
+    # Historical metadata carries the expanded ticker-to-array map. Keep its
+    # original record members, including older spellings such as fieldId.
+    if not ("entries" in value and "securities" in value) and all(
+        isinstance(exceptions, list) for exceptions in value.values()
+    ):
+        if any(not isinstance(exception, dict) for exceptions in value.values() for exception in exceptions):
+            raise ValueError("legacy field-exception records must be objects")
+        return _FieldExceptions(value, any(value.values()))
+    if set(value) != {"version", "entries", "securities"} or type(value.get("version")) is not int:
+        raise ValueError("invalid compact field-exception envelope")
+    if value["version"] != 1:
+        raise ValueError("unsupported field-exception metadata version")
+    entries, securities = value["entries"], value["securities"]
+    if not isinstance(entries, list) or not isinstance(securities, dict):
+        raise ValueError("invalid field-exception dictionary or security map")
+    for entry in entries:
+        if (
+            not isinstance(entry, dict)
+            or any(not isinstance(entry.get(key), str) for key in ("field", "category", "subcategory", "message"))
+            or type(entry.get("code")) is not int
+            or not -(2**31) <= entry["code"] < 2**31
+        ):
+            raise ValueError("invalid field-exception dictionary entry")
+    for indices in securities.values():
+        if not isinstance(indices, list) or any(
+            type(index) is not int or not 0 <= index < len(entries) for index in indices
+        ):
+            raise ValueError("invalid field-exception dictionary index")
+    return _FieldExceptions(
+        {security: _FieldExceptionRows(entries, indices) for security, indices in securities.items()},
+        any(securities.values()),
+    )
 
 
 def _pyarrow_cost(array: Any, budget: int, depth: int = 0) -> int | None:
@@ -217,16 +277,26 @@ class _ArrowSource:
             if encoded is None:
                 continue
             if len(encoded) > min(work.nodes_left, work.bytes_left):
-                self.diagnostics[target] = encoded
+                self.diagnostics[target] = _OMITTED_DIAGNOSTIC if target == "fieldExceptions" else encoded
                 self.reasons.add("max_result_nodes" if len(encoded) > work.nodes_left else "max_result_bytes")
             elif not _json_depth_fits(encoded):
-                self.diagnostics[target] = encoded
+                self.diagnostics[target] = _OMITTED_DIAGNOSTIC if target == "fieldExceptions" else encoded
                 self.reasons.add("max_result_depth")
             else:
                 # JSON parsing cannot create more nodes than input characters.
                 work.nodes_left -= len(encoded)
                 work.bytes_left -= len(encoded)
-                self.diagnostics[target] = json.loads(encoded)
+                if target in {"fieldExceptions", "fieldErrors"}:
+                    try:
+                        decoded = json.loads(encoded)
+                        self.diagnostics[target] = (
+                            _field_exceptions(decoded) if target == "fieldExceptions" else decoded
+                        )
+                    except ValueError:
+                        self.diagnostics[target] = _OMITTED_DIAGNOSTIC
+                        self.reasons.add("unsupported_value")
+                else:
+                    self.diagnostics[target] = json.loads(encoded)
 
     def row(self, index: int) -> dict[str, Any] | None:
         if index < len(self.rows):
@@ -393,6 +463,8 @@ class _Projection:
         if depth >= _MAX_DEPTH:
             self.reasons.add("max_result_depth")
             value = None
+        if value is _OMITTED_DIAGNOSTIC:
+            return _Built({}, 2)
         if isinstance(value, str):
             return self.string(value, budget)
         if isinstance(value, (bytes, bytearray)):
@@ -453,7 +525,9 @@ class _Projection:
                     result = self.sequence(rows, budget, depth, metadata)
                 self.reasons.update(source.reasons)
                 return result
-            if isinstance(value, _ArrowRows):
+            if isinstance(value, _FieldExceptions):
+                return self.mapping(value.securities, budget, depth, True)
+            if isinstance(value, (_ArrowRows, _FieldExceptionRows)):
                 return self.sequence(value, budget, depth, metadata)
             if isinstance(value, _Metadata):
                 return self.mapping(value.value, budget, depth, True, raw_metadata=True)
@@ -498,12 +572,7 @@ class _Projection:
             self.nodes_left -= 1  # Even omitted/non-string keys consume inspection work.
             original_key = key
             if raw_metadata:
-                if key in _METADATA_KEYS or key in (
-                    b"xbbg.security_errors",
-                    b"xbbg.field_exceptions",
-                    b"xbbg.eid_data",
-                    b"xbbg.delayed",
-                ):
+                if key in _RAW_METADATA_KEYS:
                     continue
                 if isinstance(key, bytes):
                     if len(key) > self.options.max_string_chars:

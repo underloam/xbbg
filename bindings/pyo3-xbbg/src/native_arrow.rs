@@ -34,10 +34,12 @@ use xbbg_arrow::{
     ArrowCoreError, CellValue, ColumnData, SortDirection, TableData, build_array, cell_from_array,
     cell_has_value, cell_to_string,
 };
+use xbbg_async::diagnostics::{
+    FieldExceptions, METADATA_KEY_FIELD_ERRORS, METADATA_KEY_FIELD_EXCEPTIONS,
+};
 use xbbg_async::engine::state::{
     METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS, METADATA_KEY_DELAYED,
-    METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
-    METADATA_KEY_TYPE_MISSES,
+    METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
 };
 
 fn core_err_to_py(err: ArrowCoreError) -> PyErr {
@@ -101,6 +103,41 @@ fn parse_metadata_json(
     let value: serde_json::Value = serde_json::from_str(raw)
         .map_err(|err| PyValueError::new_err(format!("invalid JSON in {key}: {err}")))?;
     serde_json_value_to_py(py, &value)
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+#[pyfunction]
+fn _decode_field_exceptions(py: Python<'_>, raw: &str) -> PyResult<Py<PyAny>> {
+    let exceptions = FieldExceptions::from_json(raw).map_err(|err| {
+        PyValueError::new_err(format!(
+            "invalid JSON in {METADATA_KEY_FIELD_EXCEPTIONS}: {err}"
+        ))
+    })?;
+    let securities = PyDict::new(py);
+    for ticker in exceptions.securities() {
+        let values = PyList::empty(py);
+        for exception in exceptions.for_security(ticker) {
+            let value = PyDict::new(py);
+            value.set_item("field", &exception.field)?;
+            value.set_item("category", &exception.category)?;
+            value.set_item("code", exception.code)?;
+            value.set_item("subcategory", &exception.subcategory)?;
+            value.set_item("message", &exception.message)?;
+            values.append(value)?;
+        }
+        securities.set_item(ticker, values)?;
+    }
+    Ok(securities.into_any().unbind())
+}
+
+fn parse_field_exceptions_metadata(
+    py: Python<'_>,
+    metadata: &HashMap<String, String>,
+) -> PyResult<Py<PyAny>> {
+    match metadata.get(METADATA_KEY_FIELD_EXCEPTIONS) {
+        Some(raw) => _decode_field_exceptions(py, raw),
+        None => Ok(py.None()),
+    }
 }
 
 fn ensure_optional_module(
@@ -1005,6 +1042,25 @@ impl ArrowRecordBatch {
         }
     }
 
+    #[getter]
+    fn metadata(&self) -> HashMap<String, String> {
+        self.batch.schema_ref().metadata().clone()
+    }
+
+    #[getter]
+    fn field_exceptions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        parse_field_exceptions_metadata(py, self.batch.schema_ref().metadata())
+    }
+
+    #[getter]
+    fn field_errors(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        parse_metadata_json(
+            py,
+            self.batch.schema_ref().metadata(),
+            METADATA_KEY_FIELD_ERRORS,
+        )
+    }
+
     #[pyo3(signature = (requested_schema=None))]
     fn __arrow_c_array__<'py>(
         &self,
@@ -1292,11 +1348,12 @@ impl ArrowTable {
 
     #[getter]
     fn field_exceptions(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        parse_metadata_json(
-            py,
-            self.data.schema.metadata(),
-            METADATA_KEY_FIELD_EXCEPTIONS,
-        )
+        parse_field_exceptions_metadata(py, self.data.schema.metadata())
+    }
+
+    #[getter]
+    fn field_errors(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        parse_metadata_json(py, self.data.schema.metadata(), METADATA_KEY_FIELD_ERRORS)
     }
 
     #[getter]
@@ -1696,6 +1753,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<ArrowColumn>()?;
     m.add_class::<ArrowRecordBatch>()?;
     m.add_class::<ArrowTable>()?;
+    m.add_function(wrap_pyfunction!(_decode_field_exceptions, m)?)?;
     Ok(())
 }
 
@@ -1988,6 +2046,166 @@ mod tests {
                 assert_eq!(
                     raw.extract::<Vec<u8>>().unwrap(),
                     br#"["sdk-synthetic-a","sdk-synthetic-z"]"#
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn native_field_exceptions_expand_compact_and_persisted_legacy_metadata() {
+        Python::initialize();
+        Python::attach(|py| {
+            let first = serde_json::json!({
+                "field": "OPEN_INT", "category": "BAD_FLD", "code": 9,
+                "subcategory": "NOT_APPLICABLE_TO_REF_DATA", "message": "not applicable"
+            });
+            let second = serde_json::json!({
+                "field": "PX_BAD", "category": "BAD_FLD", "code": 2,
+                "subcategory": "INVALID", "message": "bad field"
+            });
+            let expanded = serde_json::json!({
+                "IBM US Equity": [first, second, first],
+                "MSFT US Equity": [second]
+            });
+            let compact = serde_json::json!({
+                "version": 1,
+                "entries": [first, second],
+                "securities": {"IBM US Equity": [0, 1, 0], "MSFT US Equity": [1]}
+            });
+            let expected = serde_json_value_to_py(py, &expanded).unwrap();
+            for payload in [expanded, compact] {
+                let raw = payload.to_string();
+                let schema =
+                    Schema::new(vec![Field::new("ticker", DataType::Utf8, false)]).with_metadata(
+                        HashMap::from([(METADATA_KEY_FIELD_EXCEPTIONS.into(), raw.clone())]),
+                    );
+                let batch = RecordBatch::try_new(
+                    Arc::new(schema),
+                    vec![Arc::new(StringArray::from(vec!["IBM US Equity"]))],
+                )
+                .unwrap();
+                let batch = record_batch_to_arrow_record_batch(py, batch).unwrap();
+                let table = batch.bind(py).call_method0("to_table").unwrap();
+                for carrier in [batch.bind(py), &table] {
+                    let actual = carrier.getattr("field_exceptions").unwrap();
+                    assert!(actual.eq(expected.bind(py)).unwrap());
+                    assert_eq!(
+                        carrier
+                            .getattr("metadata")
+                            .unwrap()
+                            .get_item(METADATA_KEY_FIELD_EXCEPTIONS)
+                            .unwrap()
+                            .extract::<String>()
+                            .unwrap(),
+                        raw
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_field_exception_getters_reject_malformed_compact_indices() {
+        Python::initialize();
+        Python::attach(|py| {
+            for index in [
+                serde_json::json!(-1),
+                serde_json::json!(1),
+                serde_json::json!(0.5),
+                serde_json::json!("0"),
+                serde_json::json!(true),
+                serde_json::Value::Null,
+            ] {
+                let raw = serde_json::json!({
+                    "version": 1,
+                    "entries": [{
+                        "field": "PX_BAD", "category": "BAD_FLD", "code": 2,
+                        "subcategory": "INVALID", "message": "bad field"
+                    }],
+                    "securities": {"IBM US Equity": [index]}
+                })
+                .to_string();
+                let schema = Schema::empty()
+                    .with_metadata(HashMap::from([(METADATA_KEY_FIELD_EXCEPTIONS.into(), raw)]));
+                let batch = record_batch_to_arrow_record_batch(
+                    py,
+                    RecordBatch::new_empty(Arc::new(schema)),
+                )
+                .unwrap();
+                let table = batch.bind(py).call_method0("to_table").unwrap();
+                for carrier in [batch.bind(py), &table] {
+                    let error = carrier.getattr("field_exceptions").unwrap_err();
+                    assert!(error.is_instance_of::<PyValueError>(py));
+                    assert!(error.to_string().contains(METADATA_KEY_FIELD_EXCEPTIONS));
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn native_field_errors_account_for_refused_ids_on_empty_typed_results() {
+        Python::initialize();
+        Python::attach(|py| {
+            let errors = serde_json::json!({
+                "NOT_A_FIELD": {
+                    "category": "BAD_FLD", "code": -103, "subcategory": "",
+                    "message": "Unknown Field Id/Mnemonic", "source": "apiflds@test"
+                },
+                "REFUSED": {
+                    "category": "NOT_AUTHORIZED", "code": -1, "subcategory": "DENIED",
+                    "message": "Not authorized"
+                }
+            });
+            let raw = errors.to_string();
+            let schema = Schema::new(
+                ["field", "type", "description", "category", "id"]
+                    .into_iter()
+                    .map(|name| Field::new(name, DataType::Utf8, false))
+                    .collect::<Vec<_>>(),
+            )
+            .with_metadata(HashMap::from([(
+                METADATA_KEY_FIELD_ERRORS.into(),
+                raw.clone(),
+            )]));
+            let batch =
+                record_batch_to_arrow_record_batch(py, RecordBatch::new_empty(Arc::new(schema)))
+                    .unwrap();
+            let table = batch.bind(py).call_method0("to_table").unwrap();
+            let expected = serde_json_value_to_py(py, &errors).unwrap();
+            for carrier in [batch.bind(py), &table] {
+                assert_eq!(
+                    carrier
+                        .getattr("num_rows")
+                        .unwrap()
+                        .extract::<usize>()
+                        .unwrap(),
+                    0
+                );
+                assert_eq!(
+                    carrier
+                        .getattr("column_names")
+                        .unwrap()
+                        .extract::<Vec<String>>()
+                        .unwrap(),
+                    ["field", "type", "description", "category", "id"]
+                );
+                assert!(
+                    carrier
+                        .getattr("field_errors")
+                        .unwrap()
+                        .eq(expected.bind(py))
+                        .unwrap()
+                );
+                assert!(carrier.getattr("field_exceptions").unwrap().is_none());
+                assert_eq!(
+                    carrier
+                        .getattr("metadata")
+                        .unwrap()
+                        .get_item(METADATA_KEY_FIELD_ERRORS)
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    raw
                 );
             }
         });

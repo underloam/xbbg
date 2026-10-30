@@ -14,7 +14,7 @@ use futures_util::future::BoxFuture;
 use tokio::runtime::Handle;
 
 use crate::errors::BlpAsyncError;
-use crate::field_cache::{FieldTypeResolver, global_resolver};
+use crate::field_cache::{FieldTypeResolver, field_errors_from_response, global_resolver};
 use crate::schema::SchemaCache;
 use crate::services::{ExtractorType, Operation, Service};
 
@@ -126,6 +126,22 @@ impl SubscriptionTypeResolver {
             );
             match self.query.request(uncached).await {
                 Ok(batch) => {
+                    match field_errors_from_response(&batch) {
+                        Ok(errors) if !errors.is_empty() => {
+                            xbbg_log::warn!(
+                                refused_count = errors.len(),
+                                field_errors = ?errors,
+                                "Bloomberg refused field type metadata; using cached types and defaults for refused ids"
+                            );
+                        }
+                        Ok(_) => {}
+                        Err(error) => {
+                            xbbg_log::warn!(
+                                error = %error,
+                                "Invalid FieldInfo error metadata; preserving successful field types and defaults"
+                            );
+                        }
+                    }
                     self.cache.insert_from_response(&batch);
                     let cache = Arc::clone(&self.cache);
                     match self

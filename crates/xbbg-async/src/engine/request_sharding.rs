@@ -184,7 +184,7 @@ fn concat_sharded_batches(batches: Vec<RecordBatch>) -> Result<RecordBatch, BlpA
     // Concatenation keeps only `target_schema`'s metadata; union the
     // response diagnostics (eidData / securityError / fieldExceptions)
     // across shards so later shards' entries are not silently dropped.
-    let merged_meta = state::ResponseMetadata::union_of(&batches);
+    let merged_meta = state::ResponseMetadata::union_of(&batches)?;
 
     let target_schema = first.schema_ref().clone();
     let mut normalized = Vec::with_capacity(batches.len());
@@ -708,10 +708,11 @@ mod tests {
 
     #[test]
     fn same_field_shards_reuse_columns_and_preserve_provenance_and_diagnostics() {
+        use crate::diagnostics::{FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
         use state::{
             METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS,
-            METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS,
-            METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES, ResponseMetadata,
+            METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS,
+            METADATA_KEY_TYPE_MISSES, ResponseMetadata,
         };
 
         let mut first = ResponseMetadata::attach_bloomberg_request_id(
@@ -803,7 +804,6 @@ mod tests {
         for key in [
             METADATA_KEY_EID_DATA,
             METADATA_KEY_SECURITY_ERRORS,
-            METADATA_KEY_FIELD_EXCEPTIONS,
             METADATA_KEY_DELAYED,
         ] {
             let actual: serde_json::Value = serde_json::from_str(&metadata[key]).unwrap();
@@ -816,6 +816,36 @@ mod tests {
                 }
             }
         }
+        let actual = FieldExceptions::from_json(&metadata[METADATA_KEY_FIELD_EXCEPTIONS])
+            .unwrap()
+            .expanded_json();
+        for schema in [&first_schema, &second_schema] {
+            let expected =
+                FieldExceptions::from_json(&schema.metadata()[METADATA_KEY_FIELD_EXCEPTIONS])
+                    .unwrap()
+                    .expanded_json();
+            for (security, value) in expected.as_object().unwrap() {
+                assert_eq!(actual.get(security.as_str()).unwrap(), value);
+            }
+        }
+    }
+
+    #[test]
+    fn shard_merge_rejects_invalid_dictionary_indices_instead_of_losing_diagnostics() {
+        let first = px_last_batch(
+            &["SYN_A"],
+            Arc::new(Float64Array::from(vec![Some(1.0)])) as ArrayRef,
+        );
+        let mut second = px_last_batch(
+            &["SYN_B"],
+            Arc::new(Float64Array::from(vec![Some(2.0)])) as ArrayRef,
+        );
+        second.schema_metadata_mut().insert(
+            crate::diagnostics::METADATA_KEY_FIELD_EXCEPTIONS.into(),
+            r#"{"version":1,"entries":[],"securities":{"SYN_B":[0]}}"#.into(),
+        );
+        let error = concat_sharded_batches(vec![first, second]).unwrap_err();
+        assert!(error.to_string().contains("dictionary index out of range"));
     }
 
     #[test]

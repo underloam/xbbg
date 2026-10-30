@@ -355,7 +355,9 @@ mod tests {
         );
         assert_eq!(misses(&chunks[1]), serde_json::json!({"TEXT": 1}));
         let combined = arrow_select::concat::concat_batches(&chunks[0].schema(), &chunks).unwrap();
-        let combined = ResponseMetadata::union_of(&chunks).attach(combined);
+        let combined = ResponseMetadata::union_of(&chunks)
+            .unwrap()
+            .attach(combined);
         assert_eq!(
             misses(&combined),
             serde_json::json!({"COUNT": 1, "TEXT": 2})
@@ -608,9 +610,9 @@ mod tests {
 
     #[test]
     fn streaming_history_preserves_diagnostics_including_metadata_only_failures() {
+        use crate::diagnostics::{FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
         use crate::engine::state::value_utils::{
-            METADATA_KEY_EID_DATA, METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS,
-            ResponseMetadata,
+            METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS, ResponseMetadata,
         };
 
         let error = serde_json::json!({
@@ -672,7 +674,9 @@ mod tests {
                 .contains_key(METADATA_KEY_SECURITY_ERRORS)
         );
         let combined = arrow_select::concat::concat_batches(&expected.schema(), &chunks).unwrap();
-        let combined = ResponseMetadata::union_of(&chunks).attach(combined);
+        let combined = ResponseMetadata::union_of(&chunks)
+            .unwrap()
+            .attach(combined);
         assert_eq!(combined, expected);
         let metadata = combined.schema_ref().metadata();
         let eids: serde_json::Value =
@@ -681,8 +685,9 @@ mod tests {
         let errors: serde_json::Value =
             serde_json::from_str(&metadata[METADATA_KEY_SECURITY_ERRORS]).unwrap();
         assert_eq!(errors["DENIED Equity"]["code"], 17);
-        let exceptions: serde_json::Value =
-            serde_json::from_str(&metadata[METADATA_KEY_FIELD_EXCEPTIONS]).unwrap();
+        let exceptions = FieldExceptions::from_json(&metadata[METADATA_KEY_FIELD_EXCEPTIONS])
+            .unwrap()
+            .expanded_json();
         assert_eq!(exceptions["TEST Equity"][0]["field"], "TEXT");
         assert_eq!(exceptions["DENIED Equity"][0]["field"], "COUNT");
     }

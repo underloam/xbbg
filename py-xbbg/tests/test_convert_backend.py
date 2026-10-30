@@ -6,6 +6,7 @@ import builtins
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, date, datetime, time
 import importlib.util
+import json
 import os
 from typing import Any
 from uuid import uuid4
@@ -192,14 +193,41 @@ class TestConvertBackendPandas:
         pd = pytest.importorskip("pandas")
 
         class FakeTable:
+            field_errors = {
+                "NOT_A_FIELD": {
+                    "category": "BAD_FLD",
+                    "code": -103,
+                    "subcategory": "",
+                    "message": "Unknown Field Id/Mnemonic",
+                    "source": "apiflds@test",
+                }
+            }
+            field_exceptions = {
+                "IBM US Equity": [
+                    {
+                        "field": "OPEN_INT",
+                        "category": "BAD_FLD",
+                        "code": 9,
+                        "subcategory": "NOT_APPLICABLE_TO_REF_DATA",
+                        "message": "Field not applicable to security",
+                    }
+                ]
+            }
             metadata = {
                 "xbbg.eid_data": '{"IBM US Equity":[101,202]}',
                 "xbbg.security_errors": '{"BAD Ticker":{"message":"bad security"}}',
+                "xbbg.field_errors": json.dumps(field_errors),
+                "xbbg.field_exceptions": json.dumps(
+                    {
+                        "version": 1,
+                        "entries": field_exceptions["IBM US Equity"],
+                        "securities": {"IBM US Equity": [0]},
+                    }
+                ),
                 "xbbg.delayed": '{"IBM US Equity":{"delayed":true,"delay_minutes":15}}',
             }
             eid_data = {"IBM US Equity": [101, 202]}
             security_errors = {"BAD Ticker": {"message": "bad security"}}
-            field_exceptions = None
             delayed = {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
 
         frame = pd.DataFrame({"ticker": ["IBM US Equity"]})
@@ -209,7 +237,8 @@ class TestConvertBackendPandas:
         assert result is frame
         assert frame.attrs["xbbg_eid_data"] == {"IBM US Equity": [101, 202]}
         assert frame.attrs["xbbg_security_errors"] == {"BAD Ticker": {"message": "bad security"}}
-        assert "xbbg_field_exceptions" not in frame.attrs
+        assert frame.attrs["xbbg_field_exceptions"] == FakeTable.field_exceptions
+        assert frame.attrs["xbbg_field_errors"] == FakeTable.field_errors
         assert frame.attrs["xbbg_delayed"] == {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
 
     @pytest.mark.parametrize(
@@ -234,6 +263,147 @@ class TestConvertBackendPandas:
         frame = convert_backend_frame(table, Backend.PANDAS)
         assert frame.attrs == expected
         assert frame["row"].tolist() == [1, 2]
+
+    @pytest.mark.parametrize("compact", [False, True], ids=["legacy", "compact-v1"])
+    @pytest.mark.parametrize("batch", [False, True], ids=["table", "batch"])
+    def test_persisted_pyarrow_field_exceptions_expand_in_pandas_attrs(self, compact, batch):
+        pa = pytest.importorskip("pyarrow")
+        pq = pytest.importorskip("pyarrow.parquet")
+        pytest.importorskip("pandas")
+        first = {
+            "field": "OPEN_INT",
+            "category": "BAD_FLD",
+            "code": 9,
+            "subcategory": "NOT_APPLICABLE_TO_REF_DATA",
+            "message": "Field not applicable to security",
+        }
+        second = {
+            "field": "PX_BAD",
+            "category": "BAD_FLD",
+            "code": 2,
+            "subcategory": "INVALID",
+            "message": "bad field",
+        }
+        expanded = {"IBM US Equity": [first, second, first], "MSFT US Equity": [second]}
+        payload = (
+            {
+                "version": 1,
+                "entries": [first, second],
+                "securities": {"IBM US Equity": [0, 1, 0], "MSFT US Equity": [1]},
+            }
+            if compact
+            else expanded
+        )
+        metadata = {
+            b"xbbg.field_exceptions": json.dumps(payload).encode(),
+            b"app.raw": b"unchanged",
+        }
+        table = pa.table({"ticker": ["IBM US Equity", "MSFT US Equity"]}).replace_schema_metadata(metadata)
+        sink = pa.BufferOutputStream()
+        pq.write_table(table, sink)
+        restored = pq.read_table(pa.BufferReader(sink.getvalue()))
+        carrier = restored.to_batches()[0] if batch else restored
+
+        converted = convert_backend_frame(carrier, Backend.PYARROW)
+        assert converted.schema.metadata == metadata
+        frame = convert_backend_frame(carrier, Backend.PANDAS)
+
+        assert frame.attrs["xbbg_field_exceptions"] == expanded
+        assert frame["ticker"].tolist() == ["IBM US Equity", "MSFT US Equity"]
+        assert restored.schema.metadata == metadata
+
+    @pytest.mark.parametrize("index", [-1, 1, 0.5, "0", True, None])
+    def test_pyarrow_pandas_rejects_malformed_compact_field_exception_indices(self, index):
+        pa = pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+        payload = {
+            "version": 1,
+            "entries": [
+                {
+                    "field": "PX_BAD",
+                    "category": "BAD_FLD",
+                    "code": 2,
+                    "subcategory": "INVALID",
+                    "message": "bad field",
+                }
+            ],
+            "securities": {"IBM US Equity": [index]},
+        }
+        metadata = {b"xbbg.field_exceptions": json.dumps(payload).encode()}
+        table = pa.table({"ticker": ["IBM US Equity"]}).replace_schema_metadata(metadata)
+
+        with pytest.raises(ValueError, match=r"xbbg\.field_exceptions"):
+            convert_backend_frame(table, Backend.PANDAS)
+        assert table.schema.metadata == metadata
+
+    @pytest.mark.parametrize(
+        "payload",
+        [
+            {"version": 2, "entries": [], "securities": {}},
+            {"version": 1, "entries": []},
+            {"version": 1, "securities": {}},
+            {"version": [], "entries": [], "securities": []},
+        ],
+        ids=["unsupported-version", "missing-securities", "missing-entries", "malformed-envelope"],
+    )
+    def test_pyarrow_pandas_rejects_invalid_field_exception_envelopes(self, payload):
+        pa = pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+        table = pa.table({"row": [1]}).replace_schema_metadata({b"xbbg.field_exceptions": json.dumps(payload).encode()})
+
+        with pytest.raises(ValueError, match=r"xbbg\.field_exceptions"):
+            convert_backend_frame(table, Backend.PANDAS)
+
+    @pytest.mark.parametrize("all_rejected", [False, True], ids=["mixed", "all-rejected"])
+    @pytest.mark.parametrize("batch", [False, True], ids=["table", "batch"])
+    def test_pyarrow_pandas_exposes_refused_field_ids(self, all_rejected, batch):
+        pa = pytest.importorskip("pyarrow")
+        pytest.importorskip("pandas")
+        errors = {
+            "NOT_A_FIELD": {
+                "category": "BAD_FLD",
+                "code": -103,
+                "subcategory": "",
+                "message": "Unknown Field Id/Mnemonic",
+                "source": "apiflds@test",
+            },
+            "REFUSED": {
+                "category": "NOT_AUTHORIZED",
+                "code": -1,
+                "subcategory": "DENIED",
+                "message": "Not authorized",
+            },
+        }
+        metadata = {b"xbbg.field_errors": json.dumps(errors).encode()}
+        schema = pa.schema(
+            [(name, pa.string()) for name in ["field", "type", "description", "category", "id"]],
+            metadata=metadata,
+        )
+        rows = (
+            []
+            if all_rejected
+            else [
+                {
+                    "field": "LAST_PRICE",
+                    "type": "Float64",
+                    "description": "Last Price",
+                    "category": "Pricing",
+                    "id": "last_price",
+                }
+            ]
+        )
+        table = pa.Table.from_pylist(rows, schema=schema)
+        carrier = pa.RecordBatch.from_pylist(rows, schema=schema) if batch else table
+
+        converted = convert_backend_frame(carrier, Backend.PYARROW)
+        assert converted.schema.metadata == metadata
+        frame = convert_backend_frame(carrier, Backend.PANDAS)
+
+        assert frame.attrs["xbbg_field_errors"] == errors
+        assert list(frame.columns) == schema.names
+        assert frame["id"].tolist() == ([] if all_rejected else ["last_price"])
+        assert frame["field"].tolist() == ([] if all_rejected else ["LAST_PRICE"])
+        assert table.schema.metadata == metadata
 
     def test_convert_pandas_falls_back_when_pyarrow_import_raises(
         self, arrow_table: Any, monkeypatch: pytest.MonkeyPatch

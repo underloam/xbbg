@@ -55,6 +55,15 @@ export interface BloombergFieldException extends BloombergMetadataError {
   field?: string;
 }
 
+/** Bloomberg refusal for an echoed FieldInfoRequest id. */
+export interface BloombergFieldError extends BloombergMetadataError {
+  category: string;
+  code: number;
+  subcategory: string;
+  message: string;
+  source?: string;
+}
+
 /** Per-ticker delayed-data flag parsed from `xbbg.delayed` result metadata. */
 export interface DelayedDataInfo {
   /** Bloomberg `IS_DELAYED_STREAM` for the requesting session. */
@@ -74,6 +83,8 @@ export interface ResultMetadata {
   delayed?: Record<string, DelayedDataInfo>;
   securityErrors?: Record<string, BloombergMetadataError>;
   fieldExceptions?: Record<string, BloombergFieldException[]>;
+  /** Refused FieldInfoRequest ids, keyed by the server's echoed id. */
+  fieldErrors?: Record<string, BloombergFieldError>;
 }
 
 export interface ServerAddress {

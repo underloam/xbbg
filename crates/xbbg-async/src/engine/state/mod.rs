@@ -46,8 +46,7 @@ pub use update::{
 pub use update_arrow::{SubscriptionArrowBatcher, subscription_update_to_record_batch};
 pub(crate) use value_utils::ResponseMetadata;
 pub use value_utils::{
-    BloombergRequestIds, DelayedMeta, FieldExceptionMeta, METADATA_KEY_BLOOMBERG_REQUEST_ID,
+    BloombergRequestIds, DelayedMeta, METADATA_KEY_BLOOMBERG_REQUEST_ID,
     METADATA_KEY_BLOOMBERG_REQUEST_IDS, METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA,
-    METADATA_KEY_FIELD_EXCEPTIONS, METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
-    SecurityErrorMeta, delayed_metadata,
+    METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES, SecurityErrorMeta, delayed_metadata,
 };

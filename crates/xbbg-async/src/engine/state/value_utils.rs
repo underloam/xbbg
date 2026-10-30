@@ -4,6 +4,7 @@ use std::sync::{Arc, LazyLock};
 
 use super::refdata::LongMode;
 use super::typed_builder::{ArrowType, ColumnSet, TypedBuilder};
+use crate::diagnostics::{FieldExceptionRef, FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
 use arrow_array::ArrayRef;
 use arrow_array::RecordBatch;
 use arrow_array::builder::{
@@ -21,9 +22,6 @@ pub const METADATA_KEY_EID_DATA: &str = "xbbg.eid_data";
 /// Schema-metadata key carrying per-security `securityError` details
 /// (JSON: `{"<ticker>": {"category", "code", "subcategory", "message"}}`).
 pub const METADATA_KEY_SECURITY_ERRORS: &str = "xbbg.security_errors";
-/// Schema-metadata key carrying per-security `fieldExceptions`
-/// (JSON: `{"<ticker>": [{"field", "category", "code", "subcategory", "message"}, ...]}`).
-pub const METADATA_KEY_FIELD_EXCEPTIONS: &str = "xbbg.field_exceptions";
 /// Schema-metadata key carrying per-security delayed-data status for requests
 /// made with `on_delayed`
 /// (JSON: `{"<ticker>": {"delayed": bool, "delay_minutes": int | null}}`).
@@ -135,16 +133,6 @@ pub struct SecurityErrorMeta {
     pub message: String,
 }
 
-/// One `fieldExceptions[]` entry captured for batch metadata.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct FieldExceptionMeta {
-    pub field: String,
-    pub category: String,
-    pub code: i32,
-    pub subcategory: String,
-    pub message: String,
-}
-
 struct ResponseElementNames {
     eid_data: Name,
     security_error: Name,
@@ -220,7 +208,7 @@ pub(super) struct SecurityDiagnostics<'a> {
 pub(crate) struct ResponseMetadata {
     eid_data: BTreeMap<String, Vec<i64>>,
     security_errors: BTreeMap<String, SecurityErrorMeta>,
-    field_exceptions: BTreeMap<String, Vec<FieldExceptionMeta>>,
+    field_exceptions: FieldExceptions,
     delayed: BTreeMap<String, DelayedMeta>,
     type_misses: BTreeMap<String, u64>,
     bloomberg_request_ids: BloombergRequestIds,
@@ -360,14 +348,14 @@ impl ResponseMetadata {
                 }
                 let error_info = exception.get(&names.error_info);
                 let error = SecurityErrorDetails::read(error_info.as_ref(), names);
-                self.record_field_exception(
+                self.field_exceptions.record_ref(
                     ticker,
-                    FieldExceptionMeta {
-                        field: field.to_string(),
-                        category: error.category.to_string(),
+                    FieldExceptionRef {
+                        field,
+                        category: error.category,
                         code: error.code,
-                        subcategory: error.subcategory.to_string(),
-                        message: error.message.to_string(),
+                        subcategory: error.subcategory,
+                        message: error.message,
                     },
                 );
                 field_exception_count += 1;
@@ -436,13 +424,6 @@ impl ResponseMetadata {
         self.security_errors.insert(ticker.to_string(), error);
     }
 
-    pub(crate) fn record_field_exception(&mut self, ticker: &str, exception: FieldExceptionMeta) {
-        self.field_exceptions
-            .entry(ticker.to_string())
-            .or_default()
-            .push(exception);
-    }
-
     pub(super) fn is_empty(&self) -> bool {
         self.eid_data.is_empty()
             && self.security_errors.is_empty()
@@ -469,11 +450,14 @@ impl ResponseMetadata {
             METADATA_KEY_SECURITY_ERRORS,
             &self.security_errors,
         );
-        Self::insert_json(
-            metadata,
-            METADATA_KEY_FIELD_EXCEPTIONS,
-            &self.field_exceptions,
-        );
+        if !self.field_exceptions.is_empty() {
+            metadata.insert(
+                METADATA_KEY_FIELD_EXCEPTIONS.into(),
+                self.field_exceptions
+                    .to_json()
+                    .expect("field-exception strings and indices serialize"),
+            );
+        }
         Self::insert_json(metadata, METADATA_KEY_DELAYED, &self.delayed);
         Self::insert_json(metadata, METADATA_KEY_TYPE_MISSES, &self.type_misses);
         self.bloomberg_request_ids.attach_metadata(metadata);
@@ -483,13 +467,9 @@ impl ResponseMetadata {
     fn insert_json<T: serde::Serialize>(
         metadata: &mut HashMap<String, String>,
         key: &str,
-        value: &T,
+        value: &BTreeMap<String, T>,
     ) {
-        let is_empty = match serde_json::to_value(value) {
-            Ok(serde_json::Value::Object(map)) => map.is_empty(),
-            _ => false,
-        };
-        if is_empty {
+        if value.is_empty() {
             return;
         }
         match serde_json::to_string(value) {
@@ -507,7 +487,7 @@ impl ResponseMetadata {
     /// silently drop diagnostics from later shards. Shards partition
     /// securities, so per-ticker entries never conflict.
     /// Conversion misses are per-batch deltas and sum across shards or chunks.
-    pub(crate) fn union_of(batches: &[RecordBatch]) -> Self {
+    pub(crate) fn union_of(batches: &[RecordBatch]) -> Result<Self, BlpError> {
         let mut merged = Self::default();
         for batch in batches {
             merged.collect_type_misses(batch);
@@ -523,16 +503,14 @@ impl ResponseMetadata {
             ) {
                 merged.security_errors.extend(map);
             }
-            if let Some(map) = Self::parse_json::<BTreeMap<String, Vec<FieldExceptionMeta>>>(
-                metadata.get(METADATA_KEY_FIELD_EXCEPTIONS),
-            ) {
-                for (ticker, exceptions) in map {
-                    merged
-                        .field_exceptions
-                        .entry(ticker)
-                        .or_default()
-                        .extend(exceptions);
-                }
+            if let Some(raw) = metadata.get(METADATA_KEY_FIELD_EXCEPTIONS) {
+                let exceptions =
+                    FieldExceptions::from_json(raw).map_err(|error| BlpError::Internal {
+                        detail: format!(
+                            "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {error}"
+                        ),
+                    })?;
+                merged.field_exceptions.extend(exceptions);
             }
             if let Some(map) = Self::parse_json::<BTreeMap<String, DelayedMeta>>(
                 metadata.get(METADATA_KEY_DELAYED),
@@ -540,7 +518,7 @@ impl ResponseMetadata {
                 merged.delayed.extend(map);
             }
         }
-        merged
+        Ok(merged)
     }
 
     fn parse_json<T: serde::de::DeserializeOwned>(value: Option<&String>) -> Option<T> {
@@ -1484,6 +1462,7 @@ pub(crate) fn value_to_string<'a>(value: &'a Value<'a>) -> Cow<'a, str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::FieldExceptionMeta;
     use arrow_array::{Array, Date32Array, Float64Array, StringArray};
 
     #[test]
@@ -1794,6 +1773,7 @@ mod tests {
         let first = ResponseMetadata::attach_bloomberg_request_id(tiny_batch(), "sdk-synthetic-z");
         let second = ResponseMetadata::attach_bloomberg_request_id(tiny_batch(), "sdk-synthetic-a");
         let combined = ResponseMetadata::union_of(&[first.clone(), second.clone(), first.clone()])
+            .unwrap()
             .attach(tiny_batch());
         let metadata = combined.schema_ref().metadata();
         assert!(!metadata.contains_key(METADATA_KEY_BLOOMBERG_REQUEST_ID));
@@ -1801,8 +1781,9 @@ mod tests {
             metadata[METADATA_KEY_BLOOMBERG_REQUEST_IDS],
             r#"["sdk-synthetic-a","sdk-synthetic-z"]"#
         );
-        let duplicate =
-            ResponseMetadata::union_of(&[first.clone(), first.clone()]).attach(tiny_batch());
+        let duplicate = ResponseMetadata::union_of(&[first.clone(), first.clone()])
+            .unwrap()
+            .attach(tiny_batch());
         assert_eq!(
             duplicate.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
             "sdk-synthetic-z"
@@ -1874,15 +1855,15 @@ mod tests {
         meta1
             .eid_data
             .insert("IBM US Equity".to_string(), vec![14005, 35009]);
-        meta1.field_exceptions.insert(
-            "IBM US Equity".to_string(),
-            vec![FieldExceptionMeta {
+        meta1.field_exceptions.record(
+            "IBM US Equity",
+            FieldExceptionMeta {
                 field: "BAD_FIELD".to_string(),
                 category: "BAD_FLD".to_string(),
                 code: 9,
                 subcategory: "NOT_APPLICABLE_TO_REF_DATA".to_string(),
                 message: "Field not applicable".to_string(),
-            }],
+            },
         );
         meta1.delayed.insert(
             "IBM US Equity".to_string(),
@@ -1929,7 +1910,7 @@ mod tests {
         assert!(batch3.schema_ref().metadata().is_empty());
 
         // Union across shards preserves every entry from both sides.
-        let merged = ResponseMetadata::union_of(&[batch1, batch2, batch3]);
+        let merged = ResponseMetadata::union_of(&[batch1, batch2, batch3]).unwrap();
         assert_eq!(
             merged.eid_data.get("IBM US Equity"),
             Some(&vec![14005, 35009])
@@ -1938,7 +1919,10 @@ mod tests {
         let err = merged.security_errors.get("PRIVATE US Equity").unwrap();
         assert_eq!(err.code, 17);
         assert_eq!(err.subcategory, "NOT_ENTITLED");
-        let excs = merged.field_exceptions.get("IBM US Equity").unwrap();
+        let excs: Vec<_> = merged
+            .field_exceptions
+            .for_security("IBM US Equity")
+            .collect();
         assert_eq!(excs.len(), 1);
         assert_eq!(excs[0].field, "BAD_FIELD");
         assert_eq!(merged.delayed.len(), 2);
@@ -1952,10 +1936,10 @@ mod tests {
 
         // Re-attach of the merged map keeps JSON parseable end to end.
         let final_batch = merged.attach(tiny_batch());
-        let re_merged = ResponseMetadata::union_of(std::slice::from_ref(&final_batch));
+        let re_merged = ResponseMetadata::union_of(std::slice::from_ref(&final_batch)).unwrap();
         assert_eq!(re_merged.eid_data.len(), 2);
         assert_eq!(re_merged.security_errors.len(), 1);
-        assert_eq!(re_merged.field_exceptions.len(), 1);
+        assert_eq!(re_merged.field_exceptions.securities().count(), 1);
         assert_eq!(re_merged.delayed.len(), 2);
     }
 
@@ -2078,8 +2062,25 @@ mod tests {
             let errors: serde_json::Value =
                 serde_json::from_str(&metadata[METADATA_KEY_SECURITY_ERRORS]).unwrap();
             assert_eq!(errors["DENIED Equity"]["message"], "Synthetic diagnostic");
-            let exceptions: serde_json::Value =
+            let encoded: serde_json::Value =
                 serde_json::from_str(&metadata[METADATA_KEY_FIELD_EXCEPTIONS]).unwrap();
+            assert_eq!(encoded["version"], 1);
+            assert_eq!(
+                encoded["entries"],
+                serde_json::json!([{
+                    "field": "VALUE", "category": "TEST_ERROR", "code": 9,
+                    "subcategory": "SYNTHETIC", "message": "Synthetic diagnostic",
+                }])
+            );
+            assert_eq!(
+                encoded["securities"],
+                serde_json::json!({
+                    "TEST Equity": [0], "DENIED Equity": [0],
+                })
+            );
+            let exceptions = FieldExceptions::from_json(&metadata[METADATA_KEY_FIELD_EXCEPTIONS])
+                .unwrap()
+                .expanded_json();
             for ticker in ["TEST Equity", "DENIED Equity"] {
                 assert_eq!(exceptions[ticker][0]["field"], "VALUE");
                 assert_eq!(exceptions[ticker][0]["code"], 9);
@@ -2235,11 +2236,11 @@ mod tests {
                     ),
                 ])
             );
-            let exceptions: BTreeMap<String, Vec<FieldExceptionMeta>> = batch
+            let exceptions = batch
                 .schema_ref()
                 .metadata()
                 .get(METADATA_KEY_FIELD_EXCEPTIONS)
-                .map(|json| serde_json::from_str(json).unwrap())
+                .map(|json| FieldExceptions::from_json(json).unwrap().expanded())
                 .unwrap_or_default();
             let reported: Vec<&str> = exceptions
                 .values()

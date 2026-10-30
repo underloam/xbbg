@@ -228,6 +228,7 @@ CHART_DEFAULTS = {
 ARROW_METADATA_KEYS = {
     "xbbg.security_errors": "securityErrors",
     "xbbg.field_exceptions": "fieldExceptions",
+    "xbbg.field_errors": "fieldErrors",
     "xbbg.eid_data": "eidData",
     "xbbg.delayed": "delayed",
 }

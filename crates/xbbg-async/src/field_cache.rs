@@ -9,7 +9,7 @@
 //! In-memory storage uses `ArcSwap` — lock-free reads via atomic pointer load.
 //! Writers mutate a mutex-protected source-of-truth map and publish snapshots.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::{Arc, OnceLock};
 
@@ -22,6 +22,17 @@ use serde::{Deserialize, Serialize};
 use xbbg_log::{debug, info, warn};
 
 use crate::cache_io::{AtomicJsonPublisher, PublicationOutcome, read_json_array_bounded};
+use crate::diagnostics::{FieldErrorMeta, METADATA_KEY_FIELD_ERRORS};
+
+/// Decode explicit apiflds refusals without treating malformed diagnostics as absence.
+pub(crate) fn field_errors_from_response(
+    batch: &RecordBatch,
+) -> Result<BTreeMap<String, FieldErrorMeta>, serde_json::Error> {
+    match batch.schema().metadata().get(METADATA_KEY_FIELD_ERRORS) {
+        Some(raw) => serde_json::from_str(raw),
+        None => Ok(BTreeMap::new()),
+    }
+}
 
 /// Bloomberg field type as returned by //blp/apiflds.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -438,6 +449,7 @@ impl FieldTypeResolver {
     /// - type: Arrow type string (e.g., "float64")
     /// - description: Field description
     /// - category: Category name
+    /// - id: Echoed request id, indexed alongside the mnemonic when present
     pub fn insert_from_response(&self, batch: &RecordBatch) {
         self.ensure_loaded();
 
@@ -453,6 +465,9 @@ impl FieldTypeResolver {
         let cat_col = batch
             .column_by_name("category")
             .and_then(|c| c.as_any().downcast_ref::<StringArray>());
+        let id_col = batch
+            .column_by_name("id")
+            .and_then(|c| c.as_any().downcast_ref::<StringArray>());
 
         let (Some(fields), Some(types)) = (field_col, type_col) else {
             warn!("FieldInfo batch missing required columns (field, type)");
@@ -460,7 +475,12 @@ impl FieldTypeResolver {
         };
 
         // Collect all entries first, then publish a single snapshot — avoids O(n²) clone cost.
-        let mut entries: Vec<FieldInfo> = Vec::with_capacity(batch.num_rows());
+        let mut entries: Vec<FieldInfo> =
+            Vec::with_capacity(batch.num_rows().saturating_mul(if id_col.is_some() {
+                2
+            } else {
+                1
+            }));
         for i in 0..batch.num_rows() {
             if fields.is_null(i) || types.is_null(i) {
                 continue;
@@ -477,12 +497,27 @@ impl FieldTypeResolver {
                 .to_string();
 
             debug!(field = %field_id, arrow_type = %arrow_type, "Cached field type");
-            entries.push(FieldInfo {
+            let info = FieldInfo {
                 field_id,
                 arrow_type,
                 description,
                 category,
-            });
+            };
+            if let Some(id) = id_col
+                .and_then(|column| (!column.is_null(i)).then(|| column.value(i)))
+                .filter(|id| !id.is_empty())
+            {
+                let echoed_id = id.to_uppercase();
+                if echoed_id != info.field_id {
+                    entries.push(FieldInfo {
+                        field_id: echoed_id,
+                        arrow_type: info.arrow_type.clone(),
+                        description: info.description.clone(),
+                        category: info.category.clone(),
+                    });
+                }
+            }
+            entries.push(info);
         }
 
         if !entries.is_empty() {

@@ -630,6 +630,115 @@ describe("Bloomberg request tools", () => {
     }
   });
 
+  it("retains all-rejected field-info diagnostics, including prototype-sensitive echoed ids", async () => {
+    const error = {
+      category: "BAD_FLD",
+      code: -103,
+      subcategory: "INVALID_FIELD",
+      message: "Unknown Field Id/Mnemonic",
+      source: "synthetic-apiflds",
+    };
+    const fieldErrors = Object.fromEntries([
+      ["__proto__", error],
+      ["constructor", error],
+    ]);
+    const engine = fakeEngine();
+    vi.mocked(engine.bflds).mockResolvedValueOnce(Object.assign([], { fieldErrors }));
+    const tools = createBloombergTools({ core: fakeCore(engine) });
+
+    const [content, artifact] = await invokeArtifact(byName(tools, "xbbg_bflds"), {
+      fields: ["__proto__", "constructor"],
+    });
+
+    expect(artifact).toMatchObject({
+      data: { fieldErrors, rows: [] },
+      hasErrors: true,
+      rowCount: 0,
+      truncated: false,
+    });
+    expect(Object.hasOwn((artifact.data as Record<string, any>).fieldErrors, "__proto__")).toBe(
+      true,
+    );
+    expect(content).toContain("Unknown Field Id/Mnemonic");
+    expect(content).toContain("synthetic-apiflds");
+  });
+
+  it("keeps all legacy expanded diagnostics independent of the data-row limit", () => {
+    const exception = {
+      field: "OPEN_INT",
+      category: "BAD_FLD",
+      code: 9,
+      subcategory: "NOT_APPLICABLE_TO_REF_DATA",
+      message: "Field not applicable to security",
+    };
+    const raw = JSON.stringify({ SYN: [exception, exception, exception] });
+    const rows = Object.assign([{ value: 1 }, { value: 2 }], {
+      fieldExceptions: { SYN: [exception, exception, exception] },
+      metadata: { "xbbg.field_exceptions": raw },
+    });
+    const limits = resultLimits({
+      maxResultBytes: 2_048,
+      maxResultNodes: 128,
+      maxRows: 1,
+      maxStringChars: 128,
+    });
+
+    const limited = limitResultWithRowPriority(rows, limits, false);
+    const projected = limited.value as Record<string, any>;
+
+    expect(projected.fieldExceptions).toEqual({ SYN: [exception, exception, exception] });
+    expect(projected.rows).toEqual([{ value: 1 }]);
+    expect(projected.metadata["xbbg.field_exceptions"]).toContain("[truncated");
+    expect(limited.hasErrors).toBe(true);
+    expect(limited.inspectedNodes).toBeLessThanOrEqual(limits.maxResultNodes);
+    expect(limited.byteLength).toBeLessThanOrEqual(limits.maxResultBytes);
+    expect(new TextEncoder().encode(JSON.stringify(limited.value)).byteLength).toBe(
+      limited.byteLength,
+    );
+    expect(limited.truncation?.reasons).toEqual(
+      expect.arrayContaining(["max_rows", "max_string_chars"]),
+    );
+    expect(rows.fieldExceptions.SYN).toHaveLength(3);
+    expect(rows.metadata["xbbg.field_exceptions"]).toBe(raw);
+  });
+
+  it.each([
+    { maxResultBytes: 384, maxResultNodes: 256 },
+    { maxResultBytes: 4_096, maxResultNodes: 32 },
+  ])("keeps field refusals within shared byte and node budgets: %o", (budget) => {
+    const error = {
+      category: "BAD_FLD",
+      code: -103,
+      subcategory: "INVALID_FIELD",
+      message: "Unknown Field Id/Mnemonic",
+      source: "synthetic-apiflds",
+    };
+    const fieldErrors = Object.fromEntries([
+      ["__proto__", error],
+      ...Array.from({ length: 10_000 }, (_, index) => [`INVALID_${String(index)}`, error]),
+    ]);
+    const limits = resultLimits({ ...budget, maxRows: 1 });
+
+    const limited = limitResultWithRowPriority(Object.assign([], { fieldErrors }), limits, false);
+    const projected = limited.value as Record<string, any>;
+
+    expect(limited.hasErrors).toBe(true);
+    expect(Object.hasOwn(projected.fieldErrors, "__proto__")).toBe(true);
+    expect(Object.getOwnPropertyDescriptor(projected.fieldErrors, "__proto__")?.value).toEqual(
+      error,
+    );
+    expect(Object.keys(projected.fieldErrors).length).toBeLessThan(Object.keys(fieldErrors).length);
+    expect(limited.inspectedNodes).toBeLessThanOrEqual(limits.maxResultNodes);
+    expect(limited.byteLength).toBeLessThanOrEqual(limits.maxResultBytes);
+    expect(new TextEncoder().encode(JSON.stringify(limited.value)).byteLength).toBe(
+      limited.byteLength,
+    );
+    expect(limited.truncated).toBe(true);
+    expect(limited.truncation?.reasons).toContain(
+      budget.maxResultNodes === 32 ? "max_result_nodes" : "max_result_bytes",
+    );
+  });
+
   it("forwards onDelayed and keeps per-security delay metadata on the four checkable requests", async () => {
     const engine = fakeEngine();
     const delayed = { "AAPL US Equity": { delay_minutes: 15, delayed: true } };

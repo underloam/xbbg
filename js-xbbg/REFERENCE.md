@@ -301,6 +301,12 @@ if (eids.length > 0) {
 
 `eidData` belongs to the outer result container, not to individual rows. The outer result also exposes the raw schema metadata through `metadata`.
 
+## Response diagnostics
+
+`fieldInfo()` and `bflds()` append an `id` column containing Bloomberg's echoed field id, separate from the canonical `field` mnemonic. Refused ids are available in the outer result's `fieldErrors` map, including for zero-row results; each error retains category, code, subcategory, message, and optional source.
+
+`fieldExceptions` retains its expanded per-security array shape. Raw `metadata["xbbg.field_exceptions"]` uses the version-1 dictionary described in the [shared response diagnostic contract](../README.md#response-diagnostics); persisted legacy maps remain readable. Invalid compact versions or indices fail explicitly instead of disappearing from the accessor.
+
 ## Bloomberg support RequestIds
 
 Arrow/JSON result containers expose `bloombergRequestId` for one SDK-assigned ID and `bloombergRequestIds` for all available IDs. Raw metadata uses `xbbg.bloomberg_request_id` as a plain string, or the mutually exclusive `xbbg.bloomberg_request_ids` as a sorted, deduplicated JSON array for composed results. Streams and shards retain their provenance; derived recipes union contributing data-request IDs without retaining input batches for diagnostics.

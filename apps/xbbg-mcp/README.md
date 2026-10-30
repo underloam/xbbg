@@ -320,7 +320,9 @@ The final-byte limit includes JSON escaping and envelope overhead; it is not jus
 
 String values are shortened on Unicode boundaries. Column names and metadata keys are identities: oversized names are omitted rather than shortened, and duplicate column names are not silently overwritten in JSON rows. Nested Arrow values are represented by a bounded omission marker instead of recursively formatting an unbounded cell; omission counts distinguish this from an ordinary scalar value. Integer values outside JavaScript's safe range are returned as strings rather than rounded numbers.
 
-Metadata inspection is bounded before JSON parsing. Oversized entries and generic metadata that cannot be inspected within the aggregate allowance may be omitted without a full scan. `xbbg.security_errors`, `xbbg.field_exceptions`, `xbbg.delayed`, and `xbbg.eid_data` are prioritized before generic metadata and rows. Diagnostic records are retained with their structure rather than arbitrary property fragments, but string contents and the number of records remain bounded; even priority metadata can be omitted when it cannot fit.
+Metadata inspection is bounded before JSON parsing. Oversized entries and generic metadata that cannot be inspected within the aggregate allowance may be omitted without a full scan. `xbbg.security_errors`, `xbbg.field_errors`, `xbbg.field_exceptions`, `xbbg.delayed`, and `xbbg.eid_data` are prioritized before generic metadata and rows. Diagnostic records are retained with their structure rather than arbitrary property fragments, but string contents and the number of records remain bounded; even priority metadata can be omitted when it cannot fit.
+
+Compact field-exception dictionaries are validated before projection and emitted as bounded expanded records, never as partially clipped dictionary references. `bflds` retains refused ids in `xbbg.field_errors` even when its data table has no successful rows. See the [response diagnostic contract](../../README.md#response-diagnostics).
 
 ### Output diagnostics and errors
 

@@ -191,7 +191,7 @@ When EIDs are requested, bounded tool artifacts can retain result metadata along
 }
 ```
 
-The row limit alone does not discard attached `eidData`, `delayed`, `metadata`, `securityErrors`, or `fieldExceptions`; byte, node, string, and entitlement limits still apply. Diagnostics, EID, and delay metadata are prioritized over ordinary properties. When present, `eidDataTruncation` reports retained IDs and securities, omissions, and whether original totals are complete; an unknown original count is not zero. Metadata may itself be omitted under tighter budgets, so inspect the truncation diagnostics before treating an EID map as complete. Pass the collected IDs to `xbbg_check_entitlements`:
+The row limit alone does not discard attached `eidData`, `delayed`, `metadata`, `securityErrors`, `fieldErrors`, or `fieldExceptions`; byte, node, string, and entitlement limits still apply. Diagnostics, EID, and delay metadata are prioritized over ordinary properties. When present, `eidDataTruncation` reports retained IDs and securities, omissions, and whether original totals are complete; an unknown original count is not zero. Metadata may itself be omitted under tighter budgets, so inspect the truncation diagnostics before treating an EID map as complete. Pass the collected IDs to `xbbg_check_entitlements`:
 
 ```json
 { "eids": [101, 202], "service": "//blp/refdata" }

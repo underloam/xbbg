@@ -1,6 +1,6 @@
 import type { Table } from 'apache-arrow';
 
-import { DataType, DateUnit, tableToIPC, TimeUnit } from 'apache-arrow';
+import { DataType, DateUnit, tableFromIPC, tableToIPC, TimeUnit } from 'apache-arrow';
 
 import { TA_DEFAULTS } from '../src/_defs_gen';
 import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
@@ -14,6 +14,7 @@ import type {
 import * as subscriptions from '../src/subscriptions';
 import {
   deliveryReceipt,
+  emptyFieldInfoArrowBatch,
   fakeNativeSubscription,
   int32ArrowBatch,
   scalarBatch,
@@ -37,8 +38,23 @@ vi.mock(import('node:module'), async (importOriginal) => {
     getLogLevel: () => 'off',
     setLogLevel: () => undefined,
   };
-  // The optional nodejs-polars peer is replaced by a frame that records its IPC input size.
-  const polars = { readIPC: (buffer: Buffer) => ({ polarsIpcBytes: buffer.byteLength }) };
+  // The peer accepts file IPC only; real Arrow decoding exposes its received payload.
+  const polars = {
+    readIPC: (buffer: Buffer) => {
+      if (
+        buffer.subarray(0, 6).toString('ascii') !== 'ARROW1' ||
+        buffer.subarray(-6).toString('ascii') !== 'ARROW1'
+      ) {
+        throw new TypeError('Polars peer requires Arrow file IPC');
+      }
+      const table = tableFromIPC(buffer);
+      return {
+        polarsIpcBytes: buffer.byteLength,
+        ipcTable: table,
+        ipcMetadata: Object.fromEntries(table.schema.metadata),
+      };
+    },
+  };
 
   return {
     ...actual,
@@ -953,17 +969,20 @@ describe('request delayed-data policy', () => {
     );
     const engine = engineWithNative({ requestRaw: async () => ipc });
 
-    const frame = await engine.bdp(['SYN_A Equity'], ['PX_LAST'], {
+    const frame = (await engine.bdp(['SYN_A Equity'], ['PX_LAST'], {
       backend: 'polars',
       onDelayed: 'warn',
-    });
+    })) as api.ResultMetadata & { ipcTable: Table; ipcMetadata: Record<string, string> };
     const raw = await engine.requestRaw({
       onDelayed: 'warn',
       operation: 'ReferenceDataRequest',
       service: '//blp/refdata',
     });
 
-    expect(frame).toStrictEqual({ polarsIpcBytes: ipc.byteLength });
+    expect(frame.ipcTable.getChild('answer')?.get(0)).toBe(1);
+    expect(frame.ipcMetadata).toStrictEqual(DELAYED_METADATA);
+    expect(frame.metadata).toStrictEqual(DELAYED_METADATA);
+    expect(frame.delayed).toStrictEqual(DELAYED_TICKERS);
     expect(raw).toBe(ipc);
     expect(emitted.mock.calls).toStrictEqual([...DELAYED_WARNINGS, ...DELAYED_WARNINGS]);
   });
@@ -1095,6 +1114,127 @@ const recipes: readonly RecipeCase[] = [
       await engine.currencyConversion('SYN', 'USD', '20240102', '20240103', options),
   },
 ];
+
+describe('public diagnostic metadata conversion', () => {
+  it('preserves stream IPC payload and raw and decoded diagnostics through Engine.request', async () => {
+    const exception = {
+      field: 'OPEN_INT',
+      category: 'BAD_FLD',
+      code: 9,
+      subcategory: 'NOT_APPLICABLE_TO_REF_DATA',
+      message: 'Field not applicable to security',
+    };
+    const fieldErrors = {
+      NOT_A_FIELD: {
+        category: 'BAD_FLD',
+        code: -103,
+        subcategory: 'INVALID_FIELD',
+        message: 'Unknown Field Id/Mnemonic',
+        source: 'synthetic-apiflds',
+      },
+    };
+    const metadata = {
+      'xbbg.field_exceptions': JSON.stringify({
+        version: 1,
+        entries: [exception],
+        securities: { SYN: [0, 0] },
+      }),
+      'xbbg.field_errors': JSON.stringify(fieldErrors),
+      'synthetic.metadata': 'retained',
+    };
+    const ipc = Buffer.from(
+      tableToIPC(tableFromNativeArrowBatch(int32ArrowBatch(42, metadata)), 'stream'),
+    );
+    const requestRaw = vi.fn<NativeEngine['requestRaw']>().mockResolvedValue(ipc);
+    const engine = engineWithNative({ requestRaw });
+
+    const frame = (await engine.request({
+      backend: 'polars',
+      operation: 'ReferenceDataRequest',
+      service: '//blp/refdata',
+    })) as api.ResultMetadata & { ipcTable: Table; ipcMetadata: Record<string, string> };
+
+    expect(requestRaw).toHaveBeenCalledTimes(1);
+    expect(frame.ipcTable.getChild('answer')?.get(0)).toBe(42);
+    expect(frame.ipcMetadata).toStrictEqual(metadata);
+    expect(frame.metadata).toStrictEqual(metadata);
+    expect(Object.getOwnPropertyDescriptor(frame, 'fieldExceptions')).toHaveProperty(
+      'get',
+      expect.any(Function),
+    );
+    expect(frame.fieldExceptions).toStrictEqual({ SYN: [exception, exception] });
+    expect(frame.fieldErrors).toStrictEqual(fieldErrors);
+  });
+
+  it.each(['arrow', 'json', 'polars'] as const)(
+    'rejects corrupt compact diagnostics through the %s request wrapper',
+    async (backend) => {
+      const batch = int32ArrowBatch(42, {
+        'xbbg.field_exceptions': '{"version":1,"entries":[],"securities":{"SYN":[0]}}',
+      });
+      const engine = engineWithNative({
+        request: vi.fn<NativeEngine['request']>().mockResolvedValue(batch),
+        requestRaw: vi
+          .fn<NativeEngine['requestRaw']>()
+          .mockResolvedValue(Buffer.from(tableToIPC(tableFromNativeArrowBatch(batch), 'file'))),
+      });
+
+      await expect(
+        engine.request({
+          backend,
+          operation: 'ReferenceDataRequest',
+          service: '//blp/refdata',
+        }),
+      ).rejects.toMatchObject({
+        name: 'BlpError',
+        message: expect.stringMatching(/xbbg\.field_exceptions.*index/iu),
+      });
+    },
+  );
+
+  it('retains the malformed-metadata reason through native recipe and snapshot wrappers', async () => {
+    const batch = int32ArrowBatch(42, {
+      'xbbg.field_exceptions': '{"version":1,"entries":[],"securities":{"SYN":[0]}}',
+    });
+    const engine = engineWithNative({
+      recipeResolveIsins: vi.fn<NativeEngine['recipeResolveIsins']>().mockResolvedValue(batch),
+    });
+    const subscription = new api.Subscription(fakeNativeSubscription({ latest: () => batch }));
+
+    await expect(engine.resolveIsins('SYN', { backend: 'json' })).rejects.toThrow(
+      /xbbg\.field_exceptions.*index/iu,
+    );
+    expect(() => subscription.latest({ backend: 'json' })).toThrow(
+      /xbbg\.field_exceptions.*index/iu,
+    );
+  });
+
+  it('retains field refusal details on an all-rejected bflds JSON result', async () => {
+    const fieldErrors = {
+      NOT_A_FIELD: {
+        category: 'BAD_FLD',
+        code: -103,
+        subcategory: 'INVALID_FIELD',
+        message: 'Unknown Field Id/Mnemonic',
+        source: 'synthetic-apiflds',
+      },
+    };
+    const batch = emptyFieldInfoArrowBatch({
+      'xbbg.field_errors': JSON.stringify(fieldErrors),
+    });
+    const engine = engineWithNative({
+      request: vi.fn<NativeEngine['request']>().mockResolvedValue(batch),
+    });
+
+    const rows = await engine.bflds({ fields: ['NOT_A_FIELD'], backend: 'json' });
+
+    expect(rows).toHaveLength(0);
+    expect(rows).toMatchObject({
+      fieldErrors,
+      metadata: { 'xbbg.field_errors': JSON.stringify(fieldErrors) },
+    });
+  });
+});
 
 describe('shared native recipe result adapter', () => {
   it.each(recipes)(

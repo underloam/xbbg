@@ -33,6 +33,7 @@ export interface LimitState {
   readonly diagnostics: Readonly<Record<string, unknown>>[];
   readonly limits: ResultLimitOptions;
   readonly reasons: Set<ResultTruncationReason>;
+  inDiagnostics: boolean;
   readonly rowsBeforeMetadata: boolean;
   maximumArrayRows: number;
   hasErrors: boolean;
@@ -57,7 +58,10 @@ export interface ObjectAccumulator {
 
 export const OMIT = Symbol("omit_result_value");
 
-export function isPlainObject(value: object): value is Record<string, unknown> {
+export function isPlainObject(value: unknown): value is Record<string, unknown> {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
   const prototype: unknown = Object.getPrototypeOf(value);
   return prototype === Object.prototype || prototype === null;
 }

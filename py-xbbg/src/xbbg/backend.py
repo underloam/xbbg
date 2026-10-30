@@ -499,6 +499,7 @@ _XBBG_METADATA_ATTRS = {
     "xbbg.eid_data": ("eid_data", "xbbg_eid_data"),
     "xbbg.security_errors": ("security_errors", "xbbg_security_errors"),
     "xbbg.field_exceptions": ("field_exceptions", "xbbg_field_exceptions"),
+    "xbbg.field_errors": ("field_errors", "xbbg_field_errors"),
     "xbbg.delayed": ("delayed", "xbbg_delayed"),
     "xbbg.type_misses": ("type_misses", "xbbg_type_misses"),
     "xbbg.bloomberg_request_id": ("bloomberg_request_id", "xbbg_bloomberg_request_id"),
@@ -528,7 +529,12 @@ def _attach_xbbg_metadata_attrs(dataframe: Any, table: Any) -> Any:
         value = getattr(table, source_attr, None)
         if value is None:
             raw = raw.decode() if isinstance(raw, bytes) else raw
-            value = raw if metadata_key == "xbbg.bloomberg_request_id" else json.loads(raw)
+            if metadata_key == "xbbg.field_exceptions":
+                from xbbg._core import _decode_field_exceptions
+
+                value = _decode_field_exceptions(raw)
+            else:
+                value = raw if metadata_key == "xbbg.bloomberg_request_id" else json.loads(raw)
         if value is not None:
             attrs[frame_attr] = value
     return dataframe

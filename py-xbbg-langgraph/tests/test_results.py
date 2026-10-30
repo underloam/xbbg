@@ -23,6 +23,86 @@ def _project(value: Any, **kwargs: Any) -> tuple[dict[str, Any], dict[str, Any]]
     return json.loads(content), artifact
 
 
+def _metadata_result(metadata: dict[bytes, bytes], kind: str, values: list[float] | None = None) -> Any:
+    values = [] if values is None else values
+    if kind.startswith("pyarrow"):
+        pa = pytest.importorskip("pyarrow")
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array(values, type=pa.float64())],
+            schema=pa.schema([("price", pa.float64())], metadata=metadata),
+        )
+        return batch if kind.endswith("batch") else pa.Table.from_batches([batch])
+
+    class ArrowColumn:
+        name = "price"
+        data_type = "Float64"
+
+        def __init__(self, rows: list[float]) -> None:
+            self.rows = rows
+
+        def slice(self, offset: int, length: int) -> ArrowColumn:
+            return ArrowColumn(self.rows[offset : offset + length])
+
+        def to_pylist(self) -> list[float]:
+            return list(self.rows)
+
+    class ArrowTable:
+        __module__ = "xbbg._core"
+        num_columns = 1
+
+        def __init__(self, rows: list[float] | None = None) -> None:
+            self.rows = values if rows is None else rows
+
+        @property
+        def num_rows(self) -> int:
+            return len(self.rows)
+
+        @property
+        def metadata(self) -> dict[str, str]:
+            return {key.decode(): value.decode() for key, value in metadata.items()}
+
+        def select(self, columns: list[int]) -> ArrowTable:
+            assert columns == [0]
+            return self
+
+        def slice(self, offset: int, length: int) -> ArrowTable:
+            return ArrowTable(self.rows[offset : offset + length])
+
+        def column(self, index: int) -> ArrowColumn:
+            assert index == 0
+            return ArrowColumn(self.rows)
+
+        def __getattr__(self, name: str) -> Any:
+            if name in {"field_exceptions", "field_errors"}:
+                raise AssertionError("bounded projection must not expand native diagnostic accessors")
+            raise AttributeError(name)
+
+    class ArrowRecordBatch:
+        __module__ = "xbbg._core"
+        num_rows = len(values)
+        num_columns = 1
+
+        def to_table(self) -> ArrowTable:
+            return ArrowTable()
+
+        def select(self, columns: list[int]) -> ArrowTable:
+            return self.to_table().select(columns)
+
+    return ArrowRecordBatch() if kind.endswith("batch") else ArrowTable()
+
+
+def _compact_metadata(indices: list[Any], **overrides: Any) -> dict[bytes, bytes]:
+    payload = {
+        "version": 1,
+        "entries": [
+            {"field": "BAD_FIELD", "category": "BAD_FLD", "code": 9, "subcategory": "INVALID", "message": "Unknown"}
+        ],
+        "securities": {"IBM US Equity": indices},
+        **overrides,
+    }
+    return {b"xbbg.field_exceptions": json.dumps(payload).encode()}
+
+
 @pytest.mark.parametrize(
     "artifact_rows,content_rows,artifact_bytes,content_bytes",
     [
@@ -182,6 +262,275 @@ def test_zero_row_arrow_preserves_diagnostics_entitlements_delay_and_metadata() 
         assert result["rowCount"] == 0
         assert result["hasErrors"] is True
         assert result["truncated"] is True
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+def test_compact_arrow_diagnostics_project_expanded_occurrences_and_field_errors(kind: str) -> None:
+    first = {"field": "BAD_FIELD", "category": "BAD_FLD", "code": 9, "subcategory": "INVALID", "message": "Unknown"}
+    second = {"field": "PRIVATE", "category": "NO_AUTH", "code": 10, "subcategory": "DENIED", "message": "Restricted"}
+    field_errors = {
+        "bad-id": {
+            "category": "BAD_FLD",
+            "code": 9,
+            "subcategory": "INVALID",
+            "message": "Invalid field identifier",
+            "source": "apiflds",
+        }
+    }
+    metadata = {
+        b"xbbg.security_errors": b'{"BAD Security":{"message":"NO_AUTH"}}',
+        b"xbbg.field_exceptions": json.dumps(
+            {"version": 1, "entries": [first, second], "securities": {"IBM US Equity": [0, 1, 0]}}
+        ).encode(),
+        b"xbbg.field_errors": json.dumps(field_errors).encode(),
+        b"xbbg.eid_data": b'{"IBM US Equity":[101,202]}',
+        b"xbbg.delayed": b'{"IBM US Equity":{"delayed":true,"delay_minutes":15}}',
+        b"source": b"ReferenceDataRequest",
+    }
+    content, artifact = _project(_metadata_result(metadata, kind), max_rows=1, max_content_rows=1)
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == {"IBM US Equity": [first, second, first]}
+        assert result["data"]["fieldErrors"] == field_errors
+        assert result["data"]["securityErrors"]["BAD Security"]["message"] == "NO_AUTH"
+        assert result["data"]["eidData"] == {"IBM US Equity": [101, 202]}
+        assert result["data"]["delayed"] == {"IBM US Equity": {"delayed": True, "delay_minutes": 15}}
+        assert result["data"]["metadata"] == {"source": "ReferenceDataRequest"}
+        assert result["data"]["rows"] == []
+        assert result["hasErrors"] is True
+        assert result["truncated"] is False
+    content, artifact = _project(
+        _metadata_result(metadata, kind),
+        max_result_nodes=10,
+        max_result_bytes=256,
+        max_content_bytes=256,
+    )
+    for result in (content, artifact):
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+@pytest.mark.parametrize("with_security_errors", [False, True])
+def test_malformed_field_errors_preserve_usable_rows_and_adjacent_diagnostics(
+    kind: str, with_security_errors: bool
+) -> None:
+    metadata = {
+        b"xbbg.field_errors": b"{",
+        b"xbbg.eid_data": b'{"SYNTHETIC Security":[101,202]}',
+    }
+    if with_security_errors:
+        metadata[b"xbbg.security_errors"] = b'{"BAD Security":{"message":"NO_AUTH"}}'
+    content, artifact = _project(_metadata_result(metadata, kind, [123.45]))
+    for result in (content, artifact):
+        assert result["rowCount"] == 1
+        assert result["data"]["rows"] == [{"price": 123.45}]
+        assert result["data"]["fieldErrors"] == {}
+        assert result["data"]["eidData"] == {"SYNTHETIC Security": [101, 202]}
+        assert result["data"]["metadata"] == {}
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "unsupported_value" in result["truncation"]["reasons"]
+        if with_security_errors:
+            assert result["data"]["securityErrors"]["BAD Security"]["message"] == "NO_AUTH"
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "native_table", "native_batch"])
+@pytest.mark.parametrize("with_security_errors", [False, True])
+@pytest.mark.parametrize(
+    "indices,overrides",
+    [
+        ([0] * 100 + [1], {}),
+        ([-1], {}),
+        ([True], {}),
+        ([0.0], {}),
+        (["0"], {}),
+        ([None], {}),
+        ([0], {"version": 2}),
+        ([0], {"version": True}),
+        ([0], {"entries": []}),
+        ([0], {"entries": [{"field": "BAD_FIELD"}]}),
+        ([0], {"securities": {"IBM US Equity": "0"}}),
+        ([0], {"unexpected": True}),
+    ],
+)
+def test_malformed_compact_metadata_is_explicit_even_beyond_output_prefix(
+    kind: str, with_security_errors: bool, indices: list[Any], overrides: dict[str, Any]
+) -> None:
+    metadata = _compact_metadata(indices, **overrides)
+    if with_security_errors:
+        metadata[b"xbbg.security_errors"] = b'{"BAD Security":{"message":"NO_AUTH"}}'
+    content, artifact = _project(_metadata_result(metadata, kind), max_result_bytes=4096, max_content_bytes=256)
+    for result in (content, artifact):
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "unsupported_value" in result["truncation"]["reasons"]
+        assert "xbbg.field_exceptions" not in result["data"].get("metadata", {})
+        assert result["data"].get("fieldExceptions", {}) == {}
+    if with_security_errors:
+        assert artifact["data"]["securityErrors"]["BAD Security"]["message"] == "NO_AUTH"
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+@pytest.mark.parametrize(
+    "encoded",
+    [
+        b'{"entries":[],"securities":[]}',
+        b'{"version":[],"entries":[],"securities":[]}',
+        b'{"version":1,"entries":[]}',
+        b'{"version":1,"securities":{}}',
+    ],
+)
+def test_malformed_envelope_members_cannot_masquerade_as_legacy_tickers(kind: str, encoded: bytes) -> None:
+    content, artifact = _project(_metadata_result({b"xbbg.field_exceptions": encoded}, kind))
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == {}
+        assert result["data"]["metadata"] == {}
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "unsupported_value" in result["truncation"]["reasons"]
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "native_table", "native_batch"])
+def test_repeated_compact_diagnostics_are_expanded_only_within_projection_budgets(kind: str) -> None:
+    entry = {
+        "field": "PRIVATE",
+        "category": "NO_AUTH",
+        "code": 10,
+        "subcategory": "DENIED",
+        "message": "Restricted " * 50,
+    }
+    metadata = _compact_metadata([0] * 1000, entries=[entry])
+    content, artifact = _project(
+        _metadata_result(metadata, kind),
+        max_rows=1,
+        max_content_rows=1,
+        max_result_bytes=16_384,
+        max_content_bytes=4096,
+        max_result_nodes=10_000,
+    )
+    content_occurrences = content["data"]["fieldExceptions"]["IBM US Equity"]
+    artifact_occurrences = artifact["data"]["fieldExceptions"]["IBM US Equity"]
+    assert 0 < len(content_occurrences) < len(artifact_occurrences) < 1000
+    for result, occurrences in ((content, content_occurrences), (artifact, artifact_occurrences)):
+        assert occurrences[0] == entry
+        assert all(isinstance(occurrence, dict) for occurrence in occurrences)
+        assert "version" not in result["data"]["fieldExceptions"]
+        assert "entries" not in result["data"]["fieldExceptions"]
+        assert "securities" not in result["data"]["fieldExceptions"]
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "max_result_bytes" in result["truncation"]["reasons"]
+        assert "max_rows" not in result["truncation"]["reasons"]
+
+
+def test_compact_diagnostic_expansion_obeys_node_budget() -> None:
+    def nodes(value: Any) -> int:
+        if isinstance(value, dict):
+            return 1 + sum(nodes(child) for child in value.values())
+        if isinstance(value, list):
+            return 1 + sum(nodes(child) for child in value)
+        return 1
+
+    metadata = _compact_metadata([0] * 500)
+    content, artifact = _project(_metadata_result(metadata, "native_table"), max_result_nodes=2048)
+    for result in (content, artifact):
+        occurrences = result["data"]["fieldExceptions"]["IBM US Equity"]
+        assert 0 < len(occurrences) < 500
+        assert occurrences[0]["field"] == "BAD_FIELD"
+        assert all(isinstance(occurrence, dict) for occurrence in occurrences)
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "max_result_nodes" in result["truncation"]["reasons"]
+        assert nodes(result) <= 2048
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+def test_legacy_raw_field_exceptions_keep_expanded_members_and_duplicates(kind: str) -> None:
+    exceptions = {"IBM US Equity": [{"fieldId": "OLD_FIELD"}, {"fieldId": "OTHER_FIELD"}, {"fieldId": "OLD_FIELD"}]}
+    metadata = {b"xbbg.field_exceptions": json.dumps(exceptions).encode()}
+    content, artifact = _project(_metadata_result(metadata, kind), max_rows=1, max_content_rows=1)
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == exceptions
+        assert result["data"]["metadata"] == {}
+        assert result["hasErrors"] is True
+        assert result["truncated"] is False
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+@pytest.mark.parametrize("securities", [{}, {"EMPTY Security": []}])
+def test_empty_compact_diagnostics_do_not_report_errors_or_truncation(
+    kind: str, securities: dict[str, list[int]]
+) -> None:
+    metadata = _compact_metadata([], entries=[], securities=securities)
+    content, artifact = _project(_metadata_result(metadata, kind))
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == securities
+        assert result["data"]["metadata"] == {}
+        assert "hasErrors" not in result
+        assert result["truncated"] is False
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "pyarrow_batch", "native_table", "native_batch"])
+@pytest.mark.parametrize("encoding", ["compact", "legacy"])
+@pytest.mark.parametrize("with_occurrences", [False, True])
+def test_field_exception_error_presence_counts_occurrences_not_security_keys(
+    kind: str, encoding: str, with_occurrences: bool
+) -> None:
+    entry = {
+        "field": "BAD_FIELD",
+        "category": "BAD_FLD",
+        "code": 9,
+        "subcategory": "INVALID",
+        "message": "Unknown",
+    }
+    securities: dict[str, list[int]] = {"EMPTY Security": [], "ANOTHER EMPTY Security": []}
+    if with_occurrences:
+        securities["SYNTHETIC Security"] = [0, 0]
+    expected = {security: [entry for _ in indices] for security, indices in securities.items()}
+    metadata = (
+        _compact_metadata([], entries=[entry], securities=securities)
+        if encoding == "compact"
+        else {b"xbbg.field_exceptions": json.dumps(expected).encode()}
+    )
+    content, artifact = _project(_metadata_result(metadata, kind))
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == expected
+        assert result["data"]["metadata"] == {}
+        assert result.get("hasErrors", False) is with_occurrences
+        assert result["truncated"] is False
+
+
+@pytest.mark.parametrize(
+    "limits,reason",
+    [
+        ({"max_result_bytes": 256, "max_content_bytes": 256}, "max_result_bytes"),
+        ({"max_result_nodes": 32}, "max_result_nodes"),
+    ],
+)
+def test_unparsed_compact_metadata_is_omitted_without_exposing_index_references(
+    limits: dict[str, int], reason: str
+) -> None:
+    metadata = _compact_metadata([0] * 1000)
+    content, artifact = _project(_metadata_result(metadata, "native_table"), **limits)
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == {}
+        assert "xbbg.field_exceptions" not in result["data"].get("metadata", {})
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert reason in result["truncation"]["reasons"]
+
+
+def test_deep_field_exception_metadata_is_omitted_with_explicit_reason() -> None:
+    nested: Any = "Too deep"
+    for _ in range(40):
+        nested = {"nested": nested}
+    metadata = {b"xbbg.field_exceptions": json.dumps({"IBM US Equity": [{"message": nested}]}).encode()}
+    content, artifact = _project(_metadata_result(metadata, "native_batch"))
+    for result in (content, artifact):
+        assert result["data"]["fieldExceptions"] == {}
+        assert result["hasErrors"] is True
+        assert result["truncated"] is True
+        assert "max_result_depth" in result["truncation"]["reasons"]
 
 
 def test_arrow_is_sliced_before_a_later_unconvertible_timestamp() -> None:
