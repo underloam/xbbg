@@ -716,7 +716,13 @@ mod defs_contract {
 
     #[test]
     fn overflow_policy_accepts_every_defs_spelling() {
-        for spelling in ["block", "drop_newest", "dropnewest"] {
+        for spelling in [
+            "block",
+            "drop_newest",
+            "dropnewest",
+            "drop_oldest",
+            "dropoldest",
+        ] {
             assert!(
                 crate::engine::OverflowPolicy::from_str(spelling).is_ok(),
                 "defs/bloomberg.toml declares {spelling} but the parser rejects it"
@@ -733,9 +739,10 @@ mod defs_contract {
             match value {
                 crate::engine::OverflowPolicy::Block => "block",
                 crate::engine::OverflowPolicy::DropNewest => "drop_newest",
+                crate::engine::OverflowPolicy::DropOldest => "drop_oldest",
             }
         }
-        for spelling in ["block", "drop_newest"] {
+        for spelling in ["block", "drop_newest", "drop_oldest"] {
             assert_eq!(
                 canonical(crate::engine::OverflowPolicy::from_str(spelling).unwrap()),
                 spelling,
@@ -746,7 +753,7 @@ mod defs_contract {
 
     #[test]
     fn overflow_policy_display_matches_defs() {
-        for canonical in ["block", "drop_newest"] {
+        for canonical in ["block", "drop_newest", "drop_oldest"] {
             assert_eq!(
                 crate::engine::OverflowPolicy::from_str(canonical)
                     .unwrap()
@@ -762,6 +769,74 @@ mod defs_contract {
         assert_eq!(
             crate::engine::OverflowPolicy::from_str("drop_newest").unwrap(),
             crate::engine::OverflowPolicy::default(),
+            "defs marks a different member as default than the parser does"
+        );
+    }
+
+    #[test]
+    fn overflow_delivery_requirement_matches_defs() {
+        for (spelling, requires_deliveries) in [
+            ("block", false),
+            ("drop_newest", false),
+            ("drop_oldest", true),
+        ] {
+            assert_eq!(
+                crate::engine::OverflowPolicy::from_str(spelling)
+                    .unwrap()
+                    .requires_deliveries(),
+                requires_deliveries
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_delivery_accepts_every_defs_spelling() {
+        for spelling in ["deltas", "state"] {
+            assert!(
+                crate::engine::SubscriptionDeliveryMode::from_str(spelling).is_ok(),
+                "defs/bloomberg.toml declares {spelling} but the parser rejects it"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_delivery_defs_covers_every_variant() {
+        // Non-exhaustive matches do not compile, so adding a variant to the
+        // enum without declaring it in defs breaks the build instead of
+        // silently leaving it out of every advertised value set.
+        fn canonical(value: crate::engine::SubscriptionDeliveryMode) -> &'static str {
+            match value {
+                crate::engine::SubscriptionDeliveryMode::Deltas => "deltas",
+                crate::engine::SubscriptionDeliveryMode::State => "state",
+            }
+        }
+        for spelling in ["deltas", "state"] {
+            assert_eq!(
+                canonical(crate::engine::SubscriptionDeliveryMode::from_str(spelling).unwrap()),
+                spelling,
+                "defs maps this spelling to a different variant than the parser does"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_delivery_display_matches_defs() {
+        for canonical in ["deltas", "state"] {
+            assert_eq!(
+                crate::engine::SubscriptionDeliveryMode::from_str(canonical)
+                    .unwrap()
+                    .to_string(),
+                canonical,
+                "the canonical defs value must be the value the engine emits"
+            );
+        }
+    }
+
+    #[test]
+    fn subscription_delivery_default_matches_defs() {
+        assert_eq!(
+            crate::engine::SubscriptionDeliveryMode::from_str("deltas").unwrap(),
+            crate::engine::SubscriptionDeliveryMode::default(),
             "defs marks a different member as default than the parser does"
         );
     }

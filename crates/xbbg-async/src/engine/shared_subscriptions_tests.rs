@@ -1,68 +1,6 @@
+use super::testing::{data, hub, hub_with_config, test_feed};
 use super::*;
 use arrow_array::{Array, Float64Array};
-
-pub(super) struct TestSessionFactory {
-    config: Arc<EngineConfig>,
-    sessions: Mutex<Vec<Arc<TestSession>>>,
-    owners: Mutex<Vec<Weak<FeedSession>>>,
-    startup_delay: Mutex<Duration>,
-}
-
-impl TestSessionFactory {
-    pub(super) async fn claim(
-        &self,
-        permit: tokio::sync::OwnedSemaphorePermit,
-    ) -> Arc<FeedSession> {
-        let delay = *self.startup_delay.lock();
-        if !delay.is_zero() {
-            tokio::time::sleep(delay).await;
-        }
-        let test = TestSession::new(self.config.clone());
-        self.sessions.lock().push(test.clone());
-        let owner = Arc::new_cyclic(|weak: &Weak<FeedSession>| {
-            let weak = weak.clone();
-            let status = Arc::new(SubscriptionStatusHandle::with_observer(Arc::new(
-                move |previous, status, scope, events| {
-                    if let Some(session) = weak.upgrade() {
-                        session.on_status(previous, status, scope, events);
-                    }
-                },
-            )));
-            FeedSession {
-                claim: Mutex::new(None),
-                status,
-                feeds: Mutex::new(HashMap::new()),
-                live_feeds: AtomicUsize::new(0),
-                test: Some(test),
-                routing: StatusRoutingMetrics::default(),
-                _test_admission: Some(permit),
-            }
-        });
-        self.owners.lock().push(Arc::downgrade(&owner));
-        owner
-    }
-}
-
-fn hub() -> (Arc<SharedSubscriptions>, Arc<TestSessionFactory>) {
-    hub_with_config(EngineConfig::default())
-}
-
-fn hub_with_config(
-    mut config: EngineConfig,
-) -> (Arc<SharedSubscriptions>, Arc<TestSessionFactory>) {
-    config.subscription_pool_size = 0;
-    let config = Arc::new(config);
-    let pool = Arc::new(SubscriptionSessionPool::new(0, config.clone()).unwrap());
-    let factory = Arc::new(TestSessionFactory {
-        config: config.clone(),
-        sessions: Mutex::new(Vec::new()),
-        owners: Mutex::new(Vec::new()),
-        startup_delay: Mutex::new(Duration::ZERO),
-    });
-    let mut hub = SharedSubscriptions::new(pool, config, tokio::runtime::Handle::current(), None);
-    Arc::get_mut(&mut hub).unwrap().test_sessions = Some(factory.clone());
-    (hub, factory)
-}
 
 fn request(topics: &[&str], fields: &[&str]) -> SubscribeRequest {
     SubscribeRequest {
@@ -70,40 +8,6 @@ fn request(topics: &[&str], fields: &[&str]) -> SubscribeRequest {
         fields: fields.iter().map(|value| value.to_string()).collect(),
         ..SubscribeRequest::default()
     }
-}
-
-fn test_feed(hub: &SharedSubscriptions, topic: &str) -> (Arc<TestSession>, SlabKey) {
-    let feed = hub
-        .registry
-        .lock()
-        .values()
-        .find(|feed| feed.identity.topic == topic)
-        .cloned()
-        .unwrap();
-    (
-        feed.session.test.clone().unwrap(),
-        feed.upstream_key.load(Ordering::Acquire),
-    )
-}
-
-fn data(session: &TestSession, key: SlabKey, json: &str) {
-    let value: serde_json::Value = serde_json::from_str(json).unwrap();
-    let fields: String = value
-        .as_object()
-        .unwrap()
-        .iter()
-        .map(|(name, value)| {
-            let kind = if name.starts_with("MKTDATA_") || value.is_string() {
-                "String"
-            } else if name == "IS_DELAYED_STREAM" || value.is_boolean() {
-                "Boolean"
-            } else {
-                "Float64"
-            };
-            format!(r#"<element name="{name}" type="{kind}" minOccurs="0"/>"#)
-        })
-        .collect();
-    session.data(key, &fields, json);
 }
 
 fn next(stream: &mut SubscriptionStream) -> SubscriptionUpdate {
@@ -2485,4 +2389,1533 @@ async fn int32_stream_observations_replace_widened_metadata_hints_even_with_unse
             .value(0),
         5
     );
+}
+
+fn state_request(topics: &[&str], fields: &[&str]) -> SubscribeRequest {
+    SubscribeRequest {
+        delivery: SubscriptionDeliveryMode::State,
+        ..request(topics, fields)
+    }
+}
+
+fn state_consumer(
+    stream: SubscriptionStream,
+) -> crate::subscription_consumer::SubscriptionConsumer {
+    let (receiver, handle) = stream.into_parts();
+    crate::subscription_consumer::SubscriptionConsumer::new(receiver, handle)
+}
+
+fn state_number(batch: &RecordBatch, name: &str, row: usize) -> f64 {
+    batch
+        .column_by_name(name)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<Float64Array>()
+        .unwrap()
+        .value(row)
+}
+
+fn state_flag(batch: &RecordBatch, name: &str, row: usize) -> bool {
+    batch
+        .column_by_name(name)
+        .unwrap()
+        .as_any()
+        .downcast_ref::<BooleanArray>()
+        .unwrap()
+        .value(row)
+}
+
+fn state_label(batch: &RecordBatch, row: usize) -> &str {
+    batch
+        .column_by_name("topic")
+        .unwrap()
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap()
+        .value(row)
+}
+struct ResumeSnapshot(Arc<std::sync::Barrier>);
+
+impl Drop for ResumeSnapshot {
+    fn drop(&mut self) {
+        self.0.wait();
+    }
+}
+
+fn assert_state_recovery_epochs(deliveries: &[SubscriptionDelivery], bid: f64) {
+    assert_eq!(deliveries.len(), 2);
+    assert!(!state_flag(&deliveries[0].data, "valid", 0));
+    assert!(deliveries[0].data.column_by_name("BID").unwrap().is_null(0));
+    assert!(deliveries[0].data.column_by_name("ASK").unwrap().is_null(0));
+    assert!(state_flag(&deliveries[1].data, "valid", 0));
+    assert_eq!(state_number(&deliveries[1].data, "BID", 0), bid);
+    assert!(deliveries[1].data.column_by_name("ASK").unwrap().is_null(0));
+}
+
+#[tokio::test]
+async fn state_delivery_conflates_sparse_images_without_starving_quiet_topics() {
+    let (hub, factory) = hub();
+    let stream = hub
+        .subscribe(state_request(
+            &["SYNTH HOT", "SYNTH QUIET"],
+            &["BID", "ASK"],
+        ))
+        .await
+        .unwrap();
+    let handle = stream.handle.clone();
+    let state = state_consumer(stream);
+    let initial = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(!state_flag(&initial.data, "valid", 0));
+    assert_eq!(state_label(&initial.data, 0), "SYNTH HOT");
+    let mut strict_request = request(&["SYNTH HOT"], &["BID"]);
+    strict_request.stream_capacity = Some(1);
+    let mut strict = hub.subscribe(strict_request).await.unwrap();
+    let (hot, hot_key) = test_feed(&hub, "SYNTH HOT");
+    let (quiet, quiet_key) = test_feed(&hub, "SYNTH QUIET");
+    data(&quiet, quiet_key, r#"{"BID":42,"ASK":43}"#);
+    data(&hot, hot_key, r#"{"BID":1,"ASK":2}"#);
+    data(&hot, hot_key, r#"{"ASK":null}"#);
+    for bid in 3..1024 {
+        data(&hot, hot_key, &format!(r#"{{"BID":{bid}}}"#));
+    }
+    assert_eq!(
+        state.rx.lock().await.as_ref().unwrap().len(),
+        2,
+        "dirty storage must be bounded by active topics, not update count"
+    );
+    let first = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(first.kind, SubscriptionDeliveryMode::State);
+    assert!(first.gap_before.is_none());
+    assert_eq!(state_label(&first.data, 0), "SYNTH QUIET");
+    assert!(state_flag(&first.data, "valid", 0));
+    assert_eq!(state_number(&first.data, "BID", 0), 42.0);
+    assert_eq!(state_number(&first.data, "ASK", 0), 43.0);
+    let second = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(state_label(&second.data, 0), "SYNTH HOT");
+    assert!(state_flag(&second.data, "valid", 0));
+    assert_eq!(state_number(&second.data, "BID", 0), 1023.0);
+    assert!(second.data.column_by_name("ASK").unwrap().is_null(0));
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+    assert!(matches!(
+        value(&next(&mut strict), "BID"),
+        Some(UpdateValue::F64(1.0))
+    ));
+    assert!(matches!(
+        strict.try_next(),
+        Some(Err(BlpError::SubscriptionDataLoss { .. }))
+    ));
+    assert!(
+        handle.is_active(),
+        "strict local overflow invalidated shared state"
+    );
+    assert_eq!(factory.sessions.lock().len(), 1);
+    for metrics in handle.status().load().fields_metrics().values() {
+        assert_eq!(metrics.batches_sent.load(Ordering::Relaxed), 0);
+        assert_eq!(metrics.dropped_batches.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[tokio::test]
+async fn cancelled_state_receipt_re_reads_current_image_instead_of_replaying_a_batch() {
+    let (hub, _) = hub();
+    let state = state_consumer(
+        hub.subscribe(state_request(&["SYNTH CANCEL"], &["BID", "ASK"]))
+            .await
+            .unwrap(),
+    );
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH CANCEL");
+    data(&session, key, r#"{"BID":10,"ASK":11}"#);
+    let cancelled = state.next_delivery(1).await.unwrap();
+    assert_eq!(
+        state_number(&cancelled.as_ref().unwrap().data, "BID", 0),
+        10.0
+    );
+    data(&session, key, r#"{"BID":12}"#);
+    data(&session, key, r#"{"ASK":null}"#);
+    drop(cancelled);
+    let current = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(state_number(&current.data, "BID", 0), 12.0);
+    assert!(current.data.column_by_name("ASK").unwrap().is_null(0));
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn state_membership_generation_survives_alias_readd_and_field_type_growth() {
+    let (hub, _) = hub();
+    let _poller = hub
+        .subscribe(image_request(&["SYNTH ALIAS"], &["BID", "ASK"]))
+        .await
+        .unwrap();
+    let mut req = state_request(&["SYNTH ALIAS"], &["BID"]);
+    req.aliases = vec![("SYNTH ALIAS".into(), "board".into())];
+    let stream = hub.subscribe(req).await.unwrap();
+    let handle = stream.handle.clone();
+    let state = state_consumer(stream);
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH ALIAS");
+    data(&session, key, r#"{"BID":10,"ASK":11}"#);
+    let removed = state.next_delivery(1).await.unwrap();
+    handle.remove(vec!["board".into()]).await.unwrap();
+    data(&session, key, r#"{"BID":20,"ASK":21}"#);
+    handle
+        .add(
+            vec!["SYNTH ALIAS".into()],
+            vec![("SYNTH ALIAS".into(), "board".into())],
+        )
+        .await
+        .unwrap();
+    drop(removed);
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 1);
+    let readded = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(state_label(&readded.data, 0), "board");
+    assert_eq!(state_number(&readded.data, "BID", 0), 20.0);
+    handle.add_fields(vec!["ASK".into()]).await.unwrap();
+    let grown = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(state_number(&grown.data, "ASK", 0), 21.0);
+    data(&session, key, r#"{"BID":"changed"}"#);
+    let changed = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert_eq!(
+        changed
+            .data
+            .column_by_name("BID")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "changed"
+    );
+    assert_eq!(state_number(&changed.data, "ASK", 0), 21.0);
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn state_delivers_invalidation_before_recovered_image_even_when_unread() {
+    let (hub, _) = hub();
+    let state = state_consumer(
+        hub.subscribe(state_request(&["SYNTH RECOVER"], &["BID", "ASK"]))
+            .await
+            .unwrap(),
+    );
+    let mut strict = hub
+        .subscribe(request(&["SYNTH RECOVER"], &["BID"]))
+        .await
+        .unwrap();
+    let mut lossy_request = request(&["SYNTH RECOVER"], &["BID"]);
+    lossy_request.overflow_policy = Some(OverflowPolicy::DropOldest);
+    lossy_request.stream_capacity = Some(1);
+    let lossy = state_consumer(hub.subscribe(lossy_request).await.unwrap());
+    let (session, key) = test_feed(&hub, "SYNTH RECOVER");
+    data(&session, key, r#"{"BID":10,"ASK":11}"#);
+    next(&mut strict);
+    lossy.next_delivery(1).await.unwrap().commit().unwrap();
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    data(
+        &session,
+        key,
+        r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+    );
+    assert!(matches!(
+        strict.try_next(),
+        Some(Err(BlpError::SubscriptionDataLoss { .. }))
+    ));
+    assert!(matches!(
+        lossy.next_delivery(1).await.unwrap().commit(),
+        Err(BlpError::SubscriptionDataLoss { .. })
+    ));
+    cleanup(&hub).await;
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 1);
+    data(&session, key, r#"{"BID":99}"#);
+    data(
+        &session,
+        key,
+        r#"{"BID":12,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+    );
+    let cancelled = state.next_delivery(1).await.unwrap();
+    assert!(!state_flag(&cancelled.as_ref().unwrap().data, "valid", 0));
+    assert!(
+        cancelled
+            .as_ref()
+            .unwrap()
+            .data
+            .column_by_name("BID")
+            .unwrap()
+            .is_null(0)
+    );
+    drop(cancelled);
+    let invalid = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(!state_flag(&invalid.data, "valid", 0));
+    assert!(!state_flag(&invalid.data, "live", 0));
+    assert!(invalid.data.column_by_name("ASK").unwrap().is_null(0));
+    let recovered = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&recovered.data, "valid", 0));
+    assert_eq!(state_number(&recovered.data, "BID", 0), 12.0);
+    assert!(recovered.data.column_by_name("ASK").unwrap().is_null(0));
+    assert!(!state_flag(&recovered.data, "live", 0));
+    data(&session, key, r#"{"ASK":13}"#);
+    let live = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&live.data, "valid", 0));
+    assert!(state_flag(&live.data, "live", 0));
+    assert_eq!(state_number(&live.data, "BID", 0), 12.0);
+    assert_eq!(state_number(&live.data, "ASK", 0), 13.0);
+}
+
+#[tokio::test]
+async fn state_terminal_error_wakes_reader_and_survives_cancelled_publication() {
+    let (hub, _) = hub();
+    let state = Arc::new(state_consumer(
+        hub.subscribe(state_request(&["SYNTH END"], &["BID"]))
+            .await
+            .unwrap(),
+    ));
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    let reader = state.clone();
+    let waiting = tokio::spawn(async move { reader.next_delivery(1).await });
+    tokio::task::yield_now().await;
+    let (session, _) = test_feed(&hub, "SYNTH END");
+    session.session_event("SessionTerminated");
+    let terminal = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(terminal.as_ref().is_err());
+    drop(terminal);
+    let terminal = state.next_delivery(1).await.unwrap();
+    assert!(terminal.commit().is_err());
+    assert!(state.next_delivery(1).await.is_none());
+}
+
+#[tokio::test]
+async fn state_delivery_drain_freezes_dirty_images_before_detaching_last_membership() {
+    let (hub, _) = hub();
+    let mut state = hub
+        .subscribe(state_request(&["SYNTH DRAIN"], &["BID", "ASK"]))
+        .await
+        .unwrap()
+        .deliveries();
+    state.next().await.unwrap().unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH DRAIN");
+    data(&session, key, r#"{"BID":1,"ASK":2}"#);
+    data(&session, key, r#"{"BID":3}"#);
+    data(&session, key, r#"{"ASK":null}"#);
+    let drained = state.unsubscribe(true).await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(state_number(&drained[0].data, "BID", 0), 3.0);
+    assert!(drained[0].data.column_by_name("ASK").unwrap().is_null(0));
+    assert!(state_flag(&drained[0].data, "valid", 0));
+    assert!(hub.feeds().is_empty());
+    assert_eq!(session.unsubscribes.load(Ordering::Relaxed), 1);
+}
+
+#[tokio::test]
+async fn prepared_state_drain_rolls_back_to_the_final_image_not_a_borrowed_snapshot() {
+    let (hub, _) = hub();
+    let _poller = hub
+        .subscribe(image_request(&["SYNTH FREEZE"], &["BID"]))
+        .await
+        .unwrap();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH FREEZE"], &["BID"]))
+        .await
+        .unwrap();
+    let (mut receiver, handle) = stream.into_parts();
+    receiver.recv_state(1).await.unwrap().commit().unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH FREEZE");
+    data(&session, key, r#"{"BID":1}"#);
+    let mut borrowed = receiver.recv_state(1).await.unwrap();
+    let moved = borrowed.take_success().unwrap();
+    assert_eq!(state_number(&moved.data, "BID", 0), 1.0);
+    data(&session, key, r#"{"BID":3}"#);
+    receiver.prepare_close();
+    handle.unsubscribe().await.unwrap();
+    data(&session, key, r#"{"BID":4}"#);
+    drop(moved);
+    drop(borrowed);
+    let mut receipt = receiver.try_recv_state(1).unwrap();
+    let final_image = receipt.take_success().unwrap();
+    receipt.acknowledge();
+    assert_eq!(state_number(&final_image.data, "BID", 0), 3.0);
+    assert!(receiver.try_recv_state(1).is_none());
+}
+
+#[tokio::test]
+async fn state_drain_reports_source_terminal_error_instead_of_successful_partial_state() {
+    let (hub, _) = hub();
+    let state = hub
+        .subscribe(state_request(&["SYNTH DRAIN ERROR"], &["BID"]))
+        .await
+        .unwrap()
+        .deliveries();
+    let (session, key) = test_feed(&hub, "SYNTH DRAIN ERROR");
+    data(&session, key, r#"{"BID":1}"#);
+    session.session_event("SessionTerminated");
+    assert!(matches!(
+        state.unsubscribe(true).await,
+        Err(BlpAsyncError::Blp(_))
+    ));
+}
+
+#[tokio::test]
+async fn state_options_reject_contradictions_before_claiming_or_mutating() {
+    for contradictory in [
+        SubscribeRequest {
+            deliver_rows: false,
+            ..state_request(&["SYNTH VALIDATE"], &["BID"])
+        },
+        SubscribeRequest {
+            stream_capacity: Some(8),
+            ..state_request(&["SYNTH VALIDATE"], &["BID"])
+        },
+        SubscribeRequest {
+            overflow_policy: Some(OverflowPolicy::DropNewest),
+            ..state_request(&["SYNTH VALIDATE"], &["BID"])
+        },
+        SubscribeRequest {
+            overflow_policy: Some(OverflowPolicy::DropOldest),
+            ..state_request(&["SYNTH VALIDATE"], &["BID"])
+        },
+        SubscribeRequest {
+            overflow_policy: Some(OverflowPolicy::Block),
+            ..state_request(&["SYNTH VALIDATE"], &["BID"])
+        },
+    ] {
+        let (hub, factory) = hub();
+        assert!(matches!(
+            hub.subscribe(contradictory).await,
+            Err(BlpAsyncError::ConfigError { .. })
+        ));
+        assert!(hub.feeds().is_empty());
+        assert!(factory.sessions.lock().is_empty());
+        assert!(hub.consumers.lock().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn state_ignores_inherited_raw_overflow_and_retains_all_field_discoveries() {
+    for overflow_policy in [OverflowPolicy::DropOldest, OverflowPolicy::Block] {
+        let (hub, _) = hub_with_config(EngineConfig {
+            overflow_policy,
+            subscription_stream_capacity: 1,
+            ..EngineConfig::default()
+        });
+        let mut req = state_request(&["SYNTH ALL"], &["BID"]);
+        req.all_fields = true;
+        req.flush_threshold = Some(4);
+        req.zero_as_null = vec!["BID".into()];
+        let stream = hub.subscribe(req).await.unwrap();
+        let handle = stream.handle.clone();
+        assert!(handle.inner.forwarder.is_none());
+        assert_eq!(handle.delivery_batch_limit(), 4);
+        let state = state_consumer(stream);
+        let (session, key) = test_feed(&hub, "SYNTH ALL");
+        for bid in 0..256 {
+            data(
+                &session,
+                key,
+                &format!(r#"{{"BID":{bid},"EXTRA":"retained"}}"#),
+            );
+        }
+        data(&session, key, r#"{"BID":0}"#);
+        let latest = state.next_delivery(4).await.unwrap().commit().unwrap();
+        assert_eq!(latest.data.num_rows(), 1);
+        assert!(state_flag(&latest.data, "valid", 0));
+        assert!(latest.data.column_by_name("BID").unwrap().is_null(0));
+        assert_eq!(
+            latest
+                .data
+                .column_by_name("EXTRA")
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+                .value(0),
+            "retained"
+        );
+        assert!(handle.is_active());
+        let (_operation, result) = state.unsubscribe_deliveries(false, None).await;
+        assert!(result.unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn unattributable_admin_loss_invalidates_every_state_topic_and_wakes_a_waiter() {
+    let (hub, _) = hub();
+    let mut req = state_request(&["SYNTH ADMIN A", "SYNTH ADMIN B"], &["BID"]);
+    req.flush_threshold = Some(2);
+    let state = Arc::new(state_consumer(hub.subscribe(req).await.unwrap()));
+    let (session, first_key) = test_feed(&hub, "SYNTH ADMIN A");
+    let (_, second_key) = test_feed(&hub, "SYNTH ADMIN B");
+    data(&session, first_key, r#"{"BID":1}"#);
+    data(&session, second_key, r#"{"BID":2}"#);
+    let initial = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(initial.data.num_rows(), 2);
+    let reader = state.clone();
+    let waiting = tokio::spawn(async move { reader.next_delivery(2).await });
+    tokio::task::yield_now().await;
+    session.admin_event("DataLoss");
+    let invalid = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(invalid.data.num_rows(), 2);
+    for row in 0..2 {
+        assert!(!state_flag(&invalid.data, "valid", row));
+        assert!(invalid.data.column_by_name("BID").unwrap().is_null(row));
+    }
+    cleanup(&hub).await;
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 2);
+}
+
+#[tokio::test]
+async fn state_schema_retains_discoveries_and_promotions_when_only_other_topics_are_dirty() {
+    let (hub, _) = hub();
+    let mut req = state_request(&["SYNTH SCHEMA A", "SYNTH SCHEMA B"], &["BID"]);
+    req.all_fields = true;
+    let state = state_consumer(hub.subscribe(req).await.unwrap());
+    let (session, first_key) = test_feed(&hub, "SYNTH SCHEMA A");
+    let (_, second_key) = test_feed(&hub, "SYNTH SCHEMA B");
+    data(&session, first_key, r#"{"BID":1,"EXTRA":42}"#);
+    data(&session, second_key, r#"{"BID":2}"#);
+    let both = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(both.data.num_rows(), 2);
+    assert_eq!(state_number(&both.data, "EXTRA", 0), 42.0);
+    assert!(both.data.column_by_name("EXTRA").unwrap().is_null(1));
+    assert!(
+        state_flag(&both.data, "valid", 1),
+        "unknown fields do not invalidate continuity"
+    );
+    data(&session, second_key, r#"{"BID":3}"#);
+    let only_second = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(only_second.data.num_rows(), 1);
+    assert_eq!(state_label(&only_second.data, 0), "SYNTH SCHEMA B");
+    assert_eq!(
+        only_second
+            .data
+            .schema()
+            .field_with_name("EXTRA")
+            .unwrap()
+            .data_type(),
+        &arrow_schema::DataType::Float64
+    );
+    assert!(only_second.data.column_by_name("EXTRA").unwrap().is_null(0));
+    data(&session, second_key, r#"{"EXTRA":"promoted"}"#);
+    let promoted = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(
+        promoted
+            .data
+            .column_by_name("EXTRA")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "promoted"
+    );
+    data(&session, first_key, r#"{"BID":4}"#);
+    let narrower = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(state_label(&narrower.data, 0), "SYNTH SCHEMA A");
+    assert_eq!(
+        narrower
+            .data
+            .schema()
+            .field_with_name("EXTRA")
+            .unwrap()
+            .data_type(),
+        &arrow_schema::DataType::Utf8,
+        "a narrower dirty-topic subset downgraded the observed union"
+    );
+    assert!(narrower.data.column_by_name("EXTRA").unwrap().is_valid(0));
+}
+
+#[tokio::test]
+async fn state_schema_yields_metadata_hints_to_observed_types_and_ignores_quiet_hints() {
+    use crate::engine::subscription_types::SubscriptionTypeResolver;
+    use crate::field_cache::{FieldInfo, FieldTypeResolver};
+    let directory = tempfile::tempdir().unwrap();
+    let cache = Arc::new(FieldTypeResolver::with_cache_path(
+        directory.path().join("fields.json"),
+    ));
+    cache.insert(FieldInfo {
+        field_id: "ASK_SIZE".into(),
+        arrow_type: "int64".into(),
+        description: String::new(),
+        category: String::new(),
+    });
+    let resolver = Arc::new(SubscriptionTypeResolver::with_query(
+        cache,
+        tokio::runtime::Handle::current(),
+        |_| Box::pin(std::future::ready(Err(BlpAsyncError::ChannelClosed))),
+    ));
+    let (mut hub, _) = hub();
+    Arc::get_mut(&mut hub).unwrap().type_resolver = Some(resolver);
+    let state = state_consumer(
+        hub.subscribe(state_request(
+            &["SYNTH HINT A", "SYNTH HINT B"],
+            &["ASK_SIZE"],
+        ))
+        .await
+        .unwrap(),
+    );
+    let seeded = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(
+        seeded
+            .data
+            .schema()
+            .field_with_name("ASK_SIZE")
+            .unwrap()
+            .data_type(),
+        &arrow_schema::DataType::Int64
+    );
+    let (session, first_key) = test_feed(&hub, "SYNTH HINT A");
+    let (_, second_key) = test_feed(&hub, "SYNTH HINT B");
+    session.data(
+        first_key,
+        r#"<element name="ASK_SIZE" type="Int32" minOccurs="0"/>"#,
+        r#"{"ASK_SIZE":null}"#,
+    );
+    let observed = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(
+        observed
+            .data
+            .schema()
+            .field_with_name("ASK_SIZE")
+            .unwrap()
+            .data_type(),
+        &arrow_schema::DataType::Int32
+    );
+    data(
+        &session,
+        second_key,
+        r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+    );
+    let hint_only = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(state_label(&hint_only.data, 0), "SYNTH HINT B");
+    assert_eq!(
+        hint_only
+            .data
+            .schema()
+            .field_with_name("ASK_SIZE")
+            .unwrap()
+            .data_type(),
+        &arrow_schema::DataType::Int32,
+        "an unseen sibling's provisional Int64 hint replaced the observed Int32"
+    );
+    assert!(
+        hint_only
+            .data
+            .column_by_name("ASK_SIZE")
+            .unwrap()
+            .is_null(0)
+    );
+}
+
+#[tokio::test]
+async fn state_plain_reads_do_not_consume_images_and_plain_drain_still_cleans_up() {
+    let (hub, _) = hub();
+    let mut stream = hub
+        .subscribe(state_request(&["SYNTH GUARDED"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH GUARDED");
+    data(&session, key, r#"{"BID":5}"#);
+    assert!(matches!(stream.try_next(), Some(Err(_))));
+    let mut deliveries = stream.deliveries();
+    let state = deliveries.next().await.unwrap().unwrap();
+    assert_eq!(state_number(&state.data, "BID", 0), 5.0);
+    deliveries.unsubscribe(false).await.unwrap();
+    assert!(hub.feeds().is_empty());
+    let stream = hub
+        .subscribe(state_request(&["SYNTH GUARDED DRAIN"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH GUARDED DRAIN");
+    data(&session, key, r#"{"BID":6}"#);
+    assert!(stream.unsubscribe(true).await.is_err());
+    assert!(hub.feeds().is_empty());
+}
+
+#[tokio::test]
+async fn state_topic_failure_or_termination_invalidates_only_that_topic_after_cleanup() {
+    for message_type in ["SubscriptionFailure", "SubscriptionTerminated"] {
+        let (hub, _) = hub();
+        let stream = hub
+            .subscribe(state_request(
+                &["SYNTH FAILED", "SYNTH SURVIVOR"],
+                &["BID", "ASK"],
+            ))
+            .await
+            .unwrap();
+        let handle = stream.handle.clone();
+        let state = state_consumer(stream);
+        let (session, failed_key) = test_feed(&hub, "SYNTH FAILED");
+        let (_, survivor_key) = test_feed(&hub, "SYNTH SURVIVOR");
+        data(&session, failed_key, r#"{"BID":10,"ASK":11}"#);
+        data(&session, survivor_key, r#"{"BID":20,"ASK":21}"#);
+        let initial = state.next_delivery(2).await.unwrap().commit().unwrap();
+        assert!(state_flag(&initial.data, "valid", 0));
+        assert!(state_flag(&initial.data, "live", 0));
+        session.status(failed_key, message_type);
+        cleanup(&hub).await;
+        assert_eq!(hub.feeds().len(), 1);
+        assert!(
+            handle.is_active(),
+            "a topic-local failure closed the surviving topic"
+        );
+        let cancelled = state.next_delivery(2).await.unwrap();
+        let invalid = cancelled.as_ref().unwrap();
+        assert_eq!(invalid.data.num_rows(), 1);
+        assert_eq!(state_label(&invalid.data, 0), "SYNTH FAILED");
+        assert!(!state_flag(&invalid.data, "valid", 0));
+        assert!(!state_flag(&invalid.data, "live", 0));
+        assert!(invalid.data.column_by_name("BID").unwrap().is_null(0));
+        assert!(invalid.data.column_by_name("ASK").unwrap().is_null(0));
+        drop(cancelled);
+        let invalid = state.next_delivery(2).await.unwrap().commit().unwrap();
+        assert!(!state_flag(&invalid.data, "valid", 0));
+        assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+        data(&session, survivor_key, r#"{"BID":22}"#);
+        let survivor = state.next_delivery(2).await.unwrap().commit().unwrap();
+        assert_eq!(survivor.data.num_rows(), 1);
+        assert_eq!(state_label(&survivor.data, 0), "SYNTH SURVIVOR");
+        assert!(state_flag(&survivor.data, "valid", 0));
+        assert!(state_flag(&survivor.data, "live", 0));
+        assert_eq!(state_number(&survivor.data, "BID", 0), 22.0);
+        assert_eq!(state_number(&survivor.data, "ASK", 0), 21.0);
+        handle
+            .add(vec!["SYNTH FAILED".into()], vec![])
+            .await
+            .unwrap();
+        let (session, failed_key) = test_feed(&hub, "SYNTH FAILED");
+        data(&session, failed_key, r#"{"BID":30,"ASK":31}"#);
+        session.status(failed_key, message_type);
+        cleanup(&hub).await;
+        let (_operation, drained) = state.unsubscribe_deliveries(true, None).await;
+        let drained = drained.unwrap();
+        assert_eq!(drained.len(), 1);
+        assert_eq!(state_label(&drained[0].data, 0), "SYNTH FAILED");
+        assert!(!state_flag(&drained[0].data, "valid", 0));
+    }
+}
+
+#[tokio::test]
+async fn state_stream_availability_wakes_only_the_changed_topic_without_changing_polling() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH AVAIL A", "SYNTH AVAIL B"], &["BID"]))
+        .await
+        .unwrap();
+    let state = Arc::new(state_consumer(stream));
+    let polling = hub
+        .subscribe(image_request(&["SYNTH AVAIL A", "SYNTH AVAIL B"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, first_key) = test_feed(&hub, "SYNTH AVAIL A");
+    let (_, second_key) = test_feed(&hub, "SYNTH AVAIL B");
+    session.status(first_key, "SubscriptionStreamsActivated");
+    data(&session, first_key, r#"{"BID":1}"#);
+    data(&session, second_key, r#"{"BID":2}"#);
+    let initial = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert!(state_flag(&initial.data, "live", 0));
+    assert!(state_flag(&initial.data, "live", 1));
+    let reader = state.clone();
+    let waiting = tokio::spawn(async move { reader.next_delivery(2).await });
+    tokio::task::yield_now().await;
+    session.status(first_key, "SubscriptionStreamsDeactivated");
+    let inactive = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(inactive.data.num_rows(), 1);
+    assert_eq!(state_label(&inactive.data, 0), "SYNTH AVAIL A");
+    assert!(state_flag(&inactive.data, "valid", 0));
+    assert!(!state_flag(&inactive.data, "live", 0));
+    assert_eq!(state_number(&inactive.data, "BID", 0), 1.0);
+    assert!(state_flag(&polling.latest().unwrap(), "live", 0));
+    data(&session, first_key, r#"{"BID":3}"#);
+    let still_inactive = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert!(!state_flag(&still_inactive.data, "live", 0));
+    assert_eq!(state_number(&still_inactive.data, "BID", 0), 3.0);
+    session.status(first_key, "SubscriptionStreamsActivated");
+    let active = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(active.data.num_rows(), 1);
+    assert_eq!(state_label(&active.data, 0), "SYNTH AVAIL A");
+    assert!(state_flag(&active.data, "valid", 0));
+    assert!(state_flag(&active.data, "live", 0));
+    assert_eq!(state_number(&active.data, "BID", 0), 3.0);
+}
+
+#[tokio::test]
+async fn state_readd_replaces_cancelled_retired_generation_before_it_can_reappear() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH READD", "SYNTH KEEP"], &["BID"]))
+        .await
+        .unwrap();
+    let handle = stream.handle.clone();
+    let state = state_consumer(stream);
+    let (session, failed_key) = test_feed(&hub, "SYNTH READD");
+    let (_, kept_key) = test_feed(&hub, "SYNTH KEEP");
+    data(&session, failed_key, r#"{"BID":1}"#);
+    data(&session, kept_key, r#"{"BID":2}"#);
+    state.next_delivery(2).await.unwrap().commit().unwrap();
+    session.status(failed_key, "SubscriptionFailure");
+    cleanup(&hub).await;
+    let invalidation = state.next_delivery(1).await.unwrap();
+    assert!(!state_flag(
+        &invalidation.as_ref().unwrap().data,
+        "valid",
+        0
+    ));
+    handle
+        .add(vec!["SYNTH READD".into()], vec![])
+        .await
+        .unwrap();
+    let (session, new_key) = test_feed(&hub, "SYNTH READD");
+    data(&session, new_key, r#"{"BID":9}"#);
+    drop(invalidation);
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 1);
+    let current = state.next_delivery(2).await.unwrap().commit().unwrap();
+    assert_eq!(current.data.num_rows(), 1);
+    assert_eq!(state_label(&current.data, 0), "SYNTH READD");
+    assert!(state_flag(&current.data, "valid", 0));
+    assert_eq!(state_number(&current.data, "BID", 0), 9.0);
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn state_loss_and_recovery_between_selection_and_snapshot_emits_invalid_then_quiet_current() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH SNAPSHOT RACE"], &["BID", "ASK"]))
+        .await
+        .unwrap();
+    let handle = stream.handle.clone();
+    let state = Arc::new(state_consumer(stream));
+    let (session, key) = test_feed(&hub, "SYNTH SNAPSHOT RACE");
+    data(&session, key, r#"{"BID":10,"ASK":11}"#);
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    data(&session, key, r#"{"BID":12}"#);
+
+    let selected = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let selected_reader = selected.clone();
+    let resume_reader = resume.clone();
+    handle
+        .inner
+        .state_delivery
+        .as_ref()
+        .unwrap()
+        .before_next_snapshot(Arc::new(move || {
+            selected_reader.wait();
+            resume_reader.wait();
+        }));
+    let reader = state.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let waiting = tokio::task::spawn_blocking(move || runtime.block_on(reader.next_delivery(1)));
+    selected.wait();
+    let resume = ResumeSnapshot(resume);
+    data(
+        &session,
+        key,
+        r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+    );
+    cleanup(&hub).await;
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 1);
+    data(
+        &session,
+        key,
+        r#"{"BID":20,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+    );
+    drop(resume);
+
+    let invalid = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(!state_flag(&invalid.data, "valid", 0));
+    assert!(invalid.data.column_by_name("BID").unwrap().is_null(0));
+    assert!(invalid.data.column_by_name("ASK").unwrap().is_null(0));
+    let recovered = tokio::time::timeout(Duration::from_secs(1), state.next_delivery(1))
+        .await
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(state_flag(&recovered.data, "valid", 0));
+    assert_eq!(state_number(&recovered.data, "BID", 0), 20.0);
+    assert!(recovered.data.column_by_name("ASK").unwrap().is_null(0));
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn moved_state_terminal_error_is_restorable_until_publication_acknowledgement() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH ERROR RECEIPT"], &["BID"]))
+        .await
+        .unwrap();
+    let (mut receiver, _handle) = stream.into_parts();
+    receiver.recv_state(1).await.unwrap().commit().unwrap();
+    let (session, _) = test_feed(&hub, "SYNTH ERROR RECEIPT");
+    session.session_event("SessionTerminated");
+    let mut cancelled = receiver.recv_state(1).await.unwrap();
+    let error = cancelled.take_error().expect("source terminal error");
+    cancelled.restore_error(error);
+    drop(cancelled);
+    let mut published = receiver.recv_state(1).await.unwrap();
+    assert!(published.take_success().is_none());
+    let _error = published
+        .take_error()
+        .expect("restored source terminal error");
+    published.acknowledge();
+    assert!(receiver.recv_state(1).await.is_none());
+}
+
+#[tokio::test]
+async fn moved_state_drain_rollback_rebuilds_frozen_final_images_in_fifo_order() {
+    let (hub, _) = hub();
+    let _poller = hub
+        .subscribe(image_request(
+            &["SYNTH RETRY A", "SYNTH RETRY B"],
+            &["BID", "ASK"],
+        ))
+        .await
+        .unwrap();
+    let mut req = state_request(&["SYNTH RETRY A", "SYNTH RETRY B"], &["BID", "ASK"]);
+    req.flush_threshold = Some(1);
+    let state = state_consumer(hub.subscribe(req).await.unwrap());
+    let (session, first_key) = test_feed(&hub, "SYNTH RETRY A");
+    let (_, second_key) = test_feed(&hub, "SYNTH RETRY B");
+    data(&session, first_key, r#"{"BID":1,"ASK":2}"#);
+    data(&session, second_key, r#"{"BID":3,"ASK":4}"#);
+    state.next_delivery(2).await.unwrap().commit().unwrap();
+    data(&session, first_key, r#"{"BID":5,"ASK":null}"#);
+    data(&session, second_key, r#"{"BID":6,"ASK":7}"#);
+
+    let drain = state.prepare_unsubscribe_deliveries(true, None).await;
+    assert_eq!(drain.as_ref().unwrap().len(), 2);
+    let (outputs, acknowledgement) = match drain.prepare_success() {
+        Ok(prepared) => prepared,
+        Err(_) => panic!("state drain unexpectedly failed"),
+    };
+    assert_eq!(state_label(&outputs[0].data, 0), "SYNTH RETRY A");
+    assert_eq!(state_label(&outputs[1].data, 0), "SYNTH RETRY B");
+    drop(outputs);
+    data(&session, first_key, r#"{"BID":99,"ASK":100}"#);
+    data(&session, second_key, r#"{"BID":101,"ASK":102}"#);
+    drop(acknowledgement);
+
+    let retried = state
+        .prepare_unsubscribe_deliveries(true, None)
+        .await
+        .commit()
+        .unwrap();
+    assert_eq!(retried.len(), 2);
+    assert_eq!(state_label(&retried[0].data, 0), "SYNTH RETRY A");
+    assert_eq!(state_label(&retried[1].data, 0), "SYNTH RETRY B");
+    assert_eq!(state_number(&retried[0].data, "BID", 0), 5.0);
+    assert!(retried[0].data.column_by_name("ASK").unwrap().is_null(0));
+    assert_eq!(state_number(&retried[1].data, "BID", 0), 6.0);
+    assert_eq!(state_number(&retried[1].data, "ASK", 0), 7.0);
+    assert!(
+        state
+            .prepare_unsubscribe_deliveries(true, None)
+            .await
+            .commit()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn state_wide_snapshot_late_join_and_layout_growth_retry_preserve_full_images() {
+    let (hub, _) = hub();
+    let fields: Vec<_> = (0..12).map(|index| format!("F{index}")).collect();
+    let field_names: Vec<_> = fields.iter().map(String::as_str).collect();
+    let _poller = hub
+        .subscribe(image_request(&["SYNTH WIDE"], &field_names))
+        .await
+        .unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH WIDE");
+    let payload: serde_json::Map<String, serde_json::Value> = (0..12)
+        .map(|index| (format!("F{index}"), serde_json::json!(index)))
+        .collect();
+    data(
+        &session,
+        key,
+        &serde_json::Value::Object(payload).to_string(),
+    );
+    let mut request = state_request(&["SYNTH WIDE"], &["F0"]);
+    request.all_fields = true;
+    let stream = hub.subscribe(request).await.unwrap();
+    let handle = stream.handle.clone();
+    let state = Arc::new(state_consumer(stream));
+    let joined = state.next_delivery(1).await.unwrap().commit().unwrap();
+    for index in 0..12 {
+        assert_eq!(
+            state_number(&joined.data, &format!("F{index}"), 0),
+            index as f64
+        );
+    }
+    data(&session, key, r#"{"F0":100}"#);
+    let prepared = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let prepared_reader = prepared.clone();
+    let resume_reader = resume.clone();
+    handle
+        .inner
+        .state_delivery
+        .as_ref()
+        .unwrap()
+        .before_next_snapshot(Arc::new(move || {
+            prepared_reader.wait();
+            resume_reader.wait();
+        }));
+    let reader = state.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let waiting = tokio::task::spawn_blocking(move || runtime.block_on(reader.next_delivery(1)));
+    prepared.wait();
+    let resume = ResumeSnapshot(resume);
+    data(&session, key, r#"{"F3":null,"F12":"grown"}"#);
+    drop(resume);
+    let grown = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert_eq!(state_number(&grown.data, "F0", 0), 100.0);
+    assert_eq!(state_number(&grown.data, "F11", 0), 11.0);
+    assert!(grown.data.column_by_name("F3").unwrap().is_null(0));
+    assert_eq!(
+        grown
+            .data
+            .column_by_name("F12")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .value(0),
+        "grown"
+    );
+    assert_eq!(state.rx.lock().await.as_ref().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn state_reserved_metadata_fields_reject_configuration_before_mutation() {
+    for field in ["topic", "last_update", "live", "delayed", "valid"] {
+        let (hub, factory) = hub();
+        assert!(matches!(
+            hub.subscribe(state_request(&["SYNTH RESERVED"], &[field]))
+                .await,
+            Err(BlpAsyncError::ConfigError { .. })
+        ));
+        assert!(hub.feeds().is_empty());
+        assert!(factory.sessions.lock().is_empty());
+        assert!(hub.consumers.lock().is_empty());
+    }
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH RESERVED ADD"], &["BID"]))
+        .await
+        .unwrap();
+    assert!(matches!(
+        stream.add_fields(vec!["valid".into()]).await,
+        Err(BlpAsyncError::ConfigError { .. })
+    ));
+    assert_eq!(stream.fields(), vec!["BID"]);
+}
+
+#[tokio::test]
+async fn state_sdk_reserved_valid_field_fails_without_shadowing_continuity_or_polling_data() {
+    let (hub, _) = hub();
+    let poller = hub
+        .subscribe(image_request(&["SYNTH SDK RESERVED"], &["BID", "valid"]))
+        .await
+        .unwrap();
+    let mut req = state_request(&["SYNTH SDK RESERVED"], &["BID"]);
+    req.all_fields = true;
+    let state = state_consumer(hub.subscribe(req).await.unwrap());
+    let filtered = state_consumer(
+        hub.subscribe(state_request(&["SYNTH SDK RESERVED"], &["BID"]))
+            .await
+            .unwrap(),
+    );
+    let (session, key) = test_feed(&hub, "SYNTH SDK RESERVED");
+    data(&session, key, r#"{"BID":7}"#);
+    let warmed = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&warmed.data, "valid", 0));
+    data(&session, key, r#"{"BID":8,"valid":false}"#);
+    let delivery = state.next_delivery(1).await.unwrap();
+    assert!(matches!(
+        delivery.as_ref(),
+        Err(BlpError::InvalidArgument { .. })
+    ));
+    assert!(delivery.commit().is_err());
+    let filtered = filtered.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(
+        state_flag(&filtered.data, "valid", 0),
+        "SDK data overwrote continuity"
+    );
+    assert_eq!(state_number(&filtered.data, "BID", 0), 8.0);
+    let latest = poller.latest().unwrap();
+    assert!(
+        !state_flag(&latest, "valid", 0),
+        "polling lost its legitimate SDK field"
+    );
+    assert_eq!(state_number(&latest, "BID", 0), 8.0);
+}
+
+#[tokio::test]
+async fn frozen_state_drain_stages_invalidation_and_recovery_before_ack_and_restores_both() {
+    for limit in [1, 16] {
+        for rollback in [false, true] {
+            let (hub, _) = hub();
+            let poller = hub
+                .subscribe(image_request(&["SYNTH DRAIN EPOCHS"], &["BID", "ASK"]))
+                .await
+                .unwrap();
+            let mut req = state_request(&["SYNTH DRAIN EPOCHS"], &["BID", "ASK"]);
+            req.flush_threshold = Some(limit);
+            let state = state_consumer(hub.subscribe(req).await.unwrap());
+            let (session, key) = test_feed(&hub, "SYNTH DRAIN EPOCHS");
+            data(&session, key, r#"{"BID":10,"ASK":11}"#);
+            state.next_delivery(limit).await.unwrap().commit().unwrap();
+            data(
+                &session,
+                key,
+                r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+            );
+            cleanup(&hub).await;
+            data(
+                &session,
+                key,
+                r#"{"BID":20,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+            );
+            let drain = state.prepare_unsubscribe_deliveries(true, None).await;
+            let staged = drain.as_ref().unwrap();
+            assert_eq!(staged.len(), 2);
+            assert!(!state_flag(&staged[0].data, "valid", 0));
+            assert!(staged[0].data.column_by_name("BID").unwrap().is_null(0));
+            assert!(state_flag(&staged[1].data, "valid", 0));
+            assert_eq!(state_number(&staged[1].data, "BID", 0), 20.0);
+            let drained = if rollback {
+                let (outputs, acknowledgement) = match drain.prepare_success() {
+                    Ok(prepared) => prepared,
+                    Err(_) => panic!("state epochs unexpectedly failed"),
+                };
+                drop(outputs);
+                data(&session, key, r#"{"BID":99,"ASK":100}"#);
+                drop(acknowledgement);
+                assert_eq!(state_number(&poller.latest().unwrap(), "BID", 0), 99.0);
+                state
+                    .prepare_unsubscribe_deliveries(true, None)
+                    .await
+                    .commit()
+                    .unwrap()
+            } else {
+                drain.commit().unwrap()
+            };
+            assert_eq!(drained.len(), 2);
+            assert!(!state_flag(&drained[0].data, "valid", 0));
+            assert!(state_flag(&drained[1].data, "valid", 0));
+            assert_eq!(state_number(&drained[1].data, "BID", 0), 20.0);
+            assert!(drained[1].data.column_by_name("ASK").unwrap().is_null(0));
+            assert!(
+                state
+                    .prepare_unsubscribe_deliveries(true, None)
+                    .await
+                    .commit()
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn state_base_schema_reuses_clean_fields_and_rebuilds_after_kind_growth() {
+    let (hub, _) = hub();
+    let state = state_consumer(
+        hub.subscribe(state_request(&["SYNTH SCHEMA CACHE"], &["BID"]))
+            .await
+            .unwrap(),
+    );
+    let (session, key) = test_feed(&hub, "SYNTH SCHEMA CACHE");
+    data(&session, key, r#"{"BID":1}"#);
+    let first = state.next_delivery(1).await.unwrap().commit().unwrap();
+    let base = first.data.schema();
+    let mut diagnostics = super::super::state::ResponseMetadata::default();
+    diagnostics.record_type_miss("BID");
+    let decorated = diagnostics.attach(first.data);
+    let metadata_key = super::super::state::METADATA_KEY_TYPE_MISSES;
+    assert!(decorated.schema().metadata().contains_key(metadata_key));
+    data(&session, key, r#"{"BID":2}"#);
+    let second = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(Arc::ptr_eq(&base, &second.data.schema()));
+    assert!(!second.data.schema().metadata().contains_key(metadata_key));
+    data(&session, key, r#"{"BID":"changed"}"#);
+    let changed = state.next_delivery(1).await.unwrap().commit().unwrap();
+    let changed_schema = changed.data.schema();
+    assert!(!Arc::ptr_eq(&base, &changed_schema));
+    assert_eq!(
+        changed_schema.field_with_name("BID").unwrap().data_type(),
+        &arrow_schema::DataType::Utf8
+    );
+    data(&session, key, r#"{"BID":"again"}"#);
+    let stable = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(Arc::ptr_eq(&changed_schema, &stable.data.schema()));
+    assert!(!stable.data.schema().metadata().contains_key(metadata_key));
+}
+
+#[tokio::test]
+async fn cached_image_schema_keeps_plain_and_marked_headers_separate() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH HEADER CACHE"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH HEADER CACHE");
+    data(&session, key, r#"{"BID":3}"#);
+    let feed = feed_for_label(&stream, "SYNTH HEADER CACHE");
+    let member = stream.handle.inner.memberships.lock()[0].key;
+    let (_, row) = stream
+        .handle
+        .inner
+        .snapshot_image(&feed, member, true)
+        .unwrap();
+    let rows = std::slice::from_ref(&row);
+    let mut schema = ImageSchema::new(stream.handle.inner.image_fields());
+    schema.observe_rows(rows.iter());
+    let plain = materialize_images(rows.iter(), &mut schema, &HashSet::new(), false).unwrap();
+    let marked = materialize_images(rows.iter(), &mut schema, &HashSet::new(), true).unwrap();
+    let plain_again = materialize_images(rows.iter(), &mut schema, &HashSet::new(), false).unwrap();
+    assert_eq!(plain.num_columns(), 5);
+    assert_eq!(marked.num_columns(), 6);
+    assert!(plain.column_by_name("valid").is_none());
+    assert!(state_flag(&marked, "valid", 0));
+    assert_eq!(state_number(&plain, "BID", 0), 3.0);
+    assert_eq!(state_number(&marked, "BID", 0), 3.0);
+    assert!(Arc::ptr_eq(&plain.schema(), &plain_again.schema()));
+    assert!(!Arc::ptr_eq(&plain.schema(), &marked.schema()));
+}
+
+#[tokio::test]
+async fn state_freeze_retains_loss_and_recovery_metadata_while_snapshot_is_preparing() {
+    for rollback in [false, true] {
+        let (hub, _) = hub();
+        let _poller = hub
+            .subscribe(image_request(&["SYNTH FREEZE LOSS"], &["BID", "ASK"]))
+            .await
+            .unwrap();
+        let stream = hub
+            .subscribe(state_request(&["SYNTH FREEZE LOSS"], &["BID", "ASK"]))
+            .await
+            .unwrap();
+        let shared = stream.handle.inner.state_delivery.as_ref().unwrap().clone();
+        let state = Arc::new(state_consumer(stream));
+        let (session, key) = test_feed(&hub, "SYNTH FREEZE LOSS");
+        data(&session, key, r#"{"BID":10,"ASK":11}"#);
+        state.next_delivery(1).await.unwrap().commit().unwrap();
+        data(&session, key, r#"{"BID":12}"#);
+        let prepared = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let prepared_reader = prepared.clone();
+        let resume_reader = resume.clone();
+        shared.before_next_snapshot(Arc::new(move || {
+            prepared_reader.wait();
+            resume_reader.wait();
+        }));
+        let reader = state.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let waiting = tokio::task::spawn_blocking(move || {
+            runtime.block_on(reader.prepare_unsubscribe_deliveries(true, None))
+        });
+        prepared.wait();
+        let resume = ResumeSnapshot(resume);
+        data(
+            &session,
+            key,
+            r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+        );
+        cleanup(&hub).await;
+        data(
+            &session,
+            key,
+            r#"{"BID":20,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+        );
+        drop(resume);
+        let drain = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_state_recovery_epochs(drain.as_ref().unwrap(), 20.0);
+        let delivered = if rollback {
+            let (outputs, acknowledgement) = match drain.prepare_success() {
+                Ok(prepared) => prepared,
+                Err(_) => panic!("state freeze unexpectedly failed"),
+            };
+            drop(outputs);
+            data(&session, key, r#"{"BID":99}"#);
+            drop(acknowledgement);
+            state
+                .prepare_unsubscribe_deliveries(true, None)
+                .await
+                .commit()
+                .unwrap()
+        } else {
+            drain.commit().unwrap()
+        };
+        assert_state_recovery_epochs(&delivered, 20.0);
+    }
+}
+
+#[tokio::test]
+async fn state_freeze_retains_topic_retirement_while_snapshot_is_preparing() {
+    for message_type in ["SubscriptionFailure", "SubscriptionTerminated"] {
+        let (hub, _) = hub();
+        let stream = hub
+            .subscribe(state_request(
+                &["SYNTH FREEZE FAIL", "SYNTH FREEZE KEEP"],
+                &["BID"],
+            ))
+            .await
+            .unwrap();
+        let shared = stream.handle.inner.state_delivery.as_ref().unwrap().clone();
+        let state = Arc::new(state_consumer(stream));
+        let (session, key) = test_feed(&hub, "SYNTH FREEZE FAIL");
+        let (_, kept) = test_feed(&hub, "SYNTH FREEZE KEEP");
+        data(&session, key, r#"{"BID":1}"#);
+        data(&session, kept, r#"{"BID":2}"#);
+        state.next_delivery(2).await.unwrap().commit().unwrap();
+        data(&session, key, r#"{"BID":3}"#);
+        let prepared = Arc::new(std::sync::Barrier::new(2));
+        let resume = Arc::new(std::sync::Barrier::new(2));
+        let prepared_reader = prepared.clone();
+        let resume_reader = resume.clone();
+        shared.before_next_snapshot(Arc::new(move || {
+            prepared_reader.wait();
+            resume_reader.wait();
+        }));
+        let reader = state.clone();
+        let runtime = tokio::runtime::Handle::current();
+        let waiting = tokio::task::spawn_blocking(move || {
+            runtime.block_on(reader.prepare_unsubscribe_deliveries(true, None))
+        });
+        prepared.wait();
+        let resume = ResumeSnapshot(resume);
+        session.status(key, message_type);
+        cleanup(&hub).await;
+        drop(resume);
+        let drain = tokio::time::timeout(Duration::from_secs(1), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        let (outputs, acknowledgement) = match drain.prepare_success() {
+            Ok(prepared) => prepared,
+            Err(_) => panic!("topic-local retirement closed the whole state subscription"),
+        };
+        assert_eq!(outputs.len(), 1);
+        assert_eq!(state_label(&outputs[0].data, 0), "SYNTH FREEZE FAIL");
+        assert!(!state_flag(&outputs[0].data, "valid", 0));
+        assert!(outputs[0].data.column_by_name("BID").unwrap().is_null(0));
+        drop(outputs);
+        drop(acknowledgement);
+        let retried = state
+            .prepare_unsubscribe_deliveries(true, None)
+            .await
+            .commit()
+            .unwrap();
+        assert_eq!(retried.len(), 1);
+        assert_eq!(state_label(&retried[0].data, 0), "SYNTH FREEZE FAIL");
+        assert!(!state_flag(&retried[0].data, "valid", 0));
+    }
+}
+
+#[tokio::test]
+async fn state_freeze_preserves_first_loss_before_capture_and_excludes_later_recovery() {
+    let (hub, _) = hub();
+    let poller = hub
+        .subscribe(image_request(&["SYNTH FREEZE CUTOFF"], &["BID", "ASK"]))
+        .await
+        .unwrap();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH FREEZE CUTOFF"], &["BID", "ASK"]))
+        .await
+        .unwrap();
+    let shared = stream.handle.inner.state_delivery.as_ref().unwrap().clone();
+    let state = Arc::new(state_consumer(stream));
+    let (session, key) = test_feed(&hub, "SYNTH FREEZE CUTOFF");
+    data(&session, key, r#"{"BID":10,"ASK":11}"#);
+    state.next_delivery(1).await.unwrap().commit().unwrap();
+    data(
+        &session,
+        key,
+        r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+    );
+    cleanup(&hub).await;
+    data(
+        &session,
+        key,
+        r#"{"BID":20,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+    );
+    let captured = Arc::new(std::sync::Barrier::new(2));
+    let resume = Arc::new(std::sync::Barrier::new(2));
+    let captured_reader = captured.clone();
+    let resume_reader = resume.clone();
+    shared.after_next_snapshot(Arc::new(move || {
+        captured_reader.wait();
+        resume_reader.wait();
+    }));
+    let reader = state.clone();
+    let runtime = tokio::runtime::Handle::current();
+    let waiting = tokio::task::spawn_blocking(move || {
+        runtime.block_on(reader.prepare_unsubscribe_deliveries(true, None))
+    });
+    captured.wait();
+    let resume = ResumeSnapshot(resume);
+    data(
+        &session,
+        key,
+        r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#,
+    );
+    cleanup(&hub).await;
+    data(
+        &session,
+        key,
+        r#"{"BID":99,"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"INITPAINT"}"#,
+    );
+    assert_eq!(state_number(&poller.latest().unwrap(), "BID", 0), 99.0);
+    drop(resume);
+    let drain = tokio::time::timeout(Duration::from_secs(1), waiting)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_state_recovery_epochs(drain.as_ref().unwrap(), 20.0);
+    let (outputs, acknowledgement) = match drain.prepare_success() {
+        Ok(prepared) => prepared,
+        Err(_) => panic!("captured state epochs unexpectedly failed"),
+    };
+    drop(outputs);
+    drop(acknowledgement);
+    let retried = state
+        .prepare_unsubscribe_deliveries(true, None)
+        .await
+        .commit()
+        .unwrap();
+    assert_state_recovery_epochs(&retried, 20.0);
+}
+
+#[tokio::test]
+async fn state_wide_scratch_pool_tracks_actual_live_batch_peak_not_topics_or_freeze_size() {
+    let (hub, _) = hub();
+    let topics = ["SYNTH POOL A", "SYNTH POOL B", "SYNTH POOL C"];
+    let fields: Vec<_> = (0..12).map(|index| format!("F{index}")).collect();
+    let field_names: Vec<_> = fields.iter().map(String::as_str).collect();
+    let stream = hub
+        .subscribe(state_request(&topics, &field_names))
+        .await
+        .unwrap();
+    let shared = stream.handle.inner.state_delivery.as_ref().unwrap().clone();
+    let state = state_consumer(stream);
+    for _ in &topics {
+        state.next_delivery(1).await.unwrap().commit().unwrap();
+    }
+    assert_eq!(shared.spare_buffer_stats(), (1, 0));
+    for (topic_index, topic) in topics.iter().enumerate() {
+        let (session, key) = test_feed(&hub, topic);
+        let payload: serde_json::Map<String, serde_json::Value> = (0..12)
+            .map(|index| {
+                (
+                    format!("F{index}"),
+                    serde_json::json!(topic_index * 100 + index),
+                )
+            })
+            .collect();
+        data(
+            &session,
+            key,
+            &serde_json::Value::Object(payload).to_string(),
+        );
+        let delivery = state.next_delivery(4096).await.unwrap().commit().unwrap();
+        assert_eq!(delivery.data.num_rows(), 1);
+        assert_eq!(
+            state_number(&delivery.data, "F11", 0),
+            (topic_index * 100 + 11) as f64
+        );
+        assert_eq!(shared.spare_buffer_stats(), (1, 1));
+    }
+    for topic in &topics {
+        let (session, key) = test_feed(&hub, topic);
+        data(&session, key, r#"{"F0":1000}"#);
+    }
+    let delivery = state.next_delivery(4096).await.unwrap().commit().unwrap();
+    assert_eq!(delivery.data.num_rows(), topics.len());
+    assert_eq!(shared.spare_buffer_stats(), (3, 3));
+    let mut request = state_request(&topics, &field_names);
+    request.flush_threshold = Some(4096);
+    let freeze = hub.subscribe(request).await.unwrap();
+    let frozen_shared = freeze.handle.inner.state_delivery.as_ref().unwrap().clone();
+    let freeze = state_consumer(freeze);
+    let drain = freeze.prepare_unsubscribe_deliveries(true, None).await;
+    assert_eq!(drain.as_ref().unwrap()[0].data.num_rows(), topics.len());
+    assert_eq!(frozen_shared.spare_buffer_stats(), (0, 0));
+    drain.commit().unwrap();
+}
+
+#[tokio::test]
+async fn first_sdk_deactivation_without_prior_activation_marks_state_not_polling() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(state_request(&["SYNTH FIRST INACTIVE"], &["BID"]))
+        .await
+        .unwrap();
+    let handle = stream.handle.clone();
+    let state = state_consumer(stream);
+    let polling = hub
+        .subscribe(image_request(&["SYNTH FIRST INACTIVE"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, key) = test_feed(&hub, "SYNTH FIRST INACTIVE");
+    data(&session, key, r#"{"BID":1}"#);
+    let active = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&active.data, "valid", 0));
+    assert!(state_flag(&active.data, "live", 0));
+    assert!(!handle.status().load().topic_statuses()["SYNTH FIRST INACTIVE"].streams_active);
+    session.status(key, "SubscriptionStreamsDeactivated");
+    let inactive = tokio::time::timeout(Duration::from_secs(1), state.next_delivery(1))
+        .await
+        .unwrap()
+        .unwrap()
+        .commit()
+        .unwrap();
+    assert!(state_flag(&inactive.data, "valid", 0));
+    assert!(!state_flag(&inactive.data, "live", 0));
+    assert_eq!(state_number(&inactive.data, "BID", 0), 1.0);
+    assert!(state_flag(&polling.latest().unwrap(), "live", 0));
+    let late = state_consumer(
+        hub.subscribe(state_request(&["SYNTH FIRST INACTIVE"], &["BID"]))
+            .await
+            .unwrap(),
+    );
+    let late_inactive = late.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&late_inactive.data, "valid", 0));
+    assert!(!state_flag(&late_inactive.data, "live", 0));
+    session.status(key, "SubscriptionStreamsActivated");
+    let resumed = state.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&resumed.data, "live", 0));
+    let late_resumed = late.next_delivery(1).await.unwrap().commit().unwrap();
+    assert!(state_flag(&late_resumed.data, "live", 0));
 }

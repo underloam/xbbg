@@ -133,6 +133,33 @@ impl FieldKind {
             _ => FieldKind::Str,
         }
     }
+
+    /// Metadata hints are provisional until the first SDK-observed kind.
+    pub(crate) fn seed_hint(&mut self, provisional: &mut bool, hint: Self) -> bool {
+        if *self == Self::Unknown && hint != Self::Unknown {
+            *self = hint;
+            *provisional = true;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Apply one observed kind; return whether the immutable layout must change.
+    pub(crate) fn observe(&mut self, provisional: &mut bool, observed: Self) -> bool {
+        if observed == Self::Unknown {
+            return false;
+        }
+        let merged = if *provisional {
+            observed
+        } else {
+            self.merge_observed(observed)
+        };
+        let changed = merged != *self || *provisional;
+        *self = merged;
+        *provisional = false;
+        changed
+    }
 }
 
 impl UpdateValue {

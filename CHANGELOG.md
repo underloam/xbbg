@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Gap-aware subscription delivery (#271).** Python, Node, and Rust support opt-in `drop_oldest` deltas with exact local-eviction counts, and `delivery="state"`/`delivery: 'state'` for fair, conflated current images. Delivery envelopes preserve gaps across Arrow and dataframe backends; state rows expose continuity validity and ordered invalidation/recovery without building Arrow on incoming updates or scanning quiet topics.
+- **Transactional marked reads and drains.** Native source receipts survive conversion failure, cancellation, and closing views until publication. Frozen drains retain complete epoch/gap/error ordering for backend retry, without retaining exported Arrow buffers.
+- **Offline native verification and benchmarks.** Feature-gated SDK TestUtil drivers exercise real CPython, V8, and Bun paths; CI excludes the drivers from shipped artifacts. Benchmarks compare default queues with a frozen v1.7.0 source and distinguish full adapters from bare overwrite primitives, with privacy-safe provenance.
+
+### Changed
+
+- **BREAKING (Rust):** `SubscribeRequest` includes `delivery`, and `OverflowPolicy` adds `DropOldest`. Update full struct literals and exhaustive policy matches. Default sparse-delta behavior and ordinary Python/Node iteration remain unchanged.
+- **LangGraph snapshots explicitly select a strict policy.** Omitting overflow policy selects `drop_newest` independently of engine defaults; callers can still request `block`. Snapshot schemas do not advertise lossy policies they cannot represent.
+
 ## [1.7.0] - 2026-10-29
 
 ### Added

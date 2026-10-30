@@ -461,7 +461,7 @@ class PyEngine:
         r"""
         List all valid element names for an operation.
         """
-    def subscribe(self, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None) -> typing.Any:
+    def subscribe(self, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None, delivery: builtins.str = 'deltas') -> typing.Any:
         r"""
         Subscribe to real-time market data.
         
@@ -485,7 +485,7 @@ class PyEngine:
         await sub.unsubscribe()
         ```
         """
-    def subscribe_with_options(self, service: builtins.str, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], options: typing.Optional[typing.Sequence[builtins.str]] = None, flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None) -> typing.Any:
+    def subscribe_with_options(self, service: builtins.str, tickers: typing.Sequence[builtins.str], fields: typing.Sequence[builtins.str], options: typing.Optional[typing.Sequence[builtins.str]] = None, flush_threshold: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None, stream_capacity: typing.Optional[builtins.int] = None, all_fields: builtins.bool = False, aliases: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None, on_delayed: builtins.str = 'warn', isolated: builtins.bool = False, rows: builtins.bool = True, on_field_error: builtins.str = 'warn', zero_as_null: typing.Optional[typing.Sequence[builtins.str]] = None, session_wait_ms: typing.Optional[builtins.int] = None, delivery: builtins.str = 'deltas') -> typing.Any:
         r"""
         Subscribe to real-time data with custom service and options.
         
@@ -1034,6 +1034,16 @@ class PySubscription:
         Whether this handle delivers rows; False requires latest() instead of iteration.
         """
     @property
+    def delivery(self) -> builtins.str:
+        r"""
+        Delivery semantics remain available after this handle is closed.
+        """
+    @property
+    def requires_deliveries(self) -> builtins.bool:
+        r"""
+        Whether batch-envelope consumption is required by the effective mode.
+        """
+    @property
     def tickers(self) -> builtins.list[builtins.str]:
         r"""
         Get the currently subscribed tickers.
@@ -1085,12 +1095,17 @@ class PySubscription:
     def __anext__(self) -> typing.Any:
         r"""
         Get next batch of data.
-        Only locks the rx, not the stream - so add/remove can run concurrently.
+        Legacy-only reads lock only rx; mixed readers also share the existing publication gate.
         
         Returns an xbbg ArrowRecordBatch on success.
         Raises a Python exception (BlpRequestError, BlpInternalError, etc.) on error.
         Raises StopAsyncIteration when the subscription is closed.
         Raises RuntimeError for rows=False; use latest() for image-only consumers.
+        """
+    def next_delivery(self, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+        r"""
+        Prepare a marked batch for publication on the consuming Python loop.
+        The converter runs before the returned receipt's publish() commits it.
         """
     def __anext_tick_dict__(self) -> typing.Any:
         r"""
@@ -1122,11 +1137,19 @@ class PySubscription:
         
         Each row has at_us, category, level, message_type, topic, and detail keys.
         """
+    def ensure_plain_delivery(self) -> None:
+        r"""
+        Guard plain iteration without reproducing native effective-policy logic.
+        """
     def unsubscribe(self, drain: builtins.bool = False, tick_mode: builtins.bool = False) -> typing.Any:
         r"""
         Unsubscribe and close the stream.
         
         If drain=True, returns all unread values in the selected iteration mode.
+        """
+    def unsubscribe_deliveries(self, drain: builtins.bool = False, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+        r"""
+        Close and optionally drain marked batches without losing gap metadata.
         """
     def __aenter__(self) -> PySubscription:
         r"""

@@ -51,7 +51,10 @@ from ._engine import (
 from ._exports import BLP_MODULE_EXPORTS
 from ._request_options import OverrideSpec as OverrideSpec, ovr as ovr
 from ._streaming import (
+    DeliveryStream as DeliveryStream,
     Subscription as Subscription,
+    SubscriptionDelivery as SubscriptionDelivery,
+    SubscriptionGap as SubscriptionGap,
     Tick as Tick,
     TickValue as TickValue,
     achains as achains,
@@ -383,6 +386,7 @@ if TYPE_CHECKING:
         flush_threshold: int | None = None,
         stream_capacity: int | None = None,
         overflow_policy: str | None = None,
+        delivery: str = "deltas",
         output: str | None = None,
         aliases: Mapping[str, str] | None = None,
         on_delayed: str = "warn",
@@ -402,6 +406,7 @@ if TYPE_CHECKING:
         raw: bool = False,
         all_fields: bool = True,
         backend: Backend | str | None = None,
+        delivery: str = "deltas",
     ) -> Subscription:
         """Sync VWAP subscription creation. See ``avwap`` for details."""
         ...
@@ -415,6 +420,7 @@ if TYPE_CHECKING:
         raw: bool = False,
         all_fields: bool = True,
         backend: Backend | str | None = None,
+        delivery: str = "deltas",
     ) -> Subscription:
         """Sync market-bar subscription creation. See ``amktbar`` for details."""
         ...
@@ -425,6 +431,7 @@ if TYPE_CHECKING:
         raw: bool = False,
         all_fields: bool = False,
         backend: Backend | str | None = None,
+        delivery: str = "deltas",
     ) -> Subscription:
         """Sync market-depth subscription creation. See ``adepth`` for details."""
         ...
@@ -436,6 +443,7 @@ if TYPE_CHECKING:
         raw: bool = False,
         all_fields: bool = False,
         backend: Backend | str | None = None,
+        delivery: str = "deltas",
     ) -> Subscription:
         """Sync chain subscription creation. See ``achains`` for details."""
         ...

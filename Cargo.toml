@@ -137,6 +137,8 @@ rmcp = "3.5.1"
 # ── Build-time and dev-only ───────────────────────────────────────────────────
 bindgen = { version = "0.73.2", default-features = false }
 criterion = "0.8.2"
+async-channel = "2.5"
+crossbeam-queue = "0.3.14"
 simd-json = "0.18"
 tempfile = "3.27"
 

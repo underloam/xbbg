@@ -22,6 +22,11 @@ class _Feed:
 
 class _Rows:
     delivers_rows = True
+    delivery = "deltas"
+    requires_deliveries = False
+
+    def ensure_plain_delivery(self):
+        return None
 
     def __init__(self, engine, feed):
         self.engine = engine

@@ -1,6 +1,9 @@
 mod arrow_zero_copy;
 mod ext;
 mod request;
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod subscription_fixture;
 pub use ext::*;
 use request::pairs_to_map;
 
@@ -15,11 +18,12 @@ use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
 use arrow_zero_copy::NativeArrowBatch;
 use napi::bindgen_prelude::{
-    Buffer, Either, Error, FromNapiValue, Status, ToNapiValue, TypeName, Uint8Array,
-    ValidateNapiValue, create_custom_tokio_runtime,
+    Buffer, Either, Env, Error, FromNapiValue, FunctionRef, JavaScriptClassExt, JsObjectValue,
+    JsValue, Object, Status, ToNapiValue, TypeName, Uint8Array, Unknown, ValidateNapiValue,
+    create_custom_tokio_runtime,
 };
 use napi_derive::napi;
-use tokio::sync::watch;
+use tokio::sync::{OwnedMutexGuard, watch};
 use tokio::time::Instant;
 use xbbg_async::engine::state::{
     FieldKind, FieldLayout, SubscriptionArrowBatcher, SubscriptionReceiver, SubscriptionUpdate,
@@ -27,8 +31,9 @@ use xbbg_async::engine::state::{
 };
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr,
-    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, SubscriptionEventInfo,
-    SubscriptionFailureInfo, SubscriptionStatusState, TlsMaterial, TopicStatusInfo, Transport,
+    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDelivery,
+    SubscriptionDeliveryMode, SubscriptionEventInfo, SubscriptionFailureInfo, SubscriptionGap,
+    SubscriptionStatusState, TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
@@ -38,8 +43,9 @@ use xbbg_async::{
 use xbbg_core::BlpError;
 
 use xbbg_async::subscription_consumer::{
-    PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer,
-    subscription_batch_capacity_hint, subscription_layouts_match, wait_for_subscription_close,
+    PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer, SubscriptionDeliveryAck,
+    SubscriptionDeliveryDrainLease, SubscriptionDeliveryLease, subscription_batch_capacity_hint,
+    subscription_layouts_match, wait_for_subscription_close,
 };
 
 #[napi_derive::module_init]
@@ -266,7 +272,7 @@ pub struct EngineConfigInput {
     pub max_event_queue_size: Option<u32>,
     pub command_queue_size: Option<u32>,
     pub subscription_stream_capacity: Option<u32>,
-    /// Overflow policy: "drop_newest" (default) or "block".
+    /// Overflow policy: "drop_newest" (default), "block", or gap-aware "drop_oldest".
     /// Also accepts "dropnewest" as an alias for "drop_newest".
     pub overflow_policy: Option<String>,
     pub warmup_services: Option<Vec<String>>,
@@ -1093,6 +1099,7 @@ async fn receive_subscription_updates(
 /// as a `[XBBG:<CODE>] ` prefix. The js-xbbg wrapper parses this prefix to
 /// construct typed error classes; the human-readable message follows it.
 /// Codes: SESSION, REQUEST, LIMIT, DATALOSS, VALIDATION, TIMEOUT, INTERNAL.
+/// DELIVERY_CONVERSION marks an uncommitted, retryable host-export failure.
 fn coded(status: Status, code: &str, msg: impl AsRef<str>) -> Error {
     Error::new(status, format!("[XBBG:{code}] {}", msg.as_ref()))
 }
@@ -1155,6 +1162,15 @@ fn field_error_policy_from_input(on_field_error: Option<&str>) -> napi::Result<F
         .transpose()
         .map(|policy| policy.unwrap_or_default())
         .map_err(blp_async_error_to_napi)
+}
+fn subscription_delivery_from_input(
+    delivery: Option<&str>,
+) -> napi::Result<SubscriptionDeliveryMode> {
+    delivery
+        .map(SubscriptionDeliveryMode::from_str)
+        .transpose()
+        .map(|mode| mode.unwrap_or_default())
+        .map_err(|error| coded(Status::InvalidArg, "VALIDATION", error.to_string()))
 }
 
 fn subscription_closed_error() -> Error {
@@ -1581,16 +1597,19 @@ impl JsEngine {
         rows: Option<bool>,
         on_field_error: Option<String>,
         zero_as_null: Option<Vec<String>>,
+        delivery: Option<String>,
     ) -> napi::Result<JsSubscription> {
         let all_fields = all_fields.unwrap_or(false);
         let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
         let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
+        let delivery = subscription_delivery_from_input(delivery.as_deref())?;
         let stream = self
             .engine
             .subscribe(SubscribeRequest {
                 topics: tickers,
                 fields,
                 all_fields,
+                delivery,
                 aliases: aliases.unwrap_or_default().into_iter().collect(),
                 delayed_policy,
                 field_error_policy,
@@ -1626,6 +1645,7 @@ impl JsEngine {
         rows: Option<bool>,
         on_field_error: Option<String>,
         zero_as_null: Option<Vec<String>>,
+        delivery: Option<String>,
     ) -> napi::Result<JsSubscription> {
         let overflow = match overflow_policy {
             Some(policy) => Some(
@@ -1637,6 +1657,7 @@ impl JsEngine {
         let all_fields = all_fields.unwrap_or(false);
         let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
         let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
+        let delivery = subscription_delivery_from_input(delivery.as_deref())?;
 
         if stream_capacity == Some(0) {
             return Err(Error::new(
@@ -1661,6 +1682,7 @@ impl JsEngine {
                 topics: tickers,
                 fields,
                 all_fields,
+                delivery,
                 options: options.unwrap_or_default(),
                 aliases: aliases.unwrap_or_default().into_iter().collect(),
                 delayed_policy,
@@ -2200,6 +2222,367 @@ impl JsEngine {
     }
 }
 
+enum SubscriptionPublicationReceipt {
+    Delivery(SubscriptionDeliveryAck),
+    Error(SubscriptionDeliveryLease),
+}
+
+struct SubscriptionPublicationState {
+    receipt: SubscriptionPublicationReceipt,
+    close_signal: watch::Receiver<bool>,
+}
+
+/// Private settlement state retains no Arrow arrays or JavaScript buffers.
+#[napi]
+pub struct JsSubscriptionPublication {
+    pending: StdMutex<Option<SubscriptionPublicationState>>,
+}
+
+#[napi]
+impl JsSubscriptionPublication {
+    #[napi]
+    pub fn commit(&self) -> napi::Result<bool> {
+        let pending = self
+            .pending
+            .lock()
+            .expect("subscription publication poisoned")
+            .take()
+            .ok_or_else(|| {
+                coded(
+                    Status::InvalidArg,
+                    "VALIDATION",
+                    "delivery publication already settled",
+                )
+            })?;
+        let SubscriptionPublicationState {
+            receipt,
+            close_signal,
+        } = pending;
+        let publishing = close_signal.borrow();
+        if *publishing {
+            drop(publishing);
+            drop(receipt);
+            return Ok(false);
+        }
+        match receipt {
+            SubscriptionPublicationReceipt::Delivery(acknowledgement) => {
+                acknowledgement.commit();
+                Ok(true)
+            }
+            SubscriptionPublicationReceipt::Error(lease) => match lease.commit() {
+                Err(error) => Err(blp_error_to_napi(error)),
+                Ok(_) => unreachable!("an error delivery cannot commit successfully"),
+            },
+        }
+    }
+
+    #[napi]
+    pub fn rollback(&self) {
+        let receipt = self
+            .pending
+            .lock()
+            .expect("subscription publication poisoned")
+            .take();
+        drop(receipt);
+    }
+}
+
+fn native_subscription_publication(
+    env: napi::sys::napi_env,
+    value: Option<napi::sys::napi_value>,
+    receipt: SubscriptionPublicationReceipt,
+    close_signal: watch::Receiver<bool>,
+) -> napi::Result<napi::sys::napi_value> {
+    let env_wrapper = Env::from_raw(env);
+    let publication = JsSubscriptionPublication {
+        pending: StdMutex::new(None),
+    }
+    .into_instance(&env_wrapper)?;
+    let mut output = publication.as_object(&env_wrapper);
+    output.set_named_property("kind", if value.is_some() { "delivery" } else { "error" })?;
+    if let Some(value) = value {
+        // SAFETY: created in this active JS completion handle scope.
+        output.set_named_property("value", unsafe { Unknown::from_napi_value(env, value)? })?;
+    }
+    // Install ownership only after all fallible JS construction. Any earlier
+    // failure restores the source immediately rather than waiting for V8 GC.
+    let publishing = close_signal.borrow();
+    if *publishing {
+        return unsafe { Option::<()>::to_napi_value(env, None) };
+    }
+    drop(publishing);
+    *publication
+        .pending
+        .lock()
+        .expect("subscription publication poisoned") = Some(SubscriptionPublicationState {
+        receipt,
+        close_signal,
+    });
+    Ok(output.raw())
+}
+
+/// Rust-only completion state. Arrow buffers are exported and the optional backend
+/// projector is invoked only by ToNapiValue on the owning JS thread.
+pub struct NativeSubscriptionDeliveryRead {
+    lease: SubscriptionDeliveryLease,
+    project: Option<SubscriptionDeliveryProjector>,
+    close_signal: watch::Receiver<bool>,
+}
+
+type SubscriptionDeliveryProjector =
+    FunctionRef<NativeSubscriptionDeliveryOutput, Unknown<'static>>;
+
+pub struct NativeSubscriptionDeliveryOutput {
+    kind: SubscriptionDeliveryMode,
+    data: NativeArrowBatch,
+    gap_before: Option<SubscriptionGap>,
+}
+
+impl NativeSubscriptionDeliveryOutput {
+    fn from_delivery(delivery: SubscriptionDelivery) -> napi::Result<Self> {
+        Ok(Self {
+            kind: delivery.kind,
+            data: to_native_record_batch(delivery.data)?,
+            gap_before: delivery.gap_before,
+        })
+    }
+}
+
+impl ToNapiValue for NativeSubscriptionDeliveryOutput {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        let env = Env::from_raw(env);
+        let mut output = Object::new(&env)?;
+        output.set_named_property("kind", value.kind.as_str())?;
+        output.set_named_property("data", value.data)?;
+        if let Some(gap) = value.gap_before {
+            let mut gap_before = Object::new(&env)?;
+            gap_before.set_named_property("cause", gap.cause())?;
+            gap_before.set_named_property("droppedUpdates", gap.dropped_updates)?;
+            output.set_named_property("gapBefore", gap_before)?;
+        }
+        Ok(output.raw())
+    }
+}
+
+fn project_subscription_delivery(
+    env: &Env,
+    output: NativeSubscriptionDeliveryOutput,
+    project: Option<&SubscriptionDeliveryProjector>,
+) -> napi::Result<napi::sys::napi_value> {
+    if let Some(project) = project {
+        let value = project.borrow_back(env)?.call(output)?;
+        let value_type = value.get_type()?;
+        let thenable = matches!(
+            value_type,
+            napi::ValueType::Object | napi::ValueType::Function
+        ) && value
+            .coerce_to_object()?
+            .get_named_property::<Unknown>("then")?
+            .get_type()?
+            == napi::ValueType::Function;
+        if thenable {
+            return Err(Error::new(
+                Status::InvalidArg,
+                "delivery backend projector must return synchronously, not a Promise or thenable",
+            ));
+        }
+        return Ok(value.raw());
+    }
+    // SAFETY: called only from ToNapiValue on the owning JS thread.
+    unsafe { NativeSubscriptionDeliveryOutput::to_napi_value(env.raw(), output) }
+}
+
+fn delivery_conversion_error(env: napi::sys::napi_env, mut error: Error) -> Error {
+    // Property installation can leave a JS exception pending, unlike FunctionRef
+    // calls which capture it themselves. Clear/capture it before building the
+    // retryable transport error, retaining the original exception as its cause.
+    let mut pending = false;
+    let status = unsafe { napi::sys::napi_is_exception_pending(env, &mut pending) };
+    if status != napi::sys::Status::napi_ok {
+        let mut failure = coded(
+            Status::from(status),
+            "DELIVERY_CONVERSION",
+            "failed to inspect a pending JavaScript delivery-conversion exception",
+        );
+        failure.set_cause(error);
+        return failure;
+    }
+    if pending {
+        let mut exception = std::ptr::null_mut();
+        let status = unsafe { napi::sys::napi_get_and_clear_last_exception(env, &mut exception) };
+        if status != napi::sys::Status::napi_ok {
+            let mut failure = coded(
+                Status::from(status),
+                "DELIVERY_CONVERSION",
+                "failed to capture a pending JavaScript delivery-conversion exception",
+            );
+            failure.set_cause(error);
+            return failure;
+        }
+        // SAFETY: napi_get_and_clear_last_exception returned this live value
+        // from the current JS environment and active completion handle scope.
+        error = Error::from(unsafe { Unknown::from_raw_unchecked(env, exception) });
+    }
+    let status = if error.status == Status::PendingException {
+        Status::GenericFailure
+    } else {
+        error.status
+    };
+    let mut failure = coded(status, "DELIVERY_CONVERSION", &error.reason);
+    failure.set_cause(error);
+    failure
+}
+
+impl ToNapiValue for NativeSubscriptionDeliveryRead {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        let Self {
+            lease,
+            project,
+            close_signal,
+        } = value;
+        if *close_signal.borrow() {
+            // Expected close/abort handoff: dropping the lease restores the
+            // unread delivery or terminal error to the draining owner.
+            return unsafe { Option::<()>::to_napi_value(env, None) };
+        }
+        let (delivery, acknowledgement) = match lease.prepare_success() {
+            Ok(prepared) => prepared,
+            Err(lease) => {
+                return native_subscription_publication(
+                    env,
+                    None,
+                    SubscriptionPublicationReceipt::Error(lease),
+                    close_signal,
+                )
+                .map_err(|error| delivery_conversion_error(env, error));
+            }
+        };
+        let env_wrapper = Env::from_raw(env);
+        let output = NativeSubscriptionDeliveryOutput::from_delivery(delivery).and_then(|output| {
+            project_subscription_delivery(&env_wrapper, output, project.as_ref())
+        });
+        if *close_signal.borrow() {
+            return unsafe { Option::<()>::to_napi_value(env, None) };
+        }
+        let output = output.map_err(|error| delivery_conversion_error(env, error))?;
+        // The final public iterator continuation, not this Promise resolver,
+        // decides whether to acknowledge or hand the source to a drain.
+        native_subscription_publication(
+            env,
+            Some(output),
+            SubscriptionPublicationReceipt::Delivery(acknowledgement),
+            close_signal,
+        )
+        .map_err(|error| delivery_conversion_error(env, error))
+    }
+}
+
+pub struct NativeSubscriptionDeliveryDrain {
+    lease: SubscriptionDeliveryDrainLease,
+    project: Option<SubscriptionDeliveryProjector>,
+}
+
+impl ToNapiValue for NativeSubscriptionDeliveryDrain {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        let env_wrapper = Env::from_raw(env);
+        let (deliveries, acknowledgement) = match value.lease.prepare_success() {
+            Ok(prepared) => prepared,
+            Err(lease) => {
+                return match lease.commit() {
+                    Err(error) => Err(blp_async_error_to_napi(*error)),
+                    Ok(_) => unreachable!("an error drain cannot commit successfully"),
+                };
+            }
+        };
+        let mut output = Vec::with_capacity(deliveries.len());
+        for delivery in deliveries {
+            let item = NativeSubscriptionDeliveryOutput::from_delivery(delivery)
+                .map_err(|error| delivery_conversion_error(env, error))?;
+            let raw = project_subscription_delivery(&env_wrapper, item, value.project.as_ref())
+                .map_err(|error| delivery_conversion_error(env, error))?;
+            // SAFETY: this value belongs to the active ToNapiValue handle scope.
+            output.push(unsafe { Unknown::from_napi_value(env, raw)? });
+        }
+        // Build the complete JS result before acknowledging any drained batch.
+        // SAFETY: all values belong to this JS environment and handle scope.
+        let output = if output.is_empty() {
+            unsafe { Option::<()>::to_napi_value(env, None) }
+        } else {
+            unsafe { Vec::<Unknown<'_>>::to_napi_value(env, output) }
+        }
+        .map_err(|error| delivery_conversion_error(env, error))?;
+        acknowledgement.commit();
+        Ok(output)
+    }
+}
+
+/// Legacy rows retain their existing publication point, but keep either the
+/// receiver or an established marked-read guard until JS conversion finishes.
+pub struct NativeLegacyRead<T> {
+    output: napi::Result<Option<T>>,
+    _receiver: Option<OwnedMutexGuard<Option<SubscriptionReceiver>>>,
+    _publication: Option<OwnedMutexGuard<()>>,
+}
+
+impl<T> NativeLegacyRead<T> {
+    fn empty() -> Self {
+        Self {
+            output: Ok(None),
+            _receiver: None,
+            _publication: None,
+        }
+    }
+
+    fn new(
+        output: napi::Result<Option<T>>,
+        receiver: OwnedMutexGuard<Option<SubscriptionReceiver>>,
+        publication: Option<OwnedMutexGuard<()>>,
+    ) -> Self {
+        // Without a gate, keep rx: a first marked reader can initialize its
+        // gate immediately after the rx-held recheck and must still wait here.
+        let receiver = if publication.is_none() {
+            Some(receiver)
+        } else {
+            drop(receiver);
+            None
+        };
+        Self {
+            output,
+            _receiver: receiver,
+            _publication: publication,
+        }
+    }
+}
+
+impl<T: ToNapiValue> ToNapiValue for NativeLegacyRead<T> {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        let Self {
+            output,
+            _receiver,
+            _publication,
+        } = value;
+        let result = match output {
+            Ok(output) => unsafe { Option::<T>::to_napi_value(env, output) },
+            Err(error) => Err(error),
+        };
+        drop(_receiver);
+        drop(_publication);
+        result
+    }
+}
+
 #[napi]
 pub struct JsSubscription {
     consumer: SubscriptionConsumer,
@@ -2209,6 +2592,8 @@ pub struct JsSubscription {
     batch_items: usize,
     deliver_rows: bool,
     status: SharedSubscriptionStatus,
+    #[cfg(feature = "test-support")]
+    publication_pause: StdMutex<Option<Arc<subscription_fixture::SubscriptionPublicationPause>>>,
 }
 
 #[napi]
@@ -2230,7 +2615,16 @@ impl JsSubscription {
             batch_items,
             deliver_rows,
             status,
+            #[cfg(feature = "test-support")]
+            publication_pause: StdMutex::new(None),
         }
+    }
+
+    /// Stop publication before a pending native completion reaches JavaScript.
+    /// The asynchronous unsubscribe operation still owns detach/drain/cleanup.
+    #[napi]
+    pub fn signal_closing(&self) {
+        self.consumer.close_signal.send_replace(true);
     }
 
     #[napi]
@@ -2238,39 +2632,46 @@ impl JsSubscription {
         &self,
         max_items: Option<u32>,
         max_wait_ms: Option<u32>,
-    ) -> napi::Result<Option<NativeSubscriptionUpdateBatch>> {
+    ) -> napi::Result<NativeLegacyRead<NativeSubscriptionUpdateBatch>> {
         self.require_rows()?;
         if self.consumer.is_closed() {
-            return Ok(None);
+            return Ok(NativeLegacyRead::empty());
         }
         let limit = subscription_limit(max_items, "maxItems", self.batch_items)?;
         let mut close_rx = self.consumer.close_signal.subscribe();
-        let mut rx_guard = self.consumer.rx.lock().await;
-        let Some(rx) = rx_guard.as_mut() else {
-            return Ok(None);
+        let Some((mut rx_guard, publication)) =
+            self.consumer.lock_plain_receiver(&mut close_rx).await
+        else {
+            return Ok(NativeLegacyRead::empty());
         };
-        let updates = receive_subscription_updates(
-            rx,
-            self.consumer.pending.as_ref(),
-            &mut close_rx,
-            limit,
-            max_wait_ms,
-        )
-        .await
-        .map_err(|error| blp_error_to_napi(*error))?;
+        let output = async {
+            let Some(rx) = rx_guard.as_mut() else {
+                return Ok(None);
+            };
+            let updates = receive_subscription_updates(
+                rx,
+                self.consumer.pending.as_ref(),
+                &mut close_rx,
+                limit,
+                max_wait_ms,
+            )
+            .await
+            .map_err(|error| blp_error_to_napi(*error))?;
 
-        let Some(updates) = updates else {
-            return Ok(None);
-        };
-        let batch = {
-            let mut last_layout = self
-                .scalar_layout
-                .lock()
-                .expect("subscription scalar layout poisoned");
-            to_native_update_batch(updates, &mut last_layout)
-        };
-        drop(rx_guard);
-        Ok(batch)
+            let Some(updates) = updates else {
+                return Ok(None);
+            };
+            let batch = {
+                let mut last_layout = self
+                    .scalar_layout
+                    .lock()
+                    .expect("subscription scalar layout poisoned");
+                to_native_update_batch(updates, &mut last_layout)
+            };
+            Ok(batch)
+        }
+        .await;
+        Ok(NativeLegacyRead::new(output, rx_guard, publication))
     }
 
     #[napi]
@@ -2278,78 +2679,120 @@ impl JsSubscription {
         &self,
         max_rows: Option<u32>,
         max_wait_ms: Option<u32>,
-    ) -> napi::Result<Option<NativeArrowBatch>> {
+    ) -> napi::Result<NativeLegacyRead<NativeArrowBatch>> {
         self.require_rows()?;
         if self.consumer.is_closed() {
-            return Ok(None);
+            return Ok(NativeLegacyRead::empty());
         }
         let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
-        if let Some(batch) = self
-            .arrow_ready
-            .lock()
-            .expect("subscription Arrow output queue poisoned")
-            .pop_front()
-        {
-            return Ok(Some(to_native_record_batch(batch)?));
-        }
         let mut close_rx = self.consumer.close_signal.subscribe();
-        let mut rx_guard = self.consumer.rx.lock().await;
-        let Some(rx) = rx_guard.as_mut() else {
-            return Ok(None);
+        let Some((mut rx_guard, publication)) =
+            self.consumer.lock_plain_receiver(&mut close_rx).await
+        else {
+            return Ok(NativeLegacyRead::empty());
         };
-        let updates = receive_subscription_updates(
-            rx,
-            self.consumer.pending.as_ref(),
-            &mut close_rx,
-            limit,
-            max_wait_ms,
-        )
-        .await
-        .map_err(|error| blp_error_to_napi(*error))?;
-
-        let Some(updates) = updates else {
-            return Ok(None);
-        };
-        let produced = {
-            let mut batcher_state = self
-                .arrow_batcher
-                .lock()
-                .expect("subscription Arrow batcher poisoned");
-            let mut produced = Vec::new();
-            if batcher_state.0 != limit {
-                if let Some(batch) = batcher_state.1.flush() {
-                    produced.push(batch);
-                }
-                *batcher_state = (
-                    limit,
-                    SubscriptionArrowBatcher::with_capacity(subscription_batch_capacity_hint(
-                        limit,
-                    )),
-                );
-            }
-            let batcher = &mut batcher_state.1;
-            for update in updates {
-                if let Some(batch) = batcher.append(&update) {
-                    produced.push(batch);
-                }
-            }
-            if let Some(batch) = batcher.flush() {
-                produced.push(batch);
-            }
-            produced
-        };
-        let batch = {
-            let mut ready = self
+        let output = async {
+            if let Some(batch) = self
                 .arrow_ready
                 .lock()
-                .expect("subscription Arrow output queue poisoned");
-            ready.extend(produced);
-            ready
+                .expect("subscription Arrow output queue poisoned")
                 .pop_front()
-                .expect("a non-empty update set must produce an Arrow batch")
+            {
+                return Ok(Some(to_native_record_batch(batch)?));
+            }
+            let Some(rx) = rx_guard.as_mut() else {
+                return Ok(None);
+            };
+            let updates = receive_subscription_updates(
+                rx,
+                self.consumer.pending.as_ref(),
+                &mut close_rx,
+                limit,
+                max_wait_ms,
+            )
+            .await
+            .map_err(|error| blp_error_to_napi(*error))?;
+
+            let Some(updates) = updates else {
+                return Ok(None);
+            };
+            let produced = {
+                let mut batcher_state = self
+                    .arrow_batcher
+                    .lock()
+                    .expect("subscription Arrow batcher poisoned");
+                let mut produced = Vec::new();
+                if batcher_state.0 != limit {
+                    if let Some(batch) = batcher_state.1.flush() {
+                        produced.push(batch);
+                    }
+                    *batcher_state = (
+                        limit,
+                        SubscriptionArrowBatcher::with_capacity(subscription_batch_capacity_hint(
+                            limit,
+                        )),
+                    );
+                }
+                let batcher = &mut batcher_state.1;
+                for update in updates {
+                    if let Some(batch) = batcher.append(&update) {
+                        produced.push(batch);
+                    }
+                }
+                if let Some(batch) = batcher.flush() {
+                    produced.push(batch);
+                }
+                produced
+            };
+            let batch = {
+                let mut ready = self
+                    .arrow_ready
+                    .lock()
+                    .expect("subscription Arrow output queue poisoned");
+                ready.extend(produced);
+                ready
+                    .pop_front()
+                    .expect("a non-empty update set must produce an Arrow batch")
+            };
+            Ok(Some(to_native_record_batch(batch)?))
+        }
+        .await;
+        Ok(NativeLegacyRead::new(output, rx_guard, publication))
+    }
+    /// Retain the delivery until main-thread Arrow/backend conversion succeeds.
+    #[napi]
+    pub async fn next_delivery(
+        &self,
+        max_rows: Option<u32>,
+        max_wait_ms: Option<u32>,
+        project: Option<SubscriptionDeliveryProjector>,
+    ) -> napi::Result<Option<NativeSubscriptionDeliveryRead>> {
+        self.require_delivery_rows()?;
+        let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
+        let close_signal = self.consumer.close_signal.subscribe();
+        let read = self.consumer.next_delivery(limit);
+        let lease = match max_wait_ms {
+            Some(wait_ms) => tokio::time::timeout(Duration::from_millis(u64::from(wait_ms)), read)
+                .await
+                .unwrap_or(None),
+            None => read.await,
         };
-        drop(rx_guard);
-        Ok(Some(to_native_record_batch(batch)?))
+        #[cfg(feature = "test-support")]
+        if lease.is_some() {
+            let pause = self
+                .publication_pause
+                .lock()
+                .expect("subscription publication pause poisoned")
+                .take();
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        }
+        Ok(lease.map(|lease| NativeSubscriptionDeliveryRead {
+            lease,
+            project,
+            close_signal,
+        }))
     }
 
     #[napi]
@@ -2431,6 +2874,15 @@ impl JsSubscription {
     #[napi(getter)]
     pub fn delivers_rows(&self) -> bool {
         self.deliver_rows
+    }
+    #[napi(getter)]
+    pub fn delivery(&self) -> &'static str {
+        self.consumer.delivery_mode().as_str()
+    }
+
+    #[napi(getter)]
+    pub fn requires_deliveries(&self) -> bool {
+        self.consumer.requires_deliveries()
     }
 
     #[napi(getter)]
@@ -2549,6 +3001,7 @@ impl JsSubscription {
         drain: Option<bool>,
     ) -> napi::Result<Option<Vec<NativeSubscriptionUpdateBatch>>> {
         let drain = drain.unwrap_or(false);
+        self.guard_plain_drain(drain).await?;
         let (_mutation, drained_updates) = self.consumer.unsubscribe(drain, None).await;
         self.arrow_ready
             .lock()
@@ -2599,6 +3052,7 @@ impl JsSubscription {
         drain: Option<bool>,
     ) -> napi::Result<Option<Vec<NativeArrowBatch>>> {
         let drain = drain.unwrap_or(false);
+        self.guard_plain_drain(drain).await?;
         let (_mutation, drained_updates) = self.consumer.unsubscribe(drain, None).await;
 
         let queued_batches: Vec<RecordBatch> = {
@@ -2656,10 +3110,33 @@ impl JsSubscription {
             Ok(Some(remaining))
         }
     }
+    #[napi]
+    pub async fn unsubscribe_deliveries(
+        &self,
+        drain: Option<bool>,
+        project: Option<SubscriptionDeliveryProjector>,
+    ) -> napi::Result<Option<NativeSubscriptionDeliveryDrain>> {
+        let lease = self
+            .consumer
+            .prepare_unsubscribe_deliveries(drain.unwrap_or(false), None)
+            .await;
+        self.arrow_ready
+            .lock()
+            .expect("subscription Arrow output queue poisoned")
+            .clear();
+        Ok(Some(NativeSubscriptionDeliveryDrain { lease, project }))
+    }
 }
 
 impl JsSubscription {
     fn require_rows(&self) -> napi::Result<()> {
+        self.require_delivery_rows()?;
+        self.consumer
+            .ensure_plain_delivery()
+            .map_err(|error| coded(Status::InvalidArg, "VALIDATION", error.to_string()))
+    }
+
+    fn require_delivery_rows(&self) -> napi::Result<()> {
         if self.deliver_rows {
             Ok(())
         } else {
@@ -2669,6 +3146,18 @@ impl JsSubscription {
                 "image-only subscription (rows: false) does not deliver rows; use latest() instead",
             ))
         }
+    }
+    async fn guard_plain_drain(&self, drain: bool) -> napi::Result<()> {
+        if drain && let Err(error) = self.consumer.ensure_plain_delivery() {
+            let (_mutation, cleanup) = self.consumer.unsubscribe_deliveries(true, None).await;
+            self.arrow_ready
+                .lock()
+                .expect("subscription Arrow output queue poisoned")
+                .clear();
+            cleanup.map_err(|error| blp_async_error_to_napi(*error))?;
+            return Err(coded(Status::InvalidArg, "VALIDATION", error.to_string()));
+        }
+        Ok(())
     }
 
     fn open_handle(&self) -> napi::Result<SubscriptionHandle> {
@@ -2683,7 +3172,9 @@ impl JsSubscription {
 mod tests {
     use super::*;
     use std::future::Future;
-    use xbbg_async::engine::state::{FieldLayout, FieldMeta, UpdateField, subscription_channel};
+    use xbbg_async::engine::state::{
+        FieldLayout, FieldMeta, UpdateField, subscription_channel, subscription_channel_with_policy,
+    };
     use xbbg_async::services::ExtractorType;
     use xbbg_core::AuthConfig;
 
@@ -2762,9 +3253,7 @@ mod tests {
 
     fn subscription_with_receiver(rx: SubscriptionReceiver, deliver_rows: bool) -> JsSubscription {
         let batch_items = 1;
-        let consumer = SubscriptionConsumer::default();
-        *consumer.rx.try_lock().expect("uncontended receiver") = Some(rx);
-        consumer.close_signal.send_replace(false);
+        let consumer = SubscriptionConsumer::from_receiver(rx);
         JsSubscription {
             consumer,
             scalar_layout: Arc::new(StdMutex::new(None)),
@@ -2776,6 +3265,8 @@ mod tests {
             batch_items,
             deliver_rows,
             status: SharedSubscriptionStatus::default(),
+            #[cfg(feature = "test-support")]
+            publication_pause: StdMutex::new(None),
         }
     }
 
@@ -2836,6 +3327,7 @@ mod tests {
             let rx_guard = subscription.consumer.rx.lock().await;
             let mut scalar_read = Box::pin(subscription.next_updates(None, None));
             let mut arrow_read = Box::pin(subscription.next_arrow_batch(None, None));
+            let mut delivery_read = Box::pin(subscription.next_delivery(None, None, None));
             std::future::poll_fn(|cx| {
                 let scalar_error = match scalar_read.as_mut().poll(cx) {
                     Poll::Ready(Err(error)) => error,
@@ -2845,7 +3337,11 @@ mod tests {
                     Poll::Ready(Err(error)) => error,
                     _ => panic!("image-only Arrow reads must reject immediately"),
                 };
-                for error in [scalar_error, arrow_error] {
+                let delivery_error = match delivery_read.as_mut().poll(cx) {
+                    Poll::Ready(Err(error)) => error,
+                    _ => panic!("image-only delivery reads must reject immediately"),
+                };
+                for error in [scalar_error, arrow_error, delivery_error] {
                     assert_eq!(error.status, Status::InvalidArg);
                     assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
                     assert!(error.reason.contains("rows: false"));
@@ -2885,6 +3381,8 @@ mod tests {
                 .next_updates(None, None)
                 .await
                 .expect("row read")
+                .output
+                .expect("row conversion")
                 .expect("update batch");
             assert_eq!(batch.updates[0].timestamp_us, 42);
             assert!(subscription.delivers_rows());
@@ -2895,8 +3393,273 @@ mod tests {
                     .next_updates(None, None)
                     .await
                     .unwrap()
+                    .output
+                    .unwrap()
                     .is_none()
             );
+        });
+    }
+
+    #[test]
+    fn legacy_native_outputs_hold_receiver_until_publication_when_first_marked_gate_is_absent() {
+        use std::task::Poll;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            for arrow in [false, true] {
+                let (tx, rx) = subscription_channel(2);
+                let subscription = subscription_with_receiver(rx, true);
+                for timestamp in [1, 2] {
+                    tx.try_send(Ok(subscription_update(1, timestamp)))
+                        .expect("synthetic update");
+                }
+                let (receiver, publication) = if arrow {
+                    let output = subscription
+                        .next_arrow_batch(None, None)
+                        .await
+                        .expect("legacy Arrow");
+                    assert!(output.output.as_ref().expect("Arrow output").is_some());
+                    (output._receiver, output._publication)
+                } else {
+                    let output = subscription
+                        .next_updates(None, None)
+                        .await
+                        .expect("legacy scalar");
+                    assert_eq!(
+                        output
+                            .output
+                            .as_ref()
+                            .expect("scalar output")
+                            .as_ref()
+                            .unwrap()
+                            .updates[0]
+                            .timestamp_us,
+                        1
+                    );
+                    (output._receiver, output._publication)
+                };
+                assert!(receiver.is_some());
+                assert!(publication.is_none());
+                assert!(!subscription.consumer.has_delivery_read_gate());
+                let mut marked = Box::pin(subscription.next_delivery(None, None, None));
+                std::future::poll_fn(|cx| {
+                    assert!(matches!(marked.as_mut().poll(cx), Poll::Pending));
+                    Poll::Ready(())
+                })
+                .await;
+                assert!(subscription.consumer.has_delivery_read_gate());
+                // This is where ToNapiValue releases the legacy publication
+                // guard after constructing the complete JS result.
+                drop((receiver, publication));
+                let completion = marked.await.expect("marked read").expect("second update");
+                let delivery = completion.lease.commit().expect("marked publication");
+                assert_eq!(
+                    delivery
+                        .data
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                        .expect("timestamp")
+                        .value(0),
+                    2
+                );
+                subscription.unsubscribe(Some(false)).await.expect("close");
+            }
+        });
+    }
+
+    #[test]
+    fn native_delivery_drops_restore_overflow_data_and_gap_until_commit() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            let subscription = subscription_with_receiver(rx, true);
+            for timestamp in 1..=3 {
+                tx.try_send(Ok(subscription_update(1, timestamp)))
+                    .expect("overwrite queue accepts updates");
+            }
+            assert_eq!(subscription.delivery(), "deltas");
+            assert!(subscription.requires_deliveries());
+            for error in [
+                subscription
+                    .next_updates(None, None)
+                    .await
+                    .err()
+                    .expect("plain scalar guard"),
+                subscription
+                    .next_arrow_batch(None, None)
+                    .await
+                    .err()
+                    .expect("plain Arrow guard"),
+            ] {
+                assert_eq!(error.status, Status::InvalidArg);
+            }
+            let completion = subscription
+                .next_delivery(None, None, None)
+                .await
+                .expect("native read")
+                .expect("retained delivery");
+            let delivery = completion.lease.as_ref().expect("successful delivery");
+            assert_eq!(delivery.kind, SubscriptionDeliveryMode::Deltas);
+            assert_eq!(delivery.data.num_rows(), 1);
+            assert_eq!(
+                delivery.gap_before,
+                Some(SubscriptionGap { dropped_updates: 2 })
+            );
+            drop(completion);
+
+            let retried = subscription
+                .next_delivery(None, None, None)
+                .await
+                .expect("native retry")
+                .expect("restored delivery");
+            let delivery = retried.lease.commit().expect("publish retry");
+            assert_eq!(
+                delivery.gap_before,
+                Some(SubscriptionGap { dropped_updates: 2 })
+            );
+            let timestamp = delivery
+                .data
+                .column(0)
+                .as_any()
+                .downcast_ref::<arrow::array::TimestampMicrosecondArray>()
+                .expect("timestamp");
+            assert_eq!(timestamp.value(0), 3);
+            subscription
+                .unsubscribe(Some(false))
+                .await
+                .expect("universal cleanup");
+        });
+    }
+
+    #[test]
+    fn native_delivery_drain_preserves_gap_and_plain_drain_guards_still_close() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            let subscription = subscription_with_receiver(rx, true);
+            for timestamp in 1..=3 {
+                tx.try_send(Ok(subscription_update(1, timestamp)))
+                    .expect("synthetic update");
+            }
+            let drained = subscription
+                .unsubscribe_deliveries(Some(true), None)
+                .await
+                .expect("delivery drain")
+                .expect("drained delivery");
+            let drained = drained.lease.commit().expect("publish drain");
+            assert_eq!(drained.len(), 1);
+            assert_eq!(
+                drained[0].gap_before,
+                Some(SubscriptionGap { dropped_updates: 2 })
+            );
+            assert_eq!(drained[0].data.num_rows(), 1);
+            assert!(subscription.consumer.is_closed());
+
+            for arrow in [false, true] {
+                let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+                let subscription = subscription_with_receiver(rx, true);
+                tx.try_send(Ok(subscription_update(1, 7)))
+                    .expect("synthetic update");
+                let error = if arrow {
+                    subscription.unsubscribe_arrow(Some(true)).await.err()
+                } else {
+                    subscription.unsubscribe(Some(true)).await.err()
+                }
+                .expect("plain drains must reject");
+                assert_eq!(error.status, Status::InvalidArg);
+                assert!(subscription.consumer.is_closed());
+                assert!(tx.is_closed());
+            }
+        });
+    }
+
+    #[test]
+    fn native_delivery_terminal_errors_are_retryable_until_publication_then_end_once() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            let subscription = subscription_with_receiver(rx, true);
+            tx.fail(BlpError::SubscriptionDataLoss {
+                topic: "SYNTHETIC Equity".into(),
+                detail: "synthetic source loss".into(),
+            });
+            let first = subscription
+                .next_delivery(None, None, None)
+                .await
+                .expect("native read")
+                .expect("terminal delivery");
+            assert!(first.lease.as_ref().is_err());
+            drop(first);
+            let terminal = subscription
+                .next_delivery(None, None, None)
+                .await
+                .expect("native retry")
+                .expect("restored terminal delivery");
+            let error = terminal.lease.commit().expect_err("terminal error");
+            assert!(matches!(error, BlpError::SubscriptionDataLoss { .. }));
+            assert!(
+                subscription
+                    .next_delivery(None, None, None)
+                    .await
+                    .expect("EOF")
+                    .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn native_delivery_deadlines_cancel_reads_without_closing_or_losing_future_gaps() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            let subscription = subscription_with_receiver(rx, true);
+            assert!(
+                subscription
+                    .next_delivery(None, Some(1), None)
+                    .await
+                    .expect("deadline")
+                    .is_none()
+            );
+            assert!(!subscription.consumer.is_closed());
+            tx.try_send(Ok(subscription_update(1, 1)))
+                .expect("first update");
+            tx.try_send(Ok(subscription_update(1, 2)))
+                .expect("second update");
+            let delivery = subscription
+                .next_delivery(Some(1), None, None)
+                .await
+                .expect("next read")
+                .expect("new delivery")
+                .lease
+                .commit()
+                .expect("publish");
+            assert_eq!(
+                delivery.gap_before,
+                Some(SubscriptionGap { dropped_updates: 1 })
+            );
+            let error = subscription
+                .next_delivery(Some(0), None, None)
+                .await
+                .err()
+                .expect("zero batch limit must reject");
+            assert_eq!(error.status, Status::InvalidArg);
+            subscription.unsubscribe(Some(false)).await.expect("close");
         });
     }
 

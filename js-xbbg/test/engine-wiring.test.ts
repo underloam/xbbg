@@ -13,6 +13,7 @@ import type {
 } from '../src/napi';
 import * as subscriptions from '../src/subscriptions';
 import {
+  deliveryReceipt,
   fakeNativeSubscription,
   int32ArrowBatch,
   scalarBatch,
@@ -143,10 +144,19 @@ describe('shared subscription controls', () => {
         rows: false,
         onFieldError: 'raise',
         zeroAsNull: ['BID'],
+        delivery: 'deltas',
       });
       const call =
         method === 'subscribe' ? subscribe.mock.calls[0] : subscribeWithOptions.mock.calls[0];
-      expect(call?.slice(-6)).toStrictEqual([aliases, 'raise', true, false, 'raise', ['BID']]);
+      expect(call?.slice(-7)).toStrictEqual([
+        aliases,
+        'raise',
+        true,
+        false,
+        'raise',
+        ['BID'],
+        'deltas',
+      ]);
     },
   );
 
@@ -165,6 +175,7 @@ describe('shared subscription controls', () => {
       rows: false,
       onFieldError: 'ignore',
       zeroAsNull: ['BID'],
+      delivery: 'deltas',
     } as const;
     try {
       await api.asubscribe('SYN', 'BID', options);
@@ -185,6 +196,7 @@ describe('shared subscription controls', () => {
           false,
           'ignore',
           ['BID'],
+          'deltas',
         ],
         [
           '//blp/mktdata',
@@ -201,6 +213,7 @@ describe('shared subscription controls', () => {
           false,
           'ignore',
           ['BID'],
+          'deltas',
         ],
       ]);
     } finally {
@@ -221,6 +234,10 @@ describe('shared subscription controls', () => {
     { onFieldError: 'unknown' },
     { zeroAsNull: 'THEO_PRICE' },
     { zeroAsNull: ['THEO_PRICE', 7] },
+    { delivery: 'snapshot' },
+    { delivery: 'state', rows: false },
+    { delivery: 'state', overflowPolicy: 'drop_oldest' },
+    { delivery: 'state', streamCapacity: 8 },
   ])('rejects invalid controls before opening a feed: %j', async (options) => {
     const subscribe = vi.fn<NativeEngine['subscribe']>();
     const subscribeWithOptions = vi.fn<NativeEngine['subscribeWithOptions']>();
@@ -324,15 +341,19 @@ describe('shared subscription controls', () => {
     );
   });
 
-  it('keeps image-only subscriptions usable after scalar and Arrow read attempts', async () => {
+  it('keeps image-only subscriptions usable after scalar, Arrow, and delivery read attempts', async () => {
     const nextUpdates = vi.fn<NativeSubscription['nextUpdates']>();
     const nextArrowBatch = vi.fn<NativeSubscription['nextArrowBatch']>();
+    const nextDelivery = vi
+      .fn<(...args: Parameters<NativeSubscription['nextDelivery']>) => Promise<null>>()
+      .mockResolvedValue(null);
     const unsubscribe = vi.fn<NativeSubscription['unsubscribe']>().mockResolvedValue(null);
     const subscription = new api.Subscription(
       fakeNativeSubscription({
         deliversRows: false,
         nextUpdates,
         nextArrowBatch,
+        nextDelivery,
         unsubscribe,
       }),
     );
@@ -342,12 +363,14 @@ describe('shared subscription controls', () => {
       message: expect.stringMatching(/rows=false.*latest/u),
     });
     await expect(subscription.arrow().next()).rejects.toThrow(/rows=false.*latest/u);
+    await expect(subscription.deliveries().next()).rejects.toThrow(/rows=false.*latest/u);
     await expect(subscription.next({ signal: new AbortController().signal })).rejects.toThrow(
       /rows=false.*latest/u,
     );
     expect((subscription.latest() as Table).getChild('answer')?.get(0)).toBe(7);
     expect(nextUpdates).not.toHaveBeenCalled();
     expect(nextArrowBatch).not.toHaveBeenCalled();
+    expect(nextDelivery).not.toHaveBeenCalled();
     expect(unsubscribe).not.toHaveBeenCalled();
     await subscription.unsubscribe();
     expect(unsubscribe).toHaveBeenCalledTimes(1);
@@ -447,7 +470,7 @@ describe('subscription warning lifecycle', () => {
     ]);
   });
 
-  it.each(['scalar', 'arrow'] as const)(
+  it.each(['scalar', 'arrow', 'delivery'] as const)(
     'emits warnings once from the %s read lifecycle',
     async (view) => {
       const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
@@ -463,11 +486,18 @@ describe('subscription warning lifecycle', () => {
           warnings.push(delayed, field);
           return int32ArrowBatch(1);
         },
+        nextDelivery: async (_maxRows, _maxWaitMs, project) => {
+          warnings.push(delayed, field);
+          if (project === undefined) throw new Error('missing delivery projector');
+          return deliveryReceipt(project({ kind: 'deltas', data: int32ArrowBatch(1) }));
+        },
       });
       const subscription = new api.Subscription(native);
       if (view === 'scalar') {
         await subscription.next();
         await subscription.next(); // JS-buffered rows must not replay native warnings.
+      } else if (view === 'delivery') {
+        await subscription.deliveries().next();
       } else {
         await subscription.arrow().next();
       }
@@ -628,6 +658,7 @@ describe('auction preflight and results', () => {
         pcsOverrides,
         isolated: true,
         onDelayed: 'raise',
+        delivery: 'state',
       });
       expect(recipe).toHaveBeenCalledWith(['SYN_A US Equity', 'SYN_B US Equity'], pcsOverrides);
       expect(subscribe).toHaveBeenCalledWith(
@@ -640,6 +671,7 @@ describe('auction preflight and results', () => {
         undefined,
         undefined,
         [],
+        'state',
       );
     },
   );
@@ -770,7 +802,12 @@ describe('auction preflight and results', () => {
         rows: false,
         onFieldError: 'raise',
       });
-      expect(subscribe.mock.calls[0]?.slice(-3)).toStrictEqual([false, 'raise', expected]);
+      expect(subscribe.mock.calls[0]?.slice(-4)).toStrictEqual([
+        false,
+        'raise',
+        expected,
+        undefined,
+      ]);
     },
   );
 
@@ -1123,6 +1160,7 @@ describe('shared native recipe result adapter', () => {
   it('preserves the subscription class identities at the package root', () => {
     expect(api.Subscription).toBe(subscriptions.Subscription);
     expect(api.ArrowSubscription).toBe(subscriptions.ArrowSubscription);
+    expect(api.DeliveryStream).toBe(subscriptions.DeliveryStream);
     expect(api.FieldHandle).toBe(subscriptions.FieldHandle);
     expect(api.Tick).toBe(subscriptions.Tick);
   });
@@ -1152,6 +1190,7 @@ describe('subscription service option forwarding', () => {
       rows: false,
       onFieldError: 'raise',
       zeroAsNull: ['BID'],
+      delivery: 'deltas',
     };
     await (method === 'stream' || method === 'vwap'
       ? engine[method](['SYN'], ['BID'], options)
@@ -1172,7 +1211,28 @@ describe('subscription service option forwarding', () => {
       false,
       'raise',
       ['BID'],
+      'deltas',
     );
+  });
+
+  it.each([
+    { method: 'stream', service: '//blp/mktdata' },
+    { method: 'vwap', service: '//blp/mktvwap' },
+    { method: 'mktbar', service: '//blp/mktbar' },
+    { method: 'depth', service: '//blp/mktdepthdata' },
+    { method: 'chains', service: '//blp/mktlist' },
+  ] as const)('forwards state delivery and batch size through $method', async ({ method }) => {
+    const subscribeWithOptions = vi
+      .fn<NativeEngine['subscribeWithOptions']>()
+      .mockResolvedValue(fakeNativeSubscription({ delivery: 'state', requiresDeliveries: true }));
+    const engine = engineWithNative({ subscribeWithOptions });
+    const options: api.StreamOptions = { delivery: 'state', flushThreshold: 5 };
+    const subscription = await (method === 'stream' || method === 'vwap'
+      ? engine[method](['SYN'], ['BID'], options)
+      : engine[method]('SYN', { ...options, fields: ['BID'] }));
+    expect(subscription.delivery).toBe('state');
+    expect(subscribeWithOptions.mock.calls[0]?.[4]).toBe(5);
+    expect(subscribeWithOptions.mock.calls[0]?.at(-1)).toBe('state');
   });
 
   it('preserves raw positional wire options and native policy strings', async () => {
@@ -1196,6 +1256,7 @@ describe('subscription service option forwarding', () => {
       false,
       'raise',
       ['BID'],
+      'deltas',
     );
 
     expect(subscribeWithOptions).toHaveBeenCalledWith(
@@ -1213,6 +1274,7 @@ describe('subscription service option forwarding', () => {
       false,
       'raise',
       ['BID'],
+      'deltas',
     );
   });
 

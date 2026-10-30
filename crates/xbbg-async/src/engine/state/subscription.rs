@@ -444,8 +444,42 @@ impl SubscriptionState {
     /// Source names and string values are shared; stable layouts reuse the index
     /// mapping and an inline sparse delta allocates nothing.
     pub(crate) fn project_image(&mut self, source: &SubscriptionUpdate) -> SubscriptionUpdate {
+        self.project_values(
+            &source.layout,
+            source
+                .values
+                .iter()
+                .map(|field| (field.index as usize, &field.value)),
+            source.timestamp_us,
+        )
+    }
+
+    /// Copy only this projection's known values from a shared image. The caller
+    /// holds the image lock; no full-union temporary or Arrow batch is allocated.
+    pub(crate) fn project_current_image(
+        &mut self,
+        layout: &Arc<FieldLayout>,
+        image: &[Option<UpdateValue>],
+        timestamp_us: i64,
+    ) -> SubscriptionUpdate {
+        self.project_values(
+            layout,
+            image
+                .iter()
+                .enumerate()
+                .filter_map(|(index, value)| value.as_ref().map(|value| (index, value))),
+            timestamp_us,
+        )
+    }
+
+    fn project_values<'a>(
+        &mut self,
+        layout: &Arc<FieldLayout>,
+        source: impl IntoIterator<Item = (usize, &'a UpdateValue)>,
+        timestamp_us: i64,
+    ) -> SubscriptionUpdate {
         let mut values: SmallVec<[UpdateField; 8]> = SmallVec::new();
-        self.visit_projected_fields(source, |index, value| {
+        self.visit_projected_values(layout, source, |index, value| {
             values.push(UpdateField {
                 index,
                 value: value.clone(),
@@ -457,7 +491,7 @@ impl SubscriptionState {
             values.sort_unstable_by_key(|field| field.index);
         }
         SubscriptionUpdate {
-            timestamp_us: source.timestamp_us,
+            timestamp_us,
             topic_id: self.topic_id,
             topic: Arc::clone(&self.topic),
             layout: Arc::clone(&self.layout),
@@ -468,12 +502,27 @@ impl SubscriptionState {
     fn visit_projected_fields(
         &mut self,
         source: &SubscriptionUpdate,
+        visit: impl FnMut(FieldIndex, &UpdateValue),
+    ) {
+        self.visit_projected_values(
+            &source.layout,
+            source
+                .values
+                .iter()
+                .map(|field| (field.index as usize, &field.value)),
+            visit,
+        );
+    }
+
+    fn visit_projected_values<'a>(
+        &mut self,
+        layout: &Arc<FieldLayout>,
+        source: impl IntoIterator<Item = (usize, &'a UpdateValue)>,
         mut visit: impl FnMut(FieldIndex, &UpdateValue),
     ) {
-        self.cache_projection(&source.layout);
-        for field in &source.values {
-            let source_idx = field.index as usize;
-            let Some(meta) = source.layout.fields.get(source_idx) else {
+        self.cache_projection(layout);
+        for (source_idx, value) in source {
+            let Some(meta) = layout.fields.get(source_idx) else {
                 continue;
             };
             let idx = match self.projection_indices[source_idx] {
@@ -491,8 +540,8 @@ impl SubscriptionState {
             } else {
                 self.observe_field_kind(idx, meta.kind);
             }
-            self.observe_kind(idx, &field.value);
-            visit(idx, &field.value);
+            self.observe_kind(idx, value);
+            visit(idx, value);
         }
         self.refresh_layout();
     }
@@ -924,27 +973,14 @@ impl SubscriptionState {
 
     fn seed_kind(&mut self, idx: FieldIndex, kind: FieldKind) {
         let idx = idx as usize;
-        if self.field_kinds[idx] == FieldKind::Unknown && kind != FieldKind::Unknown {
-            self.field_kinds[idx] = kind;
-            self.provisional_kinds[idx] = true;
+        if self.field_kinds[idx].seed_hint(&mut self.provisional_kinds[idx], kind) {
             self.layout_version = self.layout_version.wrapping_add(1).max(1);
         }
     }
 
     fn observe_field_kind(&mut self, idx: FieldIndex, observed: FieldKind) {
-        if observed == FieldKind::Unknown {
-            return;
-        }
         let idx = idx as usize;
-        let provisional = self.provisional_kinds[idx];
-        let merged = if provisional {
-            observed
-        } else {
-            self.field_kinds[idx].merge_observed(observed)
-        };
-        if merged != self.field_kinds[idx] || provisional {
-            self.field_kinds[idx] = merged;
-            self.provisional_kinds[idx] = false;
+        if self.field_kinds[idx].observe(&mut self.provisional_kinds[idx], observed) {
             self.layout_version = self.layout_version.wrapping_add(1).max(1);
         }
     }
@@ -1042,6 +1078,28 @@ impl SubscriptionState {
             return false;
         }
         match self.overflow_policy {
+            OverflowPolicy::DropOldest => match self.stream.try_send_with_eviction(update) {
+                Ok(dropped) => {
+                    self.metrics.batches_sent.fetch_add(1, Ordering::Relaxed);
+                    if dropped != 0 {
+                        self.dropped_batches = self.dropped_batches.saturating_add(dropped);
+                        self.metrics
+                            .dropped_batches
+                            .fetch_add(dropped, Ordering::Relaxed);
+                        self.metrics.slow_consumer.store(true, Ordering::Relaxed);
+                    }
+                    true
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => false,
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    // A DropOldest producer must be paired with the overwrite
+                    // strategy, never silently degrade to unmarked raw loss.
+                    self.stream.fail(BlpError::Internal {
+                        detail: "drop_oldest requires a gap-aware subscription channel".into(),
+                    });
+                    false
+                }
+            },
             OverflowPolicy::Block => {
                 let result = match &self.forwarder {
                     Some(forwarder) => forwarder.try_forward(
@@ -1130,7 +1188,7 @@ impl SubscriptionState {
 mod tests {
     use super::*;
 
-    use super::super::subscription_channel;
+    use super::super::{SubscriptionEvent, subscription_channel, subscription_channel_with_policy};
     use xbbg_core::test_support::{TestEvent, TestMessageFormatter};
 
     fn fixture(
@@ -2254,21 +2312,62 @@ mod tests {
                     .json(r#"{"MKTDATA_EVENT_TYPE":"SUMMARY","MKTDATA_EVENT_SUBTYPE":"DATALOSS"}"#)
             },
         );
-        for all_fields in [false, true] {
-            let (tx, mut rx) = subscription_channel(1);
-            tx.try_send(Ok(test_update(1))).unwrap();
-            let mut state = SubscriptionState::new("TEST".into(), Vec::new(), tx, all_fields);
-            assert_eq!(deliver(&mut state, &event), MessageOutcome::DataLoss);
-            assert_eq!(rx.try_recv().unwrap().unwrap().topic_id, 1);
-            assert!(matches!(
-                rx.try_recv().unwrap(), Err(BlpError::SubscriptionDataLoss { topic, .. }) if topic == "TEST"
-            ));
-            assert_eq!(deliver(&mut state, &event), MessageOutcome::Closed);
-            assert!(matches!(
-                rx.try_recv(),
-                Err(mpsc::error::TryRecvError::Disconnected)
-            ));
+        for policy in [OverflowPolicy::DropNewest, OverflowPolicy::DropOldest] {
+            for all_fields in [false, true] {
+                let (tx, mut rx) = subscription_channel_with_policy(1, policy);
+                tx.try_send(Ok(test_update(1))).unwrap();
+                let mut state = SubscriptionState::with_policy(
+                    "TEST".into(),
+                    Vec::new(),
+                    tx,
+                    policy,
+                    all_fields,
+                );
+                assert_eq!(deliver(&mut state, &event), MessageOutcome::DataLoss);
+                assert!(matches!(
+                    rx.try_recv_event().unwrap(),
+                    SubscriptionEvent::Update { update, gap_before: None } if update.topic_id == 1
+                ));
+                assert!(matches!(
+                    rx.try_recv_event().unwrap(),
+                    SubscriptionEvent::Error(BlpError::SubscriptionDataLoss { topic, .. }) if topic == "TEST"
+                ));
+                assert_eq!(deliver(&mut state, &event), MessageOutcome::Closed);
+                assert!(matches!(
+                    rx.try_recv_event(),
+                    Err(mpsc::error::TryRecvError::Disconnected)
+                ));
+            }
         }
+    }
+
+    #[test]
+    fn drop_oldest_counts_evicted_updates_without_failing_the_source() {
+        let (tx, mut rx) = subscription_channel_with_policy(2, OverflowPolicy::DropOldest);
+        let mut state = SubscriptionState::with_policy(
+            "TEST".into(),
+            Vec::new(),
+            tx,
+            OverflowPolicy::DropOldest,
+            false,
+        );
+        for id in 1..=4 {
+            assert!(state.send_update(test_update(id)));
+        }
+        assert!(!state.stream.is_closed());
+        assert_eq!(state.dropped_batches, 2);
+        assert_eq!(state.metrics.dropped_batches.load(Ordering::Relaxed), 2);
+        assert_eq!(state.metrics.batches_sent.load(Ordering::Relaxed), 4);
+        assert_eq!(state.metrics.data_loss_events.load(Ordering::Relaxed), 0);
+        assert!(matches!(
+            rx.try_recv_event().unwrap(),
+            SubscriptionEvent::Update { update, gap_before: Some(gap) }
+                if update.topic_id == 3 && gap.dropped_updates == 2
+        ));
+        assert!(matches!(
+            rx.try_recv_event().unwrap(),
+            SubscriptionEvent::Update { update, gap_before: None } if update.topic_id == 4
+        ));
     }
 
     fn test_update(topic_id: TopicId) -> SubscriptionUpdate {

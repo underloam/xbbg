@@ -18,6 +18,7 @@ mod request_sharding;
 mod session_lifecycle;
 mod shared_subscriptions;
 pub mod state;
+mod subscription_delivery;
 mod subscription_pool;
 mod subscription_status;
 mod subscription_types;
@@ -57,6 +58,7 @@ pub use state::{
     RefDataState, SubscriptionState, SubscriptionUpdate,
 };
 use state::{SubscriptionMetrics, SubscriptionReceiver};
+pub use subscription_delivery::{SubscriptionDelivery, SubscriptionDeliveryMode, SubscriptionGap};
 use subscription_pool::{SessionClaim, SubscriptionCommandHandle, SubscriptionSessionPool};
 pub use subscription_status::{
     AdminStatusInfo, ServiceStatusInfo, SessionLifecycleState, SessionStatusInfo,
@@ -68,6 +70,15 @@ pub use subscription_status::{
 use subscription_status::{SubscriptionStatusScope, timestamp_now_us};
 use subscription_types::SubscriptionTypeResolver;
 pub use worker::UnifiedRequestState;
+
+/// Optional offline fixtures using SDK TestUtil and production subscriptions.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub mod testing {
+    pub use super::shared_subscriptions::testing::{
+        SubscriptionFixture, SyntheticSubscriptionFeed,
+    };
+}
 
 const SESSION_STARTUP_TIMEOUT_MS: u32 = 30_000;
 pub type OverridePairs = Vec<(String, String)>;
@@ -202,9 +213,22 @@ pub enum OverflowPolicy {
     /// Close with a data-loss error when the buffer is full (default, non-blocking).
     #[default]
     DropNewest,
+    /// Keep the newest bounded deltas and report every local eviction through
+    /// the gap-aware delivery API.
+    DropOldest,
     /// Wait briefly on a bounded forwarding task. Queue overflow or timeout
     /// closes with a data-loss error; the Bloomberg SDK callback never waits.
     Block,
+}
+
+impl OverflowPolicy {
+    /// Whether unmarked row readers would hide intentional continuity gaps.
+    pub const fn requires_deliveries(self) -> bool {
+        match self {
+            Self::DropOldest => true,
+            Self::DropNewest | Self::Block => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -232,9 +256,10 @@ impl std::str::FromStr for OverflowPolicy {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_lowercase().as_str() {
             "drop_newest" | "dropnewest" => Ok(Self::DropNewest),
+            "drop_oldest" | "dropoldest" => Ok(Self::DropOldest),
             "block" => Ok(Self::Block),
             _ => Err(format!(
-                "unknown overflow policy '{}': expected 'drop_newest' or 'block'",
+                "unknown overflow policy '{}': expected 'drop_newest', 'drop_oldest', or 'block'",
                 s
             )),
         }
@@ -245,6 +270,7 @@ impl std::fmt::Display for OverflowPolicy {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::DropNewest => write!(f, "drop_newest"),
+            Self::DropOldest => write!(f, "drop_oldest"),
             Self::Block => write!(f, "block"),
         }
     }
@@ -1523,6 +1549,16 @@ impl SubscriptionStream {
         self.rx.try_recv().ok()
     }
 
+    /// Opt into explicit batch deliveries, including local-overflow gaps and
+    /// conflated state. The strict raw-update path is unchanged.
+    pub fn deliveries(self) -> SubscriptionDeliveries {
+        let batch_limit = self.handle.delivery_batch_limit();
+        SubscriptionDeliveries {
+            consumer: crate::subscription_consumer::SubscriptionConsumer::new(self.rx, self.handle),
+            batch_limit,
+        }
+    }
+
     pub async fn add(
         &self,
         topics: Vec<String>,
@@ -1567,6 +1603,12 @@ impl SubscriptionStream {
         mut self,
         drain: bool,
     ) -> Result<Vec<SubscriptionUpdate>, BlpAsyncError> {
+        if self.rx.requires_deliveries() {
+            let consumer =
+                crate::subscription_consumer::SubscriptionConsumer::new(self.rx, self.handle);
+            let (_operation, result) = consumer.unsubscribe(drain, None).await;
+            return result.map_err(|error| *error);
+        }
         let mut remaining = Vec::new();
         let mut first_error = None;
         let mut cleanup_error = self.handle.unsubscribe().await.err();
@@ -1602,6 +1644,46 @@ impl SubscriptionStream {
     pub fn into_parts(self) -> (SubscriptionReceiver, SubscriptionHandle) {
         (self.rx, self.handle)
     }
+}
+
+/// Owning gap-aware subscription view. Rust publication commits the same
+/// transactional delivery used by the language adapters.
+pub struct SubscriptionDeliveries {
+    consumer: crate::subscription_consumer::SubscriptionConsumer,
+    batch_limit: usize,
+}
+
+impl SubscriptionDeliveries {
+    pub async fn next(&mut self) -> Option<Result<SubscriptionDelivery, BlpError>> {
+        self.consumer
+            .next_delivery(self.batch_limit)
+            .await
+            .map(crate::subscription_consumer::SubscriptionDeliveryLease::commit)
+    }
+
+    pub async fn recv(&mut self) -> Option<Result<SubscriptionDelivery, BlpError>> {
+        self.next().await
+    }
+
+    pub fn handle(&self) -> SubscriptionHandle {
+        self.consumer
+            .handle()
+            .expect("an owning delivery view retains its control handle")
+    }
+
+    pub fn delivery_mode(&self) -> SubscriptionDeliveryMode {
+        self.consumer.delivery_mode()
+    }
+
+    pub async fn unsubscribe(
+        self,
+        drain: bool,
+    ) -> Result<Vec<SubscriptionDelivery>, BlpAsyncError> {
+        let (_operation, result) = self.consumer.unsubscribe_deliveries(drain, None).await;
+        result.map_err(|error| *error)
+    }
+
+    pub fn close(self) {}
 }
 
 #[cfg(test)]

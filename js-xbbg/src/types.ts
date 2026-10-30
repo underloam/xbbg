@@ -1,8 +1,11 @@
+import type { Table } from 'apache-arrow';
+
 import type {
   IndexMemberField,
   OverflowPolicy,
   SdkLogLevel,
   ValidationMode,
+  SubscriptionDeliveryMode,
   VolSurfacePreset,
 } from './_defs_gen';
 
@@ -387,6 +390,8 @@ export interface RequestOptions {
 }
 
 export interface StreamOptions {
+  /** Strict deltas by default; state coalesces dirty topics into current-state batches. */
+  delivery?: SubscriptionDeliveryMode;
   options?: readonly string[];
   conflate?: boolean;
   flushThreshold?: number;
@@ -404,8 +409,24 @@ export interface StreamOptions {
   rows?: boolean;
   /** Rejected explicit fields: warn (default), fail the topic, or only record errors. */
   onFieldError?: 'warn' | 'raise' | 'ignore';
-  /** Numeric zero sentinels to materialize as null in latest() only. */
+  /** Numeric zero sentinels to materialize as null in latest() and state deliveries. */
   zeroAsNull?: readonly string[];
+}
+
+export interface SubscriptionGap {
+  readonly cause: 'local_overflow';
+  /** Exact number of locally evicted SubscriptionUpdates, not rows or batches. */
+  readonly droppedUpdates: bigint;
+}
+
+export interface SubscriptionDelivery<TData = Table> {
+  readonly kind: SubscriptionDeliveryMode;
+  readonly data: TData;
+  readonly gapBefore?: SubscriptionGap;
+}
+
+export interface SubscriptionDeliveryOptions {
+  readonly backend?: BackendKind;
 }
 
 export interface SubscriptionEvent {
@@ -682,6 +703,7 @@ export type {
   FormatKind,
   OverflowPolicy,
   SdkLogLevel,
+  SubscriptionDeliveryMode,
   ValidationMode,
   VolSurfacePreset,
 } from './_defs_gen';

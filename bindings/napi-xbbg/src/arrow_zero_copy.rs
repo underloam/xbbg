@@ -701,6 +701,76 @@ mod tests {
     }
 
     #[test]
+    fn delivery_acknowledgements_preserve_unique_export_and_rollback_after_mutation() {
+        use xbbg_async::engine::OverflowPolicy;
+        use xbbg_async::engine::state::{
+            FieldLayout, SubscriptionUpdate, subscription_channel_with_policy,
+        };
+        use xbbg_async::subscription_consumer::SubscriptionConsumer;
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            let consumer = SubscriptionConsumer::from_receiver(rx);
+            for timestamp_us in [1, 2] {
+                tx.try_send(Ok(SubscriptionUpdate {
+                    timestamp_us,
+                    topic_id: 1,
+                    topic: Arc::from("SYNTHETIC Equity"),
+                    layout: Arc::new(FieldLayout::new(1, Vec::new())),
+                    values: Default::default(),
+                }))
+                .expect("synthetic update");
+            }
+            let lease = consumer.next_delivery(1).await.expect("delivery");
+            let (delivery, acknowledgement) = match lease.prepare_success() {
+                Ok(prepared) => prepared,
+                Err(_) => panic!("expected a successful delivery"),
+            };
+            let original = delivery
+                .data
+                .column(0)
+                .as_any()
+                .downcast_ref::<TimestampMicrosecondArray>()
+                .expect("timestamp")
+                .values()
+                .inner()
+                .as_ptr();
+            let mut native = NativeArrowBatch::from_record_batch(delivery.data).expect("export");
+            let transferred = native.columns[0].data.as_mut().expect("timestamp buffer");
+            assert_eq!(
+                transferred.as_ptr(),
+                original,
+                "receipt must not share Arrow data"
+            );
+            transferred.as_slice_mut()[..8].copy_from_slice(&99_i64.to_ne_bytes());
+            drop(native);
+            drop(acknowledgement);
+
+            let retried = consumer
+                .next_delivery(1)
+                .await
+                .expect("restored delivery")
+                .commit()
+                .expect("publish");
+            assert_eq!(retried.gap_before.expect("restored gap").dropped_updates, 1);
+            assert_eq!(
+                retried
+                    .data
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<TimestampMicrosecondArray>()
+                    .expect("timestamp")
+                    .value(0),
+                2
+            );
+        });
+    }
+
+    #[test]
     fn duplicate_columns_never_export_aliasing_mutable_buffers() {
         let values = Arc::new(Int64Array::from(vec![7_i64, 11]));
         let schema = Arc::new(Schema::new(vec![

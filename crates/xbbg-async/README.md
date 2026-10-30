@@ -69,7 +69,7 @@ repeat; large payloads no longer skip those columns.
 
 ## Subscription deltas and termination
 
-`SubscriptionStream::next()` yields sparse `SubscriptionUpdate` values. Missing
+With default delta delivery, `SubscriptionStream::next()` yields sparse `SubscriptionUpdate` values. Missing
 `UpdateField` entries mean unchanged; `UpdateValue::Null` is an explicit SDK
 clear. Requested arrays/complex values and non-null decode failures are errors.
 All-fields mode omits unrequested nonscalars without suppressing a later scalar.
@@ -101,3 +101,44 @@ Draining unsubscribe propagates unread failures after cleanup rather than
 returning a successful partial result. Removing every topic does not detach the
 handle from engine/session termination. Partial-topic failures and ordinary
 connection-down notifications retain their nonterminal behavior.
+
+## Gap-aware delivery and state images
+
+Set `SubscribeRequest::overflow_policy` to `Some(OverflowPolicy::DropOldest)`
+for newest-pending deltas, or `SubscribeRequest::delivery` to
+`SubscriptionDeliveryMode::State` for conflated current images. Consume either
+through `Engine::subscribe(request).await?.deliveries()`, which takes ownership
+of the ordinary stream and returns `SubscriptionDeliveries`.
+
+`SubscriptionDeliveries::next()` returns `SubscriptionDelivery` values containing
+`kind`, an Arrow `RecordBatch` in `data`, and optional `gap_before`. Local
+drop-oldest overflow reports `SubscriptionGap::dropped_updates` with cause
+`local_overflow`; the count is evicted source updates, not Arrow batches.
+Upstream SDK data loss is still terminal for delta delivery.
+
+State delivery reads the existing shared image for dirty topics in fair FIFO
+order, without allocating Arrow on ingestion or scanning quiet topics per read.
+Metadata columns are `topic`, `last_update`, `live`, `delayed`, and `valid`;
+these names are reserved. Unknown/invalid images carry null data. Continuity
+invalidation precedes recovery, including a drain with both epochs pending.
+`valid` does not promise every selected field has a value. Observed schemas
+persist across topic subsets. `zero_as_null` applies to state and polling images.
+
+State rejects disabled rows and explicit raw-queue controls. The flush threshold
+is a read-side batch maximum, not a wait-for-full-buffer setting. Plain reads
+reject advanced modes; non-draining close remains universal. Marked drains retain
+frozen native state until publication and can be retried after conversion failure.
+Bindings use data-free acknowledgments so rollback never relies on mutable
+exported Arrow buffers.
+
+Offline performance checks use synthetic data and the SDK TestUtil decoder:
+
+```sh
+cargo bench -p xbbg-bench --bench subscription_queue_default
+cargo bench -p xbbg-bench --bench subscription_delivery
+```
+
+The standalone default-queue target also runs unchanged against v1.7.0. Queue
+reports distinguish complete production semantics from bare async-channel and
+Crossbeam primitives; decoded feed replay excludes SDK/network time. Reports
+omit local paths and raw environment/compiler strings.

@@ -38,6 +38,11 @@ class NativeSubscription:
         self.field_errors = {LABEL: {"BAD_FIELD": "BAD_FLD"}}
         self.topic_states = [(LABEL, "streaming", 123, True, TOPIC)]
         self.delivers_rows = rows
+        self.delivery = "deltas"
+        self.requires_deliveries = False
+
+    def ensure_plain_delivery(self):
+        return None
 
     def take_warnings(self):
         pending, self.pending = self.pending, []
@@ -49,6 +54,7 @@ class NativeSubscription:
         ).to_record_batch()
 
     async def __anext__(self):
+        self.ensure_plain_delivery()
         if not self.remaining:
             raise StopAsyncIteration
         self.remaining -= 1
@@ -301,3 +307,23 @@ async def test_unsubscribe_drains_warnings_after_native_cleanup(cleanup_fails):
     assert [item.category for item in caught] == [BlpDelayedDataWarning, BlpFieldWarning]
     assert all(item.filename == __file__ for item in caught)
     assert native.take_warnings() == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"delivery": "images"},
+        {"delivery": "state", "rows": False},
+        {"delivery": "state", "stream_capacity": 10},
+        {"delivery": "state", "overflow_policy": "drop_oldest"},
+        {"delivery": "state", "overflow_policy": "drop_newest"},
+    ],
+)
+async def test_delivery_selector_rejects_contradictory_modes_before_engine_access(monkeypatch, kwargs):
+    def engine_unavailable():
+        raise AssertionError("invalid delivery options must fail before engine access")
+
+    monkeypatch.setattr(_engine, "_get_engine", engine_unavailable)
+    with pytest.raises(ValueError, match="delivery"):
+        await blp.asubscribe(TOPIC, "BID", **kwargs)

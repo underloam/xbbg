@@ -18,8 +18,14 @@ pub use errors::BlpAsyncError;
 // Worker-pool Engine — the primary API
 pub use engine::{
     DelayedPolicy, Engine, EngineConfig, FeedInfo, FieldErrorPolicy, OverflowPolicy, RequestStream,
-    SlabKey, SubscribeRequest, SubscriptionHandle, SubscriptionStream, ValidationMode,
+    SlabKey, SubscribeRequest, SubscriptionDeliveries, SubscriptionDelivery,
+    SubscriptionDeliveryMode, SubscriptionGap, SubscriptionHandle, SubscriptionStream,
+    ValidationMode,
 };
+
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub use engine::testing;
 
 // Identity / entitlement types surfaced by Engine::seat_type and
 // Engine::check_entitlements.

@@ -64,8 +64,8 @@ use xbbg_async::engine::state::{
 };
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
-    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionEventInfo, SubscriptionFailureInfo,
-    TlsMaterial, TopicStatusInfo, Transport,
+    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDelivery, SubscriptionDeliveryMode,
+    SubscriptionEventInfo, SubscriptionFailureInfo, TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
@@ -80,12 +80,15 @@ mod markets;
 mod native_arrow;
 mod recipes;
 mod request;
+#[cfg(feature = "test-support")]
+mod subscription_fixture;
 
 use request::dict_to_request_params;
 
 use xbbg_async::subscription_consumer::{
-    SubscriptionConsumer, SubscriptionRead, receive_subscription_updates,
-    subscription_batch_capacity_hint, wait_for_subscription_close,
+    SubscriptionConsumer, SubscriptionDeliveryAck, SubscriptionDeliveryDrainAck,
+    SubscriptionDeliveryDrainLease, SubscriptionDeliveryLease, SubscriptionRead,
+    receive_subscription_updates, subscription_batch_capacity_hint, wait_for_subscription_close,
 };
 type SubscriptionMetricsMap = HashMap<usize, Arc<SubscriptionMetrics>>;
 type SubscriptionEventTuple = (i64, String, String, String, Option<String>, Option<String>);
@@ -1361,7 +1364,7 @@ impl PyEngine {
     /// await sub.unsubscribe()
     /// ```
     #[allow(clippy::too_many_arguments)]
-    #[pyo3(signature = (tickers, fields, flush_threshold=None, overflow_policy=None, stream_capacity=None, all_fields=false, aliases=None, on_delayed="warn", isolated=false, rows=true, on_field_error="warn", zero_as_null=None, session_wait_ms=None))]
+    #[pyo3(signature = (tickers, fields, flush_threshold=None, overflow_policy=None, stream_capacity=None, all_fields=false, aliases=None, on_delayed="warn", isolated=false, rows=true, on_field_error="warn", zero_as_null=None, session_wait_ms=None, delivery="deltas"))]
     fn subscribe<'py>(
         &self,
         py: Python<'py>,
@@ -1378,6 +1381,7 @@ impl PyEngine {
         on_field_error: &str,
         zero_as_null: Option<Vec<String>>,
         session_wait_ms: Option<u64>,
+        delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
         let batch_items = flush_threshold.unwrap_or(self.subscription_batch_items);
@@ -1396,6 +1400,9 @@ impl PyEngine {
             .transpose()?;
         let delayed_policy = parse_delayed_policy(on_delayed)?;
         let field_error_policy = parse_field_error_policy(on_field_error)?;
+        let delivery = delivery
+            .parse::<SubscriptionDeliveryMode>()
+            .map_err(blp_async_error_to_pyerr)?;
 
         debug!(
             tickers = ?tickers,
@@ -1413,6 +1420,7 @@ impl PyEngine {
                     delayed_policy,
                     field_error_policy,
                     deliver_rows: rows,
+                    delivery,
                     zero_as_null: zero_as_null.unwrap_or_default(),
                     session_wait: session_wait_ms.map(std::time::Duration::from_millis),
                     isolated,
@@ -1430,16 +1438,18 @@ impl PyEngine {
             let (rx, handle) = stream.into_parts();
 
             let py_sub = PySubscription {
-                arrow_batcher: Arc::new(StdMutex::new(SubscriptionArrowBatcher::with_capacity(
-                    subscription_batch_capacity_hint(batch_items),
-                ))),
-                arrow_ready: Arc::new(StdMutex::new(VecDeque::new())),
+                legacy_arrow: (!rx.requires_deliveries())
+                    .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
                 batch_items,
                 status: handle.status(),
                 deliver_rows: handle.delivers_rows(),
                 overflow_policy: handle.overflow_policy(),
                 consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
                 engine_shutdown: engine.shutdown_receiver(),
+                #[cfg(feature = "test-support")]
+                _test_fixture: None,
+                #[cfg(feature = "test-support")]
+                _test_legacy_read_started: None,
             };
             py_sub.into_python().await
         })
@@ -1474,7 +1484,7 @@ impl PyEngine {
     /// async for batch in sub:
     ///     print(batch)
     /// ```
-    #[pyo3(signature = (service, tickers, fields, options=None, flush_threshold=None, overflow_policy=None, stream_capacity=None, all_fields=false, aliases=None, on_delayed="warn", isolated=false, rows=true, on_field_error="warn", zero_as_null=None, session_wait_ms=None))]
+    #[pyo3(signature = (service, tickers, fields, options=None, flush_threshold=None, overflow_policy=None, stream_capacity=None, all_fields=false, aliases=None, on_delayed="warn", isolated=false, rows=true, on_field_error="warn", zero_as_null=None, session_wait_ms=None, delivery="deltas"))]
     #[allow(clippy::too_many_arguments)]
     fn subscribe_with_options<'py>(
         &self,
@@ -1494,6 +1504,7 @@ impl PyEngine {
         on_field_error: &str,
         zero_as_null: Option<Vec<String>>,
         session_wait_ms: Option<u64>,
+        delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
         let batch_items = flush_threshold.unwrap_or(self.subscription_batch_items);
@@ -1512,6 +1523,9 @@ impl PyEngine {
             .transpose()?;
         let delayed_policy = parse_delayed_policy(on_delayed)?;
         let field_error_policy = parse_field_error_policy(on_field_error)?;
+        let delivery = delivery
+            .parse::<SubscriptionDeliveryMode>()
+            .map_err(blp_async_error_to_pyerr)?;
 
         debug!(
             service = %service,
@@ -1533,6 +1547,7 @@ impl PyEngine {
                     delayed_policy,
                     field_error_policy,
                     deliver_rows: rows,
+                    delivery,
                     zero_as_null: zero_as_null.unwrap_or_default(),
                     session_wait: session_wait_ms.map(std::time::Duration::from_millis),
                     isolated,
@@ -1548,16 +1563,18 @@ impl PyEngine {
             let (rx, handle) = stream.into_parts();
 
             let py_sub = PySubscription {
-                arrow_batcher: Arc::new(StdMutex::new(SubscriptionArrowBatcher::with_capacity(
-                    subscription_batch_capacity_hint(batch_items),
-                ))),
-                arrow_ready: Arc::new(StdMutex::new(VecDeque::new())),
+                legacy_arrow: (!rx.requires_deliveries())
+                    .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
                 batch_items,
                 status: handle.status(),
                 deliver_rows: handle.delivers_rows(),
                 overflow_policy: handle.overflow_policy(),
                 consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
                 engine_shutdown: engine.shutdown_receiver(),
+                #[cfg(feature = "test-support")]
+                _test_fixture: None,
+                #[cfg(feature = "test-support")]
+                _test_legacy_read_started: None,
             };
             py_sub.into_python().await
         })
@@ -1664,10 +1681,8 @@ impl PyEngine {
 #[pyclass]
 pub struct PySubscription {
     consumer: Arc<SubscriptionConsumer>,
-    /// Batcher retaining schema/layout/capacity hints; builders are recreated after finish.
-    arrow_batcher: Arc<StdMutex<SubscriptionArrowBatcher>>,
-    /// Completed batches deferred across layout boundaries.
-    arrow_ready: Arc<StdMutex<VecDeque<RecordBatch>>>,
+    /// Existing strict Arrow batching; advanced readers use native receipts.
+    legacy_arrow: Option<Arc<LegacySubscriptionArrow>>,
     /// Maximum immediately available updates returned by one Arrow iteration.
     batch_items: usize,
     /// Status remains available after the owning control has been released.
@@ -1679,6 +1694,27 @@ pub struct PySubscription {
     /// Engine shutdown is not iteration EOF; this only prevents close commands
     /// from being sent after global engine teardown has already cleaned up.
     engine_shutdown: watch::Receiver<bool>,
+    /// Retain the synthetic engine while a real test subscription is alive.
+    #[cfg(feature = "test-support")]
+    _test_fixture: Option<Arc<xbbg_async::testing::SubscriptionFixture>>,
+    #[cfg(feature = "test-support")]
+    _test_legacy_read_started: Option<Arc<tokio::sync::Notify>>,
+}
+
+struct LegacySubscriptionArrow {
+    batcher: StdMutex<SubscriptionArrowBatcher>,
+    ready: StdMutex<VecDeque<RecordBatch>>,
+}
+
+impl LegacySubscriptionArrow {
+    fn new(limit: usize) -> Self {
+        Self {
+            batcher: StdMutex::new(SubscriptionArrowBatcher::with_capacity(
+                subscription_batch_capacity_hint(limit),
+            )),
+            ready: StdMutex::new(VecDeque::new()),
+        }
+    }
 }
 
 struct SubscriptionSnapshot {
@@ -1747,10 +1783,7 @@ impl PySubscription {
             services,
             admin: snapshot.admin().clone(),
             events: snapshot.events().iter().cloned().collect(),
-            effective_overflow_policy: match self.overflow_policy {
-                OverflowPolicy::DropNewest => "drop_newest".to_string(),
-                OverflowPolicy::Block => "block".to_string(),
-            },
+            effective_overflow_policy: self.overflow_policy.to_string(),
         }
     }
 
@@ -1767,6 +1800,13 @@ impl PySubscription {
             ))
         }
     }
+
+    fn ensure_plain_rows(&self) -> PyResult<()> {
+        self.ensure_rows()?;
+        self.consumer
+            .ensure_plain_delivery()
+            .map_err(blp_error_to_pyerr)
+    }
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
@@ -1774,53 +1814,69 @@ impl PySubscription {
 impl PySubscription {
     /// Async iterator protocol; image-only subscriptions must use latest().
     fn __aiter__(slf: PyRef<'_, Self>) -> PyResult<PyRef<'_, Self>> {
-        slf.ensure_rows()?;
+        slf.ensure_plain_rows()?;
         Ok(slf)
     }
 
     /// Get next batch of data.
-    /// Only locks the rx, not the stream - so add/remove can run concurrently.
+    /// Legacy-only reads lock only rx; mixed readers also share the existing publication gate.
     ///
     /// Returns an xbbg ArrowRecordBatch on success.
     /// Raises a Python exception (BlpRequestError, BlpInternalError, etc.) on error.
     /// Raises StopAsyncIteration when the subscription is closed.
     /// Raises RuntimeError for rows=False; use latest() for image-only consumers.
     fn __anext__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.ensure_rows()?;
-        let rx = self.consumer.rx.clone();
-        let pending = self.consumer.pending.clone();
-        let arrow_batcher = self.arrow_batcher.clone();
-        let arrow_ready = self.arrow_ready.clone();
+        self.ensure_plain_rows()?;
+        let consumer = self.consumer.clone();
+        let arrow = self
+            .legacy_arrow
+            .clone()
+            .expect("plain Arrow iteration has a legacy batcher");
         let batch_items = self.batch_items;
-        let close_signal = self.consumer.close_signal.clone();
+        #[cfg(feature = "test-support")]
+        let read_started = self._test_legacy_read_started.clone();
 
         shutdown_safe_future(py, async move {
-            let mut close_rx = close_signal.subscribe();
+            let mut close_rx = consumer.close_signal.subscribe();
             if *close_rx.borrow() {
                 return Err(PyStopAsyncIteration::new_err("subscription closed"));
             }
-            let ready_batch = arrow_ready
+            #[cfg(feature = "test-support")]
+            if let Some(signal) = read_started {
+                signal.notify_one();
+            }
+            let (mut guard, _publication) = consumer
+                .lock_plain_receiver(&mut close_rx)
+                .await
+                .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
+            let ready_batch = arrow
+                .ready
                 .lock()
                 .expect("subscription Arrow output queue poisoned")
                 .pop_front();
             if let Some(batch) = ready_batch {
+                // Without a gate, rx itself owns the first-use publication boundary.
+                let _receiver = _publication.is_none().then_some(guard);
                 return try_attach_or_suspend(|py| {
                     native_arrow::record_batch_to_arrow_record_batch(py, batch)
                 })
                 .await;
             }
-            let mut guard = rx.lock().await;
             let rx_ref = guard
                 .as_mut()
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
-            let read =
-                receive_subscription_updates(rx_ref, pending.as_ref(), &mut close_rx, batch_items)
-                    .await;
-
+            let read = receive_subscription_updates(
+                rx_ref,
+                consumer.pending.as_ref(),
+                &mut close_rx,
+                batch_items,
+            )
+            .await;
             match read {
                 SubscriptionRead::Updates(updates) => {
                     let produced = {
-                        let mut batcher = arrow_batcher
+                        let mut batcher = arrow
+                            .batcher
                             .lock()
                             .expect("subscription Arrow batcher poisoned");
                         let mut produced = Vec::new();
@@ -1835,7 +1891,8 @@ impl PySubscription {
                         produced
                     };
                     let batch = {
-                        let mut ready = arrow_ready
+                        let mut ready = arrow
+                            .ready
                             .lock()
                             .expect("subscription Arrow output queue poisoned");
                         ready.extend(produced);
@@ -1843,7 +1900,8 @@ impl PySubscription {
                             .pop_front()
                             .expect("a non-empty update set must produce an Arrow batch")
                     };
-                    drop(guard);
+                    // Retain rx until attachment unless the publication gate owns ordering.
+                    let _receiver = _publication.is_none().then_some(guard);
                     try_attach_or_suspend(|py| {
                         native_arrow::record_batch_to_arrow_record_batch(py, batch)
                     })
@@ -1858,29 +1916,62 @@ impl PySubscription {
         })
     }
 
+    /// Prepare a marked batch for publication on the consuming Python loop.
+    /// The converter runs before the returned receipt's publish() commits it.
+    #[pyo3(signature = (converter=None))]
+    fn next_delivery<'py>(
+        &self,
+        py: Python<'py>,
+        converter: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.ensure_rows()?;
+        let consumer = self.consumer.clone();
+        let batch_items = self.batch_items;
+
+        shutdown_safe_future(py, async move {
+            let lease = consumer
+                .next_delivery(batch_items)
+                .await
+                .ok_or_else(|| PyStopAsyncIteration::new_err("subscription ended"))?;
+            prepare_subscription_delivery(lease, move |py, delivery| {
+                subscription_delivery_to_python(py, delivery, converter.as_ref())
+            })
+            .await
+        })
+    }
+
     /// Get next update as a Python dict without building Arrow.
     /// Raises RuntimeError for rows=False; use latest() for image-only consumers.
     fn __anext_tick_dict__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        self.ensure_rows()?;
-        let rx = self.consumer.rx.clone();
-        let pending = self.consumer.pending.clone();
-        let close_signal = self.consumer.close_signal.clone();
+        self.ensure_plain_rows()?;
+        let consumer = self.consumer.clone();
+        #[cfg(feature = "test-support")]
+        let read_started = self._test_legacy_read_started.clone();
 
         shutdown_safe_future(py, async move {
-            let mut close_rx = close_signal.subscribe();
-            let mut guard = rx.lock().await;
+            let mut close_rx = consumer.close_signal.subscribe();
+            #[cfg(feature = "test-support")]
+            if let Some(signal) = read_started {
+                signal.notify_one();
+            }
+            let (mut guard, _publication) = consumer
+                .lock_plain_receiver(&mut close_rx)
+                .await
+                .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
             let rx_ref = guard
                 .as_mut()
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
             let read =
-                receive_subscription_updates(rx_ref, pending.as_ref(), &mut close_rx, 1).await;
+                receive_subscription_updates(rx_ref, consumer.pending.as_ref(), &mut close_rx, 1)
+                    .await;
 
             match read {
                 SubscriptionRead::Updates(mut updates) => {
                     let update = updates
                         .pop()
                         .expect("one-update read must contain an update");
-                    drop(guard);
+                    // Retain rx until attachment unless the publication gate owns ordering.
+                    let _receiver = _publication.is_none().then_some(guard);
                     try_attach_or_suspend(|py| subscription_update_to_pydict(py, update)).await
                 }
                 SubscriptionRead::Error(error) => Err(blp_error_to_pyerr(error)),
@@ -2028,6 +2119,23 @@ impl PySubscription {
     #[getter]
     fn delivers_rows(&self) -> bool {
         self.deliver_rows
+    }
+
+    /// Guard plain iteration without reproducing native effective-policy logic.
+    fn ensure_plain_delivery(&self) -> PyResult<()> {
+        self.ensure_plain_rows()
+    }
+
+    /// Delivery semantics remain available after this handle is closed.
+    #[getter]
+    fn delivery(&self) -> &'static str {
+        self.consumer.delivery_mode().as_str()
+    }
+
+    /// Whether batch-envelope consumption is required by the effective mode.
+    #[getter]
+    fn requires_deliveries(&self) -> bool {
+        self.consumer.requires_deliveries()
     }
 
     /// Get the currently subscribed tickers.
@@ -2192,8 +2300,7 @@ impl PySubscription {
         tick_mode: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let consumer = self.consumer.clone();
-        let arrow_batcher = self.arrow_batcher.clone();
-        let arrow_ready = self.arrow_ready.clone();
+        let legacy_arrow = self.legacy_arrow.clone();
         let batch_items = self.batch_items;
         let engine_shutdown = self.engine_shutdown.clone();
 
@@ -2201,33 +2308,38 @@ impl PySubscription {
 
         shutdown_safe_future(py, async move {
             let (_operation, remaining) = consumer.unsubscribe(drain, Some(&engine_shutdown)).await;
-
             if !drain {
-                arrow_ready
-                    .lock()
-                    .expect("subscription Arrow output queue poisoned")
-                    .clear();
-                remaining.map_err(|error| blp_async_error_to_pyerr(*error))?;
-                return try_attach_or_suspend(|py| Ok(py.None())).await;
-            }
-
-            let remaining = match remaining {
-                Ok(remaining) => remaining,
-                Err(error) => {
-                    arrow_ready
+                if let Some(arrow) = &legacy_arrow {
+                    arrow
+                        .ready
                         .lock()
                         .expect("subscription Arrow output queue poisoned")
                         .clear();
+                }
+                remaining.map_err(|error| blp_async_error_to_pyerr(*error))?;
+                return try_attach_or_suspend(|py| Ok(py.None())).await;
+            }
+            let remaining = match remaining {
+                Ok(remaining) => remaining,
+                Err(error) => {
+                    if let Some(arrow) = &legacy_arrow {
+                        arrow
+                            .ready
+                            .lock()
+                            .expect("subscription Arrow output queue poisoned")
+                            .clear();
+                    }
                     return Err(blp_async_error_to_pyerr(*error));
                 }
             };
             if tick_mode {
-                // Dict mode never round-trips through Arrow: sparse update
-                // presence is preserved directly from the native stream.
-                arrow_ready
-                    .lock()
-                    .expect("subscription Arrow output queue poisoned")
-                    .clear();
+                if let Some(arrow) = &legacy_arrow {
+                    arrow
+                        .ready
+                        .lock()
+                        .expect("subscription Arrow output queue poisoned")
+                        .clear();
+                }
                 return try_attach_or_suspend(|py| {
                     let list = pyo3::types::PyList::empty(py);
                     for update in remaining {
@@ -2237,17 +2349,17 @@ impl PySubscription {
                 })
                 .await;
             }
-
-            let queued_batches: Vec<RecordBatch> = arrow_ready
+            let arrow = legacy_arrow.expect("plain Arrow drains have a legacy batcher");
+            let queued_batches: Vec<RecordBatch> = arrow
+                .ready
                 .lock()
                 .expect("subscription Arrow output queue poisoned")
                 .drain(..)
                 .collect();
-            // Build Arrow arrays before attaching to Python. The attachment only
-            // creates Python wrappers around already-finished Rust-owned buffers.
             let remaining = {
                 let mut batches = queued_batches;
-                let mut batcher = arrow_batcher
+                let mut batcher = arrow
+                    .batcher
                     .lock()
                     .expect("subscription Arrow batcher poisoned");
                 for update in remaining {
@@ -2265,16 +2377,46 @@ impl PySubscription {
                 }
                 batches
             };
-
             try_attach_or_suspend(|py| {
                 let list = pyo3::types::PyList::empty(py);
                 for batch in remaining {
-                    let py_batch = native_arrow::record_batch_to_arrow_record_batch(py, batch)?;
-                    list.append(py_batch)?;
+                    list.append(native_arrow::record_batch_to_arrow_record_batch(py, batch)?)?;
                 }
                 Ok(list.into_any().unbind())
             })
             .await
+        })
+    }
+
+    /// Close and optionally drain marked batches without losing gap metadata.
+    #[pyo3(signature = (drain=false, converter=None))]
+    fn unsubscribe_deliveries<'py>(
+        &self,
+        py: Python<'py>,
+        drain: bool,
+        converter: Option<Py<PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let consumer = self.consumer.clone();
+        let legacy_arrow = self.legacy_arrow.clone();
+        let engine_shutdown = self.engine_shutdown.clone();
+        shutdown_safe_future(py, async move {
+            if !drain {
+                let (_operation, remaining) =
+                    consumer.unsubscribe(false, Some(&engine_shutdown)).await;
+                if let Some(arrow) = legacy_arrow {
+                    arrow
+                        .ready
+                        .lock()
+                        .expect("subscription Arrow output queue poisoned")
+                        .clear();
+                }
+                remaining.map_err(|error| blp_async_error_to_pyerr(*error))?;
+                return try_attach_or_suspend(|py| Ok(py.None())).await;
+            }
+            let lease = consumer
+                .prepare_unsubscribe_deliveries(true, Some(&engine_shutdown))
+                .await;
+            prepare_subscription_drain(lease, converter).await
         })
     }
 
@@ -2305,6 +2447,154 @@ impl PySubscription {
         } else {
             "Subscription(closed)".to_string()
         }
+    }
+}
+
+enum SubscriptionPublicationLease {
+    ReadAck(SubscriptionDeliveryAck),
+    ReadError(SubscriptionDeliveryLease),
+    DrainAck(SubscriptionDeliveryDrainAck),
+    DrainError(SubscriptionDeliveryDrainLease),
+}
+
+impl SubscriptionPublicationLease {
+    fn commit(self) -> PyResult<()> {
+        match self {
+            Self::ReadAck(ack) => {
+                ack.commit();
+                Ok(())
+            }
+            Self::ReadError(lease) => lease.commit().map(|_| ()).map_err(blp_error_to_pyerr),
+            Self::DrainAck(ack) => {
+                ack.commit();
+                Ok(())
+            }
+            Self::DrainError(lease) => lease
+                .commit()
+                .map(|_| ())
+                .map_err(|error| blp_async_error_to_pyerr(*error)),
+        }
+    }
+}
+
+/// Retains the native receipt until the consuming Python task actually resumes.
+/// Dropping an unpublished result restores updates/gaps, re-dirties state, or
+/// retains a frozen drain for a later publication attempt.
+#[pyclass(frozen)]
+struct PySubscriptionDeliveryReceipt {
+    lease: StdMutex<Option<SubscriptionPublicationLease>>,
+    result: Option<Py<PyAny>>,
+}
+
+#[pymethods]
+impl PySubscriptionDeliveryReceipt {
+    fn publish(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+        let lease = self
+            .lease
+            .lock()
+            .expect("subscription delivery receipt poisoned")
+            .take()
+            .ok_or_else(|| PyRuntimeError::new_err("subscription delivery already published"))?;
+        lease.commit()?;
+        Ok(self
+            .result
+            .as_ref()
+            .expect("a successful receipt has a converted result")
+            .clone_ref(py))
+    }
+
+    #[getter]
+    fn has_error(&self) -> bool {
+        self.result.is_none()
+    }
+
+    fn discard(&self) {
+        let lease = self
+            .lease
+            .lock()
+            .expect("subscription delivery receipt poisoned")
+            .take();
+        drop(lease);
+    }
+}
+
+async fn prepare_subscription_delivery<F>(
+    lease: SubscriptionDeliveryLease,
+    convert: F,
+) -> PyResult<Py<PyAny>>
+where
+    F: FnOnce(Python<'_>, SubscriptionDelivery) -> PyResult<Py<PyAny>> + Send,
+{
+    try_attach_or_suspend(move |py| {
+        let (publication, result) = match lease.prepare_success() {
+            Ok((delivery, ack)) => {
+                let result = convert(py, delivery)?;
+                (SubscriptionPublicationLease::ReadAck(ack), Some(result))
+            }
+            Err(lease) => (SubscriptionPublicationLease::ReadError(lease), None),
+        };
+        Py::new(
+            py,
+            PySubscriptionDeliveryReceipt {
+                lease: StdMutex::new(Some(publication)),
+                result,
+            },
+        )
+        .map(Py::into_any)
+    })
+    .await
+}
+
+async fn prepare_subscription_drain(
+    lease: SubscriptionDeliveryDrainLease,
+    converter: Option<Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    try_attach_or_suspend(move |py| {
+        let (publication, result) = match lease.prepare_success() {
+            Ok((deliveries, ack)) => {
+                let list = pyo3::types::PyList::empty(py);
+                for delivery in deliveries {
+                    list.append(subscription_delivery_to_python(
+                        py,
+                        delivery,
+                        converter.as_ref(),
+                    )?)?;
+                }
+                (
+                    SubscriptionPublicationLease::DrainAck(ack),
+                    Some(list.into_any().unbind()),
+                )
+            }
+            Err(lease) => (SubscriptionPublicationLease::DrainError(lease), None),
+        };
+        Py::new(
+            py,
+            PySubscriptionDeliveryReceipt {
+                lease: StdMutex::new(Some(publication)),
+                result,
+            },
+        )
+        .map(Py::into_any)
+    })
+    .await
+}
+
+fn subscription_delivery_to_python(
+    py: Python<'_>,
+    delivery: SubscriptionDelivery,
+    converter: Option<&Py<PyAny>>,
+) -> PyResult<Py<PyAny>> {
+    let SubscriptionDelivery {
+        kind,
+        data,
+        gap_before,
+    } = delivery;
+    let batch = native_arrow::record_batch_to_arrow_record_batch(py, data)?;
+    let dropped_updates = gap_before.map(|gap| gap.dropped_updates);
+    let args = (kind.as_str(), batch, dropped_updates);
+    match converter {
+        Some(converter) => Ok(converter.bind(py).call1(args)?.unbind()),
+        None => Ok(args.into_pyobject(py)?.into_any().unbind()),
     }
 }
 
@@ -2485,6 +2775,8 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyEngineConfig>()?;
     m.add_class::<PySubscription>()?;
     m.add_class::<PyEngine>()?;
+    #[cfg(feature = "test-support")]
+    subscription_fixture::register(m)?;
 
     // Register exception classes for use from Python
     m.add("BlpError", _py.get_type::<BlpErrorBase>())?;
@@ -2575,6 +2867,7 @@ mod tests {
     use tokio::sync::Mutex;
     use xbbg_async::engine::state::{
         FieldKind, FieldLayout, FieldMeta, UpdateField, subscription_channel,
+        subscription_channel_with_policy,
     };
     use xbbg_async::engine::{
         ExtractorType, SubscriptionEventCategory, SubscriptionEventLevel, SubscriptionStatusHandle,
@@ -2620,8 +2913,7 @@ mod tests {
     fn closed_subscription(deliver_rows: bool) -> PySubscription {
         PySubscription {
             consumer: Arc::new(SubscriptionConsumer::default()),
-            arrow_batcher: Arc::new(StdMutex::new(SubscriptionArrowBatcher::with_capacity(1))),
-            arrow_ready: Arc::new(StdMutex::new(VecDeque::new())),
+            legacy_arrow: Some(Arc::new(LegacySubscriptionArrow::new(1))),
             batch_items: 1,
             status: Arc::new(SubscriptionStatusHandle::new(
                 SubscriptionStatusState::default(),
@@ -2629,6 +2921,10 @@ mod tests {
             deliver_rows,
             overflow_policy: OverflowPolicy::DropNewest,
             engine_shutdown: watch::channel(false).1,
+            #[cfg(feature = "test-support")]
+            _test_fixture: None,
+            #[cfg(feature = "test-support")]
+            _test_legacy_read_started: None,
         }
     }
 
@@ -2689,7 +2985,12 @@ mod tests {
                     .extract::<bool>()
                     .unwrap()
             );
-            for method in ["__aiter__", "__anext__", "__anext_tick_dict__"] {
+            for method in [
+                "__aiter__",
+                "__anext__",
+                "__anext_tick_dict__",
+                "next_delivery",
+            ] {
                 let error = subscription
                     .call_method0(method)
                     .expect_err("image-only iteration");
@@ -2698,6 +2999,192 @@ mod tests {
                 assert!(message.contains("rows=False"));
                 assert!(message.contains("latest()"));
             }
+        });
+    }
+
+    #[test]
+    fn delivery_conversion_failure_restores_real_native_batch_and_gap() {
+        Python::initialize();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            for timestamp_us in [10, 20] {
+                let mut update = subscription_update(timestamp_us);
+                update.topic = Arc::from("SYNTHETIC Index");
+                tx.try_send(Ok(update)).expect("synthetic update");
+            }
+            let consumer = SubscriptionConsumer::from_receiver(rx);
+            let lease = consumer.next_delivery(1).await.expect("first receipt");
+            let error = prepare_subscription_delivery(lease, |_py, _delivery| {
+                Err(PyValueError::new_err(
+                    "synthetic backend conversion failure",
+                ))
+            })
+            .await
+            .expect_err("conversion failure");
+            Python::attach(|py| assert!(error.is_instance_of::<PyValueError>(py)));
+
+            let lease = consumer.next_delivery(1).await.expect("restored receipt");
+            assert_eq!(
+                lease.as_ref().unwrap().gap_before.unwrap().dropped_updates,
+                1
+            );
+            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
+                subscription_delivery_to_python(py, delivery, None)
+            })
+            .await
+            .expect("converted delivery");
+            Python::attach(|py| {
+                let output = prepared.bind(py).call_method0("publish").unwrap();
+                assert_eq!(
+                    output.get_item(0).unwrap().extract::<String>().unwrap(),
+                    "deltas"
+                );
+                assert_eq!(output.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
+                let batch = output.get_item(1).unwrap();
+                assert_eq!(
+                    batch
+                        .getattr("num_rows")
+                        .unwrap()
+                        .extract::<usize>()
+                        .unwrap(),
+                    1
+                );
+                let rows = batch.call_method0("to_pylist").unwrap();
+                assert_eq!(
+                    rows.get_item(0)
+                        .unwrap()
+                        .get_item("topic")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "SYNTHETIC Index",
+                );
+            });
+            drop(tx);
+            assert!(consumer.next_delivery(1).await.is_none());
+        });
+    }
+
+    #[test]
+    fn delivery_error_publication_preserves_context_and_commits_once() {
+        Python::initialize();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel(1);
+            tx.fail(BlpError::SubscriptionDataLoss {
+                topic: "SYNTHETIC Index".into(),
+                detail: "synthetic SDK DATALOSS".into(),
+            });
+            let consumer = SubscriptionConsumer::from_receiver(rx);
+            let lease = consumer.next_delivery(1).await.expect("terminal receipt");
+            let prepared = prepare_subscription_delivery(lease, |_py, _delivery| {
+                panic!("terminal receipts must not run the batch converter")
+            })
+            .await
+            .expect("prepared terminal receipt");
+            Python::attach(|py| {
+                let error = prepared
+                    .bind(py)
+                    .call_method0("publish")
+                    .expect_err("terminal source loss");
+                assert!(error.is_instance_of::<BlpSubscriptionDataLossError>(py));
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("topic")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "SYNTHETIC Index",
+                );
+                assert_eq!(
+                    error
+                        .value(py)
+                        .getattr("detail")
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap(),
+                    "synthetic SDK DATALOSS",
+                );
+            });
+            assert!(consumer.next_delivery(1).await.is_none());
+        });
+    }
+
+    #[test]
+    fn dropping_unpublished_python_receipt_restores_data_and_gap() {
+        Python::initialize();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            tx.try_send(Ok(subscription_update(10))).unwrap();
+            tx.try_send(Ok(subscription_update(20))).unwrap();
+            let consumer = SubscriptionConsumer::from_receiver(rx);
+            let lease = consumer.next_delivery(1).await.unwrap();
+            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
+                subscription_delivery_to_python(py, delivery, None)
+            })
+            .await
+            .unwrap();
+            Python::attach(|_| drop(prepared));
+            let restored = consumer
+                .next_delivery(1)
+                .await
+                .expect("unpublished receipt restored");
+            assert_eq!(
+                restored
+                    .as_ref()
+                    .unwrap()
+                    .gap_before
+                    .unwrap()
+                    .dropped_updates,
+                1
+            );
+            assert_eq!(restored.commit().unwrap().data.num_rows(), 1);
+        });
+    }
+
+    #[test]
+    fn advanced_python_iteration_guards_retain_real_native_receipts() {
+        Python::initialize();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
+            tx.try_send(Ok(subscription_update(10))).unwrap();
+            tx.try_send(Ok(subscription_update(20))).unwrap();
+            let consumer = Arc::new(SubscriptionConsumer::from_receiver(rx));
+            Python::attach(|py| {
+                let mut subscription = closed_subscription(true);
+                subscription.consumer = consumer.clone();
+                subscription.overflow_policy = OverflowPolicy::DropOldest;
+                let subscription = Py::new(py, subscription).unwrap();
+                for method in ["__aiter__", "__anext__", "__anext_tick_dict__"] {
+                    let error = subscription
+                        .bind(py)
+                        .call_method0(method)
+                        .expect_err("plain advanced iteration");
+                    assert!(error.value(py).to_string().contains("deliveries()"));
+                }
+            });
+            let lease = consumer.next_delivery(1).await.expect("unconsumed receipt");
+            assert_eq!(
+                lease.as_ref().unwrap().gap_before.unwrap().dropped_updates,
+                1
+            );
+            assert_eq!(lease.commit().unwrap().data.num_rows(), 1);
         });
     }
 

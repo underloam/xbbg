@@ -153,8 +153,8 @@ async def asubscribe_auction(
     Dynamic add expects already-resolved venue topics (and optional aliases).
     Set rows=False for an image-only board: poll latest() instead of iterating.
     Rejected fields follow on_field_error ("warn", "raise", or "ignore").
-    In latest() only, zero_as_null defaults to ZERO_PRICE_FIELDS intersected with
-    requested fields; pass () to retain zeros. Tick rows remain unchanged.
+    In latest() and state deliveries, zero_as_null defaults to ZERO_PRICE_FIELDS
+    intersected with requested fields; pass () to retain zeros. Delta ticks are unchanged.
     Remaining options, including on_delayed and isolated, pass to asubscribe.
     """
     from xbbg import blp
@@ -186,7 +186,9 @@ async def astream_auction(
     """Iterate auction rows with atomic preflight and the policies of asubscribe_auction.
 
     Rows are always delivered. Use asubscribe_auction(rows=False) for a latest()
-    board; zero_as_null affects only latest(), never the yielded rows.
+    board. zero_as_null affects latest() and state deliveries, not delta rows.
+    State and drop-oldest modes yield marked SubscriptionDelivery envelopes;
+    their data is always a batch, independently of legacy tick output.
     """
     from xbbg import blp
 
@@ -224,7 +226,9 @@ def stream_auction(
     at most five seconds; consumers joining existing shared feeds never wait for
     session capacity. Rows are always delivered.
     Field-error and zero-sentinel policies match asubscribe_auction; zero_as_null
-    affects only latest(), never the yielded rows.
+    affects latest() and state deliveries, not delta rows.
+    State and drop-oldest modes yield marked SubscriptionDelivery envelopes;
+    their data is always a batch, independently of legacy tick output.
     """
     from xbbg import blp
 

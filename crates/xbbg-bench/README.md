@@ -19,7 +19,7 @@ The subscription workload modules under `benches/support/` use the production ba
 
 ## Registered benchmark targets
 
-All six targets are explicitly registered in `Cargo.toml`:
+All eight targets are explicitly registered in `Cargo.toml`:
 
 | Target | Work measured | Bloomberg session |
 |--------|---------------|-------------------|
@@ -29,8 +29,10 @@ All six targets are explicitly registered in `Cargo.toml`:
 | `async_subscription_replay` | Deterministic sparse `SubscriptionUpdate` values through `SubscriptionArrowBatcher`, including late layout changes and presence bitmaps | None |
 | `cached_subscription_arrow` | Cached SDK messages through `SubscriptionState`, bounded transport, and one-update Arrow adaptation with consumer scheduling/cancellation | One live capture, explicitly enabled with `CACHED_SUB_ENABLE_LIVE=1` |
 | `bql_json_parsers` | Serde JSON versus simd-json parsing of shared BQL fixtures; simd lanes separate copy-excluded and copy-inclusive timing | None |
+| `subscription_queue_default` | Strict queue roundtrips with unchanged source usable against frozen v1.7.0 | None |
+| `subscription_delivery` | Full overwrite adapter versus bare queue primitives, registered-future wakes, and actual shared-feed delta/state replay | None; synthetic SDK TestUtil preflight only |
 
-`pixi run bench-rs` runs `cargo bench --package xbbg-bench`, selecting all six targets. Use `--bench <target>` to select one. The workflow suite is the entrypoint for a combined JSON/Markdown report:
+`pixi run bench-rs` runs `cargo bench --package xbbg-bench`, selecting all eight targets. Use `--bench <target>` to select one. The workflow suite is the entrypoint for a combined JSON/Markdown report:
 
 ```bash
 cargo bench --package xbbg-bench --bench xbbg_benchmark_suite
@@ -154,11 +156,17 @@ SUB_REPLAY_ROWS=100000 SUB_REPLAY_FLUSH=1024 SUB_REPLAY_ITERATIONS=5 \
 CACHED_SUB_ENABLE_LIVE=1 CACHED_SUB_CAPTURE_MESSAGES=25 CACHED_SUB_REPLAY_LOOPS=1000 \
   cargo bench --package xbbg-bench --bench cached_subscription_arrow
 cargo bench --package xbbg-bench --bench bql_json_parsers
+cargo bench --package xbbg-bench --bench subscription_queue_default
+cargo bench --package xbbg-bench --bench subscription_delivery
 ```
 
 `async_subscription_replay` preserves the deterministic topic/value patterns, late-field introduction point, and rows/batches/columns reporting. `SUB_REPLAY_FLUSH` controls the maximum consumer-side Arrow batch size. A late layout change flushes the pending prefix through the real batcher, so batch counts can exceed `ceil(rows / flush_threshold)`; columns include the production `__xbbg_present` bitmap. Timing covers fixture setup, sparse update generation, append, and finalization, not SDK extraction or transport.
 
+`subscription_queue_default` uses the same eight-field payload, arguments and release profile on baseline/current. Alternate process order and retain full sample distributions; its quantiles describe sample-mean roundtrip costs, not per-operation tails. `subscription_delivery` rotates queue order and alternates strict/state replay; primitive overwrite timings exclude the ordered-gap/terminal/close adapter and are not interchangeable implementations. Producer, native materialization, and destruction timings are separate. Both targets emit allowlisted provenance without local paths or raw environment/compiler values.
+
 The suite's `synthetic_subscriptions` scenario materializes the generated values through `SubscriptionArrowBatcher` in batches of up to 1,024 rows and flushes the final partial batch. It reports emitted rows, actual Arrow columns (including timestamp/topic/presence), and batch counts rather than an arithmetic checksum. These production-path measurements are not directly comparable with the former surrogate/checksum timings.
+
+`subscription_delivery`'s idle-wakeup comparison runs at least 1,000 cycles per sample against the actual production and async-channel receive futures. Each cycle registers an idle receive with cooperative budgeting disabled only for that untimed registration, enqueues one update, and awaits completion with a 10-second deadline. The counting receiver waker forwards to the executor: completion normally occurs inline, but a pending poll allows executor-driven repolls rather than requiring immediate readiness. Every enqueue must actually wake its registered receiver; sequence values and production continuity gaps are checked per update. Reported producer latency covers enqueue and its counting/forwarding wake, not wake-to-delivery latency. Sample wall time also includes registration, timeout setup, timestamps, any scheduling, receive/materialization, checks, and output destruction. Wake counts cover calls to the counting receiver waker, not timer or forwarded task-waker calls.
 
 `cached_subscription_arrow` retains `CACHED_SUB_CONSUMER_BATCH` as the number of updates dequeued per consumer poll; each accepted update is adapted to one Arrow batch. The ignored `CACHED_SUB_COMPAT_FLUSH_THRESHOLD` option and report field have been removed, and this target's report schema is version 4. Public consumer-side batching options outside these benchmarks are unchanged.
 

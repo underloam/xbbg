@@ -142,7 +142,8 @@ function streamOptions(input: StreamOptionsInput): StreamOptionsInput {
     conflate: input.conflate,
     flushThreshold: input.flushThreshold,
     options: input.options,
-    overflowPolicy: input.overflowPolicy,
+    // Snapshot rows cannot describe gaps from an inherited lossy engine policy.
+    overflowPolicy: input.overflowPolicy ?? "drop_newest",
     streamCapacity: input.streamCapacity,
   };
 }

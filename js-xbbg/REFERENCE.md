@@ -77,13 +77,40 @@ Arrow tables append non-null binary `__xbbg_present`. Bit `i`, least-significant
 
 ### Subscription lifecycle
 
-- Choose scalar iteration (`sub.next()` / `for await`) or Arrow iteration (`sub.arrow()`) once per native subscription. The first read or draining close fixes the format; mixing formats raises `TypeError`. Reads are serialized across views, not independent consumers.
+- Choose scalar iteration (`sub.next()` / `for await`), Arrow iteration (`sub.arrow()`), or envelope iteration (`sub.deliveries()`) once per native subscription. The first read or draining close fixes the format; mixing formats raises `TypeError`. Delivery backends may differ between views, but all views share one serialized source, not independent consumers.
 - `unsubscribe()` discards unread values. `unsubscribe(true)` returns buffered values in the selected format, including pending JS values, an in-flight batch, and the native drain; use the Arrow view's `unsubscribe(true)` after Arrow reads. Draining through the wrong view closes without draining and reports the format error.
-- Close is shared across scalar/Arrow views and wakes pending reads. Concurrent closes share cleanup rather than unsubscribing twice; repeated closes do not replay drained values. Consumed and discarded pending values are released.
+- Close is shared across all views and wakes pending reads. Concurrent closes share cleanup rather than unsubscribing twice; repeated successful closes do not replay drained values. Consumed and discarded pending values are released.
 - `return()` and an early `for await` exit await non-draining cleanup. For manual reads, close in `finally`. `next({ signal })` accepts an `AbortSignal`; abort closes the whole subscription, not just that read, and waits for cleanup before rejecting.
-- Native read/conversion failures trigger cleanup. If cleanup also fails, an `AggregateError` preserves both failures instead of silently hiding the cleanup error. Rejecting an image-only row read happens before native work and does not close the board.
-- Row subscriptions fail closed on Bloomberg `DATALOSS`, `drop_newest` overflow, or bounded `block` forwarding overflow/timeout with `BlpSubscriptionDataLossError`. Committed queue data precedes the error, then EOF; resubscribe for a fresh image. Image-only subscriptions recover Bloomberg feed data loss as described below. `topic="*"` identifies unattributed/session-wide loss. The SDK callback never waits for consumers.
+- Ordinary scalar/Arrow read or conversion failures trigger cleanup. If cleanup also fails, an `AggregateError` preserves both failures. Delivery-view backend conversion failures are retryable as described below. Rejecting an image-only row read happens before native work and does not close the board.
+- Delta subscriptions fail closed on Bloomberg `DATALOSS`, `drop_newest` overflow, or bounded `block` forwarding overflow/timeout with `BlpSubscriptionDataLossError`. Committed queue data precedes the error, then EOF; resubscribe for a fresh image. `drop_oldest` changes only local queue handling. Polling and state consumers recover upstream data loss as described below. `topic="*"` identifies unattributed/session-wide loss. The SDK callback never waits for consumers.
 - A draining close propagates unread failures after cleanup instead of returning a successful partial result. Terminal session errors wake pending reads even after remove-all; ordinary connection-down events and failures of only some topics remain nonterminal.
+
+### Gap-aware delivery views
+
+`StreamOptions.delivery` accepts `'deltas'` (default) or `'state'`. With default deltas, scalar `Tick` and `sub.arrow()` output are unchanged. Opting into `overflowPolicy: 'drop_oldest'` retains the newest `streamCapacity` pending source updates and requires envelope reads; it does not turn sparse deltas into complete images.
+
+`sub.deliveries()` returns a `DeliveryStream<Table>`. Its `next()` yields `SubscriptionDelivery<TData>`:
+
+```ts
+interface SubscriptionDelivery<TData> {
+  readonly kind: 'deltas' | 'state';
+  readonly data: TData;
+  readonly gapBefore?: {
+    readonly cause: 'local_overflow';
+    readonly droppedUpdates: bigint;
+  };
+}
+```
+
+The gap count is exact source-update eviction count, never a rounded JS number or an Arrow-batch count. It remains outside dataframe data and metadata. Sparse delta batches retain `__xbbg_present`; after a gap, a delta-derived image is discontinuous. Upstream SDK `DATALOSS` remains terminal even with `drop_oldest`.
+
+State mode conflates current images using the shared feed cache and a fair, deduplicated dirty-topic FIFO. Reads materialize only selected dirty topics, not the whole board; ingestion does not build Arrow batches. Each row includes `topic`, `last_update`, `live`, `delayed`, `valid`, and the selected fields. Upsert rows by topic. These metadata names are reserved in state mode. `valid` tracks source continuity, not field completeness. An unknown image or invalidation has `valid=false` and null data fields; source recovery emits a fresh valid image. A valid row can still have unknown or explicitly cleared null fields. Source availability updates `live` independently. Schema discoveries and promotions persist when later batches contain narrower topic subsets.
+
+Use `sub.deliveries({ backend: 'json' })` or `{ backend: 'polars' }` to change payload representation without losing the envelope. Plain scalar/Arrow reads and drains reject advanced modes. State rejects `rows: false` and explicit raw-queue controls (`streamCapacity`, `overflowPolicy`); `flushThreshold` limits a batch but does not wait for it to fill. State conflation does not report a local-overflow gap.
+
+Read publication is transactional: conversion failure leaves data/gap/error unread, and canceled or closing views cannot acknowledge an invisible result. A failed backend conversion can be retried through another delivery view. `next({ signal })` still closes the whole subscription on abort.
+
+`await sub.deliveries().unsubscribe(true)` returns marked batches. The source is frozen before detach; all conversions must succeed before the drain is acknowledged. Failed conversion leaves the entire frozen drain available to another delivery backend even though `next()` is already EOF. Unread source failures outrank successful partial results. A non-draining `unsubscribe()` deliberately discards any retained drain.
 
 ### Shared market-data feeds and diagnostics
 
@@ -94,9 +121,9 @@ Within one `Engine`, market-data consumers share a feed when service, trimmed to
 - `isolated?: boolean` defaults to `false`; `true` gives the consumer its own feeds/session. Non-`//blp/mktdata` services remain isolated and do not receive synthetic late-join images.
 - `rows?: boolean` defaults to `true`. Set `false` for an image-only board: no data rows are queued and there is no output-queue overflow. Use `latest()` without reading the iterator. Scalar and Arrow `next()` attempts reject with a clear error and leave the board available for polling.
 - `onFieldError?: 'warn' | 'raise' | 'ignore'` defaults to `'warn'`. `'raise'` fails only topics with a rejected explicit field, recording its field/category in the failure reason; healthy sibling topics continue. `'ignore'` records `fieldErrors` without emitting a field warning.
-- `zeroAsNull?: readonly string[]` defaults to `[]`. In `latest()` only, numeric zero (including `-0`) in the listed fields becomes null. Tick rows, underlying images, booleans, dates/times and stats are unchanged.
+- `zeroAsNull?: readonly string[]` defaults to `[]`. In `latest()` and state deliveries, numeric zero (including `-0`) in the listed fields becomes null. Delta rows, underlying images, booleans, dates/times and stats are unchanged.
 
-These options work with `engine.subscribe`, `engine.stream`, service stream helpers and module-level `subscribe`/`asubscribe`. `allFields` intentionally sees all scalar fields received on the shared feed, including fields induced by other consumers. Local queue overflow fails only that row consumer. Detaching one consumer does not unsubscribe its siblings.
+These options work with `engine.subscribe`, `engine.stream`, service stream helpers and module-level `subscribe`/`asubscribe`. `allFields` intentionally sees all scalar fields received on the shared feed, including fields induced by other consumers. Strict local queue overflow ends only that delta consumer; `drop_oldest` evictions likewise affect only that consumer, not the shared image or siblings. Detaching one consumer does not unsubscribe its siblings.
 
 ```ts
 const sub = await engine.subscribe(['IBM UN Equity'], ['BID'], {
@@ -119,7 +146,7 @@ Explicit field kinds are seeded from field metadata when available before the fi
 
 For a polling auction board, use `await engine.subscribeAuction(['IBM US Equity'], { rows: false, onFieldError: 'raise' })`, call `latest()` at the application's chosen cadence, and always `unsubscribe()` in `finally`. `streamAuction` does not accept `rows`; it always delivers rows.
 
-On Bloomberg `DATALOSS`, row consumers fail closed. If image-only consumers remain, the shared feed resubscribes automatically. The `live` column in `latest()` becomes false immediately; the old image remains until recovery paint arrives, then is cleared and rebuilt so missing recovery fields are null. The first ordinary update makes it live again. `sub.events` records `DataLoss` and `FeedRecovered`; these recovery notices are not emitted as field/delayed warnings. Session termination still ends subscriptions without automatic recovery.
+On Bloomberg `DATALOSS`, delta consumers fail closed. If polling or state consumers remain, the shared feed resubscribes automatically. The `live` column in `latest()` becomes false immediately; the old polling image remains until recovery paint arrives, then is cleared and rebuilt so missing recovery fields are null. State delivery explicitly emits invalid/null images before valid recovery images, even when both transitions are unread at drain time. The first ordinary update makes the image live again. `sub.events` records `DataLoss` and `FeedRecovered`; these recovery notices are not emitted as field/delayed warnings. Session termination still ends subscriptions without automatic recovery.
 
 Read `status` for a combined snapshot (`events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `session`, `services`, `admin`), or use the individual getters `events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `sessionStatus`, `serviceStatus` and `adminStatus`. Topic states include `feedTopic` (upstream identity) and `delayed`. Field errors map consumer label → field → category. `engine.subscriptionFeeds()` returns current `FeedInfo[]`: service, topic, options, union fields, consumer count, delayed flag, state, isolation flag and field errors. It contains no authentication or connection identity information.
 

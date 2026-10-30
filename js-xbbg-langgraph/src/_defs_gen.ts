@@ -60,6 +60,32 @@ export const OVERFLOW_POLICY_BY_NAME = {
   DROP_NEWEST: "drop_newest",
 } as const;
 
+/** Local subscription delivery: sparse deltas or conflated current state. */
+export const SUBSCRIPTION_DELIVERY_MODES = ["deltas", "state"] as const;
+
+/** Local subscription delivery: sparse deltas or conflated current state. */
+export type SubscriptionDeliveryMode = (typeof SUBSCRIPTION_DELIVERY_MODES)[number];
+
+/** Value used when the caller omits it. */
+export const SUBSCRIPTION_DELIVERY_DEFAULT: SubscriptionDeliveryMode = "deltas";
+
+/** Canonical values as a list, for error text and tool descriptions. */
+export const SUBSCRIPTION_DELIVERY_VALUES = "deltas, state";
+
+/** Per-value documentation, keyed by canonical spelling. */
+export const SUBSCRIPTION_DELIVERY_DOCS: Readonly<Record<SubscriptionDeliveryMode, string>> = {
+  deltas:
+    "Sparse deltas with strict continuity by default; drop_oldest requires gap-aware deliveries().",
+  state:
+    "Conflated current images for dirty topics, including explicit validity and recovery state.",
+};
+
+/** Canonical values keyed by their defs name. */
+export const SUBSCRIPTION_DELIVERY_BY_NAME = {
+  DELTAS: "deltas",
+  STATE: "state",
+} as const;
+
 /** Field validation applied before a request is sent. */
 export const VALIDATION_MODES = ["disabled", "lenient", "strict"] as const;
 

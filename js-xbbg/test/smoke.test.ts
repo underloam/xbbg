@@ -47,6 +47,7 @@ function fakeNativeSubscription(): NativeSubscription {
   return {
     add: async () => undefined,
     takeWarnings: () => [],
+    signalClosing: () => undefined,
     addFields: async () => undefined,
     latest: () => ({ kind: 'zeroCopy', columns: [], numRows: 0, metadata: {} }),
     status,
@@ -61,8 +62,11 @@ function fakeNativeSubscription(): NativeSubscription {
     fields: ['BID', 'ASK'],
     isActive: true,
     deliversRows: true,
+    delivery: 'deltas',
+    requiresDeliveries: false,
     nextArrowBatch: async () => null,
     nextUpdates: async () => null,
+    nextDelivery: async () => null,
     remove: async () => undefined,
     stats: {
       batchesSent: 0,
@@ -73,6 +77,7 @@ function fakeNativeSubscription(): NativeSubscription {
     tickers: ['ES1 Index'],
     unsubscribe: async () => [],
     unsubscribeArrow: async () => [],
+    unsubscribeDeliveries: async () => [],
   };
 }
 
@@ -1388,6 +1393,7 @@ describe('subscribeEtfInav preflight', () => {
       streamCapacity: 128,
       allFields: true,
       options: ['interval=2'],
+      delivery: 'deltas',
     });
 
     expect(subscribeCalls).toStrictEqual([
@@ -1401,6 +1407,7 @@ describe('subscribeEtfInav preflight', () => {
           streamCapacity: 128,
           allFields: true,
           options: ['interval=2'],
+          delivery: 'deltas',
         },
       },
     ]);

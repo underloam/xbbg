@@ -171,17 +171,26 @@ FORMAT_DEFAULT = "long"
 FORMAT_VALUES = "long, long_typed, long_metadata, semi_long"
 """Canonical FORMATS as a list for error messages and docstrings."""
 
-OVERFLOW_POLICIES: tuple[str, ...] = ("block", "drop_newest")
+OVERFLOW_POLICIES: tuple[str, ...] = ("block", "drop_newest", "drop_oldest")
 """Subscription behaviour when a consumer cannot keep up with Bloomberg."""
 
-OVERFLOW_POLICY_ALIASES: tuple[str, ...] = ("dropnewest",)
+OVERFLOW_POLICY_ALIASES: tuple[str, ...] = ("dropnewest", "dropoldest")
 """Extra spellings OVERFLOW_POLICIES also accepts but which are not advertised."""
 
 OVERFLOW_POLICY_DEFAULT = "drop_newest"
 """Value used when the caller omits it."""
 
-OVERFLOW_POLICY_VALUES = "block, drop_newest"
+OVERFLOW_POLICY_VALUES = "block, drop_newest, drop_oldest"
 """Canonical OVERFLOW_POLICIES as a list for error messages and docstrings."""
+
+SUBSCRIPTION_DELIVERY_MODES: tuple[str, ...] = ("deltas", "state")
+"""Local subscription delivery: sparse deltas or conflated current state."""
+
+SUBSCRIPTION_DELIVERY_DEFAULT = "deltas"
+"""Value used when the caller omits it."""
+
+SUBSCRIPTION_DELIVERY_VALUES = "deltas, state"
+"""Canonical SUBSCRIPTION_DELIVERY_MODES as a list for error messages and docstrings."""
 
 VALIDATION_MODES: tuple[str, ...] = ("disabled", "lenient", "strict")
 """Field validation applied before a request is sent."""

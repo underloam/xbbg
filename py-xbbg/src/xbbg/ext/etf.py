@@ -180,6 +180,7 @@ async def asubscribe_etf_inav(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    delivery: str = "deltas",
     output: str | None = None,
 ) -> Subscription:
     """Subscribe to real-time iNAV updates for ETFs after atomic preflight.
@@ -192,8 +193,10 @@ async def asubscribe_etf_inav(
     tickers, not source ETFs.
 
     Args:
-        overflow_policy: Overflow policy for the stream: ``"drop_newest"``
-            (default) or ``"block"``.
+        overflow_policy: ``"drop_newest"`` (default), ``"block"``, or gap-aware
+            ``"drop_oldest"``. Consume the latter through ``sub.deliveries()``.
+        delivery: ``"deltas"`` (default) or conflated ``"state"``. State is read
+            through ``sub.deliveries()`` and includes each row's ``valid`` flag.
         output: Output selector: ``"record_batch"``, ``"backend"``, ``"dict"``,
             or ``"tick"`` (case-insensitive). ``None`` (default) retains the
             behavior selected by ``raw`` and ``tick_mode``.
@@ -226,6 +229,7 @@ async def asubscribe_etf_inav(
         flush_threshold=flush_threshold,
         stream_capacity=stream_capacity,
         overflow_policy=overflow_policy,
+        delivery=delivery,
         output=output,
     )
 

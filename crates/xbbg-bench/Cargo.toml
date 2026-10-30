@@ -30,6 +30,9 @@ criterion = { workspace = true }
 
 serde_json = { workspace = true }
 simd-json = { workspace = true }
+# Overwrite primitives are benchmark-only comparisons, not production transports.
+async-channel = { workspace = true }
+crossbeam-queue = { workspace = true }
 
 # =============================================================================
 # Registered benchmark targets
@@ -58,6 +61,15 @@ harness = false
 
 [[bench]]
 name = "bql_json_parsers"
+harness = false
+
+# Standalone source intentionally supports the frozen v1.7 default queue API.
+[[bench]]
+name = "subscription_queue_default"
+harness = false
+
+[[bench]]
+name = "subscription_delivery"
 harness = false
 
 [lints]

@@ -233,7 +233,12 @@ def test_auction_stream_early_close_unsubscribes_after_atomic_routing(monkeypatc
     class Native:
         remaining = 1
         delivers_rows = True
+        delivery = "deltas"
+        requires_deliveries = False
         closed = False
+
+        def ensure_plain_delivery(self):
+            return None
 
         def take_warnings(self):
             return []

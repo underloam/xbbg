@@ -19,11 +19,15 @@ mod update;
 mod update_arrow;
 mod value_utils;
 
+pub(crate) use super::shared_subscriptions::state_delivery::StateDeliveryReceipt;
 pub use bql::BqlState;
 pub use bsrch::BsrchState;
 pub use bulkdata::BulkDataState;
-pub(crate) use channel::SubscriptionTerminator;
-pub use channel::{SubscriptionReceiver, SubscriptionSender, subscription_channel};
+pub(crate) use channel::{SubscriptionEvent, SubscriptionTerminator, plain_delivery_error};
+pub use channel::{
+    SubscriptionReceiver, SubscriptionSender, subscription_channel,
+    subscription_channel_with_policy,
+};
 pub use fieldinfo::FieldInfoState;
 pub use generic::GenericState;
 pub use histdata::HistDataState;

@@ -411,12 +411,10 @@ function historicalFormat(tool: string): ZodOutput<HistoricalFormat | undefined>
 }
 
 /**
- * Closed enum for the subscription overflow policy.
+ * Closed enum for policies compatible with unmarked snapshot rows.
  *
- * The value set, the default and the per-value semantics all come from the
- * generated vocabulary. This field previously accepted a free-form string and
- * documented no values at all, so models guessed `drop_oldest` — a policy that
- * was removed in 1.2.0 and that the engine rejects outright.
+ * The vocabulary excludes policies requiring delivery envelopes. Direct SDK
+ * callers can use drop_oldest with the gap-aware deliveries() API instead.
  */
 function overflowPolicy(tool: string): ZodOutput<OverflowPolicy | undefined> {
   const semantics = OVERFLOW_POLICIES.map(

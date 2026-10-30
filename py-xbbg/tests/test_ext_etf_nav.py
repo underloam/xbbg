@@ -166,6 +166,7 @@ async def test_subscribe_etf_inav_defaults_to_last_price(monkeypatch):
         "flush_threshold": None,
         "stream_capacity": None,
         "overflow_policy": None,
+        "delivery": "deltas",
         "output": None,
     }
 
@@ -188,6 +189,7 @@ async def test_subscribe_etf_inav_forwards_stream_options(monkeypatch):
         flush_threshold=5,
         stream_capacity=128,
         overflow_policy="block",
+        delivery="deltas",
         output="dict",
     )
 
@@ -204,6 +206,7 @@ async def test_subscribe_etf_inav_forwards_stream_options(monkeypatch):
         "flush_threshold": 5,
         "stream_capacity": 128,
         "overflow_policy": "block",
+        "delivery": "deltas",
         "output": "dict",
     }
 

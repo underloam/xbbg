@@ -206,6 +206,8 @@ Dealer quote / BQR workflows in xbbg use fixed-income identifiers with a quote s
 
 Streaming surfaces are intentionally exposed only as bounded snapshot tools (`xbbg_stream_snapshot`, `xbbg_mktbar_snapshot`, and `xbbg_depth_snapshot`). Each streaming snapshot requires `maxUpdates`, applies the configured `maxStreamUpdates`/`maxStreamWaitMs` caps, stops on count, timeout, or stream completion, and calls `unsubscribe(false)` unless `drain: true` is explicitly provided. The package does not expose open-ended async subscription iterators as agent tools. If collection succeeds but releasing the subscription fails, the snapshot result still returns the collected updates and reports the failure in an `unsubscribeError` field instead of discarding data.
 
+Snapshot rows do not carry delivery-gap envelopes. Their overflow policy is explicitly `drop_newest` when omitted, independently of the supplied engine's defaults; `block` can be selected explicitly. Direct `@xbbg/core` state/drop-oldest delivery views are not exposed as agent snapshots.
+
 Arrow snapshot rows share one materialization allowance across all updates, not a fresh allowance for each table: at most `min(max(maxRows, maxContentRows), floor(maxResultNodes / 3))` rows are read before projection. Materialized rows are charged to the same aggregate node budget used for result bounding. An update cut short at this stage carries `rowCount`, `rows`, `truncated`, and a `truncation` diagnostic with `reason: "max_rows"` and `omittedRowsAtLeast`. A collection failure remains the primary thrown error even if unsubscribe also fails.
 
 ```ts

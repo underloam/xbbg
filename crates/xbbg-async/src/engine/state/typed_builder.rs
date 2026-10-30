@@ -133,6 +133,24 @@ impl TypedBuilder {
         }
     }
 
+    /// Reserve a known row count without changing the general-purpose defaults.
+    pub fn with_capacity(arrow_type: ArrowType, capacity: usize) -> Self {
+        match arrow_type {
+            ArrowType::Float64 => Self::Float64(Float64Builder::with_capacity(capacity)),
+            ArrowType::Int64 => Self::Int64(Int64Builder::with_capacity(capacity)),
+            ArrowType::Int32 => Self::Int32(Int32Builder::with_capacity(capacity)),
+            ArrowType::String => Self::String(StringBuilder::with_capacity(capacity, capacity)),
+            ArrowType::Bool => Self::Bool(BooleanBuilder::with_capacity(capacity)),
+            ArrowType::Date32 => Self::Date32(Date32Builder::with_capacity(capacity)),
+            ArrowType::TimestampMicros => {
+                Self::TimestampMicros(TimestampMicrosecondBuilder::with_capacity(capacity))
+            }
+            ArrowType::Time64Micros => {
+                Self::Time64Micros(Time64MicrosecondBuilder::with_capacity(capacity))
+            }
+        }
+    }
+
     /// Append a value, returning whether a non-null value could not be converted.
     #[must_use]
     pub fn append_value(&mut self, value: Option<Value<'_>>) -> bool {

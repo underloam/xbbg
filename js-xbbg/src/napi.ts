@@ -18,6 +18,8 @@ import type {
   StreamOptions,
   StringPair,
   SubscriptionEvent,
+  SubscriptionDeliveryMode,
+  SubscriptionGap,
   SubscriptionFailure,
   SubscriptionStats,
   SubscriptionStatus,
@@ -114,19 +116,46 @@ export interface NativeSubscriptionUpdateBatch {
   readonly updates: readonly NativeSubscriptionRow[];
 }
 
+export interface NativeSubscriptionDelivery {
+  readonly kind: SubscriptionDeliveryMode;
+  readonly data: NativeArrowZeroCopyBatch;
+  readonly gapBefore?: SubscriptionGap;
+}
+
+export interface NativeSubscriptionPublication {
+  /** False means close won and the native source was rolled back. */
+  commit(): boolean;
+  rollback(): void;
+}
+
+export type NativeSubscriptionDeliveryReceipt<T> = NativeSubscriptionPublication &
+  ({ readonly kind: 'delivery'; readonly value: T } | { readonly kind: 'error' });
+
 export interface NativeSubscription {
   nextUpdates(maxItems?: number, maxWaitMs?: number): Promise<NativeSubscriptionUpdateBatch | null>;
   nextArrowBatch(maxRows?: number, maxWaitMs?: number): Promise<NativeArrowZeroCopyBatch | null>;
+  nextDelivery<T = NativeSubscriptionDelivery>(
+    maxRows?: number,
+    maxWaitMs?: number,
+    project?: (delivery: NativeSubscriptionDelivery) => T,
+  ): Promise<NativeSubscriptionDeliveryReceipt<T> | null>;
   add(tickers: readonly string[], aliases?: Readonly<Record<string, string>>): Promise<void>;
   addFields(fields: readonly string[]): Promise<void>;
   latest(): NativeArrowZeroCopyBatch;
   takeWarnings(): SubscriptionEvent[];
+  signalClosing(): void;
   remove(tickers: readonly string[]): Promise<void>;
   unsubscribe(drain: boolean): Promise<NativeSubscriptionUpdateBatch[] | null>;
   unsubscribeArrow(drain: boolean): Promise<NativeArrowZeroCopyBatch[] | null>;
+  unsubscribeDeliveries<T = NativeSubscriptionDelivery>(
+    drain: boolean,
+    project?: (delivery: NativeSubscriptionDelivery) => T,
+  ): Promise<T[] | null>;
   readonly tickers: string[];
   readonly fields: string[];
   readonly deliversRows: boolean;
+  readonly delivery: SubscriptionDeliveryMode;
+  readonly requiresDeliveries: boolean;
   readonly isActive: boolean;
   readonly stats: SubscriptionStats;
   readonly status: SubscriptionStatus;
@@ -175,6 +204,7 @@ export interface NativeEngine {
     rows?: boolean,
     onFieldError?: string,
     zeroAsNull?: readonly string[],
+    delivery?: StreamOptions['delivery'],
   ): Promise<NativeSubscription>;
   subscribeWithOptions(
     service: string,
@@ -191,6 +221,7 @@ export interface NativeEngine {
     rows?: boolean,
     onFieldError?: string,
     zeroAsNull?: readonly string[],
+    delivery?: StreamOptions['delivery'],
   ): Promise<NativeSubscription>;
   subscriptionFeeds(): FeedInfo[];
   signalShutdown(): void;

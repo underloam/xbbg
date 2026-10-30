@@ -519,7 +519,8 @@ def create_core_schema(name: str, options: BloombergToolsOptions) -> type[ToolIn
                 "flush_threshold": optional(PositiveInteger, "Native batch flush threshold."),
                 "stream_capacity": optional(PositiveInteger, "Native bounded subscription queue capacity."),
                 "overflow_policy": optional(
-                    OverflowPolicy, "Native overflow policy: drop_newest or block; data loss is an error."
+                    OverflowPolicy,
+                    "Strict snapshot overflow policy: drop_newest (default, independent of engine policy) or block; data loss is an error.",
                 ),
                 "options": optional(
                     fields, "Bloomberg subscription options; market bars use bar_size=1 unless supplied."

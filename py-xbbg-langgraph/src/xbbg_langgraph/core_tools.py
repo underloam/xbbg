@@ -157,6 +157,8 @@ async def _snapshot(name: str, data: dict[str, Any]) -> dict[str, Any]:
         fields = data.pop("fields", [])
         service = "//blp/mktdepthdata"
         data.setdefault("all_fields", not fields)
+    # Snapshot rows cannot describe gaps from an inherited lossy engine policy.
+    data.setdefault("overflow_policy", "drop_newest")
     # asubscribe is the public API exposing all native subscription controls;
     # astream is an async generator and cannot supply an owned cleanup handle.
     subscription = await blp.asubscribe(tickers, fields, service=service, backend="native", **data)

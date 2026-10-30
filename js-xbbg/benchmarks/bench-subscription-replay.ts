@@ -99,7 +99,12 @@ interface ArrowReplaySubscription {
 
 type NativeArrowReader = Pick<
   NativeSubscription,
-  'nextArrowBatch' | 'unsubscribeArrow' | 'takeWarnings' | 'deliversRows'
+  | 'nextArrowBatch'
+  | 'unsubscribeArrow'
+  | 'takeWarnings'
+  | 'deliversRows'
+  | 'requiresDeliveries'
+  | 'signalClosing'
 >;
 type ArrowSubscriptionConstructor = new (inner: NativeArrowReader) => ArrowReplaySubscription;
 
@@ -130,6 +135,7 @@ class AutonomousNativeSubscription implements NativeArrowReader {
   readonly fields: string[];
   readonly tickers: string[];
   readonly deliversRows = true;
+  readonly requiresDeliveries = false;
 
   private readonly batches: readonly NativeArrowZeroCopyBatch[];
   private readonly capacity: number;
@@ -180,6 +186,14 @@ class AutonomousNativeSubscription implements NativeArrowReader {
 
   takeWarnings(): [] {
     return [];
+  }
+
+  signalClosing(): void {
+    if (this.active) {
+      this.cancelled = true;
+      this.active = false;
+    }
+    this.resolveWaiters();
   }
 
   async nextArrowBatch(

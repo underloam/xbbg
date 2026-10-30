@@ -32,19 +32,19 @@ export const FORMAT_BY_NAME = {
 } as const;
 
 /** Subscription behaviour when a consumer cannot keep up with Bloomberg. */
-export const OVERFLOW_POLICIES = ['block', 'drop_newest'] as const;
+export const OVERFLOW_POLICIES = ['block', 'drop_newest', 'drop_oldest'] as const;
 
 /** Subscription behaviour when a consumer cannot keep up with Bloomberg. */
 export type OverflowPolicy = (typeof OVERFLOW_POLICIES)[number];
 
 /** Extra spellings the engine also accepts, kept for compatibility. */
-export const OVERFLOW_POLICY_ALIASES = ['dropnewest'] as const;
+export const OVERFLOW_POLICY_ALIASES = ['dropnewest', 'dropoldest'] as const;
 
 /** Value used when the caller omits it. */
 export const OVERFLOW_POLICY_DEFAULT: OverflowPolicy = 'drop_newest';
 
 /** Canonical values as a list, for error text and tool descriptions. */
-export const OVERFLOW_POLICY_VALUES = 'block, drop_newest';
+export const OVERFLOW_POLICY_VALUES = 'block, drop_newest, drop_oldest';
 
 /** Per-value documentation, keyed by canonical spelling. */
 export const OVERFLOW_POLICY_DOCS: Readonly<Record<OverflowPolicy, string>> = {
@@ -52,12 +52,41 @@ export const OVERFLOW_POLICY_DOCS: Readonly<Record<OverflowPolicy, string>> = {
     "Wait briefly on a bounded forwarding task, never on Bloomberg's callback thread; queue overflow or timeout closes with a data-loss error. Resubscribe for a fresh image.",
   drop_newest:
     "Close with a data-loss error when the consumer buffer is full; never waits on Bloomberg's callback thread. Resubscribe for a fresh image.",
+  drop_oldest:
+    'Keep the newest pending deltas and report ordered local-overflow gaps through deliveries(); raw SDK data loss remains terminal.',
 };
 
 /** Canonical values keyed by their defs name. */
 export const OVERFLOW_POLICY_BY_NAME = {
   BLOCK: 'block',
   DROP_NEWEST: 'drop_newest',
+  DROP_OLDEST: 'drop_oldest',
+} as const;
+
+/** Local subscription delivery: sparse deltas or conflated current state. */
+export const SUBSCRIPTION_DELIVERY_MODES = ['deltas', 'state'] as const;
+
+/** Local subscription delivery: sparse deltas or conflated current state. */
+export type SubscriptionDeliveryMode = (typeof SUBSCRIPTION_DELIVERY_MODES)[number];
+
+/** Value used when the caller omits it. */
+export const SUBSCRIPTION_DELIVERY_DEFAULT: SubscriptionDeliveryMode = 'deltas';
+
+/** Canonical values as a list, for error text and tool descriptions. */
+export const SUBSCRIPTION_DELIVERY_VALUES = 'deltas, state';
+
+/** Per-value documentation, keyed by canonical spelling. */
+export const SUBSCRIPTION_DELIVERY_DOCS: Readonly<Record<SubscriptionDeliveryMode, string>> = {
+  deltas:
+    'Sparse deltas with strict continuity by default; drop_oldest requires gap-aware deliveries().',
+  state:
+    'Conflated current images for dirty topics, including explicit validity and recovery state.',
+};
+
+/** Canonical values keyed by their defs name. */
+export const SUBSCRIPTION_DELIVERY_BY_NAME = {
+  DELTAS: 'deltas',
+  STATE: 'state',
 } as const;
 
 /** Field validation applied before a request is sent. */

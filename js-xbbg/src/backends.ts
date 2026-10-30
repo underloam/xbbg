@@ -1,6 +1,6 @@
 import type { Table } from 'apache-arrow';
 
-import { RecordBatchReader } from 'apache-arrow';
+import { RecordBatchReader, tableToIPC } from 'apache-arrow';
 import { createRequire } from 'node:module';
 
 import { FORMAT_BY_NAME } from './_defs_gen';
@@ -35,7 +35,7 @@ export const Backend = Object.freeze({
  */
 export const Format = Object.freeze(FORMAT_BY_NAME) satisfies Readonly<Record<string, FormatKind>>;
 interface PolarsModule {
-  readIPC(buffer: Buffer): unknown;
+  readIPC(buffer: Buffer): object;
 }
 
 function isPolarsModule(value: unknown): value is PolarsModule {
@@ -177,6 +177,7 @@ export function ipcSchemaMetadata(buffer: Buffer): Record<string, string> {
 function attachResultMetadata<T extends object>(
   result: T,
   metadata: Record<string, string>,
+  configurable = false,
 ): T & ResultMetadata {
   const bloombergRequestId = metadata[METADATA_KEY_BLOOMBERG_REQUEST_ID];
   const bloombergRequestIds =
@@ -201,13 +202,13 @@ function attachResultMetadata<T extends object>(
     isFieldExceptionRecord,
   );
   Object.defineProperties(result, {
-    bloombergRequestId: { enumerable: true, value: bloombergRequestId },
-    bloombergRequestIds: { enumerable: true, value: bloombergRequestIds },
-    delayed: { enumerable: true, value: delayed },
-    eidData: { enumerable: true, value: eidData },
-    fieldExceptions: { enumerable: true, value: fieldExceptions },
-    metadata: { enumerable: true, value: { ...metadata } },
-    securityErrors: { enumerable: true, value: securityErrors },
+    bloombergRequestId: { enumerable: true, configurable, value: bloombergRequestId },
+    bloombergRequestIds: { enumerable: true, configurable, value: bloombergRequestIds },
+    delayed: { enumerable: true, configurable, value: delayed },
+    eidData: { enumerable: true, configurable, value: eidData },
+    fieldExceptions: { enumerable: true, configurable, value: fieldExceptions },
+    metadata: { enumerable: true, configurable, value: { ...metadata } },
+    securityErrors: { enumerable: true, configurable, value: securityErrors },
   });
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Object.defineProperties attaches the ResultMetadata fields above.
   return result as T & ResultMetadata;
@@ -267,6 +268,15 @@ export function nativeArrowToBackend(
     return attachResultMetadata([...table], metadata);
   }
   return attachResultMetadata(table, metadata);
+}
+
+export function nativeArrowToPolars(batch: NativeArrowZeroCopyBatch): unknown {
+  const polars = loadPolars();
+  // The supported nodejs-polars 0.10 API reads file IPC, not streams.
+  const ipc = tableToIPC(tableFromNativeArrowBatch(batch), 'file');
+  const frame = polars.readIPC(Buffer.from(ipc.buffer, ipc.byteOffset, ipc.byteLength));
+  // Configurable metadata respects Polars' column-only ownKeys Proxy.
+  return attachResultMetadata(frame, batch.metadata, true);
 }
 
 export function ipcToPolars(buffer: Buffer): unknown {

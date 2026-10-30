@@ -135,7 +135,11 @@ try {
 
 - Subscriptions to the same security within one engine share a Bloomberg feed; `addFields()` grows it with a single re-subscribe.
 - `onDelayed` and `onFieldError` choose whether delayed data and fields Bloomberg rejects warn (through `process.emitWarning`), raise, or are only recorded.
-- Iterate scalar ticks or call `sub.arrow()` for Apache Arrow tables. Row subscriptions end with `BlpSubscriptionDataLossError` on data loss; `rows: false` boards re-subscribe automatically.
+- Iterate scalar ticks or call `sub.arrow()` for Apache Arrow tables. Delta subscriptions end with `BlpSubscriptionDataLossError` on upstream data loss; `rows: false` boards re-subscribe automatically.
+- For on-change boards, pass `{ delivery: 'state' }` and iterate `sub.deliveries()`: batches contain full current images for changed topics, including a `valid` continuity flag. Incoming updates are conflated without a raw tick queue.
+- For newest-pending deltas, pass `{ overflowPolicy: 'drop_oldest' }` and use `sub.deliveries()`. Local evictions appear in `gapBefore.droppedUpdates` as an exact `bigint`; upstream SDK loss still ends the delta stream.
+
+Delivery envelopes retain `kind`, `data`, and optional `gapBefore` with Arrow, JSON, or Polars output: `sub.deliveries({ backend: 'json' })`. Invalid state rows have null data; upsert by `topic` and preserve `valid`. Plain scalar/Arrow reads reject advanced modes. Always close the shared subscription, or drain marked batches with `await sub.deliveries().unsubscribe(true)`. See the [delivery contract](REFERENCE.md#gap-aware-delivery-views) for recovery, conversion retries, and state options.
 
 ## Delayed data
 

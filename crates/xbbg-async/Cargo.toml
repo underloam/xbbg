@@ -41,7 +41,8 @@ smallvec = { workspace = true }
 [features]
 default = ["live"]
 live = ["xbbg_core/live"]
-bench-internals = []
+test-support = ["live", "xbbg_core/test-support"]
+bench-internals = ["test-support"]
 
 [dev-dependencies]
 xbbg_core = { workspace = true, features = ["test-support"] }

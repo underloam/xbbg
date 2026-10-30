@@ -1,12 +1,18 @@
 import type {
   NativeArrowZeroCopyBatch,
   NativeSubscription,
+  NativeSubscriptionDeliveryReceipt,
   NativeSubscriptionUpdateBatch,
 } from '../src/napi';
 import type { SubscriptionStatus } from '../src/types';
 
 export function typedBuffer(view: ArrayBufferView): Buffer {
   return Buffer.from(view.buffer, view.byteOffset, view.byteLength);
+}
+
+export function jsonValue(value: unknown): unknown {
+  const serialized = JSON.stringify(value);
+  return serialized === undefined ? undefined : JSON.parse(serialized);
 }
 
 export function scalarBatch(
@@ -34,7 +40,7 @@ export function scalarBatch(
 }
 
 export function int32ArrowBatch(
-  value: number,
+  value: number | null,
   metadata: Record<string, string> = {},
   name = 'answer',
 ): NativeArrowZeroCopyBatch {
@@ -43,10 +49,11 @@ export function int32ArrowBatch(
       {
         name,
         type: 'int32',
-        nullable: false,
+        nullable: value === null,
         length: 1,
-        nullCount: 0,
-        data: typedBuffer(new Int32Array([value])),
+        nullCount: value === null ? 1 : 0,
+        data: typedBuffer(new Int32Array([value ?? 0])),
+        ...(value === null ? { nullBitmap: typedBuffer(new Uint8Array([0])) } : {}),
       },
     ],
     kind: 'zeroCopy',
@@ -78,6 +85,7 @@ export function fakeNativeSubscription(
     addFields: async () => undefined,
     latest: () => int32ArrowBatch(7),
     takeWarnings: () => [],
+    signalClosing: () => undefined,
     status,
     events: status.events,
     failures: status.failures,
@@ -90,8 +98,11 @@ export function fakeNativeSubscription(
     fields: ['answer'],
     isActive: true,
     deliversRows: true,
+    delivery: 'deltas',
+    requiresDeliveries: false,
     nextArrowBatch: async () => null,
     nextUpdates: async () => null,
+    nextDelivery: async () => null,
     remove: async () => undefined,
     stats: {
       batchesSent: 0,
@@ -102,6 +113,30 @@ export function fakeNativeSubscription(
     tickers: ['topic-1'],
     unsubscribe: async () => null,
     unsubscribeArrow: async () => null,
+    unsubscribeDeliveries: async () => null,
     ...overrides,
+  };
+}
+
+export function deliveryReceipt<T>(
+  value: T,
+  commit: () => void = () => undefined,
+  rollback: () => void = () => undefined,
+): NativeSubscriptionDeliveryReceipt<T> {
+  let settled = false;
+  return {
+    kind: 'delivery',
+    value,
+    commit: () => {
+      if (settled) throw new Error('delivery receipt already settled');
+      settled = true;
+      commit();
+      return true;
+    },
+    rollback: () => {
+      if (settled) return;
+      settled = true;
+      rollback();
+    },
   };
 }

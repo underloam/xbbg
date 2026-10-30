@@ -117,6 +117,10 @@ import type {
   StreamOptions,
   StringPair,
   SubscriptionEvent,
+  SubscriptionDelivery,
+  SubscriptionDeliveryMode,
+  SubscriptionDeliveryOptions,
+  SubscriptionGap,
   SubscriptionFailure,
   SubscriptionReadOptions,
   SubscriptionStats,
@@ -213,7 +217,13 @@ const native = loadNative();
 
 // ── Constants ───────────────────────────────────────────────────────────
 export { Backend, Format };
-export { ArrowSubscription, FieldHandle, Subscription, Tick } from './subscriptions';
+export {
+  ArrowSubscription,
+  DeliveryStream,
+  FieldHandle,
+  Subscription,
+  Tick,
+} from './subscriptions';
 export type { TickValue } from './subscriptions';
 
 function auctionFields(name: string): readonly string[] {
@@ -1540,6 +1550,7 @@ export class Engine {
     rows?: boolean,
     onFieldError?: StreamOptions['onFieldError'],
     zeroAsNull?: readonly string[],
+    delivery?: StreamOptions['delivery'],
   ): Promise<Subscription> {
     return await createSubscription(
       this.inner,
@@ -1558,6 +1569,7 @@ export class Engine {
         rows,
         onFieldError,
         zeroAsNull,
+        delivery,
       },
       'raw',
     );
@@ -2493,6 +2505,10 @@ export type {
   StringPair,
   SubscriptionEvent,
   SubscriptionFailure,
+  SubscriptionDelivery,
+  SubscriptionDeliveryMode,
+  SubscriptionDeliveryOptions,
+  SubscriptionGap,
   SubscriptionReadOptions,
   SubscriptionStats,
   SubscriptionStatus,

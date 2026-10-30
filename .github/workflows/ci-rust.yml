@@ -469,6 +469,9 @@ jobs:
       - name: Build js-xbbg native package
         run: npm --prefix js-xbbg run build
 
+      - name: Keep fixture drivers out of the production addon
+        run: node -e "const assert = require('node:assert/strict'); const addon = require('./js-xbbg/napi_xbbg.node'); assert.equal(Object.keys(addon).some(key => /fixture/i.test(key)), false);"
+
       - name: Stage packaged core native addon
         run: npm --prefix js-xbbg run stage:native-package
 
@@ -513,6 +516,30 @@ jobs:
       - name: Smoke test packaged @xbbg/core install under Bun
         shell: bash
         run: npm --prefix js-xbbg run smoke:packaged-install -- --bun
+
+      # The production package was staged and exercised above. Build the
+      # synthetic SDK driver separately; never copy it into a package artifact.
+      - name: Build subscription native test driver
+        run: cargo build --locked -p napi-xbbg --features test-support
+
+      - name: Stage subscription native test driver
+        shell: bash
+        run: |
+          case "$RUNNER_OS" in
+            Linux) addon=target/debug/libnapi_xbbg.so ;;
+            macOS) addon=target/debug/libnapi_xbbg.dylib ;;
+            Windows) addon=target/debug/napi_xbbg.dll ;;
+            *) exit 1 ;;
+          esac
+          cp "$addon" js-xbbg/napi_xbbg.node
+
+      - name: Exercise native subscription deliveries in Node and Bun
+        working-directory: js-xbbg
+        env:
+          XBBG_TEST_SUBSCRIPTIONS: "1"
+        run: |
+          npx vitest run test/subscription-delivery-native.test.ts
+          bun --bun ./node_modules/vitest/vitest.mjs run test/subscription-delivery-native.test.ts
 
 
       - name: Upload staged core package artifact
@@ -785,7 +812,9 @@ jobs:
 
       - name: Run tests
         working-directory: ${{ runner.temp }}/test-run
-        run: pytest tests -v -m "not live"
+        run: |
+          python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
+          pytest tests -v -m "not live"
 
       - name: Run tests with coverage
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
@@ -798,6 +827,38 @@ jobs:
         with:
           files: coverage.xml
           fail_ci_if_error: false
+
+      - name: Setup Rust for subscription native smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+
+      - name: Download bindings for subscription native smoke
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Exercise Python native subscription deliveries
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
+        shell: bash
+        env:
+          BLPAPI_PREGENERATED_BINDINGS: ${{ github.workspace }}/ci-bindings/bindings.rs
+        run: |
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export XBBG_DIST_VERSION="$(python -c 'from importlib.metadata import version; print(version("xbbg"))')"
+          cargo build --locked -p pyo3-xbbg --features test-support
+          CORE_TARGET="$(python -c 'from importlib.metadata import distribution; print(next(distribution("xbbg").locate_file("xbbg").glob("_core*.so")))')"
+          CORE_BACKUP="$RUNNER_TEMP/core-delivery-original.so"
+          cp "$CORE_TARGET" "$CORE_BACKUP"
+          trap 'cp "$CORE_BACKUP" "$CORE_TARGET"; rm -f "$CORE_BACKUP"' EXIT
+          cp target/debug/lib_core.so "$CORE_TARGET"
+          (
+            cd "$RUNNER_TEMP/test-run"
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py -q
+          )
 
       # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
       # wheels: PyYAML (via langchain-core) and zstandard (via langsmith) have none

@@ -1164,14 +1164,13 @@ describe("Bloomberg request tools", () => {
     ).rejects.toThrow();
   });
 
-  it("advertises the overflow policies the engine accepts and rejects removed ones", async () => {
+  it("rejects envelope-only policies before opening a snapshot subscription", async () => {
     const engine = fakeEngine();
     const tools = createBloombergTools({ core: fakeCore(engine) });
     const snapshot = byName(tools, "xbbg_stream_snapshot");
 
-    // The model must be shown the closed set. Advertising a free-form string is
-    // what made models emit `drop_oldest`, removed in 1.2.0 and rejected by the
-    // engine only after a subscription had already been opened.
+    // Snapshot rows cannot encode local gaps; only lossless policies belong in
+    // this tool's schema even though direct SDK delivery streams support more.
     const described = toolParameterJsonSchema(snapshot) as {
       properties: { overflowPolicy: { enum?: string[]; description?: string } };
     };
@@ -1184,7 +1183,8 @@ describe("Bloomberg request tools", () => {
         overflowPolicy: "drop_oldest",
         tickers: ["A"],
       }),
-    ).rejects.toThrow(/overflowPolicy must be one of block, drop_newest/u);
+    ).rejects.toBeInstanceOf(Error);
+    expect(engine.stream).not.toHaveBeenCalled();
   });
 
   it("does not mutate original results while truncating output", async () => {

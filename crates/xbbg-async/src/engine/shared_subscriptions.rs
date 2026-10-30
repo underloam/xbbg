@@ -11,7 +11,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use arrow_array::{ArrayRef, BooleanArray, RecordBatch, StringArray, TimestampMicrosecondArray};
-use arrow_schema::{Field, Schema};
+use arrow_schema::{Field, Schema, SchemaRef};
 use parking_lot::Mutex;
 use smallvec::SmallVec;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
@@ -20,27 +20,32 @@ use xbbg_core::{BlpError, Value};
 use super::delayed::DelayedPolicy;
 use super::state::typed_builder::{ArrowType, TypedBuilder};
 use super::state::{
-    FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder, SubscriptionSender,
-    SubscriptionState, SubscriptionUpdate, UpdateField, UpdateValue, subscription_channel,
-    subscription_forwarder_channel,
+    FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder, SubscriptionReceiver,
+    SubscriptionSender, SubscriptionState, SubscriptionUpdate, UpdateField, UpdateValue,
+    subscription_channel, subscription_channel_with_policy, subscription_forwarder_channel,
 };
 use super::subscription_pool::FeedRegistration;
 use super::{
     BlpAsyncError, EngineConfig, OverflowPolicy, SessionClaim, SessionLifecycleState,
-    SharedSubscriptionStatus, SlabKey, SubscriptionCommandHandle, SubscriptionEventInfo,
-    SubscriptionEventLevel, SubscriptionFailureKind, SubscriptionSessionPool,
-    SubscriptionStatusHandle, SubscriptionStatusScope, SubscriptionStatusState, SubscriptionStream,
-    TopicLifecycleState, timestamp_now_us,
+    SharedSubscriptionStatus, SlabKey, SubscriptionCommandHandle, SubscriptionDelivery,
+    SubscriptionDeliveryMode, SubscriptionEventInfo, SubscriptionEventLevel,
+    SubscriptionFailureKind, SubscriptionSessionPool, SubscriptionStatusHandle,
+    SubscriptionStatusScope, SubscriptionStatusState, SubscriptionStream, TopicLifecycleState,
+    timestamp_now_us,
 };
 
+pub(crate) mod state_delivery;
+
 const MKTDATA: &str = "//blp/mktdata";
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 use super::subscription_pool::TestSubscriptionSession as TestSession;
+#[cfg(any(test, feature = "test-support"))]
+pub(super) mod testing;
 #[cfg(test)]
 #[path = "shared_subscriptions_tests.rs"]
 mod tests;
-#[cfg(test)]
-use tests::TestSessionFactory;
+#[cfg(any(test, feature = "test-support"))]
+use testing::TestSessionFactory;
 const EVENT_TYPE: &str = "MKTDATA_EVENT_TYPE";
 const EVENT_SUBTYPE: &str = "MKTDATA_EVENT_SUBTYPE";
 const SESSION_WAIT_TIMED_OUT: &str = "session_wait: subscription session capacity wait timed out";
@@ -81,14 +86,16 @@ pub struct SubscribeRequest {
     pub delayed_policy: DelayedPolicy,
     pub field_error_policy: FieldErrorPolicy,
     pub deliver_rows: bool,
+    /// Sparse deltas by default; state coalesces dirty topics over shared images.
+    pub delivery: SubscriptionDeliveryMode,
     pub zero_as_null: Vec<String>,
     /// Maximum wait for pool capacity. None waits indefinitely; excludes startup.
     /// Expiry returns ConfigError with a `session_wait:` detail before mutation.
     pub session_wait: Option<Duration>,
     pub isolated: bool,
     pub stream_capacity: Option<usize>,
-    /// Consumer-side Arrow batch size hint. Bindings apply this when collecting
-    /// native updates; engine subscription delivery is always immediate.
+    /// Maximum updates (deltas) or dirty topics (state) collected per native
+    /// delivery. Neither mode waits for this hint to fill before becoming ready.
     pub flush_threshold: Option<usize>,
     pub overflow_policy: Option<OverflowPolicy>,
 }
@@ -105,6 +112,7 @@ impl Default for SubscribeRequest {
             delayed_policy: DelayedPolicy::Warn,
             field_error_policy: FieldErrorPolicy::Warn,
             deliver_rows: true,
+            delivery: SubscriptionDeliveryMode::Deltas,
             zero_as_null: Vec::new(),
             session_wait: None,
             isolated: false,
@@ -175,6 +183,8 @@ struct FeedState {
     image: Vec<Option<UpdateValue>>,
     last_update: Option<i64>,
     live: bool,
+    streams_active: Option<bool>,
+    revision: u64,
     delayed: Option<bool>,
     repainting: bool,
     repaint_started: bool,
@@ -212,6 +222,8 @@ impl Feed {
             last_update: None,
             live: false,
             delayed: None,
+            revision: 0,
+            streams_active: None,
             repainting: false,
             repaint_started: false,
             recovery: None,
@@ -247,8 +259,37 @@ impl Feed {
                 feed.on_field_error(error, scalar);
             }
         }));
+        let feed = Arc::downgrade(self);
+        sink.on_stream_availability(Arc::new(move |active| {
+            if let Some(feed) = feed.upgrade() {
+                feed.on_stream_availability(active);
+            }
+        }));
         sink.keep_open_on_data_loss();
         sink
+    }
+    fn on_stream_availability(&self, active: bool) {
+        let mut state = self.state.lock();
+        if matches!(state.lifecycle, "failed" | "closed") || state.streams_active == Some(active) {
+            return;
+        }
+        state.streams_active = Some(active);
+        state.revision = state.revision.saturating_add(1);
+        let revision = state.revision;
+        for consumer in &state.consumers {
+            if !consumer.active {
+                continue;
+            }
+            let Some(owner) = consumer.owner.upgrade() else {
+                continue;
+            };
+            if !owner.closed.load(Ordering::Acquire)
+                && !owner.stream.is_closed()
+                && let Some(delivery) = &owner.state_delivery
+            {
+                delivery.mark(consumer.key, revision, false);
+            }
+        }
     }
 
     fn on_field_error(&self, error: &BlpError, scalar: bool) {
@@ -339,6 +380,7 @@ impl Feed {
                 state.image[value.index as usize] = Some(value.value.clone());
             }
             state.last_update = Some(update.timestamp_us);
+            state.revision = state.revision.saturating_add(1);
             state.live |= !initpaint && state.recovery.is_none();
             state.lifecycle = "active";
             if finish_paint {
@@ -347,6 +389,7 @@ impl Feed {
             }
         }
         let delayed = state.delayed;
+        let revision = state.revision;
         let suppress_empty = self.identity.service == MKTDATA;
         let mut cleanup = false;
         let mut notices: HashMap<usize, (Arc<Consumer>, Vec<String>)> = HashMap::new();
@@ -374,7 +417,9 @@ impl Feed {
                 consumer.awaiting_image = false;
                 consumer.awaiting_repaint = false;
             }
-            let outcome = if !owner.request.deliver_rows {
+            let image_delivery = !owner.request.deliver_rows
+                || owner.request.delivery == SubscriptionDeliveryMode::State;
+            let outcome = if image_delivery {
                 consumer.projection.observe_update(update)
             } else if repainting && initpaint && !consumer.awaiting_image {
                 let (changed, has_data) = changes.as_ref().expect("repaint changes were prepared");
@@ -389,13 +434,18 @@ impl Feed {
                 consumer.active = false;
                 owner.status.update(|status| status.clear_active());
                 cleanup = true;
-            } else if recovered && !owner.request.deliver_rows {
-                consumer.projection.clear_slow_consumer();
-                notices
-                    .entry(owner.id)
-                    .or_insert_with(|| (owner, Vec::new()))
-                    .1
-                    .push(consumer.projection.topic.to_string());
+            } else {
+                if let Some(delivery) = &owner.state_delivery {
+                    delivery.mark(consumer.key, revision, false);
+                }
+                if recovered && image_delivery {
+                    consumer.projection.clear_slow_consumer();
+                    notices
+                        .entry(owner.id)
+                        .or_insert_with(|| (owner, Vec::new()))
+                        .1
+                        .push(consumer.projection.topic.to_string());
+                }
             }
         }
         drop(state);
@@ -506,6 +556,8 @@ impl Feed {
             return;
         }
         let at_us = timestamp_now_us();
+        state.revision = state.revision.saturating_add(1);
+        let revision = state.revision;
         let mut image_consumer = false;
         for consumer in &mut state.consumers {
             let Some(owner) = consumer.owner.upgrade() else {
@@ -516,7 +568,9 @@ impl Feed {
                 consumer.active = false;
                 continue;
             }
-            if owner.request.deliver_rows {
+            if owner.request.deliver_rows
+                && owner.request.delivery == SubscriptionDeliveryMode::Deltas
+            {
                 consumer.active = false;
                 consumer.projection.on_dataloss(Some(at_us));
                 owner.status.update(|status| {
@@ -531,6 +585,9 @@ impl Feed {
                 consumer.projection.record_dataloss(Some(at_us));
                 consumer.pending_data_loss += 1;
                 consumer.last_data_loss_us = at_us;
+                if let Some(delivery) = &owner.state_delivery {
+                    delivery.mark(consumer.key, revision, true);
+                }
             }
         }
         state.live = false;
@@ -613,6 +670,22 @@ impl Feed {
         if terminal || session_end.is_some() {
             state.lifecycle = "failed";
         }
+        let availability =
+            events
+                .iter()
+                .rev()
+                .find_map(|(_, event)| match event.message_type.as_str() {
+                    "SubscriptionStreamsActivated" => Some(true),
+                    "SubscriptionStreamsDeactivated" => Some(false),
+                    _ => None,
+                });
+        let availability_changed =
+            availability.is_some_and(|active| state.streams_active != Some(active));
+        if availability_changed {
+            state.streams_active = availability;
+            state.revision = state.revision.saturating_add(1);
+        }
+        let revision = state.revision;
         let FeedState {
             consumers,
             field_errors,
@@ -742,6 +815,11 @@ impl Feed {
                     },
                 ));
             }
+            if failure.is_some() {
+                patch.owner.invalidate_topic(consumer);
+            } else if availability_changed && let Some(delivery) = &patch.owner.state_delivery {
+                delivery.mark(consumer.key, revision, false);
+            }
             let order = if session_end.is_some() {
                 usize::MAX
             } else {
@@ -761,7 +839,10 @@ impl Feed {
                 failure,
             });
             for (index, event) in events {
-                if !patch.owner.request.deliver_rows && event.message_type == "DataLoss" {
+                if (!patch.owner.request.deliver_rows
+                    || patch.owner.request.delivery == SubscriptionDeliveryMode::State)
+                    && event.message_type == "DataLoss"
+                {
                     continue;
                 }
                 let mut event = (*event).clone();
@@ -914,6 +995,7 @@ fn record_topic_failure(
     message_type: &str,
 ) -> bool {
     consumer.active = false;
+    owner.invalidate_topic(consumer);
     let mut sessions = owner.sessions.lock();
     sessions.detach(consumer.session_id, consumer.key);
     let aggregate = sessions.snapshot(&owner.status.load(), false);
@@ -1313,11 +1395,11 @@ struct FeedSession {
     status: SharedSubscriptionStatus,
     feeds: Mutex<HashMap<String, Weak<Feed>>>,
     live_feeds: AtomicUsize,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test: Option<Arc<TestSession>>,
     #[cfg(test)]
     routing: StatusRoutingMetrics,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     _test_admission: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -1342,11 +1424,11 @@ impl FeedSession {
                 status,
                 feeds: Mutex::new(HashMap::new()),
                 live_feeds: AtomicUsize::new(0),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 test: None,
                 #[cfg(test)]
                 routing: StatusRoutingMetrics::default(),
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-support"))]
                 _test_admission: None,
             }
         })
@@ -1496,7 +1578,7 @@ impl FeedSession {
                 stream: feed.sink(),
             })
             .collect();
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
             return test.subscribe(
                 &first.identity.service,
@@ -1530,7 +1612,7 @@ impl FeedSession {
         kinds: &HashMap<String, FieldKind>,
         options: &[String],
     ) -> Result<(), BlpAsyncError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
             return test.resubscribe(key, fields, kinds);
         }
@@ -1538,7 +1620,7 @@ impl FeedSession {
     }
 
     fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
             test.enable_all_fields(key);
             return Ok(());
@@ -1551,7 +1633,7 @@ impl FeedSession {
         key: SlabKey,
         kinds: &HashMap<String, FieldKind>,
     ) -> Result<(), BlpAsyncError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
             test.seed_kinds(key, kinds);
             return Ok(());
@@ -1560,7 +1642,7 @@ impl FeedSession {
     }
 
     fn unsubscribe(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
             return test.unsubscribe(key, &self.status);
         }
@@ -1568,7 +1650,7 @@ impl FeedSession {
     }
 
     async fn wait_clean(&self) {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if self.test.is_some() {
             return;
         }
@@ -1599,12 +1681,129 @@ struct Consumer {
     sessions: Mutex<ConsumerSessions>,
     status: SharedSubscriptionStatus,
     stream: SubscriptionSender,
+    state_delivery: Option<Arc<state_delivery::StateDeliveryShared>>,
     forwarder: Option<SubscriptionForwarder>,
     closed: AtomicBool,
     next_key: AtomicUsize,
 }
 
+#[derive(Clone)]
+struct ImageRow {
+    label: Arc<str>,
+    last_update: Option<i64>,
+    live: bool,
+    delayed: Option<bool>,
+    valid: bool,
+    layout: Arc<FieldLayout>,
+    projected: Option<SubscriptionUpdate>,
+}
+
+impl ImageRow {
+    fn invalidate(&mut self) {
+        self.valid = false;
+        self.live = false;
+        self.projected = None;
+    }
+}
+
 impl Consumer {
+    fn invalidate_topic(&self, topic: &ConsumerTopic) {
+        let Some(delivery) = &self.state_delivery else {
+            return;
+        };
+        let last_update = topic
+            .projection
+            .metrics
+            .last_message_us
+            .load(Ordering::Relaxed);
+        let delayed = self
+            .status
+            .load()
+            .topic_statuses()
+            .get(topic.projection.topic.as_ref())
+            .and_then(|status| status.delayed);
+        delivery.retire(
+            topic.key,
+            ImageRow {
+                label: topic.projection.topic.clone(),
+                last_update: (last_update != 0).then_some(last_update as i64),
+                live: false,
+                delayed,
+                valid: false,
+                layout: topic.projection.layout(),
+                projected: None,
+            },
+        );
+    }
+
+    fn image_fields(&self) -> Vec<(Arc<str>, FieldKind, bool)> {
+        let fields = self.fields.lock();
+        let seeded = self.field_kinds.lock();
+        fields
+            .iter()
+            .filter(|field| !is_metadata(field))
+            .map(|field| {
+                let kind = seeded.get(field).copied().unwrap_or(FieldKind::Unknown);
+                (Arc::from(field.as_str()), kind, true)
+            })
+            .collect()
+    }
+
+    fn snapshot_image(
+        &self,
+        feed: &Feed,
+        key: SlabKey,
+        retain_invalid_values: bool,
+    ) -> Option<(u64, ImageRow)> {
+        if self.request.delivery == SubscriptionDeliveryMode::State && !retain_invalid_values {
+            return state_delivery::snapshot_image(self, feed, key);
+        }
+        let mut state = feed.state.lock();
+        let revision = state.revision;
+        let last_update = state.last_update;
+        let live = state.live
+            && (self.request.delivery != SubscriptionDeliveryMode::State
+                || state.streams_active != Some(false));
+        let delayed = state.delayed;
+        let valid = last_update.is_some()
+            && state.recovery.is_none()
+            && !matches!(state.lifecycle, "failed" | "closed");
+        let FeedState {
+            layout,
+            image,
+            consumers,
+            ..
+        } = &mut *state;
+        let consumer = consumers
+            .iter_mut()
+            .find(|consumer| consumer.key == key && std::ptr::eq(consumer.owner.as_ptr(), self))?;
+        if !consumer.active {
+            return None;
+        }
+        let projected = if valid || retain_invalid_values {
+            layout.as_ref().map(|layout| {
+                consumer
+                    .projection
+                    .project_current_image(layout, image, last_update.unwrap_or(0))
+            })
+        } else {
+            None
+        };
+        let mut row = ImageRow {
+            label: consumer.projection.topic.clone(),
+            last_update,
+            live,
+            delayed,
+            valid,
+            layout: consumer.projection.layout(),
+            projected,
+        };
+        if !valid && !retain_invalid_values {
+            row.invalidate();
+        }
+        Some((revision, row))
+    }
+
     fn after_detach(
         &self,
         members: &[Membership],
@@ -1613,6 +1812,9 @@ impl Consumer {
         let mut sessions = self.sessions.lock();
         for member in members {
             sessions.detach(member.session_id, member.key);
+            if let Some(delivery) = &self.state_delivery {
+                delivery.detach(member.key);
+            }
         }
         let aggregate = sessions.snapshot(&self.status.load(), false);
         self.status.update(|status| {
@@ -1692,6 +1894,16 @@ impl SubscriptionHandle {
     pub fn delivers_rows(&self) -> bool {
         self.inner.request.deliver_rows
     }
+    pub fn delivery_mode(&self) -> SubscriptionDeliveryMode {
+        self.inner.request.delivery
+    }
+    pub fn delivery_batch_limit(&self) -> usize {
+        self.inner
+            .request
+            .flush_threshold
+            .unwrap_or(self.inner.hub.config.subscription_flush_threshold)
+            .max(1)
+    }
     pub fn overflow_policy(&self) -> OverflowPolicy {
         self.inner
             .request
@@ -1745,6 +1957,11 @@ impl SubscriptionHandle {
     pub async fn add_fields(&self, fields: Vec<String>) -> Result<(), BlpAsyncError> {
         self.ensure_open()?;
         let fields = normalized_fields(fields);
+        if self.inner.request.delivery == SubscriptionDeliveryMode::State
+            && let Some(field) = fields.iter().find(|field| is_state_metadata(field))
+        {
+            return Err(state_field_conflict(field));
+        }
         let resolved = self
             .inner
             .hub
@@ -1768,6 +1985,9 @@ impl SubscriptionHandle {
         if new_fields.is_empty() && !kinds_changed {
             return Ok(());
         }
+        if let Some(delivery) = &self.inner.state_delivery {
+            delivery.seed_schema(self.inner.image_fields());
+        }
         let members = self.inner.memberships.lock().clone();
         let mut visited = HashSet::new();
         let mut resubscribe = Vec::new();
@@ -1783,11 +2003,14 @@ impl SubscriptionHandle {
                 let mut state = feed.state.lock();
                 let changed = grow_union(&mut state, &new_fields);
                 seed_image_kinds(&mut state, &kinds);
+                state.revision = state.revision.saturating_add(1);
+                let revision = state.revision;
                 let image = (!new_fields.is_empty()
                     && self.inner.request.deliver_rows
+                    && self.inner.request.delivery == SubscriptionDeliveryMode::Deltas
                     && !changed
                     && feed.identity.service == MKTDATA)
-                    .then(|| image_update(&feed, &state, true))
+                    .then(|| initial_image_update(&feed, &state))
                     .flatten();
                 let errors = state.field_errors.clone();
                 for consumer in &mut state.consumers {
@@ -1799,6 +2022,9 @@ impl SubscriptionHandle {
                         consumer.awaiting_repaint |= changed;
                         if !apply_field_errors(&self.inner, consumer, &errors) {
                             continue;
+                        }
+                        if let Some(delivery) = &self.inner.state_delivery {
+                            delivery.mark(consumer.key, revision, false);
                         }
                         if let Some(image) = &image {
                             consumer.projection.project_update(image, false);
@@ -1842,7 +2068,9 @@ impl SubscriptionHandle {
         }
         self.inner
             .after_detach(&members, |status| status.clear_active());
-        if !self.inner.request.deliver_rows {
+        if !self.inner.request.deliver_rows
+            || self.inner.request.delivery == SubscriptionDeliveryMode::State
+        {
             self.inner.stream.close();
         }
         error.map_or(Ok(()), Err)
@@ -1866,117 +2094,18 @@ impl SubscriptionHandle {
         self.ensure_open()?;
         let active: HashSet<_> = self.inner.status.load().keys().iter().copied().collect();
         let members = self.inner.memberships.lock().clone();
-        let mut rows = Vec::new();
-        let seeded = self.inner.field_kinds.lock().clone();
-        let mut field_order: Vec<(Arc<str>, FieldKind, bool)> = self
-            .fields()
-            .into_iter()
-            .filter(|field| !is_metadata(field))
-            .map(|field| {
-                let kind = seeded.get(&field).copied().unwrap_or(FieldKind::Unknown);
-                (Arc::from(field), kind, true)
-            })
-            .collect();
+        let mut rows = Vec::with_capacity(active.len());
         for member in members {
-            if !active.contains(&member.key) {
-                continue;
-            }
-            let Some(feed) = member.feed.upgrade() else {
-                continue;
-            };
-            let mut state = feed.state.lock();
-            let source = image_update(&feed, &state, false);
-            let last_update = state.last_update;
-            let live = state.live;
-            let delayed = state.delayed;
-            let Some(consumer) = state.consumers.iter_mut().find(|consumer| {
-                consumer.key == member.key && consumer.owner.ptr_eq(&Arc::downgrade(&self.inner))
-            }) else {
-                continue;
-            };
-            let projected = source
-                .as_ref()
-                .map(|source| consumer.projection.project_image(source));
-            let layout = consumer.projection.layout();
-            for field in layout
-                .fields
-                .iter()
-                .filter(|field| !is_metadata(&field.name))
+            if active.contains(&member.key)
+                && let Some(feed) = member.feed.upgrade()
+                && let Some((_, row)) = self.inner.snapshot_image(&feed, member.key, true)
             {
-                if field.kind == FieldKind::Unknown {
-                    continue;
-                }
-                if let Some((_, kind, provisional)) = field_order
-                    .iter_mut()
-                    .find(|(name, _, _)| name == &field.name)
-                {
-                    if *kind == FieldKind::Unknown || (*provisional && !field.provisional) {
-                        *kind = field.kind;
-                        *provisional = field.provisional;
-                    } else if *provisional == field.provisional {
-                        *kind = kind.merge_observed(field.kind);
-                    }
-                } else {
-                    field_order.push((field.name.clone(), field.kind, field.provisional));
-                }
+                rows.push(row);
             }
-            rows.push((member.label, last_update, live, delayed, projected));
         }
-        let mut schema = vec![
-            Field::new("topic", arrow_schema::DataType::Utf8, false),
-            Field::new(
-                "last_update",
-                ArrowType::TimestampMicros.to_arrow_datatype(),
-                true,
-            ),
-            Field::new("live", arrow_schema::DataType::Boolean, false),
-            Field::new("delayed", arrow_schema::DataType::Boolean, true),
-        ];
-        let mut arrays: Vec<ArrayRef> = vec![
-            Arc::new(StringArray::from(
-                rows.iter().map(|row| row.0.as_str()).collect::<Vec<_>>(),
-            )),
-            Arc::new(
-                TimestampMicrosecondArray::from(rows.iter().map(|row| row.1).collect::<Vec<_>>())
-                    .with_timezone("UTC"),
-            ),
-            Arc::new(BooleanArray::from(
-                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
-            )),
-            Arc::new(BooleanArray::from(
-                rows.iter().map(|row| row.3).collect::<Vec<_>>(),
-            )),
-        ];
-        let mut response_meta = super::state::ResponseMetadata::default();
-        for (name, kind, _) in field_order {
-            let arrow_type = arrow_kind(kind);
-            schema.push(Field::new(
-                name.as_ref(),
-                arrow_type.to_arrow_datatype(),
-                true,
-            ));
-            let mut builder = TypedBuilder::new(arrow_type);
-            let zero_as_null = self.inner.zero_as_null.contains(name.as_ref());
-            for row in &rows {
-                let value =
-                    row.4
-                        .as_ref()
-                        .and_then(|update| {
-                            update.values.iter().find(|value| {
-                                update.layout.fields[value.index as usize].name == name
-                            })
-                        })
-                        .map(|value| &value.value);
-                let value = value.filter(|value| !zero_as_null || !is_numeric_zero(value));
-                if builder.append_value(value.map(core_value)) {
-                    response_meta.record_type_miss(name.as_ref());
-                }
-            }
-            arrays.push(builder.finish());
-        }
-        RecordBatch::try_new(Arc::new(Schema::new(schema)), arrays)
-            .map(|batch| response_meta.attach(batch))
-            .map_err(|error| BlpAsyncError::Internal(error.to_string()))
+        let mut schema = ImageSchema::new(self.inner.image_fields());
+        schema.observe_rows(rows.iter());
+        materialize_images(rows.iter(), &mut schema, &self.inner.zero_as_null, false)
     }
 
     fn ensure_open(&self) -> Result<(), BlpAsyncError> {
@@ -1986,6 +2115,181 @@ impl SubscriptionHandle {
             Ok(())
         }
     }
+}
+
+#[derive(Default)]
+struct ImageSchema {
+    fields: Vec<(Arc<str>, FieldKind, bool)>,
+    indices: HashMap<Arc<str>, usize>,
+    reserved_collision: Option<Arc<str>>,
+    base_schemas: [Option<SchemaRef>; 2],
+    value_indices: Vec<usize>,
+    builders: Vec<(TypedBuilder, bool)>,
+}
+
+impl ImageSchema {
+    fn new(fields: Vec<(Arc<str>, FieldKind, bool)>) -> Self {
+        let indices = fields
+            .iter()
+            .enumerate()
+            .map(|(index, (name, _, _))| (name.clone(), index))
+            .collect();
+        let reserved_collision = fields
+            .iter()
+            .find(|(name, _, _)| is_state_metadata(name))
+            .map(|(name, _, _)| name.clone());
+        Self {
+            fields,
+            indices,
+            reserved_collision,
+            base_schemas: [None, None],
+            value_indices: Vec::new(),
+            builders: Vec::new(),
+        }
+    }
+
+    fn seed(&mut self, fields: Vec<(Arc<str>, FieldKind, bool)>) {
+        for (name, kind, provisional) in fields {
+            if self.reserved_collision.is_none() && is_state_metadata(&name) {
+                self.reserved_collision = Some(name.clone());
+            }
+            self.observe(&name, kind, provisional);
+        }
+    }
+
+    fn observe(&mut self, name: &Arc<str>, observed: FieldKind, provisional: bool) {
+        if let Some(&index) = self.indices.get(name) {
+            let (_, kind, previous_provisional) = &mut self.fields[index];
+            let previous_kind = *kind;
+            if *kind == FieldKind::Unknown || (*previous_provisional && !provisional) {
+                *kind = observed;
+                *previous_provisional = provisional;
+            } else if *previous_provisional == provisional {
+                *kind = kind.merge_observed(observed);
+            }
+            if *kind != previous_kind {
+                self.base_schemas = [None, None];
+            }
+        } else {
+            self.indices.insert(name.clone(), self.fields.len());
+            self.fields.push((name.clone(), observed, provisional));
+            self.base_schemas = [None, None];
+        }
+    }
+
+    fn observe_rows<'a>(&mut self, rows: impl Iterator<Item = &'a ImageRow>) {
+        for row in rows {
+            for field in row.layout.fields.iter() {
+                if self.reserved_collision.is_none() && is_state_metadata(&field.name) {
+                    self.reserved_collision = Some(field.name.clone());
+                }
+                if field.kind != FieldKind::Unknown && !is_metadata(&field.name) {
+                    self.observe(&field.name, field.kind, field.provisional);
+                }
+            }
+        }
+    }
+    fn base_schema(&mut self, include_valid: bool) -> SchemaRef {
+        let slot = usize::from(include_valid);
+        if self.base_schemas[slot].is_none() {
+            let mut fields = Vec::with_capacity(self.fields.len() + 4 + slot);
+            fields.extend([
+                Field::new("topic", arrow_schema::DataType::Utf8, false),
+                Field::new(
+                    "last_update",
+                    ArrowType::TimestampMicros.to_arrow_datatype(),
+                    true,
+                ),
+                Field::new("live", arrow_schema::DataType::Boolean, false),
+                Field::new("delayed", arrow_schema::DataType::Boolean, true),
+            ]);
+            if include_valid {
+                fields.push(Field::new("valid", arrow_schema::DataType::Boolean, false));
+            }
+            fields.extend(self.fields.iter().map(|(name, kind, _)| {
+                Field::new(name.as_ref(), arrow_kind(*kind).to_arrow_datatype(), true)
+            }));
+            self.base_schemas[slot] = Some(Arc::new(Schema::new(fields)));
+        }
+        self.base_schemas[slot]
+            .as_ref()
+            .expect("initialized image schema")
+            .clone()
+    }
+}
+
+fn materialize_images<'a>(
+    rows: impl ExactSizeIterator<Item = &'a ImageRow> + Clone,
+    image_schema: &mut ImageSchema,
+    zero_as_null: &HashSet<String>,
+    include_valid: bool,
+) -> Result<RecordBatch, BlpAsyncError> {
+    let row_count = rows.len();
+    if include_valid && let Some(name) = &image_schema.reserved_collision {
+        return Err(state_field_conflict(name));
+    }
+    let base_schema = image_schema.base_schema(include_valid);
+    let ImageSchema {
+        fields: field_order,
+        indices,
+        value_indices,
+        builders,
+        ..
+    } = image_schema;
+    let metadata_arrays: [ArrayRef; 4] = [
+        Arc::new(StringArray::from_iter_values(
+            rows.clone().map(|row| row.label.as_ref()),
+        )),
+        Arc::new(
+            TimestampMicrosecondArray::from_iter(rows.clone().map(|row| row.last_update))
+                .with_timezone("UTC"),
+        ),
+        Arc::new(BooleanArray::from_iter(rows.clone().map(|row| row.live))),
+        Arc::new(BooleanArray::from_iter(rows.clone().map(|row| row.delayed))),
+    ];
+    let mut arrays = Vec::with_capacity(field_order.len() + 4 + usize::from(include_valid));
+    arrays.extend(metadata_arrays);
+    if include_valid {
+        arrays.push(Arc::new(BooleanArray::from_iter(
+            rows.clone().map(|row| row.valid),
+        )));
+    }
+    builders.clear();
+    builders.extend(field_order.iter().map(|(name, kind, _)| {
+        (
+            TypedBuilder::with_capacity(arrow_kind(*kind), row_count),
+            zero_as_null.contains(name.as_ref()),
+        )
+    }));
+    let mut response_meta = super::state::ResponseMetadata::default();
+    value_indices.resize(field_order.len(), usize::MAX);
+    for row in rows {
+        value_indices.fill(usize::MAX);
+        if let Some(update) = &row.projected {
+            for (value_index, field) in update.values.iter().enumerate() {
+                let name = &update.layout.fields[field.index as usize].name;
+                if let Some(&index) = indices.get(name) {
+                    value_indices[index] = value_index;
+                }
+            }
+        }
+        for (index, (builder, zero_as_null)) in builders.iter_mut().enumerate() {
+            let value = row
+                .projected
+                .as_ref()
+                .filter(|_| value_indices[index] != usize::MAX)
+                .map(|update| &update.values[value_indices[index]].value)
+                .filter(|value| !*zero_as_null || !is_numeric_zero(value));
+            if builder.append_value(value.map(core_value)) {
+                response_meta.record_type_miss(field_order[index].0.as_ref());
+            }
+        }
+    }
+    arrays.extend(builders.iter_mut().map(|(builder, _)| builder.finish()));
+    builders.clear();
+    RecordBatch::try_new(base_schema, arrays)
+        .map(|batch| response_meta.attach(batch))
+        .map_err(|error| BlpAsyncError::Internal(error.to_string()))
 }
 
 pub(super) struct SharedSubscriptions {
@@ -2001,7 +2305,7 @@ pub(super) struct SharedSubscriptions {
     next_consumer: AtomicUsize,
     next_feed: AtomicUsize,
     cleanup_pending: AtomicBool,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     test_sessions: Option<Arc<TestSessionFactory>>,
 }
 
@@ -2025,7 +2329,7 @@ impl SharedSubscriptions {
             next_consumer: AtomicUsize::new(1),
             next_feed: AtomicUsize::new(1),
             cleanup_pending: AtomicBool::new(false),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-support"))]
             test_sessions: None,
         })
     }
@@ -2064,13 +2368,31 @@ impl SharedSubscriptions {
         if self.shutdown.load(Ordering::Acquire) {
             return Err(config_error("subscription engine is shut down"));
         }
+        let state_mode = request.delivery == SubscriptionDeliveryMode::State;
+        if state_mode {
+            if !request.deliver_rows {
+                return Err(config_error(
+                    "delivery='state' cannot be combined with rows=false",
+                ));
+            }
+            if request.stream_capacity.is_some() || request.overflow_policy.is_some() {
+                return Err(config_error(
+                    "delivery='state' cannot use stream_capacity or overflow_policy; state delivery is conflated by topic",
+                ));
+            }
+        }
         request.service = request.service.trim().to_string();
         request.fields = normalized_fields(request.fields);
+        if state_mode
+            && let Some(field) = request.fields.iter().find(|field| is_state_metadata(field))
+        {
+            return Err(state_field_conflict(field));
+        }
         request.options = normalize_options(request.options);
         let capacity = request
             .stream_capacity
             .unwrap_or(self.config.subscription_stream_capacity);
-        if capacity == 0 {
+        if !state_mode && capacity == 0 {
             return Err(config_error(
                 "subscription stream capacity must be greater than zero",
             ));
@@ -2079,15 +2401,36 @@ impl SharedSubscriptions {
             std::mem::take(&mut request.topics),
             std::mem::take(&mut request.aliases),
         )?;
-        let (stream, rx) = subscription_channel(if request.deliver_rows { capacity } else { 1 });
         let hub = Arc::downgrade(self);
-        stream.on_closed(Arc::new(move || {
+        let on_closed: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
             if let Some(hub) = hub.upgrade() {
                 hub.changed.notify_waiters();
                 hub.schedule_cleanup();
             }
-        }));
+        });
+        let (stream, rx, state_delivery) = if state_mode {
+            let (stream, receiver, shared) = state_delivery::channel(on_closed);
+            (
+                stream,
+                SubscriptionReceiver::from_state(receiver),
+                Some(shared),
+            )
+        } else {
+            let (stream, rx) = if request.deliver_rows {
+                subscription_channel_with_policy(
+                    capacity,
+                    request
+                        .overflow_policy
+                        .unwrap_or(self.config.overflow_policy),
+                )
+            } else {
+                subscription_channel(1)
+            };
+            stream.on_closed(on_closed);
+            (stream, rx, None)
+        };
         let forwarder = if request.deliver_rows
+            && !state_mode
             && request
                 .overflow_policy
                 .unwrap_or(self.config.overflow_policy)
@@ -2113,10 +2456,14 @@ impl SharedSubscriptions {
             status: Arc::new(SubscriptionStatusHandle::default()),
             sessions: Mutex::new(ConsumerSessions::default()),
             stream,
+            state_delivery,
             forwarder,
             closed: AtomicBool::new(false),
             next_key: AtomicUsize::new(0),
         });
+        if let Some(delivery) = &consumer.state_delivery {
+            delivery.bind(&consumer);
+        }
         {
             let mut consumers = self.consumers.lock();
             consumers.retain(|consumer| consumer.strong_count() != 0);
@@ -2133,7 +2480,7 @@ impl SharedSubscriptions {
         &self,
         permit: tokio::sync::OwnedSemaphorePermit,
     ) -> Result<Arc<FeedSession>, BlpAsyncError> {
-        #[cfg(test)]
+        #[cfg(any(test, feature = "test-support"))]
         if let Some(factory) = &self.test_sessions {
             return Ok(factory.claim(permit).await);
         }
@@ -2386,13 +2733,25 @@ impl SharedSubscriptions {
                         && apply_field_errors(consumer, &mut entry, &state.field_errors);
                     if allowed
                         && consumer.request.deliver_rows
+                        && consumer.request.delivery == SubscriptionDeliveryMode::Deltas
                         && !created
                         && feed.identity.service == MKTDATA
-                        && let Some(image) = image_update(&feed, &state, true)
+                        && let Some(image) = initial_image_update(&feed, &state)
                     {
                         // A synthetic image is always one row, including an
                         // entirely unknown projection. Only known values have presence bits.
                         entry.projection.project_update(&image, false);
+                    }
+                    if allowed && let Some(delivery) = &consumer.state_delivery {
+                        delivery.register(
+                            key,
+                            &feed,
+                            state.revision,
+                            entry.projection.topic.clone(),
+                        );
+                        if state.recovery.is_some() {
+                            delivery.mark(key, state.revision, true);
+                        }
                     }
                     state.consumers.push(entry);
                     if !allowed {
@@ -2754,16 +3113,16 @@ fn repaint_changes(
     )
 }
 
-fn image_update(feed: &Feed, state: &FeedState, synthetic: bool) -> Option<SubscriptionUpdate> {
-    if synthetic && (state.last_update.is_none() || state.recovery.is_some()) {
+fn initial_image_update(feed: &Feed, state: &FeedState) -> Option<SubscriptionUpdate> {
+    if state.last_update.is_none() || state.recovery.is_some() {
         return None;
     }
     let layout = state.layout.as_ref()?.clone();
     let mut values = SmallVec::new();
     for field in layout.fields.iter() {
-        let value = if synthetic && field.name.as_ref() == EVENT_TYPE {
+        let value = if field.name.as_ref() == EVENT_TYPE {
             Some(UpdateValue::Str(Arc::from("SUMMARY")))
-        } else if synthetic && field.name.as_ref() == EVENT_SUBTYPE {
+        } else if field.name.as_ref() == EVENT_SUBTYPE {
             Some(UpdateValue::Str(Arc::from("INITPAINT")))
         } else {
             state.image[field.index as usize].clone()
@@ -2776,11 +3135,7 @@ fn image_update(feed: &Feed, state: &FeedState, synthetic: bool) -> Option<Subsc
         }
     }
     Some(SubscriptionUpdate {
-        timestamp_us: if synthetic {
-            timestamp_now_us()
-        } else {
-            state.last_update.unwrap_or(0)
-        },
+        timestamp_us: timestamp_now_us(),
         topic_id: 0,
         topic: Arc::from(feed.identity.topic.as_str()),
         layout,
@@ -2795,6 +3150,19 @@ fn is_numeric_zero(value: &UpdateValue) -> bool {
 
 fn is_metadata(field: &str) -> bool {
     matches!(field, EVENT_TYPE | EVENT_SUBTYPE)
+}
+
+fn is_state_metadata(field: &str) -> bool {
+    matches!(
+        field,
+        "topic" | "last_update" | "live" | "delayed" | "valid"
+    )
+}
+
+fn state_field_conflict(field: &str) -> BlpAsyncError {
+    config_error(&format!(
+        "state delivery field '{field}' conflicts with a reserved metadata column; use delivery='deltas' to request this field",
+    ))
 }
 
 fn alias_label_conflict(label: &str, first: &str, second: &str) -> BlpAsyncError {

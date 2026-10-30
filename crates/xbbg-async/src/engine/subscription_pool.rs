@@ -1027,6 +1027,7 @@ impl SubscriptionWorkerState {
                         .get(key)
                         .is_some_and(|state| !state.stream.is_closed())
                     {
+                        self.subs[key].stream.report_stream_availability(true);
                         self.last_streams_warn_us.remove(&key);
                         mutations.push(StatusMutation::StreamsActive {
                             key,
@@ -1042,6 +1043,7 @@ impl SubscriptionWorkerState {
                 }
                 "SubscriptionStreamsDeactivated" => {
                     if self.subs.contains(key) {
+                        self.subs[key].stream.report_stream_availability(false);
                         mutations.push(StatusMutation::StreamsActive {
                             key,
                             active: false,
@@ -2519,18 +2521,22 @@ impl Drop for SessionClaim {
     }
 }
 
-/// SDK-backed worker adapter used by deterministic shared-feed tests. It
-/// exercises the real CID dispatch and extraction without starting a session.
-#[cfg(test)]
+/// SDK-backed worker adapter for deterministic shared-feed tests and benchmarks.
+/// Exercises the real CID dispatch and extraction without starting a session.
+#[cfg(any(test, feature = "test-support"))]
 pub(super) struct TestSubscriptionSession {
     shared: SubscriptionWorkerShared,
+    #[cfg(test)]
     pub(super) subscribes: AtomicUsize,
+    #[cfg(test)]
     pub(super) resubscribes: AtomicUsize,
+    #[cfg(test)]
     pub(super) unsubscribes: AtomicUsize,
+    #[cfg(test)]
     pub(super) fail_resubscribe: Mutex<HashSet<SlabKey>>,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 impl TestSubscriptionSession {
     pub(super) fn new(config: Arc<EngineConfig>) -> Arc<Self> {
         Arc::new(Self {
@@ -2539,9 +2545,13 @@ impl TestSubscriptionSession {
                 config,
                 Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
             ),
+            #[cfg(test)]
             subscribes: AtomicUsize::new(0),
+            #[cfg(test)]
             resubscribes: AtomicUsize::new(0),
+            #[cfg(test)]
             unsubscribes: AtomicUsize::new(0),
+            #[cfg(test)]
             fail_resubscribe: Mutex::new(HashSet::new()),
         })
     }
@@ -2571,6 +2581,7 @@ impl TestSubscriptionSession {
                     forwarder: None,
                 })?;
         status.update_topics(&keys, |next| next.add_active(&topics, &keys, metrics));
+        #[cfg(test)]
         self.subscribes.fetch_add(keys.len(), Ordering::Relaxed);
         Ok(keys)
     }
@@ -2581,7 +2592,9 @@ impl TestSubscriptionSession {
         fields: &[String],
         kinds: &HashMap<String, FieldKind>,
     ) -> Result<(), BlpAsyncError> {
+        #[cfg(test)]
         self.resubscribes.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
         if self.fail_resubscribe.lock().contains(&key) {
             return Err(BlpAsyncError::ConfigError {
                 detail: "synthetic resubscribe failure".into(),
@@ -2607,6 +2620,7 @@ impl TestSubscriptionSession {
         _status: &SharedSubscriptionStatus,
     ) -> Result<(), BlpAsyncError> {
         let (_, count) = self.shared.build_unsubscribe_list(vec![key]);
+        #[cfg(test)]
         self.unsubscribes.fetch_add(count, Ordering::Relaxed);
         if count != 0 {
             self.status(key, "SubscriptionTerminated");
@@ -2621,7 +2635,105 @@ impl TestSubscriptionSession {
         }
     }
 
+    pub(super) fn publish_json(&self, key: SlabKey, json: &str) -> Result<(), BlpAsyncError> {
+        use std::fmt::Write;
+
+        let value: serde_json::Value =
+            serde_json::from_str(json).map_err(|error| BlpAsyncError::ConfigError {
+                detail: format!("invalid synthetic update JSON: {error}"),
+            })?;
+        let values = value
+            .as_object()
+            .ok_or_else(|| BlpAsyncError::ConfigError {
+                detail: "synthetic update must be a JSON object".into(),
+            })?;
+        let layout = self
+            .shared
+            .state
+            .lock()
+            .subs
+            .get(key)
+            .map(SubscriptionState::layout)
+            .ok_or_else(|| BlpAsyncError::ConfigError {
+                detail: "synthetic subscription is no longer registered".into(),
+            })?;
+        let mut fields = String::new();
+        for (name, value) in values {
+            if name.chars().any(|character| {
+                !matches!(
+                    character,
+                    '\u{9}' | '\u{a}' | '\u{d}'
+                        | '\u{20}'..='\u{d7ff}'
+                        | '\u{e000}'..='\u{fffd}'
+                        | '\u{10000}'..='\u{10ffff}'
+                )
+            }) {
+                return Err(BlpAsyncError::ConfigError {
+                    detail: "synthetic field names contain XML 1.0-forbidden characters".into(),
+                });
+            }
+            let kind = match value {
+                serde_json::Value::String(_) => "String",
+                serde_json::Value::Bool(_) => "Boolean",
+                serde_json::Value::Number(_) => "Float64",
+                serde_json::Value::Null if name.starts_with("MKTDATA_") => "String",
+                serde_json::Value::Null if name == "IS_DELAYED_STREAM" => "Boolean",
+                serde_json::Value::Null => {
+                    match layout
+                        .fields
+                        .iter()
+                        .find(|field| field.name.as_ref() == name)
+                    {
+                        Some(field) => match field.kind {
+                            FieldKind::Bool => "Boolean",
+                            FieldKind::I32 => "Int32",
+                            FieldKind::I64 => "Int64",
+                            FieldKind::Str => "String",
+                            FieldKind::Date32 => "Date",
+                            FieldKind::Time64Micros => "Time",
+                            FieldKind::TimestampMicros => "Datetime",
+                            FieldKind::Unknown | FieldKind::F64 => "Float64",
+                        },
+                        None => "Float64",
+                    }
+                }
+                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                    return Err(BlpAsyncError::ConfigError {
+                        detail: "synthetic update fields must be scalar values".into(),
+                    });
+                }
+            };
+            fields.push_str("<element name=\"");
+            for character in name.chars() {
+                match character {
+                    '&' => fields.push_str("&amp;"),
+                    '<' => fields.push_str("&lt;"),
+                    '>' => fields.push_str("&gt;"),
+                    '"' => fields.push_str("&quot;"),
+                    '\'' => fields.push_str("&apos;"),
+                    '\t' => fields.push_str("&#x9;"),
+                    '\n' => fields.push_str("&#xA;"),
+                    '\r' => fields.push_str("&#xD;"),
+                    character if !character.is_ascii() => {
+                        write!(&mut fields, "&#x{:X};", u32::from(character))
+                            .expect("writing synthetic field name to a String");
+                    }
+                    character => fields.push(character),
+                }
+            }
+            write!(&mut fields, r#"" type="{kind}" minOccurs="0"/>"#)
+                .expect("writing synthetic schema to a String");
+        }
+        self.try_data(key, &fields, json)
+    }
+
+    #[cfg(test)]
     pub(super) fn data(&self, key: SlabKey, fields: &str, json: &str) {
+        self.try_data(key, fields, json)
+            .expect("valid synthetic SDK data");
+    }
+
+    fn try_data(&self, key: SlabKey, fields: &str, json: &str) -> Result<(), BlpAsyncError> {
         let schema = format!(
             r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
             <service name="//xbbg/test" version="1.0.0.0">
@@ -2629,17 +2741,18 @@ impl TestSubscriptionSession {
             </service><schema><sequenceType name="Update">{fields}</sequenceType></schema>
             </ServiceDefinition>"#
         );
-        let event = xbbg_core::test_support::TestEvent::with_schema(
+        let event = xbbg_core::test_support::TestEvent::try_with_schema(
             &schema,
             EventType::SubscriptionData,
             "MarketDataEvents",
             &[Self::cid(key)],
-            |formatter| formatter.json(json),
-        );
+            |formatter| formatter.try_json(json),
+        )?;
         self.shared
             .state
             .lock()
             .dispatch_event(event.event(), &self.shared);
+        Ok(())
     }
 
     pub(super) fn status(&self, key: SlabKey, message_type: &str) {
@@ -2655,6 +2768,7 @@ impl TestSubscriptionSession {
             .dispatch_event(event.event(), &self.shared);
     }
 
+    #[cfg(test)]
     pub(super) fn status_batch(&self, messages: &[(SlabKey, &str, String)]) {
         let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
         <service name="//xbbg/test" version="1.0.0.0">
@@ -2685,6 +2799,7 @@ impl TestSubscriptionSession {
             .dispatch_event(event.event(), &self.shared);
     }
 
+    #[cfg(test)]
     pub(super) fn field_exceptions(&self, key: SlabKey, json: &str) {
         let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
         <service name="//xbbg/test" version="1.0.0.0">
@@ -2739,6 +2854,7 @@ impl TestSubscriptionSession {
             .dispatch_event(event.event(), &self.shared);
     }
 
+    #[cfg(test)]
     pub(super) fn admin_event(&self, message_type: &str) {
         let event =
             xbbg_core::test_support::TestEvent::admin(EventType::Admin, message_type, &[], |_| {});
@@ -2748,10 +2864,12 @@ impl TestSubscriptionSession {
             .dispatch_event(event.event(), &self.shared);
     }
 
+    #[cfg(test)]
     pub(super) fn service_event(&self, message_type: &str) {
         self.service_event_for(message_type, "//blp/mktdata");
     }
 
+    #[cfg(test)]
     pub(super) fn service_event_for(&self, message_type: &str, service: &str) {
         let schema = format!(
             r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">

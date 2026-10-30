@@ -44,7 +44,10 @@ from ._services_gen import (
     Service as Service,
 )
 from ._streaming import (
+    DeliveryStream as DeliveryStream,
     Subscription as Subscription,
+    SubscriptionDelivery as SubscriptionDelivery,
+    SubscriptionGap as SubscriptionGap,
     Tick as Tick,
     achains as achains,
     adepth as adepth,
@@ -211,6 +214,9 @@ __all__ = [
     "abgovts",
     "Tick",
     "Subscription",
+    "SubscriptionDelivery",
+    "SubscriptionGap",
+    "DeliveryStream",
     "subscription_feeds",
     "asubscribe",
     "subscribe",

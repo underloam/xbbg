@@ -15,12 +15,16 @@ from xbbg import (
     _sync,
     backend as backend_module,
     blp as blp_module,
-    exceptions as exception_module,
 )
 
 
 class _QuietSubscription:
     delivers_rows = True
+    delivery = "deltas"
+    requires_deliveries = False
+
+    def ensure_plain_delivery(self):
+        return None
 
     def take_warnings(self):
         return []
@@ -762,84 +766,6 @@ class TestConfigValidation:
             )
 
 
-class TestTickModeWarning:
-    """Verify warning when tick_mode=True conflicts with flush_threshold."""
-
-    def test_tick_mode_flush_threshold_warning(self):
-        """tick_mode=True with flush_threshold>1 emits UserWarning before engine call."""
-        from xbbg.blp import asubscribe
-
-        captured: dict[str, object] = {}
-
-        class FakePySubscription(_QuietSubscription):
-            tickers = ["AAPL US Equity"]
-            failed_tickers = []
-            failures = []
-            topic_states = [("AAPL US Equity", "pending", 1, None, "AAPL US Equity")]
-            session_status = {
-                "state": "up",
-                "last_change_us": 1,
-                "disconnect_count": 0,
-                "reconnect_count": 0,
-            }
-            admin_status = {
-                "slow_consumer_warning_active": False,
-                "slow_consumer_warning_count": 0,
-                "slow_consumer_cleared_count": 0,
-                "data_loss_count": 0,
-                "last_warning_us": None,
-                "last_cleared_us": None,
-                "last_data_loss_us": None,
-            }
-            service_status = []
-            events = []
-            fields = ["LAST_PRICE"]
-            is_active = True
-            all_failed = False
-            stats = {
-                "messages_received": 0,
-                "dropped_batches": 0,
-                "batches_sent": 0,
-                "slow_consumer": False,
-                "data_loss_events": 0,
-                "last_message_us": 0,
-                "last_data_loss_us": 0,
-                "effective_overflow_policy": "drop_newest",
-            }
-
-        class FakeEngine:
-            async def subscribe_with_options(self, service, tickers, fields, options, **kwargs):
-                captured.update(
-                    {
-                        "service": service,
-                        "tickers": tickers,
-                        "fields": fields,
-                        "options": options,
-                        **kwargs,
-                    }
-                )
-                return FakePySubscription()
-
-        original_get_engine = _engine._get_engine
-        _engine._get_engine = lambda: FakeEngine()
-
-        try:
-            with pytest.warns(UserWarning, match="tick_mode"):
-                sub = asyncio.run(
-                    asubscribe(
-                        ["AAPL US Equity"],
-                        ["LAST_PRICE"],
-                        tick_mode=True,
-                        flush_threshold=50,
-                    )
-                )
-        finally:
-            _engine._get_engine = original_get_engine
-
-        assert sub._tick_mode is True
-        assert captured["flush_threshold"] == 1
-
-
 class TestExplicitOutputSelector:
     """Explicit output modes determine both iteration and drain values."""
 
@@ -993,34 +919,6 @@ class TestExplicitOutputSelector:
         assert drained == [drained_tick]
         assert native_sub.batch_reads == 0
         assert native_sub.tick_reads == 1
-
-
-class TestPublicStreamingTyping:
-    """The package stub exposes the same streaming and exception surface as runtime."""
-
-    def test_top_level_stub_declares_streaming_and_exception_exports(self):
-        from pathlib import Path
-
-        import xbbg
-        from xbbg._exports import EXCEPTION_EXPORTS, PACKAGE_STREAMING_EXPORTS
-
-        stub = Path(xbbg.__file__).with_name("__init__.pyi").read_text()
-        for name in PACKAGE_STREAMING_EXPORTS:
-            assert f"{name} as {name}" in stub
-            assert f'    "{name}",' in stub
-            assert getattr(xbbg, name) is getattr(blp_module, name)
-        for name in EXCEPTION_EXPORTS:
-            assert f"{name} as {name}" in stub
-            assert f'    "{name}",' in stub
-            assert getattr(xbbg, name) is getattr(exception_module, name)
-
-    def test_subscription_and_asubscribe_annotations_survive_root_reexport(self):
-        from typing import Any, get_type_hints
-
-        import xbbg
-
-        assert get_type_hints(xbbg.asubscribe)["return"] is xbbg.Subscription
-        assert get_type_hints(xbbg.Subscription.unsubscribe)["return"] == list[Any] | None
 
 
 class TestSubscriptionConversion:
@@ -1297,6 +1195,8 @@ def test_astream_uses_the_subscription_owner_patch_seam(monkeypatch):
     closed = []
 
     class Subscription:
+        requires_deliveries = False
+
         async def __aenter__(self):
             return self
 

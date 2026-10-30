@@ -59,6 +59,13 @@ CLOSED_SETS: tuple[tuple[str, str, str, str, str], ...] = (
         "Subscription behaviour when a consumer cannot keep up with Bloomberg.",
     ),
     (
+        "subscription_delivery_modes",
+        "SUBSCRIPTION_DELIVERY_MODES",
+        "SUBSCRIPTION_DELIVERY",
+        "SubscriptionDeliveryMode",
+        "Local subscription delivery: sparse deltas or conflated current state.",
+    ),
+    (
         "validation_modes",
         "VALIDATION_MODES",
         "VALIDATION_MODE",
@@ -79,6 +86,13 @@ CLOSED_SETS: tuple[tuple[str, str, str, str, str], ...] = (
 # (defs section, Rust path, test stem, impls Default, impls Display)
 RUST_CONTRACTS: tuple[tuple[str, str, str, bool, bool], ...] = (
     ("overflow_policies", "crate::engine::OverflowPolicy", "overflow_policy", True, True),
+    (
+        "subscription_delivery_modes",
+        "crate::engine::SubscriptionDeliveryMode",
+        "subscription_delivery",
+        True,
+        True,
+    ),
     ("validation_modes", "crate::engine::ValidationMode", "validation_mode", True, True),
     ("sdk_log_levels", "crate::sdk_logging::SdkLogLevel", "sdk_log_level", False, False),
 )
@@ -189,14 +203,24 @@ def langgraph_contract(defs: dict[str, Any], *, python: bool) -> dict[str, Any]:
     error_keys = result["error_keys"] + (result["python_error_keys"] if python else [])
     reasons = result["truncation_reasons"]
     tool_names = list(graph["tool_names"])
-    overflow_policies = [member[1] for member in closed_set_members(defs["overflow_policies"])]
+    # Snapshot tools expose unmarked rows, so they cannot advertise policies
+    # whose correctness requires ordered delivery envelopes.
+    overflow_policies = [
+        member[1]
+        for member in closed_set_members(defs["overflow_policies"])
+        if not defs["overflow_policies"][member[0]].get("requires_deliveries", False)
+    ]
     if python:
         reasons = [reason for reason in reasons if reason not in result["javascript_only_reasons"]]
         for name, before in graph["python_tool_order_before"].items():
             tool_names.remove(name)
             tool_names.insert(tool_names.index(before), name)
         # Python schemas retain declaration order; the existing TS set is sorted.
-        overflow_policies = [member["value"] for member in defs["overflow_policies"].values()]
+        overflow_policies = [
+            member["value"]
+            for member in defs["overflow_policies"].values()
+            if not member.get("requires_deliveries", False)
+        ]
     contract: dict[str, Any] = {
         **defs["cdx_fields"],
         "BLOOMBERG_TOOL_NAMES": tool_names,
@@ -1019,6 +1043,9 @@ def render_typescript(defs: dict[str, Any], quote: str, *, langgraph: bool = Fal
     lines.append(TS_HEADER)
     for section, plural, prefix, ts_type, set_doc in CLOSED_SETS:
         members = closed_set_members(defs[section])
+        if langgraph and section == "overflow_policies":
+            snapshot_policies = langgraph_contract(defs, python=False)["OVERFLOW_POLICIES"]
+            members = [member for member in members if member[1] in snapshot_policies]
         canonical = [value for _, value, _, _, _ in members]
         aliases = [alias for _, _, alias_list, _, _ in members for alias in alias_list]
         default_value = next(value for _, value, _, _, is_default in members if is_default)
@@ -1163,6 +1190,27 @@ def render_rust_defs_contract(defs: dict[str, Any]) -> str:
             lines.append('            "defs marks a different member as default than the parser does"')
             lines.append("        );")
             lines.append("    }")
+        if section == "overflow_policies":
+            lines.extend(
+                [
+                    "",
+                    "    #[test]",
+                    "    fn overflow_delivery_requirement_matches_defs() {",
+                    "        for (spelling, requires_deliveries) in [",
+                ]
+            )
+            for _, data in sorted_items(defs[section]):
+                value = escape_rust_string(data["value"])
+                required = str(data.get("requires_deliveries", False)).lower()
+                lines.append(f'            ("{value}", {required}),')
+            lines.extend(
+                [
+                    "        ] {",
+                    f"            assert_eq!({rust_path}::from_str(spelling).unwrap().requires_deliveries(), requires_deliveries);",
+                    "        }",
+                    "    }",
+                ]
+            )
     lines.append("}")
     return "\n".join(lines) + "\n"
 

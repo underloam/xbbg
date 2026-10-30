@@ -22,7 +22,13 @@ import warnings
 from . import _engine, _request_options, _sync, backend as _backend
 from .backend import Backend
 from .exceptions import _warn_at_user_frame
-from .services import OVERFLOW_POLICIES, OVERFLOW_POLICY_VALUES, Service
+from .services import (
+    OVERFLOW_POLICIES,
+    OVERFLOW_POLICY_VALUES,
+    SUBSCRIPTION_DELIVERY_MODES,
+    SUBSCRIPTION_DELIVERY_VALUES,
+    Service,
+)
 
 DataFrameResult: TypeAlias = Any
 logger = logging.getLogger(__name__)
@@ -169,6 +175,42 @@ class Tick:
     timestamp: datetime
 
 
+@dataclass(frozen=True, slots=True)
+class SubscriptionGap:
+    """Local raw-queue loss preceding a delivery, counted in source updates."""
+
+    dropped_updates: int
+
+    @property
+    def cause(self) -> str:
+        """The reason updates were omitted from this consumer's delta stream."""
+        return "local_overflow"
+
+
+@dataclass(frozen=True, slots=True)
+class SubscriptionDelivery:
+    """A batch plus delivery semantics that survive every backend conversion.
+
+    ``kind`` is ``"deltas"`` or ``"state"``. State rows contain the complete
+    projected image and a Boolean ``valid`` column; invalid rows are not current
+    values. ``gap_before`` applies immediately before this batch, not each row.
+    """
+
+    kind: str
+    data: Any
+    gap_before: SubscriptionGap | None = None
+
+
+def _subscription_batch_converter(raw: bool, backend: Backend | str | None) -> Callable[[Any], Any]:
+    if raw:
+        return lambda batch: batch
+    if backend is None:
+        return lambda batch: batch.to_table()
+    resolved_backend = Backend(backend) if isinstance(backend, str) else backend
+    converter = _backend.convert_backend_frame
+    return lambda batch: converter(batch.to_table(), resolved_backend)
+
+
 def subscription_feeds() -> list[dict[str, Any]]:
     """Return retained upstream feeds for the active engine.
 
@@ -236,36 +278,65 @@ class Subscription:
         self._convert_batch = self._build_batch_converter()
 
     def _build_batch_converter(self) -> Callable[[Any], Any]:
-        if self._raw:
-            return lambda batch: batch
-        if self._backend is None:
-            return lambda batch: batch.to_table()
-        converter = _backend.convert_backend_frame
-        backend = self._backend
-        return lambda batch: converter(batch.to_table(), backend)
+        return _subscription_batch_converter(self._raw, self._backend)
 
-    def __aiter__(self):
+    def _ensure_rows(self) -> None:
         if not self._sub.delivers_rows:
             raise RuntimeError("rows=False subscriptions do not yield rows; use latest() instead")
-        return self
 
-    async def __anext__(self) -> Any:
+    def _ensure_plain_delivery(self) -> None:
+        self._ensure_rows()
         try:
-            if not self._sub.delivers_rows:
-                raise RuntimeError("rows=False subscriptions do not yield rows; use latest() instead")
-            if self._tick_mode:
-                return await self._sub.__anext_tick_dict__()
-
-            batch = await self._sub.__anext__()
+            self._sub.ensure_plain_delivery()
         except Exception as exc:
             mapped = _engine._normalize_engine_exception(exc)
             if mapped is exc:
                 raise
             raise mapped from exc
 
-        finally:
-            self._emit_warnings()
-        return self._convert_batch(batch)
+    def __aiter__(self):
+        self._ensure_plain_delivery()
+        return self
+
+    async def __anext__(self) -> Any:
+        tick_mode = self._tick_mode
+        try:
+            self._ensure_rows()
+            if tick_mode:
+                value = await self._sub.__anext_tick_dict__()
+            else:
+                value = await self._sub.__anext__()
+        except BaseException as exc:
+            self._emit_warnings_preserving_error()
+            if not isinstance(exc, Exception):
+                raise
+            mapped = _engine._normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+        self._emit_warnings()
+        return value if tick_mode else self._convert_batch(value)
+
+    def deliveries(self, *, backend: Backend | str | None = None, raw: bool = False) -> DeliveryStream:
+        """Read gap-aware batch envelopes, independently of legacy tick output.
+
+        The default ``data`` is a native :class:`xbbg.ArrowTable`. Pass
+        ``backend`` for any existing batch backend or ``raw=True`` for native
+        ArrowRecordBatch wrappers. State and drop-oldest subscriptions must use
+        this view rather than plain iteration or plain draining.
+        """
+        self._ensure_rows()
+        return DeliveryStream(self, backend=backend, raw=raw)
+
+    @property
+    def delivery(self) -> str:
+        """The selected delivery mode: ``"deltas"`` or ``"state"``."""
+        return self._sub.delivery
+
+    @property
+    def requires_deliveries(self) -> bool:
+        """Whether effective native settings require marked batch consumption."""
+        return self._sub.requires_deliveries
 
     def _emit_warnings(self) -> None:
         pending = self._sub.take_warnings()
@@ -280,6 +351,14 @@ class Subscription:
             topic = event.get("topic")
             message = f"{topic}: {detail}" if topic else detail
             _warn_subscription(message, categories.get(kind, BlpSubscriptionWarning))
+
+    def _emit_warnings_preserving_error(self) -> None:
+        try:
+            self._emit_warnings()
+        except Exception:
+            # Secondary diagnostics, including raising user warning handlers,
+            # must not replace an already-active operation error/cancellation.
+            pass
 
     async def add(self, tickers: str | list[str], aliases: Mapping[str, str] | None = None) -> None:
         """Add tickers to subscription dynamically.
@@ -465,7 +544,7 @@ class Subscription:
         Returns:
             dict with keys:
                 - messages_received: int - total messages received from Bloomberg
-                - dropped_batches: int - batches dropped due to overflow
+                - dropped_batches: int - native updates dropped due to overflow
                 - batches_sent: int - batches successfully sent to Python
                 - slow_consumer: bool - True if DATALOSS was received
                 - data_loss_events: int - total Bloomberg data-loss signals observed
@@ -481,6 +560,9 @@ class Subscription:
         Args:
             drain: If True, return all unread values using the same
                 representation selected for iteration.
+                State/drop-oldest handles must drain through
+                ``sub.deliveries().unsubscribe(drain=True)`` instead. A plain
+                advanced drain closes the subscription before raising.
 
         Returns:
             List of remaining values if drain=True, else None.
@@ -490,18 +572,21 @@ class Subscription:
                 partial results are not returned when draining fails.
         """
         logger.debug("unsubscribe: drain=%s", drain)
+        tick_mode = self._tick_mode
         try:
-            remaining = await self._sub.unsubscribe(drain, self._tick_mode)
-        except Exception as exc:
+            remaining = await self._sub.unsubscribe(drain, tick_mode)
+        except BaseException as exc:
+            self._emit_warnings_preserving_error()
+            if not isinstance(exc, Exception):
+                raise
             mapped = _engine._normalize_engine_exception(exc)
             if mapped is exc:
                 raise
             raise mapped from exc
-        finally:
-            self._emit_warnings()
+        self._emit_warnings()
         if not drain:
             return None
-        if self._tick_mode:
+        if tick_mode:
             return remaining
         return [self._convert_batch(batch) for batch in remaining]
 
@@ -513,6 +598,98 @@ class Subscription:
 
     def __repr__(self) -> str:
         return repr(self._sub)
+
+
+class DeliveryStream:
+    """Async batch-delivery view sharing its subscription's native lifecycle."""
+
+    __slots__ = ("_convert_delivery", "_owner")
+
+    def __init__(self, owner: Subscription, *, backend: Backend | str | None = None, raw: bool = False):
+        self._owner = owner
+        effective_backend = None if backend is None else _backend.resolve_backend(backend, None)
+        convert_batch = _subscription_batch_converter(raw, effective_backend)
+
+        def convert_delivery(kind: str, batch: Any, dropped_updates: int | None) -> SubscriptionDelivery:
+            return SubscriptionDelivery(
+                kind=kind,
+                data=convert_batch(batch),
+                gap_before=None if dropped_updates is None else SubscriptionGap(dropped_updates),
+            )
+
+        self._convert_delivery = convert_delivery
+
+    def __aiter__(self) -> DeliveryStream:
+        return self
+
+    async def _await_publication(self, future) -> Any:
+        try:
+            receipt = await future
+        except BaseException:
+            if future.done() and not future.cancelled() and future.exception() is None:
+                receipt = future.result()
+                if receipt is not None:
+                    receipt.discard()
+            self._owner._emit_warnings_preserving_error()
+            raise
+        if receipt is None:
+            self._owner._emit_warnings()
+            return None
+        if receipt.has_error:
+            try:
+                return receipt.publish()
+            finally:
+                self._owner._emit_warnings_preserving_error()
+        try:
+            self._owner._emit_warnings()
+        except BaseException:
+            receipt.discard()
+            raise
+        return receipt.publish()
+
+    async def __anext__(self) -> SubscriptionDelivery:
+        try:
+            future = self._owner._sub.next_delivery(self._convert_delivery)
+            return await self._await_publication(future)
+        except Exception as exc:
+            mapped = _engine._normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    async def read(self) -> SubscriptionDelivery:
+        """Read one delivery; cancellation leaves its native receipt unread."""
+        return await anext(self)
+
+    async def unsubscribe(self, drain: bool = False) -> list[SubscriptionDelivery] | None:
+        """Close the shared subscription, optionally returning marked batches.
+
+        Failed conversion or canceled publication leaves the frozen drain
+        available to another ``unsubscribe(drain=True)`` call, even after close.
+        A non-draining close intentionally discards any retained drain.
+        """
+        try:
+            future = self._owner._sub.unsubscribe_deliveries(drain, self._convert_delivery)
+            return await self._await_publication(future)
+        except Exception as exc:
+            mapped = _engine._normalize_engine_exception(exc)
+            if mapped is exc:
+                raise
+            raise mapped from exc
+
+    async def close(self) -> None:
+        """Close the shared subscription without draining."""
+        await self.unsubscribe()
+
+    async def aclose(self) -> None:
+        """Close this async iterator and its shared subscription."""
+        await self.close()
+
+    async def __aenter__(self) -> DeliveryStream:
+        return self
+
+    async def __aexit__(self, *_args) -> None:
+        await self.close()
 
 
 async def asubscribe(
@@ -529,6 +706,7 @@ async def asubscribe(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    delivery: str = "deltas",
     output: str | None = None,
     aliases: Mapping[str, str] | None = None,
     on_delayed: str = "warn",
@@ -550,11 +728,13 @@ async def asubscribe(
     Dict ticks are sparse deltas: missing keys are unchanged, while present
     ``None`` values explicitly clear fields. Arrow batches append the binary
     ``__xbbg_present`` bitset (LSB-first; bit i maps to schema field i + 2).
-    For row consumers, Bloomberg DATALOSS or local queue loss raises
-    ``BlpSubscriptionDataLossError`` and ends the stream. Image-only consumers
-    (``rows=False``) recover from DATALOSS with a fresh paint; ``sub.events``
-    records DataLoss/FeedRecovered. Session termination does not auto-recover.
-    Connection-down notifications alone remain nonterminal.
+    Strict delta consumers raise ``BlpSubscriptionDataLossError`` on Bloomberg
+    DATALOSS or local queue loss. Opt-in ``overflow_policy="drop_oldest"`` retains
+    newer deltas and reports local gaps through ``sub.deliveries()``; SDK loss
+    remains terminal. State and image-only (``rows=False``) consumers recover
+    from DATALOSS with a fresh paint; ``sub.events`` records DataLoss/FeedRecovered.
+    State rows are invalid until that paint completes. Session termination does
+    not auto-recover. Connection-down notifications alone remain nonterminal.
 
     Market-data feeds are shared within an engine by default. A late row consumer
     receives a projected image. Field-union repaints reach waiting consumers in
@@ -584,6 +764,12 @@ async def asubscribe(
         overflow_policy: ``"drop_newest"`` (default) fails on a full consumer
             buffer; ``"block"`` waits briefly on a bounded forwarder and fails
             on overflow/timeout. Neither waits on Bloomberg's callback thread.
+            ``"drop_oldest"`` evicts the oldest buffered updates and requires
+            ``sub.deliveries()`` so local loss cannot be silently discarded.
+        delivery: ``"deltas"`` preserves sparse update semantics (default).
+            ``"state"`` conflates current images and must be consumed through
+            ``sub.deliveries()``; each row includes ``valid``. State mode rejects
+            ``rows=False`` and explicit raw queue controls.
         output: Output selector: ``"record_batch"``, ``"backend"``, ``"dict"``,
             or ``"tick"`` (case-insensitive). When provided, it takes precedence
             over ``raw`` and ``tick_mode``; ``None`` retains their behavior.
@@ -600,7 +786,7 @@ async def asubscribe(
             fields; ``"raise"`` rejects the affected topic; ``"ignore"`` records
             ``field_errors`` without warnings.
         zero_as_null: Field names whose numeric zero values become null in
-            ``latest()`` only. Rows and stored images remain unchanged.
+            ``latest()`` and state deliveries. Delta rows and stored images are unchanged.
 
     Returns:
         Subscription handle for iteration and control
@@ -635,6 +821,14 @@ async def asubscribe(
         async for tick_dict in sub:
             print(tick_dict)  # {'ticker': 'AAPL US Equity', 'LAST_PRICE': 150.25, ...}
     """
+    if delivery not in SUBSCRIPTION_DELIVERY_MODES:
+        raise ValueError(f"delivery must be one of {SUBSCRIPTION_DELIVERY_VALUES}, got {delivery!r}")
+    if delivery == "state":
+        if not rows:
+            raise ValueError("delivery='state' cannot be combined with rows=False; use latest() instead")
+        if stream_capacity is not None or overflow_policy is not None:
+            raise ValueError("delivery='state' cannot be combined with explicit raw queue controls")
+
     if output is not None:
         normalized_output = output.lower()
         if normalized_output not in ("record_batch", "backend", "dict", "tick"):
@@ -655,12 +849,6 @@ async def asubscribe(
         raise ValueError("stream_capacity must be >= 1")
     if overflow_policy is not None and overflow_policy not in OVERFLOW_POLICIES:
         raise ValueError(f"overflow_policy must be one of {OVERFLOW_POLICY_VALUES}, got {overflow_policy!r}")
-
-    if tick_mode and flush_threshold is not None and flush_threshold > 1:
-        warnings.warn(
-            f"tick_mode=True forces flush_threshold=1, ignoring flush_threshold={flush_threshold}", stacklevel=2
-        )
-        flush_threshold = 1
 
     subscription_service = service.value if isinstance(service, Service) else service
     effective_subscription_service = subscription_service or Service.MKTDATA.value
@@ -700,6 +888,7 @@ async def asubscribe(
         "on_field_error": on_field_error,
         "zero_as_null": None if zero_as_null is None else _request_options._normalize_fields(zero_as_null),
         "session_wait_ms": _SYNC_STREAM_SESSION_WAIT_MS if session_limit is not None else None,
+        "delivery": delivery,
     }
     try:
         if (
@@ -735,6 +924,16 @@ async def asubscribe(
                 raise RuntimeError(f"sync stream producer limit reached ({session_limit})") from exc
         raise
 
+    if tick_mode and flush_threshold is not None and flush_threshold > 1 and not py_sub.requires_deliveries:
+        try:
+            warnings.warn(
+                "tick_mode=True reads one update at a time; flush_threshold applies only to batch deliveries",
+                stacklevel=2,
+            )
+        except BaseException:
+            await py_sub.unsubscribe(False, tick_mode)
+            raise
+
     return Subscription(
         py_sub,
         raw=raw or tick_mode,
@@ -757,6 +956,7 @@ async def astream(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    delivery: str = "deltas",
     aliases: Mapping[str, str] | None = None,
     on_delayed: str = "warn",
     isolated: bool = False,
@@ -779,18 +979,22 @@ async def astream(
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
         flush_threshold: Number of ticks to buffer before emitting a batch.
         stream_capacity: Capacity of the native subscription stream.
-        overflow_policy: Overflow policy for the native stream: ``"drop_newest"``
-            (default) or ``"block"``.
+        overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve
+            strict delta output. ``"drop_oldest"`` yields marked batch envelopes.
+        delivery: ``"state"`` yields :class:`SubscriptionDelivery` envelopes,
+            as does an effective drop-oldest policy (including global defaults).
+            Their ``data`` uses batch ``raw``/``backend`` settings independently
+            of ``tick_mode``; continuity information is never discarded.
         aliases: Bloomberg topic to consumer label mapping.
         on_delayed: ``"warn"`` (default), ``"raise"`` (reject delayed topics),
             or ``"ignore"`` (flag only).
         isolated: Use private feeds instead of sharing market-data subscriptions.
         on_field_error: Rejected-field policy: ``"warn"``, ``"raise"``, or ``"ignore"``.
-        zero_as_null: Fields whose numeric zeros are null in latest images only;
-            emitted rows retain the original values.
+        zero_as_null: Fields whose numeric zeros become null in ``latest()`` and
+            state deliveries; delta rows retain their original values.
 
     Yields:
-        Batches of market data (RecordBatch, DataFrame, or dict)
+        Legacy strict batches/ticks, or marked SubscriptionDelivery envelopes.
 
     Example::
 
@@ -819,13 +1023,15 @@ async def astream(
         flush_threshold=flush_threshold,
         stream_capacity=stream_capacity,
         overflow_policy=overflow_policy,
+        delivery=delivery,
         aliases=aliases,
         on_delayed=on_delayed,
         isolated=isolated,
         on_field_error=on_field_error,
         zero_as_null=zero_as_null,
     ) as sub:
-        async for batch in sub:
+        source = sub.deliveries(backend=backend, raw=raw) if sub.requires_deliveries else sub
+        async for batch in source:
             if callback is not None:
                 try:
                     callback(batch)
@@ -862,6 +1068,7 @@ def stream(
     flush_threshold: int | None = None,
     stream_capacity: int | None = None,
     overflow_policy: str | None = None,
+    delivery: str = "deltas",
     aliases: Mapping[str, str] | None = None,
     on_delayed: str = "warn",
     isolated: bool = False,
@@ -888,18 +1095,22 @@ def stream(
         flush_threshold: Number of ticks to buffer before emitting a batch.
         stream_capacity: Capacity of both the native subscription stream and the
             sync bridge. Defaults to 256.
-        overflow_policy: Overflow policy for the native stream: ``"drop_newest"``
-            (default) or ``"block"``.
+        overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve
+            strict delta output. ``"drop_oldest"`` yields marked batch envelopes.
+        delivery: ``"state"`` yields :class:`SubscriptionDelivery` envelopes,
+            as does an effective drop-oldest policy (including global defaults).
+            Their ``data`` uses batch ``raw``/``backend`` settings independently
+            of ``tick_mode``; continuity information is never discarded.
         aliases: Bloomberg topic to consumer label mapping.
         on_delayed: ``"warn"`` (default), ``"raise"`` (reject delayed topics),
             or ``"ignore"`` (flag only).
         isolated: Use private feeds instead of sharing market-data subscriptions.
         on_field_error: Rejected-field policy: ``"warn"``, ``"raise"``, or ``"ignore"``.
-        zero_as_null: Fields whose numeric zeros are null in latest images only;
-            emitted rows retain the original values.
+        zero_as_null: Fields whose numeric zeros become null in ``latest()`` and
+            state deliveries; delta rows retain their original values.
 
     Yields:
-        Batches of market data
+        Legacy strict batches/ticks, or marked SubscriptionDelivery envelopes.
 
     Example::
 
@@ -954,6 +1165,7 @@ def stream(
             flush_threshold=flush_threshold,
             stream_capacity=stream_capacity,
             overflow_policy=overflow_policy,
+            delivery=delivery,
             aliases=aliases,
             on_delayed=on_delayed,
             isolated=isolated,
@@ -1083,6 +1295,7 @@ async def avwap(
     raw: bool = False,
     all_fields: bool = True,
     backend: Backend | str | None = None,
+    delivery: str = "deltas",
 ) -> Subscription:
     """Subscribe to real-time VWAP data.
 
@@ -1131,6 +1344,7 @@ async def avwap(
         ["VWAP"],
         options if options else None,
         all_fields=all_fields,
+        delivery=delivery,
     )
 
     return Subscription(py_sub, raw=raw, backend=effective_backend, topic_normalizer=_normalize_mktvwap_topics)
@@ -1150,6 +1364,7 @@ async def amktbar(
     raw: bool = False,
     all_fields: bool = True,
     backend: Backend | str | None = None,
+    delivery: str = "deltas",
 ) -> Subscription:
     """Subscribe to real-time streaming OHLC bars.
 
@@ -1204,6 +1419,7 @@ async def amktbar(
         ["LAST_PRICE"],
         options,
         all_fields=all_fields,
+        delivery=delivery,
     )
 
     return Subscription(py_sub, raw=raw, backend=effective_backend, topic_normalizer=_normalize_mktbar_topics)
@@ -1220,6 +1436,7 @@ async def adepth(
     raw: bool = False,
     all_fields: bool = False,
     backend: Backend | str | None = None,
+    delivery: str = "deltas",
 ) -> Subscription:
     """Subscribe to Level 2 market depth / order book data.
 
@@ -1266,6 +1483,7 @@ async def adepth(
             [],  # Fields are implicit for market depth
             None,
             all_fields=all_fields,
+            delivery=delivery,
         )
     except Exception as e:
         # Check for B-PIPE related errors
@@ -1290,6 +1508,7 @@ async def achains(
     raw: bool = False,
     all_fields: bool = False,
     backend: Backend | str | None = None,
+    delivery: str = "deltas",
 ) -> Subscription:
     """Subscribe to option or futures chain updates.
 
@@ -1341,6 +1560,7 @@ async def achains(
             [],  # Fields depend on chain type
             options,
             all_fields=all_fields,
+            delivery=delivery,
         )
     except Exception as e:
         # Check for B-PIPE related errors

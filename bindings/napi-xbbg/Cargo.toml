@@ -26,6 +26,7 @@ xbbg-recipes = { workspace = true }
 [features]
 default = ["live"]
 live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
+test-support = ["xbbg-async/test-support"]
 
 [build-dependencies]
 napi-build = { workspace = true }
