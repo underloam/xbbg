@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **Field validation and type lookup retain refused-id reasons (#369).** Validation recognizes echoed ids as well as canonical mnemonics, strict errors include Bloomberg's refusal details, successful aliases enter the type cache, and partial lookup failures warn rather than silently becoming ordinary missing metadata.
 - **macOS CI checks the subscription-delivery benchmark.** The benchmark's production receiver is boxed during untimed queue setup so the heterogeneous receiver enum does not trigger `large_enum_variant`; per-update work is unchanged.
+- **Installed-wheel CI registers native async fixtures explicitly.** The SDK-backed subscription fixture works with pytest-asyncio's strict mode when tests are copied outside the source tree, rather than depending on the repository's `asyncio_mode="auto"` configuration.
 
 ## [1.7.0] - 2026-10-29
 

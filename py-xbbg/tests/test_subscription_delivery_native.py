@@ -17,6 +17,7 @@ import weakref
 
 import narwhals.stable.v1 as nw
 import pytest
+import pytest_asyncio
 
 import xbbg
 from xbbg import _core, _engine, backend as backend_module
@@ -26,7 +27,7 @@ SECOND = "SYNTHETIC SECOND Equity"
 LABEL = "synthetic delivery"
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def native_factory(monkeypatch):
     factory = getattr(_core, "_test_subscription_fixture", None)
     if factory is None:
