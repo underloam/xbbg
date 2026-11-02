@@ -9,6 +9,7 @@ import type {
   FieldInfo,
   FuturesCandidate,
   FxPairInfo,
+  KeyColumn,
   MarketRule,
   RequestInput,
   SeatType,
@@ -170,6 +171,8 @@ export interface NativeSubscription {
 }
 
 export interface NativeEngine {
+  /** Name of the result column holding each row's security. */
+  readonly keyColumn: KeyColumn;
   request(params: RequestInput): Promise<NativeArrowZeroCopyBatch>;
   requestRaw(params: RequestInput): Promise<Buffer>;
   seatType(): Promise<SeatType>;

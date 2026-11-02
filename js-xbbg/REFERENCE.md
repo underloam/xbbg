@@ -204,6 +204,8 @@ import { bdp, ovr } from '@xbbg/core';
 xbbg.configure({
   host: 'localhost',
   port: 8194,
+  // Name results' security column 'security' instead of the deprecated 'ticker'
+  keyColumn: 'security',
 });
 
 // Direct B-PIPE / leased-line hosts with ordered failover

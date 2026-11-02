@@ -2,6 +2,7 @@ import type { Table } from 'apache-arrow';
 
 import type {
   IndexMemberField,
+  KeyColumn,
   OverflowPolicy,
   SdkLogLevel,
   ValidationMode,
@@ -147,6 +148,14 @@ export interface EngineConfig {
   shardMaxConcurrent?: number;
   /** Field validation before a request is sent. Default `'disabled'`. */
   validationMode?: ValidationMode;
+  /**
+   * Name of the result column holding each row's security. Default `'ticker'`,
+   * deprecated: it collides with Bloomberg's `TICKER` field once identifiers are
+   * case-folded, and the first result that uses it emits a `DeprecationWarning`
+   * (code `XBBG_TICKER_KEY_COLUMN`). `'security'` becomes the default in the next
+   * major release.
+   */
+  keyColumn?: KeyColumn;
   subscriptionFlushThreshold?: number;
   maxEventQueueSize?: number;
   commandQueueSize?: number;
@@ -712,6 +721,7 @@ export type BackendKind = 'arrow' | 'json' | 'polars';
 // Shared Python/JS vocabulary is generated from defs/bloomberg.toml.
 export type {
   FormatKind,
+  KeyColumn,
   OverflowPolicy,
   SdkLogLevel,
   SubscriptionDeliveryMode,

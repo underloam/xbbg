@@ -318,6 +318,40 @@ export function emitDelayedDataWarnings(metadata: Record<string, string>): void 
   }
 }
 
+const TICKER_KEY_COLUMN_WARNING =
+  "@xbbg/core results name the security column 'ticker', which collides with Bloomberg's " +
+  "TICKER field. The next major release renames it 'security'; set keyColumn: 'security' " +
+  'in the engine config to switch now.';
+
+let tickerKeyColumnWarned = false;
+
+/**
+ * Emit one `DeprecationWarning` per process for the first result keyed by the
+ * deprecated `ticker` column. Pass the native batch or Arrow IPC buffer before
+ * backend conversion, so every backend warns.
+ */
+export function warnTickerKeyColumn(
+  keyColumn: string,
+  result: NativeArrowZeroCopyBatch | Buffer,
+): void {
+  if (tickerKeyColumnWarned || keyColumn !== 'ticker') {
+    return;
+  }
+  const names = Buffer.isBuffer(result)
+    ? RecordBatchReader.from(result)
+        .open()
+        .schema.fields.map((field) => field.name)
+    : result.columns.map((column) => column.name);
+  if (!names.includes('ticker')) {
+    return;
+  }
+  tickerKeyColumnWarned = true;
+  process.emitWarning(TICKER_KEY_COLUMN_WARNING, {
+    type: 'DeprecationWarning',
+    code: 'XBBG_TICKER_KEY_COLUMN',
+  });
+}
+
 /** Read the schema metadata of an Arrow IPC buffer without decoding its record batches. */
 export function ipcSchemaMetadata(buffer: Buffer): Record<string, string> {
   return metadataRecordFromMap(RecordBatchReader.from(buffer).open().schema.metadata);

@@ -96,6 +96,17 @@ BQL omits `clientContext.appName`; no implicit application name is supplied.
 Per-call `appName` overrides raw `kwargs: { 'clientContext.appName': '...' }`,
 and either explicit request value takes precedence over `bqlAppName`.
 
+Results name the column holding each row's security `ticker`, which collides with
+Bloomberg's `TICKER` field once identifiers are case-folded. It is deprecated: the
+first result that uses it emits a `DeprecationWarning` (code `XBBG_TICKER_KEY_COLUMN`),
+and the next major release renames the column `security`. Switch now with
+`keyColumn`:
+
+```ts
+xbbg.configure({ keyColumn: 'security' });
+const securityEngine = await xbbg.Engine.connect({ keyColumn: 'security' });
+```
+
 ## Connections
 
 `configure()` and `connect()` take the same config: `host`/`port` for a local Terminal, `servers` for ordered failover, `auth` (`user`, `app`, `userapp`, `dir`, `manual`, or `token`), `tls`, `zfpRemote` for ZFP leased lines, and `socks5`.

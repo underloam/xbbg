@@ -607,6 +607,14 @@ function utf8(name: string, values: readonly (string | null)[]): NativeArrowColu
     nullBitmap: Buffer.from(validity),
   };
 }
+function keyedBatch(key: string): NativeArrowZeroCopyBatch {
+  return {
+    kind: 'zeroCopy',
+    numRows: 1,
+    metadata: {},
+    columns: [utf8(key, ['EURUSD BGN Curncy']), utf8('TICKER', ['EURUSD'])],
+  };
+}
 function venueBatch(rows: readonly VenueFixture[]): NativeArrowZeroCopyBatch {
   return {
     kind: 'zeroCopy',
@@ -895,6 +903,36 @@ describe('temporal native table results', () => {
       [0n, 0],
       [null, null],
     ]);
+  });
+});
+
+describe('ticker key column deprecation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns once per process, only for results keyed by the ticker column', async () => {
+    const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
+    const request = { service: '//blp/refdata', operation: 'ReferenceDataRequest' } as const;
+
+    await engineWithNative({
+      keyColumn: 'security',
+      request: async () => keyedBatch('security'),
+    }).request(request);
+    expect(emitted).not.toHaveBeenCalled();
+
+    const legacy = engineWithNative({
+      keyColumn: 'ticker',
+      request: async () => keyedBatch('ticker'),
+      recipeDelayStatus: async () => keyedBatch('ticker'),
+    });
+    await legacy.request(request);
+    await legacy.delayStatus('EURUSD BGN Curncy');
+    expect(emitted).toHaveBeenCalledTimes(1);
+    expect(emitted).toHaveBeenCalledWith(expect.stringContaining("keyColumn: 'security'"), {
+      type: 'DeprecationWarning',
+      code: 'XBBG_TICKER_KEY_COLUMN',
+    });
   });
 });
 
