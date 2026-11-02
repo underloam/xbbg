@@ -31,6 +31,7 @@ use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use arrow_select::take::take_record_batch;
 use chrono::{Datelike, Duration, NaiveDate};
+use xbbg_async::diagnostics::{FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
 use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -1151,7 +1152,7 @@ pub async fn recipe_turnover(
             let fallback = engine.request(params).await?;
             request_ids.collect(&fallback);
             append_turnover_fallback(&mut rows, &missing, &fallback)?;
-            merge_turnover_metadata(&mut metadata, fallback.schema().metadata());
+            merge_turnover_metadata(&mut metadata, fallback.schema().metadata())?;
         }
         build_turnover_batch(rows, metadata)
     }
@@ -1624,22 +1625,31 @@ fn append_turnover_fallback(
 fn merge_turnover_metadata(
     metadata: &mut HashMap<String, String>,
     extra: &HashMap<String, String>,
-) {
+) -> Result<()> {
     for (key, value) in extra {
-        if let Some(previous) = metadata.get_mut(key) {
-            if key.starts_with("xbbg.")
-                && let (
-                    Ok(serde_json::Value::Object(mut left)),
-                    Ok(serde_json::Value::Object(right)),
-                ) = (serde_json::from_str(previous), serde_json::from_str(value))
-            {
-                left.extend(right);
-                *previous = serde_json::Value::Object(left).to_string();
-            }
-        } else {
+        let Some(previous) = metadata.get_mut(key) else {
             metadata.insert(key.clone(), value.clone());
+            continue;
+        };
+        if key == METADATA_KEY_FIELD_EXCEPTIONS {
+            // Dictionary indices are local to each payload; merge occurrences by value.
+            let invalid = |err: serde_json::Error| {
+                RecipeError::Other(format!(
+                    "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {err}"
+                ))
+            };
+            let mut merged = FieldExceptions::from_json(previous).map_err(invalid)?;
+            merged.extend(FieldExceptions::from_json(value).map_err(invalid)?);
+            *previous = merged.to_json().map_err(invalid)?;
+        } else if key.starts_with("xbbg.")
+            && let (Ok(serde_json::Value::Object(mut left)), Ok(serde_json::Value::Object(right))) =
+                (serde_json::from_str(previous), serde_json::from_str(value))
+        {
+            left.extend(right);
+            *previous = serde_json::Value::Object(left).to_string();
         }
     }
+    Ok(())
 }
 
 fn build_turnover_batch(
@@ -2871,10 +2881,58 @@ mod tests {
                 "xbbg.eid_data".to_string(),
                 r#"{"XYZ US Equity":[2]}"#.to_string(),
             )]),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&metadata["xbbg.eid_data"]).unwrap();
         assert_eq!(value["ABC US Equity"][0], 1);
         assert_eq!(value["XYZ US Equity"][0], 2);
+    }
+
+    #[test]
+    fn test_turnover_metadata_merges_compact_field_exceptions_by_value() {
+        let encode = |occurrences: &[(&str, &str)]| {
+            let mut exceptions = FieldExceptions::default();
+            for (ticker, field) in occurrences {
+                exceptions.record(
+                    ticker,
+                    xbbg_async::diagnostics::FieldExceptionMeta {
+                        field: (*field).to_string(),
+                        category: "BAD_FLD".to_string(),
+                        code: 9,
+                        subcategory: "NOT_APPLICABLE_TO_HISTORICAL_DATA".to_string(),
+                        message: "Field not applicable to security".to_string(),
+                    },
+                );
+            }
+            exceptions.to_json().unwrap()
+        };
+        let key = METADATA_KEY_FIELD_EXCEPTIONS.to_string();
+        let mut metadata = HashMap::from([(key.clone(), encode(&[("ABC US Equity", "TURNOVER")]))]);
+        let fallback = encode(&[
+            ("ABC US Equity", "EQY_WEIGHTED_AVG_PX"),
+            ("XYZ US Equity", "VOLUME"),
+        ]);
+        merge_turnover_metadata(&mut metadata, &HashMap::from([(key.clone(), fallback)])).unwrap();
+
+        let merged = FieldExceptions::from_json(&metadata[&key])
+            .unwrap()
+            .expanded();
+        let fields = |ticker: &str| {
+            merged[ticker]
+                .iter()
+                .map(|exception| exception.field.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fields("ABC US Equity"), ["TURNOVER", "EQY_WEIGHTED_AVG_PX"]);
+        assert_eq!(fields("XYZ US Equity"), ["VOLUME"]);
+
+        let malformed = HashMap::from([(key, "{not json".to_string())]);
+        let error = merge_turnover_metadata(&mut metadata, &malformed).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid xbbg.field_exceptions metadata")
+        );
     }
 
     #[test]
