@@ -406,6 +406,28 @@ requires the corresponding `auth_method`. A per-call
 overrides the engine BQL default. With `bql_app_name=None` and no per-call
 value, xbbg omits the request element and preserves the service default.
 
+Results name the column holding each row's security `ticker`. Once a consumer
+folds identifier case (a database load through unquoted identifiers, or
+upper-casing columns to match mnemonics), that name collides with Bloomberg's
+`TICKER` field, so it is deprecated: results that still use it emit a
+`FutureWarning`, and the next major release renames the column `security`,
+after Bloomberg's `securityData.security` element. Switch now with an engine
+setting:
+
+```python
+from xbbg import blp, configure
+
+configure(key_column="security")
+blp.bdp("EURUSD BGN Curncy", ["TICKER", "NAME"], format="semi_long")
+# columns: security, TICKER, NAME
+```
+
+The setting covers every result keyed by security: reference, historical, and
+bulk data, intraday bars and ticks, BQL, and the recipes built on them. Scoped
+engines take `Engine(key_column="security")`, Node takes
+`keyColumn: 'security'`, and the MCP server reads `XBBG_MCP_KEY_COLUMN`.
+Subscription rows identify securities by `topic` and are unaffected.
+
 Common environments:
 
 | Environment | Use when | Configuration shape |

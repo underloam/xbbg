@@ -13,6 +13,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Transactional marked reads and drains.** Native source receipts survive conversion failure, cancellation, and closing views until publication. Frozen drains retain complete epoch/gap/error ordering for backend retry, without retaining exported Arrow buffers.
 - **Offline native verification and benchmarks.** Feature-gated SDK TestUtil drivers exercise real CPython, V8, and Bun paths; CI excludes the drivers from shipped artifacts. Benchmarks compare default queues with a frozen v1.7.0 source and distinguish full adapters from bare overwrite primitives, with privacy-safe provenance.
 - **Field metadata refusal diagnostics (#369).** FieldInfo results append Bloomberg's field `id` for each answered field and always retain per-request-id `fieldError` details under `xbbg.field_errors`, including on empty results. Native Python tables/batches expose `field_errors`, pandas preserves `xbbg_field_errors`, and Node and bounded tool results expose `fieldErrors`.
+- **Configurable security key column (#371).** An engine setting names the column that holds each row's security: `"ticker"` (default) or `"security"`, after Bloomberg's `securityData.security` element. Set it with Python `configure(key_column=...)`/`Engine(key_column=...)`, Node `keyColumn`, Rust `EngineConfig::key_column` (`KeyColumn`), or MCP `XBBG_MCP_KEY_COLUMN`. It covers reference, historical, bulk, intraday bar and tick, and BQL results, the recipes and resolvers built on them, and `xbbg.testing` mock responses; the `ext` pivot and earnings-header helpers accept either name. Subscription rows keep `topic`.
+
+### Deprecated
+
+- **The `ticker` key column (#371).** Once identifiers are case-folded it collides with Bloomberg's `TICKER` field. Python results that use it emit a `FutureWarning`, Node emits one `DeprecationWarning` per process (code `XBBG_TICKER_KEY_COLUMN`), and the MCP server logs a warning at startup. The next major release makes `security` the default and removes `ticker`.
 
 ### Changed
 
@@ -21,6 +26,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **BREAKING (raw metadata): compact field exceptions (#368).** `xbbg.field_exceptions` now writes a version-1 dictionary envelope with unique full exception payloads and per-security occurrence indices. The engine interns repeated text during extraction and remaps dictionaries by value when merging shards or the requests of a composed recipe; each streamed chunk carries its own dictionary. Public Python/Node exception accessors retain their expanded map shape, and Python decodes it without holding the GIL. Readers continue to accept historical stored maps and name the unsupported version or malformed member they reject. Bounded tool adapters (MCP, Python and Node LangGraph) expand only retained diagnostics and omit unreadable ones as `unsupported_value` instead of failing the result.
 - **BREAKING (Rust): shared diagnostic types live in `xbbg_async::diagnostics`.** Import `FieldExceptionMeta` and `METADATA_KEY_FIELD_EXCEPTIONS` from that module instead of `engine::state`; it also provides the compact `FieldExceptions` codec and field-id refusal metadata.
 - **BREAKING (output shape): FieldInfo tables gain an `id` column.** `bflds()` (with `fields=` or `search_spec=`), Node `fieldInfo()`, and `FieldInfoRequest` results carry Bloomberg's field id (for example `PR005`) as a trailing fifth column. Code that unpacks these columns positionally must accept it.
+- **BREAKING (Rust): `EngineConfig` gains `key_column`.** Full struct literals must set it or use `..Default::default()`.
 
 ### Fixed
 
