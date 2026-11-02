@@ -46,12 +46,14 @@ use std::collections::{HashMap, VecDeque};
 use std::future::Future;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError};
 
 use arrow_array::RecordBatch;
 use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::MutexExt;
 use pyo3::types::{PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyString, PyTime, PyTzInfo};
 use pyo3_async_runtimes::tokio::future_into_py;
 #[cfg(feature = "stub-gen")]
@@ -60,7 +62,7 @@ use tokio::sync::watch;
 use xbbg_log::{debug, info, warn};
 
 use xbbg_async::engine::state::{
-    SubscriptionArrowBatcher, SubscriptionMetrics, SubscriptionUpdate, UpdateValue,
+    FieldLayout, SubscriptionArrowBatcher, SubscriptionMetrics, SubscriptionUpdate, UpdateValue,
 };
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
@@ -402,7 +404,9 @@ pub struct PyEngineConfig {
     /// next major release.
     #[pyo3(get, set)]
     pub key_column: String,
-    /// Number of ticks to buffer before flushing to Python (default: 1)
+    /// Maximum number of already-queued subscription updates combined into one
+    /// batch (default: 16). Reads never wait for more updates: a read returns as
+    /// soon as one update is available, so quiet streams still yield one-row batches.
     #[pyo3(get, set)]
     pub subscription_flush_threshold: usize,
     /// Bloomberg SDK event queue size (default: 10000)
@@ -1364,6 +1368,10 @@ impl PyEngine {
     /// Returns a PySubscription that supports async iteration and dynamic add/remove.
     /// GIL is released during async operations; iteration and add/remove use separate
     /// locks to avoid contention.
+    /// flush_threshold caps how many already-queued updates one read combines
+    /// into a batch (default: the engine's subscription_flush_threshold, 16).
+    /// Reads never wait for more updates, so quiet streams still yield one-row
+    /// batches.
     /// Aliases map Bloomberg topics to consumer labels. Delayed streams warn by
     /// default; on_delayed also accepts raise and ignore. Isolated subscriptions
     /// do not share upstream feeds with other consumers.
@@ -1463,6 +1471,7 @@ impl PyEngine {
                 overflow_policy: handle.overflow_policy(),
                 consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
                 engine_shutdown: engine.shutdown_receiver(),
+                tick_dict_keys: Arc::default(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
@@ -1481,6 +1490,9 @@ impl PyEngine {
     ///     tickers: List of securities to subscribe to
     ///     fields: List of fields to subscribe to
     ///     options: List of subscription options (e.g., ["VWAP_START_TIME=09:30"])
+    ///     flush_threshold: Maximum number of already-queued updates combined into
+    ///         one batch (default: the engine's subscription_flush_threshold, 16).
+    ///         Reads never wait for more updates.
     ///     aliases: Optional Bloomberg topic to consumer label mapping
     ///     on_delayed: Delayed stream policy: warn, raise, or ignore
     ///     isolated: Disable sharing of upstream market-data feeds
@@ -1588,6 +1600,7 @@ impl PyEngine {
                 overflow_policy: handle.overflow_policy(),
                 consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
                 engine_shutdown: engine.shutdown_receiver(),
+                tick_dict_keys: Arc::default(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
@@ -1711,6 +1724,8 @@ pub struct PySubscription {
     /// Engine shutdown is not iteration EOF; this only prevents close commands
     /// from being sent after global engine teardown has already cleaned up.
     engine_shutdown: watch::Receiver<bool>,
+    /// Tick-dict field keys, reused while the update layout is unchanged.
+    tick_dict_keys: Arc<StdMutex<TickDictKeys>>,
     /// Retain the synthetic engine while a real test subscription is alive.
     #[cfg(feature = "test-support")]
     _test_fixture: Option<Arc<xbbg_async::testing::SubscriptionFixture>>,
@@ -1955,6 +1970,7 @@ impl PySubscription {
     fn __anext_tick_dict__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.ensure_plain_rows()?;
         let consumer = self.consumer.clone();
+        let tick_keys = Arc::clone(&self.tick_dict_keys);
         #[cfg(feature = "test-support")]
         let read_started = self._test_legacy_read_started.clone();
 
@@ -1982,7 +1998,13 @@ impl PySubscription {
                         .expect("one-update read must contain an update");
                     // Retain rx until attachment unless the publication gate owns ordering.
                     let _receiver = _publication.is_none().then_some(guard);
-                    try_attach_or_suspend(|py| subscription_update_to_pydict(py, update)).await
+                    try_attach_or_suspend(|py| {
+                        let mut keys = tick_keys
+                            .lock_py_attached(py)
+                            .unwrap_or_else(PoisonError::into_inner);
+                        subscription_update_to_pydict(py, &mut keys, update)
+                    })
+                    .await
                 }
                 SubscriptionRead::Error(error) => Err(blp_error_to_pyerr(error)),
                 SubscriptionRead::Ended => Err(PyStopAsyncIteration::new_err("subscription ended")),
@@ -2313,6 +2335,7 @@ impl PySubscription {
         let legacy_arrow = self.legacy_arrow.clone();
         let batch_items = self.batch_items;
         let engine_shutdown = self.engine_shutdown.clone();
+        let tick_keys = Arc::clone(&self.tick_dict_keys);
 
         debug!(drain, tick_mode, "PySubscription: unsubscribing");
 
@@ -2351,9 +2374,12 @@ impl PySubscription {
                         .clear();
                 }
                 return try_attach_or_suspend(|py| {
+                    let mut keys = tick_keys
+                        .lock_py_attached(py)
+                        .unwrap_or_else(PoisonError::into_inner);
                     let list = pyo3::types::PyList::empty(py);
                     for update in remaining {
-                        list.append(subscription_update_to_pydict(py, update)?)?;
+                        list.append(subscription_update_to_pydict(py, &mut keys, update)?)?;
                     }
                     Ok(list.into_any().unbind())
                 })
@@ -2653,11 +2679,14 @@ fn time64_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
+fn timestamp_micros_to_py<'py>(
+    py: Python<'py>,
+    utc: &Bound<'py, PyTzInfo>,
+    micros: i64,
+) -> PyResult<Py<PyAny>> {
     let Some(dt) = DateTime::from_timestamp_micros(micros) else {
         return Ok(py.None());
     };
-    let utc = PyTzInfo::utc(py)?;
     Ok(PyDateTime::new(
         py,
         dt.year(),
@@ -2667,39 +2696,71 @@ fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
         dt.minute() as u8,
         dt.second() as u8,
         dt.timestamp_subsec_micros(),
-        Some(&utc),
+        Some(utc),
     )?
     .into_any()
     .unbind())
 }
 
+/// Python field-name keys for tick dicts, rebuilt only when the update layout
+/// changes.
+#[derive(Default)]
+struct TickDictKeys {
+    /// Layout the keys were built for; holding it keeps its address from
+    /// being reused by another layout while cached.
+    layout: Option<Arc<FieldLayout>>,
+    /// One key per layout field, indexed like `FieldLayout::fields`.
+    fields: Vec<Py<PyString>>,
+}
+
+impl TickDictKeys {
+    /// Keys for `layout`'s fields, built once per layout.
+    fn for_layout(&mut self, py: Python<'_>, layout: &Arc<FieldLayout>) -> &[Py<PyString>] {
+        let current = self
+            .layout
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, layout) && cached.version == layout.version);
+        if !current {
+            self.fields = layout
+                .fields
+                .iter()
+                .map(|meta| PyString::new(py, &meta.name).unbind())
+                .collect();
+            self.layout = Some(Arc::clone(layout));
+        }
+        &self.fields
+    }
+}
+
 fn subscription_update_to_pydict(
     py: Python<'_>,
+    keys: &mut TickDictKeys,
     update: SubscriptionUpdate,
 ) -> PyResult<Py<PyAny>> {
+    let utc = PyTzInfo::utc(py)?;
     let dict = PyDict::new(py);
     dict.set_item(
-        "timestamp",
-        timestamp_micros_to_py(py, update.timestamp_us)?,
+        intern!(py, "timestamp"),
+        timestamp_micros_to_py(py, &utc, update.timestamp_us)?,
     )?;
-    dict.set_item("topic", update.topic.as_ref())?;
+    dict.set_item(intern!(py, "topic"), update.topic.as_ref())?;
+    let names = keys.for_layout(py, &update.layout);
     for field in update.values.iter() {
-        let Some(meta) = update.layout.fields.get(field.index as usize) else {
+        let Some(name) = names.get(usize::from(field.index)) else {
             continue;
         };
+        let name = name.bind(py);
         match &field.value {
-            UpdateValue::Null => dict.set_item(meta.name.as_ref(), py.None())?,
-            UpdateValue::Bool(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::I32(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::I64(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::F64(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::Str(v) => dict.set_item(meta.name.as_ref(), v.as_ref())?,
-            UpdateValue::Date32(v) => dict.set_item(meta.name.as_ref(), date32_to_py(py, *v)?)?,
-            UpdateValue::Time64Micros(v) => {
-                dict.set_item(meta.name.as_ref(), time64_micros_to_py(py, *v)?)?
-            }
+            UpdateValue::Null => dict.set_item(name, py.None())?,
+            UpdateValue::Bool(v) => dict.set_item(name, *v)?,
+            UpdateValue::I32(v) => dict.set_item(name, *v)?,
+            UpdateValue::I64(v) => dict.set_item(name, *v)?,
+            UpdateValue::F64(v) => dict.set_item(name, *v)?,
+            UpdateValue::Str(v) => dict.set_item(name, v.as_ref())?,
+            UpdateValue::Date32(v) => dict.set_item(name, date32_to_py(py, *v)?)?,
+            UpdateValue::Time64Micros(v) => dict.set_item(name, time64_micros_to_py(py, *v)?)?,
             UpdateValue::TimestampMicros(v) => {
-                dict.set_item(meta.name.as_ref(), timestamp_micros_to_py(py, *v)?)?
+                dict.set_item(name, timestamp_micros_to_py(py, &utc, *v)?)?
             }
         }
     }
@@ -2922,6 +2983,7 @@ mod tests {
             deliver_rows,
             overflow_policy: OverflowPolicy::DropNewest,
             engine_shutdown: watch::channel(false).1,
+            tick_dict_keys: Arc::default(),
             #[cfg(feature = "test-support")]
             _test_fixture: None,
             #[cfg(feature = "test-support")]
@@ -4154,7 +4216,8 @@ mod tests {
     fn timestamp_micros_to_py_returns_utc_aware_datetime() {
         Python::initialize();
         Python::attach(|py| {
-            let value = timestamp_micros_to_py(py, 1_704_067_200_123_456).expect("timestamp");
+            let utc = PyTzInfo::utc(py).expect("utc");
+            let value = timestamp_micros_to_py(py, &utc, 1_704_067_200_123_456).expect("timestamp");
             let dt = value.bind(py);
             let tzinfo = dt.getattr("tzinfo").expect("tzinfo");
             assert!(
@@ -4181,7 +4244,8 @@ mod tests {
                 value: UpdateValue::Null,
             });
 
-            let value = subscription_update_to_pydict(py, update).expect("tick dict");
+            let value = subscription_update_to_pydict(py, &mut TickDictKeys::default(), update)
+                .expect("tick dict");
             let dict = value.bind(py).cast::<PyDict>().expect("dict");
             assert!(dict.contains("PX_LAST").expect("present field"));
             assert!(
@@ -4195,7 +4259,67 @@ mod tests {
     }
 
     #[test]
-    fn python_subscription_batch_limits_preserve_default_one_update() {
+    fn tick_dict_reuses_field_keys_until_the_layout_changes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let first = Arc::new(FieldLayout::new(
+                1,
+                vec![
+                    FieldMeta::new("PX_LAST", 0, FieldKind::F64),
+                    FieldMeta::new("BID", 1, FieldKind::F64),
+                ],
+            ));
+            // Same version, other fields: the layout object decides reuse.
+            let second = Arc::new(FieldLayout::new(
+                1,
+                vec![FieldMeta::new("BID", 0, FieldKind::F64)],
+            ));
+            let update = |layout: &Arc<FieldLayout>, value: f64| {
+                let mut update = subscription_update_with_layout(Arc::clone(layout), 10);
+                update.values.push(UpdateField {
+                    index: 0,
+                    value: UpdateValue::F64(value),
+                });
+                update
+            };
+            let mut keys = TickDictKeys::default();
+            let mut tick = |next| {
+                subscription_update_to_pydict(py, &mut keys, next)
+                    .expect("tick dict")
+                    .into_bound(py)
+                    .cast_into::<PyDict>()
+                    .expect("dict")
+            };
+            fn key<'py>(dict: &Bound<'py, PyDict>, name: &str) -> Bound<'py, PyAny> {
+                dict.keys()
+                    .iter()
+                    .find(|key| key.eq(name).expect("key comparison"))
+                    .expect("key present")
+            }
+
+            let first_tick = tick(update(&first, 1.0));
+            let second_tick = tick(update(&first, 2.0));
+            assert!(key(&first_tick, "PX_LAST").is(key(&second_tick, "PX_LAST")));
+
+            let third_tick = tick(update(&second, 3.0));
+            assert_eq!(
+                third_tick
+                    .get_item("BID")
+                    .expect("lookup")
+                    .expect("present value")
+                    .extract::<f64>()
+                    .expect("float"),
+                3.0
+            );
+            assert_eq!(
+                third_tick.keys().extract::<Vec<String>>().expect("keys"),
+                ["timestamp", "topic", "BID"]
+            );
+        });
+    }
+
+    #[test]
+    fn python_subscription_reads_stop_at_the_explicit_batch_limit() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

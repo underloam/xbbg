@@ -1,28 +1,34 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::OnceCell;
+use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::str::FromStr;
 use std::sync::Arc;
 
+use arrow_array::builder::StringBuilder;
 use arrow_array::{
     Array, ArrayRef, BinaryArray, BinaryViewArray, BooleanArray, Date32Array, Date64Array,
     Decimal128Array, DurationMicrosecondArray, DurationMillisecondArray, DurationNanosecondArray,
-    DurationSecondArray, Float16Array, Float32Array, Float64Array, Int8Array, Int16Array,
-    Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, RecordBatch, RecordBatchOptions,
-    StringArray, StringViewArray, StructArray, Time32MillisecondArray, Time32SecondArray,
-    Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
-    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
-    UInt16Array, UInt32Array, UInt64Array,
+    DurationSecondArray, Float16Array, Float32Array, Float64Array, GenericStringArray, Int8Array,
+    Int16Array, Int32Array, Int64Array, LargeBinaryArray, LargeStringArray, OffsetSizeTrait,
+    RecordBatch, RecordBatchOptions, StringArray, StringViewArray, StructArray,
+    Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray, Time64NanosecondArray,
+    TimestampMicrosecondArray, TimestampMillisecondArray, TimestampNanosecondArray,
+    TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
+use arrow_schema::{ArrowError, DataType, Field, FieldRef, Schema, SchemaRef, TimeUnit};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime, Offset, Timelike};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::{
     PyImportError, PyIndexError, PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError,
     PyValueError,
 };
+use pyo3::intern;
+use pyo3::marker::Ungil;
 use pyo3::prelude::*;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::{
-    PyAny, PyBool, PyBytes, PyCapsule, PyDate, PyDateTime, PyDict, PyInt, PyIterator, PyList,
-    PyTime, PyTuple, PyType, PyTzInfo,
+    PyAny, PyBool, PyBytes, PyCapsule, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt,
+    PyIterator, PyList, PyString, PyTime, PyTuple, PyType, PyTzInfo,
 };
 use pyo3_arrow::ffi::{
     ArrayIterator, to_array_pycapsules, to_schema_pycapsule, to_stream_pycapsule,
@@ -30,9 +36,10 @@ use pyo3_arrow::ffi::{
 use pyo3_arrow::{PyChunkedArray, PyRecordBatch, PyTable};
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
+use xbbg_arrow::scalar::{date_from_cell, date_from_days};
 use xbbg_arrow::{
     ArrowCoreError, CellValue, ColumnData, SortDirection, TableData, build_array, cell_from_array,
-    cell_has_value, cell_to_string,
+    cell_has_value,
 };
 use xbbg_async::diagnostics::{
     FieldExceptions, METADATA_KEY_FIELD_ERRORS, METADATA_KEY_FIELD_EXCEPTIONS,
@@ -157,9 +164,33 @@ fn ensure_optional_module(
     })
 }
 
+fn int64_overflow_error() -> PyErr {
+    PyOverflowError::new_err("Python integer is outside the supported signed 64-bit Arrow range")
+}
+
 fn py_value_to_cell(value: &Bound<'_, PyAny>) -> PyResult<CellValue> {
     if value.is_none() {
         return Ok(CellValue::Null);
+    }
+    // Exact builtin scalars map straight to what the probing chain below
+    // yields for them, without its failed extractions (each raises and fetches
+    // a Python exception). Subclasses and every other type still probe.
+    if let Ok(flag) = value.cast_exact::<PyBool>() {
+        return Ok(CellValue::Bool(flag.is_true()));
+    }
+    if value.is_exact_instance_of::<PyInt>() {
+        return value
+            .extract::<i64>()
+            .map(CellValue::Int)
+            .map_err(|_| int64_overflow_error());
+    }
+    if let Ok(number) = value.cast_exact::<PyFloat>() {
+        return Ok(CellValue::Float(number.value()));
+    }
+    if let Ok(text) = value.cast_exact::<PyString>()
+        && let Ok(text) = text.to_str()
+    {
+        return Ok(CellValue::Text(text.to_owned()));
     }
     if let Ok(v) = value.extract::<bool>() {
         return Ok(CellValue::Bool(v));
@@ -168,9 +199,7 @@ fn py_value_to_cell(value: &Bound<'_, PyAny>) -> PyResult<CellValue> {
         return Ok(CellValue::Int(v));
     }
     if value.is_instance_of::<PyInt>() {
-        return Err(PyOverflowError::new_err(
-            "Python integer is outside the supported signed 64-bit Arrow range",
-        ));
+        return Err(int64_overflow_error());
     }
     if let Ok(v) = value.extract::<f64>() {
         return Ok(CellValue::Float(v));
@@ -239,9 +268,24 @@ fn filter_value_supported(data_type: &DataType, needle: &CellValue) -> bool {
 }
 
 fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
+    let (columns, row_count) = rows_to_columns(rows)?;
+    rows.py()
+        .detach(move || columns_to_batch(columns, row_count))
+        .map_err(|e| PyValueError::new_err(e.to_string()))
+}
+
+/// Named cell columns collected from Python dict rows.
+type CellColumns = Vec<(String, Vec<CellValue>)>;
+
+/// Collect dict rows into cell columns named in first-seen key order.
+fn rows_to_columns(rows: &Bound<'_, PyAny>) -> PyResult<(CellColumns, usize)> {
     let iterator = PyIterator::from_object(rows)?;
-    let mut columns: Vec<(String, Vec<CellValue>)> = Vec::new();
+    let mut columns = CellColumns::new();
     let mut column_indices: HashMap<String, usize> = HashMap::new();
+    // Rows built alike repeat the same key objects in the same order, so the
+    // key last seen at a dict position usually resolves its column by
+    // identity. Holding the key keeps its address from being reused.
+    let mut position_keys: Vec<(Bound<'_, PyAny>, usize)> = Vec::new();
     let mut row_count = 0usize;
 
     for item in iterator {
@@ -251,15 +295,26 @@ fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
         })?;
         let row_idx = row_count;
 
-        for (key, value) in dict.iter() {
-            let name = key.extract::<String>()?;
-            let column_idx = if let Some(&idx) = column_indices.get(&name) {
-                idx
-            } else {
-                let idx = columns.len();
-                column_indices.insert(name.clone(), idx);
-                columns.push((name, vec![CellValue::Null; row_idx]));
-                idx
+        for (position, (key, value)) in dict.iter().enumerate() {
+            let column_idx = match position_keys.get(position) {
+                Some((cached, idx)) if cached.is(&key) => *idx,
+                _ => {
+                    let name = key.extract::<String>()?;
+                    let idx = if let Some(&idx) = column_indices.get(&name) {
+                        idx
+                    } else {
+                        let idx = columns.len();
+                        column_indices.insert(name.clone(), idx);
+                        columns.push((name, vec![CellValue::Null; row_idx]));
+                        idx
+                    };
+                    if let Some(slot) = position_keys.get_mut(position) {
+                        *slot = (key, idx);
+                    } else {
+                        position_keys.push((key, idx));
+                    }
+                    idx
+                }
             };
             columns[column_idx].1.push(py_value_to_cell(&value)?);
         }
@@ -271,23 +326,20 @@ fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
         }
         row_count += 1;
     }
+    Ok((columns, row_count))
+}
 
+/// Build the record batch for collected cell columns; pure Rust work.
+fn columns_to_batch(columns: CellColumns, row_count: usize) -> Result<RecordBatch, ArrowError> {
     if columns.is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(row_count));
-        return RecordBatch::try_new_with_options(Arc::new(Schema::empty()), vec![], &options)
-            .map_err(|e| PyValueError::new_err(e.to_string()));
+        return RecordBatch::try_new_with_options(Arc::new(Schema::empty()), vec![], &options);
     }
-
-    let mut fields = Vec::with_capacity(columns.len());
-    let mut arrays = Vec::with_capacity(columns.len());
-    for (name, cells) in columns {
-        let (field, array) = build_array(&name, &cells);
-        fields.push(field);
-        arrays.push(array);
-    }
-
+    let (fields, arrays): (Vec<Field>, Vec<ArrayRef>) = columns
+        .iter()
+        .map(|(name, cells)| build_array(name, cells))
+        .unzip();
     RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 fn py_sequence_to_cells(values: &Bound<'_, PyAny>) -> PyResult<Vec<CellValue>> {
@@ -333,7 +385,7 @@ fn column_indices_arg(value: &Bound<'_, PyAny>, schema: &SchemaRef) -> PyResult<
 }
 
 fn date32_to_py(py: Python<'_>, days: i32) -> PyResult<Py<PyAny>> {
-    let date = xbbg_arrow::scalar::date_from_days(days).ok_or_else(|| {
+    let date = date_from_days(days).ok_or_else(|| {
         PyValueError::new_err(format!(
             "Arrow date32 value {days} is outside Python's date range"
         ))
@@ -355,7 +407,45 @@ fn date64_to_py(py: Python<'_>, millis: i64) -> PyResult<Py<PyAny>> {
     date32_to_py(py, days)
 }
 
-fn timestamp_to_py(py: Python<'_>, micros: i64, timezone: Option<&str>) -> PyResult<Py<PyAny>> {
+/// Python types imported once per process rather than once per value.
+static DATETIME_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static TIMEDELTA_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static TIMEZONE_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+static DECIMAL_TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+
+/// Largest `datetime.timedelta.days` magnitude Python accepts.
+const MAX_TIMEDELTA_DAYS: i64 = 999_999_999;
+
+/// Target zone of one timestamp column, looked up at most once per column.
+enum TimestampZone<'a, 'py> {
+    Utc,
+    Named {
+        name: &'a str,
+        /// `zoneinfo.ZoneInfo(name)`, or `None` when zoneinfo cannot load it.
+        zoneinfo: OnceCell<Option<Bound<'py, PyTzInfo>>>,
+        /// chrono-tz zone for values zoneinfo does not convert.
+        fallback: OnceCell<Option<chrono_tz::Tz>>,
+    },
+}
+
+impl<'a> TimestampZone<'a, '_> {
+    fn new(timezone: Option<&'a str>) -> Self {
+        match timezone.filter(|tz| !tz.eq_ignore_ascii_case("UTC")) {
+            None => Self::Utc,
+            Some(name) => Self::Named {
+                name,
+                zoneinfo: OnceCell::new(),
+                fallback: OnceCell::new(),
+            },
+        }
+    }
+}
+
+fn timestamp_to_py<'py>(
+    py: Python<'py>,
+    micros: i64,
+    zone: &TimestampZone<'_, 'py>,
+) -> PyResult<Py<PyAny>> {
     let dt = DateTime::from_timestamp_micros(micros).ok_or_else(|| {
         PyValueError::new_err(format!(
             "Arrow timestamp value {micros}us is outside Python's datetime range"
@@ -375,30 +465,34 @@ fn timestamp_to_py(py: Python<'_>, micros: i64, timezone: Option<&str>) -> PyRes
         Some(&utc),
     )?;
 
-    let Some(tz_name) = timezone.filter(|tz| !tz.eq_ignore_ascii_case("UTC")) else {
+    let TimestampZone::Named {
+        name,
+        zoneinfo,
+        fallback,
+    } = zone
+    else {
         return Ok(utc_datetime.into_any().unbind());
     };
 
-    if let Ok(zoneinfo) = py
-        .import("zoneinfo")
-        .and_then(|module| module.getattr("ZoneInfo"))
-        .and_then(|zoneinfo| zoneinfo.call1((tz_name,)))
-        && let Ok(converted) = utc_datetime.call_method1("astimezone", (zoneinfo,))
+    if let Some(zoneinfo) = zoneinfo.get_or_init(|| PyTzInfo::timezone(py, *name).ok())
+        && let Ok(converted) = utc_datetime.call_method1(intern!(py, "astimezone"), (zoneinfo,))
     {
         return Ok(converted.unbind());
     }
 
-    let tz = tz_name
-        .parse::<chrono_tz::Tz>()
-        .map_err(|_| PyValueError::new_err(format!("unknown timestamp timezone: {tz_name}")))?;
+    let tz = (*fallback.get_or_init(|| name.parse::<chrono_tz::Tz>().ok()))
+        .ok_or_else(|| PyValueError::new_err(format!("unknown timestamp timezone: {name}")))?;
     let local = dt.with_timezone(&tz);
     let offset_seconds = local.offset().fix().local_minus_utc();
-    let datetime = py.import("datetime")?;
-    let timedelta = datetime.getattr("timedelta")?.call1((0, offset_seconds))?;
-    let fixed_tz = datetime.getattr("timezone")?.call1((timedelta, tz_name))?;
+    let timedelta = TIMEDELTA_TYPE
+        .import(py, "datetime", "timedelta")?
+        .call1((0, offset_seconds))?;
+    let fixed_tz = TIMEZONE_TYPE
+        .import(py, "datetime", "timezone")?
+        .call1((timedelta, *name))?;
 
-    Ok(datetime
-        .getattr("datetime")?
+    Ok(DATETIME_TYPE
+        .import(py, "datetime", "datetime")?
         .call1((
             local.year(),
             local.month(),
@@ -412,11 +506,11 @@ fn timestamp_to_py(py: Python<'_>, micros: i64, timezone: Option<&str>) -> PyRes
         .unbind())
 }
 
-fn timestamp_unit_to_py(
-    py: Python<'_>,
+fn timestamp_unit_to_py<'py>(
+    py: Python<'py>,
     value: i64,
     unit: &TimeUnit,
-    timezone: Option<&str>,
+    zone: &TimestampZone<'_, 'py>,
 ) -> PyResult<Py<PyAny>> {
     let micros = match unit {
         TimeUnit::Second => value.checked_mul(1_000_000),
@@ -429,7 +523,7 @@ fn timestamp_unit_to_py(
             "Arrow timestamp value {value} {unit:?} overflows microsecond conversion"
         ))
     })?;
-    timestamp_to_py(py, micros, timezone)
+    timestamp_to_py(py, micros, zone)
 }
 
 fn time_unit_to_py(py: Python<'_>, value: i64, unit: &TimeUnit) -> PyResult<Py<PyAny>> {
@@ -472,305 +566,855 @@ fn duration_to_py(py: Python<'_>, value: i64, unit: &TimeUnit) -> PyResult<Py<Py
             )
         }
     };
-    Ok(py
-        .import("datetime")?
-        .getattr("timedelta")?
+    let days = seconds.div_euclid(86_400);
+    if (-MAX_TIMEDELTA_DAYS..=MAX_TIMEDELTA_DAYS).contains(&days) {
+        // `timedelta(0, seconds, micros)` normalizes to exactly these parts.
+        let delta = PyDelta::new(
+            py,
+            days as i32,
+            seconds.rem_euclid(86_400) as i32,
+            micros as i32,
+            true,
+        )?;
+        return Ok(delta.into_any().unbind());
+    }
+    // Out of timedelta's range: Python raises its usual error.
+    Ok(TIMEDELTA_TYPE
+        .import(py, "datetime", "timedelta")?
         .call1((0, seconds, micros))?
         .unbind())
 }
 
-fn decimal_to_py(py: Python<'_>, unscaled: String, scale: i8) -> PyResult<Py<PyAny>> {
-    let exact = format!("{unscaled}E{}", -i32::from(scale));
-    Ok(py
-        .import("decimal")?
-        .getattr("Decimal")?
-        .call1((exact,))?
+fn decimal_to_py(
+    py: Python<'_>,
+    unscaled: i128,
+    scale: i8,
+    scratch: &mut String,
+) -> PyResult<Py<PyAny>> {
+    scratch.clear();
+    write!(scratch, "{unscaled}E{}", -i32::from(scale)).expect("writing to a String cannot fail");
+    Ok(DECIMAL_TYPE
+        .import(py, "decimal", "Decimal")?
+        .call1((scratch.as_str(),))?
         .unbind())
 }
 
-fn scalar_to_py(py: Python<'_>, array: &dyn Array, row: usize) -> PyResult<Py<PyAny>> {
-    if array.is_null(row) {
-        return Ok(py.None());
-    }
+/// The concrete array behind `array`, whose data type the caller matched.
+fn typed<T: Array + 'static>(array: &dyn Array) -> &T {
+    array
+        .as_any()
+        .downcast_ref::<T>()
+        .expect("Arrow array matches its data type")
+}
 
-    macro_rules! native_scalar {
-        ($array_ty:ty, $expect:literal) => {
-            array
-                .as_any()
-                .downcast_ref::<$array_ty>()
-                .expect($expect)
-                .value(row)
-                .into_py_any(py)
+/// Values of one Arrow column, downcast once for Python materialization.
+enum PyScalarValues<'a, 'py> {
+    Null,
+    Boolean(&'a BooleanArray),
+    Int8(&'a Int8Array),
+    Int16(&'a Int16Array),
+    Int32(&'a Int32Array),
+    Int64(&'a Int64Array),
+    UInt8(&'a UInt8Array),
+    UInt16(&'a UInt16Array),
+    UInt32(&'a UInt32Array),
+    UInt64(&'a UInt64Array),
+    Float16(&'a Float16Array),
+    Float32(&'a Float32Array),
+    Float64(&'a Float64Array),
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Utf8View(&'a StringViewArray),
+    Binary(&'a BinaryArray),
+    LargeBinary(&'a LargeBinaryArray),
+    BinaryView(&'a BinaryViewArray),
+    Date32(&'a Date32Array),
+    Date64(&'a Date64Array),
+    Time32(&'a [i32], TimeUnit),
+    Time64(&'a [i64], TimeUnit),
+    Timestamp(&'a [i64], TimeUnit, TimestampZone<'a, 'py>),
+    Duration(&'a [i64], TimeUnit),
+    Decimal128(&'a Decimal128Array, i8),
+    Unsupported,
+}
+
+/// One Arrow column resolved for Python materialization: the concrete array
+/// and any timezone are looked up once, so each value only reads its slot.
+struct PyScalarColumn<'a, 'py> {
+    array: &'a dyn Array,
+    values: PyScalarValues<'a, 'py>,
+}
+
+impl<'a, 'py> PyScalarColumn<'a, 'py> {
+    fn new(array: &'a dyn Array) -> Self {
+        use PyScalarValues as V;
+        let values = match array.data_type() {
+            DataType::Null => V::Null,
+            DataType::Boolean => V::Boolean(typed(array)),
+            DataType::Int8 => V::Int8(typed(array)),
+            DataType::Int16 => V::Int16(typed(array)),
+            DataType::Int32 => V::Int32(typed(array)),
+            DataType::Int64 => V::Int64(typed(array)),
+            DataType::UInt8 => V::UInt8(typed(array)),
+            DataType::UInt16 => V::UInt16(typed(array)),
+            DataType::UInt32 => V::UInt32(typed(array)),
+            DataType::UInt64 => V::UInt64(typed(array)),
+            DataType::Float16 => V::Float16(typed(array)),
+            DataType::Float32 => V::Float32(typed(array)),
+            DataType::Float64 => V::Float64(typed(array)),
+            DataType::Utf8 => V::Utf8(typed(array)),
+            DataType::LargeUtf8 => V::LargeUtf8(typed(array)),
+            DataType::Utf8View => V::Utf8View(typed(array)),
+            DataType::Binary => V::Binary(typed(array)),
+            DataType::LargeBinary => V::LargeBinary(typed(array)),
+            DataType::BinaryView => V::BinaryView(typed(array)),
+            DataType::Date32 => V::Date32(typed(array)),
+            DataType::Date64 => V::Date64(typed(array)),
+            DataType::Time32(TimeUnit::Second) => V::Time32(
+                &typed::<Time32SecondArray>(array).values()[..],
+                TimeUnit::Second,
+            ),
+            DataType::Time32(TimeUnit::Millisecond) => V::Time32(
+                &typed::<Time32MillisecondArray>(array).values()[..],
+                TimeUnit::Millisecond,
+            ),
+            DataType::Time64(TimeUnit::Microsecond) => V::Time64(
+                &typed::<Time64MicrosecondArray>(array).values()[..],
+                TimeUnit::Microsecond,
+            ),
+            DataType::Time64(TimeUnit::Nanosecond) => V::Time64(
+                &typed::<Time64NanosecondArray>(array).values()[..],
+                TimeUnit::Nanosecond,
+            ),
+            DataType::Timestamp(unit, timezone) => {
+                let values = match unit {
+                    TimeUnit::Second => &typed::<TimestampSecondArray>(array).values()[..],
+                    TimeUnit::Millisecond => {
+                        &typed::<TimestampMillisecondArray>(array).values()[..]
+                    }
+                    TimeUnit::Microsecond => {
+                        &typed::<TimestampMicrosecondArray>(array).values()[..]
+                    }
+                    TimeUnit::Nanosecond => &typed::<TimestampNanosecondArray>(array).values()[..],
+                };
+                V::Timestamp(values, *unit, TimestampZone::new(timezone.as_deref()))
+            }
+            DataType::Duration(unit) => {
+                let values = match unit {
+                    TimeUnit::Second => &typed::<DurationSecondArray>(array).values()[..],
+                    TimeUnit::Millisecond => &typed::<DurationMillisecondArray>(array).values()[..],
+                    TimeUnit::Microsecond => &typed::<DurationMicrosecondArray>(array).values()[..],
+                    TimeUnit::Nanosecond => &typed::<DurationNanosecondArray>(array).values()[..],
+                };
+                V::Duration(values, *unit)
+            }
+            DataType::Decimal128(_, scale) if *scale >= 0 => V::Decimal128(typed(array), *scale),
+            _ => V::Unsupported,
         };
+        Self { array, values }
     }
 
-    match array.data_type() {
-        DataType::Null => Ok(py.None()),
-        DataType::Boolean => native_scalar!(BooleanArray, "BooleanArray"),
-        DataType::Int8 => native_scalar!(Int8Array, "Int8Array"),
-        DataType::Int16 => native_scalar!(Int16Array, "Int16Array"),
-        DataType::Int32 => native_scalar!(Int32Array, "Int32Array"),
-        DataType::Int64 => native_scalar!(Int64Array, "Int64Array"),
-        DataType::UInt8 => native_scalar!(UInt8Array, "UInt8Array"),
-        DataType::UInt16 => native_scalar!(UInt16Array, "UInt16Array"),
-        DataType::UInt32 => native_scalar!(UInt32Array, "UInt32Array"),
-        DataType::UInt64 => native_scalar!(UInt64Array, "UInt64Array"),
-        DataType::Float16 => (array
-            .as_any()
-            .downcast_ref::<Float16Array>()
-            .expect("Float16Array")
-            .value(row)
-            .to_f32() as f64)
-            .into_py_any(py),
-        DataType::Float32 => (array
-            .as_any()
-            .downcast_ref::<Float32Array>()
-            .expect("Float32Array")
-            .value(row) as f64)
-            .into_py_any(py),
-        DataType::Float64 => native_scalar!(Float64Array, "Float64Array"),
-        DataType::Utf8 => array
-            .as_any()
-            .downcast_ref::<StringArray>()
-            .expect("StringArray")
-            .value(row)
-            .into_py_any(py),
-        DataType::LargeUtf8 => array
-            .as_any()
-            .downcast_ref::<LargeStringArray>()
-            .expect("LargeStringArray")
-            .value(row)
-            .into_py_any(py),
-        DataType::Utf8View => array
-            .as_any()
-            .downcast_ref::<StringViewArray>()
-            .expect("StringViewArray")
-            .value(row)
-            .into_py_any(py),
-        DataType::Binary => Ok(PyBytes::new(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<BinaryArray>()
-                .expect("BinaryArray")
-                .value(row),
-        )
-        .into_any()
-        .unbind()),
-        DataType::LargeBinary => Ok(PyBytes::new(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<LargeBinaryArray>()
-                .expect("LargeBinaryArray")
-                .value(row),
-        )
-        .into_any()
-        .unbind()),
-        DataType::BinaryView => Ok(PyBytes::new(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<BinaryViewArray>()
-                .expect("BinaryViewArray")
-                .value(row),
-        )
-        .into_any()
-        .unbind()),
-        DataType::Date32 => date32_to_py(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<Date32Array>()
-                .expect("Date32Array")
-                .value(row),
-        ),
-        DataType::Date64 => date64_to_py(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<Date64Array>()
-                .expect("Date64Array")
-                .value(row),
-        ),
-        DataType::Time32(TimeUnit::Second) => time_unit_to_py(
-            py,
-            i64::from(
-                array
-                    .as_any()
-                    .downcast_ref::<Time32SecondArray>()
-                    .expect("Time32SecondArray")
-                    .value(row),
-            ),
-            &TimeUnit::Second,
-        ),
-        DataType::Time32(TimeUnit::Millisecond) => time_unit_to_py(
-            py,
-            i64::from(
-                array
-                    .as_any()
-                    .downcast_ref::<Time32MillisecondArray>()
-                    .expect("Time32MillisecondArray")
-                    .value(row),
-            ),
-            &TimeUnit::Millisecond,
-        ),
-        DataType::Time64(TimeUnit::Microsecond) => time_unit_to_py(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<Time64MicrosecondArray>()
-                .expect("Time64MicrosecondArray")
-                .value(row),
-            &TimeUnit::Microsecond,
-        ),
-        DataType::Time64(TimeUnit::Nanosecond) => time_unit_to_py(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<Time64NanosecondArray>()
-                .expect("Time64NanosecondArray")
-                .value(row),
-            &TimeUnit::Nanosecond,
-        ),
-        DataType::Timestamp(unit, timezone) => {
-            let value = match unit {
-                TimeUnit::Second => array
-                    .as_any()
-                    .downcast_ref::<TimestampSecondArray>()
-                    .expect("TimestampSecondArray")
-                    .value(row),
-                TimeUnit::Millisecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMillisecondArray>()
-                    .expect("TimestampMillisecondArray")
-                    .value(row),
-                TimeUnit::Microsecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampMicrosecondArray>()
-                    .expect("TimestampMicrosecondArray")
-                    .value(row),
-                TimeUnit::Nanosecond => array
-                    .as_any()
-                    .downcast_ref::<TimestampNanosecondArray>()
-                    .expect("TimestampNanosecondArray")
-                    .value(row),
-            };
-            timestamp_unit_to_py(py, value, unit, timezone.as_deref())
+    fn len(&self) -> usize {
+        self.array.len()
+    }
+
+    /// The Python scalar at `row`; `scratch` is reusable formatting space.
+    fn value(&self, py: Python<'py>, row: usize, scratch: &mut String) -> PyResult<Py<PyAny>> {
+        use PyScalarValues as V;
+        if self.array.is_null(row) {
+            return Ok(py.None());
         }
-        DataType::Duration(unit) => {
-            let value = match unit {
-                TimeUnit::Second => array
-                    .as_any()
-                    .downcast_ref::<DurationSecondArray>()
-                    .expect("DurationSecondArray")
-                    .value(row),
-                TimeUnit::Millisecond => array
-                    .as_any()
-                    .downcast_ref::<DurationMillisecondArray>()
-                    .expect("DurationMillisecondArray")
-                    .value(row),
-                TimeUnit::Microsecond => array
-                    .as_any()
-                    .downcast_ref::<DurationMicrosecondArray>()
-                    .expect("DurationMicrosecondArray")
-                    .value(row),
-                TimeUnit::Nanosecond => array
-                    .as_any()
-                    .downcast_ref::<DurationNanosecondArray>()
-                    .expect("DurationNanosecondArray")
-                    .value(row),
-            };
-            duration_to_py(py, value, unit)
+        match &self.values {
+            V::Null => Ok(py.None()),
+            V::Boolean(values) => values.value(row).into_py_any(py),
+            V::Int8(values) => values.value(row).into_py_any(py),
+            V::Int16(values) => values.value(row).into_py_any(py),
+            V::Int32(values) => values.value(row).into_py_any(py),
+            V::Int64(values) => values.value(row).into_py_any(py),
+            V::UInt8(values) => values.value(row).into_py_any(py),
+            V::UInt16(values) => values.value(row).into_py_any(py),
+            V::UInt32(values) => values.value(row).into_py_any(py),
+            V::UInt64(values) => values.value(row).into_py_any(py),
+            V::Float16(values) => f64::from(values.value(row).to_f32()).into_py_any(py),
+            V::Float32(values) => f64::from(values.value(row)).into_py_any(py),
+            V::Float64(values) => values.value(row).into_py_any(py),
+            V::Utf8(values) => values.value(row).into_py_any(py),
+            V::LargeUtf8(values) => values.value(row).into_py_any(py),
+            V::Utf8View(values) => values.value(row).into_py_any(py),
+            V::Binary(values) => Ok(PyBytes::new(py, values.value(row)).into_any().unbind()),
+            V::LargeBinary(values) => Ok(PyBytes::new(py, values.value(row)).into_any().unbind()),
+            V::BinaryView(values) => Ok(PyBytes::new(py, values.value(row)).into_any().unbind()),
+            V::Date32(values) => date32_to_py(py, values.value(row)),
+            V::Date64(values) => date64_to_py(py, values.value(row)),
+            V::Time32(values, unit) => time_unit_to_py(py, i64::from(values[row]), unit),
+            V::Time64(values, unit) => time_unit_to_py(py, values[row], unit),
+            V::Timestamp(values, unit, zone) => timestamp_unit_to_py(py, values[row], unit, zone),
+            V::Duration(values, unit) => duration_to_py(py, values[row], unit),
+            V::Decimal128(values, scale) => decimal_to_py(py, values.value(row), *scale, scratch),
+            V::Unsupported => Err(PyTypeError::new_err(format!(
+                "Arrow dtype {} cannot be materialized to a Python scalar without PyArrow",
+                self.array.data_type()
+            ))),
         }
-        DataType::Decimal128(_, scale) if *scale >= 0 => decimal_to_py(
-            py,
-            array
-                .as_any()
-                .downcast_ref::<Decimal128Array>()
-                .expect("Decimal128Array")
-                .value(row)
-                .to_string(),
-            *scale,
-        ),
-        data_type => Err(PyTypeError::new_err(format!(
-            "Arrow dtype {data_type} cannot be materialized to a Python scalar without PyArrow"
-        ))),
     }
 }
 
-fn batch_to_pylist(py: Python<'_>, batch: &RecordBatch) -> PyResult<Vec<Py<PyAny>>> {
-    let mut rows = Vec::with_capacity(batch.num_rows());
-    for row_idx in 0..batch.num_rows() {
+fn scalar_to_py(py: Python<'_>, array: &dyn Array, row: usize) -> PyResult<Py<PyAny>> {
+    PyScalarColumn::new(array).value(py, row, &mut String::new())
+}
+
+/// Python dict keys for a schema's field names, created once per table.
+fn field_name_keys<'py>(py: Python<'py>, schema: &Schema) -> Vec<Bound<'py, PyString>> {
+    schema
+        .fields()
+        .iter()
+        .map(|field| PyString::new(py, field.name()))
+        .collect()
+}
+
+/// Append one dict per row of `batch`, keyed by the schema's `keys`.
+fn append_batch_rows<'py>(
+    py: Python<'py>,
+    batch: &RecordBatch,
+    keys: &[Bound<'py, PyString>],
+    rows: &mut Vec<Py<PyAny>>,
+) -> PyResult<()> {
+    let columns = batch
+        .columns()
+        .iter()
+        .map(|column| PyScalarColumn::new(column.as_ref()))
+        .collect::<Vec<_>>();
+    let mut scratch = String::new();
+    for row in 0..batch.num_rows() {
         let dict = PyDict::new(py);
-        for (column_idx, field) in batch.schema().fields().iter().enumerate() {
-            dict.set_item(
-                field.name(),
-                scalar_to_py(py, batch.column(column_idx).as_ref(), row_idx)?,
-            )?;
+        for (key, column) in keys.iter().zip(&columns) {
+            dict.set_item(key, column.value(py, row, &mut scratch)?)?;
         }
         rows.push(dict.into_any().unbind());
     }
+    Ok(())
+}
+
+fn batch_to_pylist(py: Python<'_>, batch: &RecordBatch) -> PyResult<Vec<Py<PyAny>>> {
+    let keys = field_name_keys(py, batch.schema_ref());
+    let mut rows = Vec::with_capacity(batch.num_rows());
+    append_batch_rows(py, batch, &keys, &mut rows)?;
     Ok(rows)
 }
 
 fn table_to_pylist(py: Python<'_>, table: &TableData) -> PyResult<Vec<Py<PyAny>>> {
-    let mut rows = Vec::new();
+    // Every batch of a table has the table's field names.
+    let keys = field_name_keys(py, &table.schema);
+    let mut rows = Vec::with_capacity(table.num_rows());
     for batch in &table.batches {
-        rows.extend(batch_to_pylist(py, batch)?);
+        append_batch_rows(py, batch, &keys, &mut rows)?;
     }
     Ok(rows)
 }
 
 fn column_to_pylist(py: Python<'_>, column: &ColumnData) -> PyResult<Vec<Py<PyAny>>> {
     let mut values = Vec::with_capacity(column.len());
+    let mut scratch = String::new();
     for chunk in &column.chunks {
+        let chunk = PyScalarColumn::new(chunk.as_ref());
         for row in 0..chunk.len() {
-            values.push(scalar_to_py(py, chunk.as_ref(), row)?);
+            values.push(chunk.value(py, row, &mut scratch)?);
         }
     }
     Ok(values)
 }
 
-fn period_label(array: &dyn Array, row: usize, periodicity: Option<&str>) -> String {
-    let Some(parsed) = xbbg_arrow::scalar::date_from_array(array, row) else {
-        return cell_to_string(&cell_from_array(array, row)).unwrap_or_default();
-    };
-    match periodicity.unwrap_or("DAILY").to_ascii_uppercase().as_str() {
-        "YEARLY" | "Y" => format!("{:04}", parsed.year()),
-        "SEMI_ANNUALLY" | "SEMIANNUALLY" | "S" => {
-            let half = if parsed.month() <= 6 { 1 } else { 2 };
-            format!("{:04}H{}", parsed.year(), half)
+/// Whether any row holds a value, exactly as
+/// `cell_has_value(&cell_from_array(array, row))` decides per row: nulls, empty
+/// text, temporal values the carrier cannot represent and dtypes it does not
+/// support are absent.
+fn column_has_value(array: &dyn Array) -> bool {
+    if array.null_count() == array.len() {
+        return false;
+    }
+    match array.data_type() {
+        // Every valid slot of these is a present carrier scalar.
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float16
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Time32(TimeUnit::Second | TimeUnit::Millisecond)
+        | DataType::Time64(TimeUnit::Microsecond | TimeUnit::Nanosecond)
+        | DataType::Timestamp(TimeUnit::Microsecond | TimeUnit::Nanosecond, _) => true,
+        DataType::Utf8 => text_has_value(typed::<StringArray>(array)),
+        DataType::LargeUtf8 => text_has_value(typed::<LargeStringArray>(array)),
+        DataType::Utf8View => {
+            let array = typed::<StringViewArray>(array);
+            match array.nulls() {
+                None => array.lengths().any(|len| len > 0),
+                // A view's low 32 bits are its byte length.
+                Some(nulls) => nulls
+                    .valid_indices()
+                    .any(|row| array.views()[row] as u32 > 0),
+            }
         }
-        "QUARTERLY" | "Q" => {
-            let quarter = ((parsed.month() - 1) / 3) + 1;
-            format!("{:04}Q{}", parsed.year(), quarter)
-        }
-        "MONTHLY" | "M" => format!("{:04}-{:02}", parsed.year(), parsed.month()),
-        "WEEKLY" | "W" => {
-            let iso = parsed.iso_week();
-            format!("{:04}-W{:02}", iso.year(), iso.week())
-        }
-        _ => parsed.to_string(),
+        DataType::Date32 => typed::<Date32Array>(array)
+            .iter()
+            .flatten()
+            .any(|days| date_from_days(days).is_some()),
+        DataType::Date64 => typed::<Date64Array>(array).iter().flatten().any(|millis| {
+            i32::try_from(millis.div_euclid(86_400_000))
+                .ok()
+                .and_then(date_from_days)
+                .is_some()
+        }),
+        DataType::Timestamp(TimeUnit::Second, _) => typed::<TimestampSecondArray>(array)
+            .iter()
+            .flatten()
+            .any(|seconds| seconds.checked_mul(1_000_000).is_some()),
+        DataType::Timestamp(TimeUnit::Millisecond, _) => typed::<TimestampMillisecondArray>(array)
+            .iter()
+            .flatten()
+            .any(|millis| millis.checked_mul(1_000).is_some()),
+        _ => false,
     }
 }
 
-fn parse_bqr_path(path: &str) -> Option<(usize, String)> {
+/// Whether a valid UTF-8 slot is non-empty, read from the offsets alone.
+fn text_has_value<O: OffsetSizeTrait>(array: &GenericStringArray<O>) -> bool {
+    let offsets = array.value_offsets();
+    match array.nulls() {
+        None => offsets.first() != offsets.last(),
+        Some(nulls) => nulls
+            .valid_indices()
+            .any(|row| offsets[row + 1] > offsets[row]),
+    }
+}
+
+/// Append the text `cell_to_string` renders for `cell`; nothing for null.
+fn write_cell_text(cell: &CellValue, out: &mut String) {
+    let written = match cell {
+        CellValue::Null => Ok(()),
+        CellValue::Bool(value) => write!(out, "{value}"),
+        CellValue::Int(value) => write!(out, "{value}"),
+        CellValue::Float(value) => write!(out, "{value}"),
+        CellValue::Date(value) => write!(out, "{value}"),
+        CellValue::Timestamp(value) => match DateTime::from_timestamp_micros(*value) {
+            Some(timestamp) => {
+                out.push_str(&timestamp.to_rfc3339());
+                Ok(())
+            }
+            None => write!(out, "{value}"),
+        },
+        CellValue::Text(value) => {
+            out.push_str(value);
+            Ok(())
+        }
+    };
+    written.expect("writing to a String cannot fail");
+}
+
+/// `date_from_cell` for borrowed text: an ISO date prefix or `YYYYMMDD`.
+fn date_from_text(text: &str) -> Option<NaiveDate> {
+    if text.len() >= 10 {
+        text.get(..10)
+            .and_then(|prefix| NaiveDate::parse_from_str(prefix, "%Y-%m-%d").ok())
+    } else if text.len() == 8 {
+        NaiveDate::parse_from_str(text, "%Y%m%d").ok()
+    } else {
+        None
+    }
+}
+
+/// Bloomberg periodicity of a historical presentation, parsed once per call.
+#[derive(Clone, Copy)]
+enum PeriodLabel {
+    Year,
+    Half,
+    Quarter,
+    Month,
+    Week,
+    Day,
+}
+
+impl PeriodLabel {
+    fn parse(periodicity: Option<&str>) -> Self {
+        let periodicity = periodicity.unwrap_or("DAILY");
+        let is_any = |names: &[&str]| {
+            names
+                .iter()
+                .any(|name| periodicity.eq_ignore_ascii_case(name))
+        };
+        if is_any(&["YEARLY", "Y"]) {
+            Self::Year
+        } else if is_any(&["SEMI_ANNUALLY", "SEMIANNUALLY", "S"]) {
+            Self::Half
+        } else if is_any(&["QUARTERLY", "Q"]) {
+            Self::Quarter
+        } else if is_any(&["MONTHLY", "M"]) {
+            Self::Month
+        } else if is_any(&["WEEKLY", "W"]) {
+            Self::Week
+        } else {
+            Self::Day
+        }
+    }
+
+    fn write(self, date: NaiveDate, out: &mut String) {
+        let written = match self {
+            Self::Year => write!(out, "{:04}", date.year()),
+            Self::Half => {
+                let half = if date.month() <= 6 { 1 } else { 2 };
+                write!(out, "{:04}H{half}", date.year())
+            }
+            Self::Quarter => write!(out, "{:04}Q{}", date.year(), (date.month() - 1) / 3 + 1),
+            Self::Month => write!(out, "{:04}-{:02}", date.year(), date.month()),
+            Self::Week => {
+                let week = date.iso_week();
+                write!(out, "{:04}-W{:02}", week.year(), week.week())
+            }
+            Self::Day => write!(out, "{date}"),
+        };
+        written.expect("writing to a String cannot fail");
+    }
+}
+
+/// Builder for one batch's `period` column.
+struct PeriodLabels {
+    builder: StringBuilder,
+    scratch: String,
+    label: PeriodLabel,
+}
+
+impl PeriodLabels {
+    fn date(&mut self, date: NaiveDate) {
+        self.scratch.clear();
+        self.label.write(date, &mut self.scratch);
+        self.builder.append_value(&self.scratch);
+    }
+
+    fn cell(&mut self, cell: &CellValue) {
+        self.scratch.clear();
+        write_cell_text(cell, &mut self.scratch);
+        self.builder.append_value(&self.scratch);
+    }
+
+    fn texts<'a>(&mut self, values: impl IntoIterator<Item = Option<&'a str>>) {
+        for value in values {
+            match value {
+                Some(text) => match date_from_text(text) {
+                    Some(date) => self.date(date),
+                    None => self.builder.append_value(text),
+                },
+                None => self.builder.append_value(""),
+            }
+        }
+    }
+}
+
+/// The `period` label of every date row: dates `date_from_array` parses get
+/// their period, other values keep their carrier text, and nulls become "".
+fn period_labels(dates: &dyn Array, label: PeriodLabel) -> ArrayRef {
+    let mut labels = PeriodLabels {
+        builder: StringBuilder::with_capacity(dates.len(), dates.len() * 10),
+        scratch: String::new(),
+        label,
+    };
+    match dates.data_type() {
+        DataType::Date32 => {
+            for days in typed::<Date32Array>(dates) {
+                match days.and_then(date_from_days) {
+                    Some(date) => labels.date(date),
+                    None => labels.builder.append_value(""),
+                }
+            }
+        }
+        DataType::Utf8 => labels.texts(typed::<StringArray>(dates)),
+        DataType::LargeUtf8 => labels.texts(typed::<LargeStringArray>(dates)),
+        DataType::Utf8View => labels.texts(typed::<StringViewArray>(dates)),
+        _ => {
+            for row in 0..dates.len() {
+                let cell = cell_from_array(dates, row);
+                match date_from_cell(&cell) {
+                    Some(date) => labels.date(date),
+                    None => labels.cell(&cell),
+                }
+            }
+        }
+    }
+    Arc::new(labels.builder.finish())
+}
+
+/// Insert (or replace) a column given as one array per physical batch, as
+/// `TableData::with_cells_column` does for scalar cells.
+fn with_array_column(
+    data: &TableData,
+    index: usize,
+    field: FieldRef,
+    arrays: Vec<ArrayRef>,
+    replace: bool,
+) -> xbbg_arrow::Result<TableData> {
+    let width = data.num_columns();
+    if (replace && index >= width) || index > width {
+        return Err(ArrowCoreError::ColumnIndexOutOfRange);
+    }
+    let batches = data
+        .batches
+        .iter()
+        .zip(arrays)
+        .map(|(batch, array)| {
+            let schema = batch.schema();
+            let mut fields = schema.fields().to_vec();
+            let mut columns = batch.columns().to_vec();
+            if replace {
+                fields[index] = Arc::clone(&field);
+                columns[index] = array;
+            } else {
+                fields.insert(index, Arc::clone(&field));
+                columns.insert(index, array);
+            }
+            RecordBatch::try_new(
+                Arc::new(Schema::new_with_metadata(fields, schema.metadata().clone())),
+                columns,
+            )
+        })
+        .collect::<Result<Vec<_>, ArrowError>>()?;
+    TableData::try_new(batches)
+}
+
+/// Excel-style BDH presentation (`sort`, `date_format`, `show_date`) applied
+/// as pure table work; sorting keys rows by `key_column`.
+fn historical_presentation(
+    data: &TableData,
+    show_date: Option<bool>,
+    date_format: Option<&str>,
+    sort: Option<&str>,
+    periodicity: Option<&str>,
+    key_column: &str,
+) -> xbbg_arrow::Result<TableData> {
+    let mut result = data.clone();
+
+    if let Some(sort) = sort
+        && result.schema.index_of("date").is_ok()
+    {
+        let date_order = if sort.eq_ignore_ascii_case("DESCENDING") {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        };
+        let mut sort_keys = Vec::with_capacity(3);
+        if result.schema.index_of(key_column).is_ok() {
+            sort_keys.push((key_column.to_string(), SortDirection::Ascending));
+        }
+        sort_keys.push(("date".to_string(), date_order));
+        if result.schema.index_of("field").is_ok() {
+            sort_keys.push(("field".to_string(), SortDirection::Ascending));
+        }
+        result = result.sort_by(&sort_keys, false)?;
+    }
+
+    if let Some(date_format) = date_format {
+        let periodic = date_format.eq_ignore_ascii_case("PERIODIC");
+        if (periodic || date_format.eq_ignore_ascii_case("BOTH"))
+            && let Ok(date_idx) = result.schema.index_of("date")
+        {
+            let label = PeriodLabel::parse(periodicity);
+            let periods = result
+                .batches
+                .iter()
+                .map(|batch| period_labels(batch.column(date_idx).as_ref(), label))
+                .collect();
+            let period = Arc::new(Field::new("period", DataType::Utf8, true));
+            result = if periodic {
+                with_array_column(&result, date_idx, period, periods, true)?
+            } else {
+                with_array_column(&result, date_idx + 1, period, periods, false)?
+            };
+        }
+    }
+
+    if show_date == Some(false) {
+        result = result.drop_columns(&["date".to_string(), "period".to_string()])?;
+    }
+    Ok(result)
+}
+
+fn parse_bqr_path(path: &str) -> Option<(usize, &str)> {
     let start = path.find("tickData[")? + "tickData[".len();
     let rest = &path[start..];
     let end = rest.find(']')?;
     let idx = rest[..end].parse::<usize>().ok()?;
-    let after = rest.get(end + 1..)?;
-    let field_start = after.strip_prefix('.')?;
-    let field = field_start
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect::<String>();
-    if field.is_empty() {
-        None
-    } else {
-        Some((idx, field))
+    let field = rest.get(end + 1..)?.strip_prefix('.')?;
+    let len = field
+        .bytes()
+        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
+        .count();
+    (len > 0).then_some((idx, &field[..len]))
+}
+
+/// Tick columns of the generic BQR reshape, in output order after the key column.
+const BQR_TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
+
+/// One `tickData[tick].field` path row of generic extractor output.
+#[derive(Clone, Copy)]
+struct BqrEntry {
+    tick: usize,
+    field: usize,
+    batch: usize,
+    row: usize,
+}
+
+/// Parsed path rows, with field names interned as borrowed ids.
+#[derive(Default)]
+struct BqrPaths<'a> {
+    field_ids: HashMap<&'a str, usize>,
+    fields: Vec<&'a str>,
+    entries: Vec<BqrEntry>,
+}
+
+impl<'a> BqrPaths<'a> {
+    fn collect(&mut self, batch: usize, paths: impl IntoIterator<Item = Option<&'a str>>) {
+        for (row, path) in paths.into_iter().enumerate() {
+            let Some((tick, name)) = path.and_then(parse_bqr_path) else {
+                continue;
+            };
+            let field = match self.field_ids.get(name) {
+                Some(&field) => field,
+                None => {
+                    self.field_ids.insert(name, self.fields.len());
+                    self.fields.push(name);
+                    self.fields.len() - 1
+                }
+            };
+            self.entries.push(BqrEntry {
+                tick,
+                field,
+                batch,
+                row,
+            });
+        }
     }
+}
+
+/// A carrier cell whose text may still borrow from its source array.
+enum CellRef<'a> {
+    Text(&'a str),
+    Value(CellValue),
+}
+
+impl CellRef<'_> {
+    const NULL: Self = Self::Value(CellValue::Null);
+
+    /// `cell_has_value` of the equivalent owned cell.
+    fn has_value(&self) -> bool {
+        match self {
+            Self::Text(text) => !text.is_empty(),
+            Self::Value(cell) => cell_has_value(cell),
+        }
+    }
+
+    /// Whether the equivalent owned cell is `CellValue::Text`.
+    fn is_text(&self) -> bool {
+        matches!(self, Self::Text(_) | Self::Value(CellValue::Text(_)))
+    }
+
+    fn into_value(self) -> CellValue {
+        match self {
+            Self::Text(text) => CellValue::Text(text.to_owned()),
+            Self::Value(cell) => cell,
+        }
+    }
+}
+
+/// A column read as `cell_from_array` cells, with text borrowed in place.
+#[derive(Clone, Copy)]
+enum CellSource<'a> {
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Utf8View(&'a StringViewArray),
+    Float64(&'a Float64Array),
+    Other(&'a dyn Array),
+}
+
+impl<'a> CellSource<'a> {
+    fn new(array: &'a dyn Array) -> Self {
+        match array.data_type() {
+            DataType::Utf8 => Self::Utf8(typed(array)),
+            DataType::LargeUtf8 => Self::LargeUtf8(typed(array)),
+            DataType::Utf8View => Self::Utf8View(typed(array)),
+            DataType::Float64 => Self::Float64(typed(array)),
+            _ => Self::Other(array),
+        }
+    }
+
+    fn cell(self, row: usize) -> CellRef<'a> {
+        let text = match self {
+            Self::Utf8(array) => array.is_valid(row).then(|| array.value(row)),
+            Self::LargeUtf8(array) => array.is_valid(row).then(|| array.value(row)),
+            Self::Utf8View(array) => array.is_valid(row).then(|| array.value(row)),
+            Self::Float64(array) => {
+                return CellRef::Value(if array.is_valid(row) {
+                    CellValue::Float(array.value(row))
+                } else {
+                    CellValue::Null
+                });
+            }
+            Self::Other(array) => return CellRef::Value(cell_from_array(array, row)),
+        };
+        text.map_or(CellRef::NULL, CellRef::Text)
+    }
+}
+
+/// The `value_str` and `value_num` sources of one batch.
+#[derive(Clone, Copy)]
+struct BqrValueSources<'a> {
+    text: Option<CellSource<'a>>,
+    number: Option<CellSource<'a>>,
+}
+
+impl<'a> BqrValueSources<'a> {
+    /// A present `value_str` cell, otherwise the `value_num` cell.
+    fn value(self, row: usize) -> CellRef<'a> {
+        let text = self.text.map_or(CellRef::NULL, |text| text.cell(row));
+        if text.has_value() {
+            text
+        } else {
+            self.number.map_or(CellRef::NULL, |number| number.cell(row))
+        }
+    }
+}
+
+/// UTF-8 column for cells that include text, rendered as `build_array`
+/// renders mixed cells.
+fn bqr_text_array(name: &str, cells: &[CellRef<'_>], scratch: &mut String) -> (Field, ArrayRef) {
+    let mut builder = StringBuilder::with_capacity(cells.len(), 0);
+    for cell in cells {
+        match cell {
+            CellRef::Text(text) => builder.append_value(text),
+            CellRef::Value(CellValue::Null) => builder.append_null(),
+            CellRef::Value(cell) => {
+                scratch.clear();
+                write_cell_text(cell, scratch);
+                builder.append_value(scratch.as_str());
+            }
+        }
+    }
+    (
+        Field::new(name, DataType::Utf8, true),
+        Arc::new(builder.finish()),
+    )
+}
+
+/// Reshape generic extractor rows (`path`, `value_str`, `value_num`) into one
+/// row per `tickData[i]`, reading paths and values in place, with the security
+/// in `key_column`.
+fn bqr_generic_table(
+    data: &TableData,
+    ticker: &str,
+    key_column: &str,
+) -> xbbg_arrow::Result<TableData> {
+    let empty = || {
+        TableData::empty_from_columns(
+            std::iter::once(key_column)
+                .chain(BQR_TICK_COLUMNS)
+                .map(ToString::to_string)
+                .collect(),
+        )
+    };
+    let Ok(path_idx) = data.schema.index_of("path") else {
+        return empty();
+    };
+    let value_str_idx = data.schema.index_of("value_str").ok();
+    let value_num_idx = data.schema.index_of("value_num").ok();
+
+    let mut paths = BqrPaths::default();
+    for (batch, record_batch) in data.batches.iter().enumerate() {
+        let column = record_batch.column(path_idx).as_ref();
+        match column.data_type() {
+            DataType::Utf8 => paths.collect(batch, typed::<StringArray>(column)),
+            DataType::LargeUtf8 => paths.collect(batch, typed::<LargeStringArray>(column)),
+            DataType::Utf8View => paths.collect(batch, typed::<StringViewArray>(column)),
+            // No other carrier scalar renders as a `tickData[...]` path.
+            _ => {}
+        }
+    }
+    if paths.entries.is_empty() {
+        return empty();
+    }
+
+    // Stable: the entries of one (field, tick) keep row order; the last wins.
+    paths.entries.sort_by_key(|entry| (entry.field, entry.tick));
+    let mut ticks = paths
+        .entries
+        .iter()
+        .map(|entry| entry.tick)
+        .collect::<Vec<_>>();
+    ticks.sort_unstable();
+    ticks.dedup();
+
+    let sources = data
+        .batches
+        .iter()
+        .map(|batch| BqrValueSources {
+            text: value_str_idx.map(|idx| CellSource::new(batch.column(idx).as_ref())),
+            number: value_num_idx.map(|idx| CellSource::new(batch.column(idx).as_ref())),
+        })
+        .collect::<Vec<_>>();
+
+    let mut order = BQR_TICK_COLUMNS
+        .iter()
+        .filter_map(|name| paths.field_ids.get(*name).copied())
+        .collect::<Vec<_>>();
+    let mut others = (0..paths.fields.len())
+        .filter(|&field| {
+            let name = paths.fields[field];
+            name != key_column && !BQR_TICK_COLUMNS.contains(&name)
+        })
+        .collect::<Vec<_>>();
+    others.sort_unstable_by_key(|&field| paths.fields[field]);
+    order.extend(others);
+
+    let mut tickers = StringBuilder::with_capacity(ticks.len(), ticks.len() * ticker.len());
+    for _ in &ticks {
+        tickers.append_value(ticker);
+    }
+    let mut out_fields = vec![Field::new(key_column, DataType::Utf8, true)];
+    let mut out_columns = vec![Arc::new(tickers.finish()) as ArrayRef];
+
+    let mut cells = Vec::with_capacity(ticks.len());
+    let mut scratch = String::new();
+    for field_id in order {
+        let name = paths.fields[field_id];
+        let start = paths
+            .entries
+            .partition_point(|entry| entry.field < field_id);
+        let end = paths
+            .entries
+            .partition_point(|entry| entry.field <= field_id);
+        let mut entries = paths.entries[start..end].iter().peekable();
+        cells.clear();
+        for &tick in &ticks {
+            let mut last = None;
+            while let Some(entry) = entries.next_if(|entry| entry.tick == tick) {
+                last = Some(entry);
+            }
+            cells.push(last.map_or(CellRef::NULL, |entry| sources[entry.batch].value(entry.row)));
+        }
+        let (field, array) = if cells.iter().any(CellRef::is_text) {
+            bqr_text_array(name, &cells, &mut scratch)
+        } else {
+            let values = cells.drain(..).map(CellRef::into_value).collect::<Vec<_>>();
+            build_array(name, &values)
+        };
+        out_fields.push(field);
+        out_columns.push(array);
+    }
+
+    let batch = RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_columns)?;
+    TableData::try_new(vec![batch])
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
@@ -898,16 +1542,14 @@ impl ArrowColumn {
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        map_core(self.data.compact()).map(Self::new)
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        map_core(py.detach(|| self.data.compact())).map(Self::new)
     }
 
     fn to_pylist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let values = PyList::empty(py);
-        for value in column_to_pylist(py, &self.data)? {
-            values.append(value.bind(py))?;
-        }
-        Ok(values.into_any().unbind())
+        Ok(PyList::new(py, column_to_pylist(py, &self.data)?)?
+            .into_any()
+            .unbind())
     }
 
     fn to_pyarrow<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
@@ -1138,8 +1780,9 @@ impl ArrowRecordBatch {
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        let table = map_core(self.table_data()?.compact())?;
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        let batch = &self.batch;
+        let table = map_core(py.detach(|| TableData::try_new(vec![batch.clone()])?.compact()))?;
         let batch = table
             .batches
             .into_iter()
@@ -1176,6 +1819,14 @@ impl ArrowTable {
 
     fn from_data(data: TableData) -> Self {
         Self { data }
+    }
+
+    /// Run native table work with this thread detached from the interpreter.
+    fn detached(
+        py: Python<'_>,
+        work: impl Ungil + FnOnce() -> xbbg_arrow::Result<TableData>,
+    ) -> PyResult<Self> {
+        map_core(py.detach(work)).map(Self::from_data)
     }
 
     fn to_stream_pycapsule<'py>(
@@ -1404,8 +2055,14 @@ impl ArrowTable {
             .collect()
     }
 
-    fn to_record_batch(&self) -> PyResult<ArrowRecordBatch> {
-        map_core(self.data.combined_batch()).map(ArrowRecordBatch::new)
+    fn to_record_batch(&self, py: Python<'_>) -> PyResult<ArrowRecordBatch> {
+        // One batch is an Arc clone; only concatenating several copies rows.
+        let batch = if self.data.batches.len() > 1 {
+            py.detach(|| self.data.combined_batch())
+        } else {
+            self.data.combined_batch()
+        };
+        map_core(batch).map(ArrowRecordBatch::new)
     }
 
     fn to_pylist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
@@ -1511,8 +2168,8 @@ impl ArrowTable {
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        map_core(self.data.compact()).map(Self::from_data)
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        Self::detached(py, || self.data.compact())
     }
 
     fn tail(&self, n: usize) -> PyResult<Self> {
@@ -1520,7 +2177,12 @@ impl ArrowTable {
     }
 
     #[pyo3(signature = (sort_keys, *, nulls_last=true))]
-    fn sort_by(&self, sort_keys: Vec<(String, String)>, nulls_last: bool) -> PyResult<Self> {
+    fn sort_by(
+        &self,
+        py: Python<'_>,
+        sort_keys: Vec<(String, String)>,
+        nulls_last: bool,
+    ) -> PyResult<Self> {
         let keys = sort_keys
             .into_iter()
             .map(|(name, direction)| {
@@ -1533,7 +2195,7 @@ impl ArrowTable {
                     })
             })
             .collect::<PyResult<Vec<_>>>()?;
-        map_core(self.data.sort_by(&keys, !nulls_last)).map(Self::from_data)
+        Self::detached(py, || self.data.sort_by(&keys, !nulls_last))
     }
 
     fn filter_eq(&self, column: &str, value: &Bound<'_, PyAny>) -> PyResult<Self> {
@@ -1545,196 +2207,67 @@ impl ArrowTable {
                 "cannot compare Python value to Arrow column {column:?} with dtype {data_type}"
             )));
         }
-        map_core(self.data.filter_eq(column, &needle)).map(Self::from_data)
+        Self::detached(value.py(), || self.data.filter_eq(column, &needle))
     }
 
     fn add_column(&self, index: usize, name: &str, values: &Bound<'_, PyAny>) -> PyResult<Self> {
         let cells = py_sequence_to_cells(values)?;
-        map_core(self.data.add_column(index, name, &cells)).map(Self::from_data)
+        Self::detached(values.py(), || self.data.add_column(index, name, &cells))
     }
 
     fn set_column(&self, index: usize, name: &str, values: &Bound<'_, PyAny>) -> PyResult<Self> {
         let cells = py_sequence_to_cells(values)?;
-        map_core(self.data.set_column(index, name, &cells)).map(Self::from_data)
+        Self::detached(values.py(), || self.data.set_column(index, name, &cells))
     }
 
     fn head(&self, n: usize) -> PyResult<Self> {
         map_core(self.data.head(n)).map(Self::from_data)
     }
 
-    fn has_any_value(&self, names: Vec<String>) -> bool {
-        for name in names {
-            let Ok(idx) = self.data.schema.index_of(&name) else {
-                continue;
-            };
-            for batch in &self.data.batches {
-                let array = batch.column(idx);
-                for row in 0..array.len() {
-                    if cell_has_value(&cell_from_array(array.as_ref(), row)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+    fn has_any_value(&self, py: Python<'_>, names: Vec<String>) -> bool {
+        let data = &self.data;
+        py.detach(|| {
+            names
+                .iter()
+                .filter_map(|name| data.schema.index_of(name).ok())
+                .any(|idx| {
+                    data.batches
+                        .iter()
+                        .any(|batch| column_has_value(batch.column(idx).as_ref()))
+                })
+        })
     }
 
     /// Excel-style BDH presentation; sorting keys rows by `key_column`.
     fn apply_historical_presentation(
         &self,
+        py: Python<'_>,
         show_date: Option<bool>,
         date_format: Option<String>,
         sort: Option<String>,
         periodicity: Option<String>,
         key_column: &str,
     ) -> PyResult<Self> {
-        let mut result = self.clone();
-
-        if let Some(sort) = sort
-            && result.data.schema.index_of("date").is_ok()
-        {
-            let date_order = if sort.eq_ignore_ascii_case("DESCENDING") {
-                "descending"
-            } else {
-                "ascending"
-            };
-            let mut sort_keys = Vec::new();
-            if result.data.schema.index_of(key_column).is_ok() {
-                sort_keys.push((key_column.to_string(), "ascending".to_string()));
-            }
-            sort_keys.push(("date".to_string(), date_order.to_string()));
-            if result.data.schema.index_of("field").is_ok() {
-                sort_keys.push(("field".to_string(), "ascending".to_string()));
-            }
-            result = result.sort_by(sort_keys, true)?;
-        }
-
-        if let Some(date_format) = date_format {
-            let normalized = date_format.to_ascii_uppercase();
-            if matches!(normalized.as_str(), "PERIODIC" | "BOTH")
-                && let Ok(date_idx) = result.data.schema.index_of("date")
-            {
-                let mut period_cells = Vec::with_capacity(result.num_rows());
-                for batch in &result.data.batches {
-                    let date_array = batch.column(date_idx);
-                    for row in 0..date_array.len() {
-                        period_cells.push(CellValue::Text(period_label(
-                            date_array.as_ref(),
-                            row,
-                            periodicity.as_deref(),
-                        )));
-                    }
-                }
-                let data = if normalized == "PERIODIC" {
-                    result
-                        .data
-                        .with_cells_column(date_idx, "period", &period_cells, true, true)
-                } else {
-                    result.data.with_cells_column(
-                        date_idx + 1,
-                        "period",
-                        &period_cells,
-                        false,
-                        true,
-                    )
-                };
-                result = Self::from_data(map_core(data)?);
-            }
-        }
-
-        if show_date == Some(false) {
-            result = result.drop_columns(vec!["date".to_string(), "period".to_string()])?;
-        }
-
-        Ok(result)
+        Self::detached(py, || {
+            historical_presentation(
+                &self.data,
+                show_date,
+                date_format.as_deref(),
+                sort.as_deref(),
+                periodicity.as_deref(),
+                key_column,
+            )
+        })
     }
 
     /// Quote rows from generic tick output, with the security in `key_column`.
-    fn reshape_bqr_generic(&self, ticker: &str, key_column: &str) -> PyResult<Self> {
-        let Ok(path_idx) = self.data.schema.index_of("path") else {
-            return map_core(TableData::empty_from_columns(vec![
-                key_column.to_string(),
-                "time".to_string(),
-                "type".to_string(),
-                "value".to_string(),
-                "size".to_string(),
-            ]))
-            .map(Self::from_data);
-        };
-        let value_str_idx = self.data.schema.index_of("value_str").ok();
-        let value_num_idx = self.data.schema.index_of("value_num").ok();
-        let batch = map_core(self.data.combined_batch())?;
-        let mut fields = BTreeSet::new();
-        let mut records: BTreeMap<usize, HashMap<String, CellValue>> = BTreeMap::new();
-
-        for row in 0..batch.num_rows() {
-            let Some(path) = cell_to_string(&cell_from_array(batch.column(path_idx).as_ref(), row))
-            else {
-                continue;
-            };
-            let Some((idx, field)) = parse_bqr_path(&path) else {
-                continue;
-            };
-            fields.insert(field.clone());
-            let value_str = value_str_idx
-                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
-                .unwrap_or(CellValue::Null);
-            let value_num = value_num_idx
-                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
-                .unwrap_or(CellValue::Null);
-            let value = if cell_has_value(&value_str) {
-                value_str
-            } else {
-                value_num
-            };
-            records.entry(idx).or_default().insert(field, value);
-        }
-
-        if records.is_empty() {
-            return map_core(TableData::empty_from_columns(vec![
-                key_column.to_string(),
-                "time".to_string(),
-                "type".to_string(),
-                "value".to_string(),
-                "size".to_string(),
-            ]))
-            .map(Self::from_data);
-        }
-
-        const TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
-        let mut columns = vec![key_column.to_string()];
-        for name in TICK_COLUMNS {
-            if fields.contains(name) {
-                columns.push(name.to_string());
-            }
-        }
-        for name in fields {
-            if name != key_column && !TICK_COLUMNS.contains(&name.as_str()) {
-                columns.push(name);
-            }
-        }
-
-        let mut out_fields = Vec::with_capacity(columns.len());
-        let mut out_arrays = Vec::with_capacity(columns.len());
-        for column in &columns {
-            let cells = records
-                .values()
-                .map(|record| {
-                    if column == key_column {
-                        CellValue::Text(ticker.to_string())
-                    } else {
-                        record.get(column).cloned().unwrap_or(CellValue::Null)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let (field, array) = build_array(column, &cells);
-            out_fields.push(field);
-            out_arrays.push(array);
-        }
-
-        let batch = RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_arrays)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Self::try_new(vec![batch])
+    fn reshape_bqr_generic(
+        &self,
+        py: Python<'_>,
+        ticker: &str,
+        key_column: &str,
+    ) -> PyResult<Self> {
+        Self::detached(py, || bqr_generic_table(&self.data, ticker, key_column))
     }
 
     fn __repr__(&self) -> String {
@@ -1766,7 +2299,159 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
     use super::*;
+
+    use arrow_array::builder::NullBufferBuilder;
+    use arrow_array::types::Int32Type;
+    use arrow_array::{DictionaryArray, NullArray};
+    use xbbg_arrow::cell_to_string;
+
+    /// The row-wise rule `column_has_value` replaced.
+    fn reference_has_value(array: &dyn Array) -> bool {
+        (0..array.len()).any(|row| cell_has_value(&cell_from_array(array, row)))
+    }
+
+    /// The per-row labelling `period_labels` replaced.
+    fn reference_period_label(array: &dyn Array, row: usize, periodicity: Option<&str>) -> String {
+        let Some(parsed) = xbbg_arrow::scalar::date_from_array(array, row) else {
+            return cell_to_string(&cell_from_array(array, row)).unwrap_or_default();
+        };
+        match periodicity.unwrap_or("DAILY").to_ascii_uppercase().as_str() {
+            "YEARLY" | "Y" => format!("{:04}", parsed.year()),
+            "SEMI_ANNUALLY" | "SEMIANNUALLY" | "S" => {
+                let half = if parsed.month() <= 6 { 1 } else { 2 };
+                format!("{:04}H{}", parsed.year(), half)
+            }
+            "QUARTERLY" | "Q" => {
+                let quarter = ((parsed.month() - 1) / 3) + 1;
+                format!("{:04}Q{}", parsed.year(), quarter)
+            }
+            "MONTHLY" | "M" => format!("{:04}-{:02}", parsed.year(), parsed.month()),
+            "WEEKLY" | "W" => {
+                let iso = parsed.iso_week();
+                format!("{:04}-W{:02}", iso.year(), iso.week())
+            }
+            _ => parsed.to_string(),
+        }
+    }
+
+    /// The path parser of the cell-map BQR reshape.
+    fn reference_parse_bqr_path(path: &str) -> Option<(usize, String)> {
+        let start = path.find("tickData[")? + "tickData[".len();
+        let rest = &path[start..];
+        let end = rest.find(']')?;
+        let idx = rest[..end].parse::<usize>().ok()?;
+        let after = rest.get(end + 1..)?;
+        let field_start = after.strip_prefix('.')?;
+        let field = field_start
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect::<String>();
+        (!field.is_empty()).then_some((idx, field))
+    }
+
+    /// The cell-map BQR reshape `bqr_generic_table` replaced.
+    fn reference_reshape_bqr_generic(
+        data: &TableData,
+        ticker: &str,
+        key_column: &str,
+    ) -> TableData {
+        let empty = || {
+            TableData::empty_from_columns(
+                std::iter::once(key_column)
+                    .chain(BQR_TICK_COLUMNS)
+                    .map(ToString::to_string)
+                    .collect(),
+            )
+            .unwrap()
+        };
+        let Ok(path_idx) = data.schema.index_of("path") else {
+            return empty();
+        };
+        let value_str_idx = data.schema.index_of("value_str").ok();
+        let value_num_idx = data.schema.index_of("value_num").ok();
+        let batch = data.combined_batch().unwrap();
+        let mut fields = BTreeSet::new();
+        let mut records: BTreeMap<usize, HashMap<String, CellValue>> = BTreeMap::new();
+        for row in 0..batch.num_rows() {
+            let Some(path) = cell_to_string(&cell_from_array(batch.column(path_idx).as_ref(), row))
+            else {
+                continue;
+            };
+            let Some((idx, field)) = reference_parse_bqr_path(&path) else {
+                continue;
+            };
+            fields.insert(field.clone());
+            let value_str = value_str_idx
+                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
+                .unwrap_or(CellValue::Null);
+            let value_num = value_num_idx
+                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
+                .unwrap_or(CellValue::Null);
+            let value = if cell_has_value(&value_str) {
+                value_str
+            } else {
+                value_num
+            };
+            records.entry(idx).or_default().insert(field, value);
+        }
+        if records.is_empty() {
+            return empty();
+        }
+        let mut columns = vec![key_column.to_string()];
+        for name in BQR_TICK_COLUMNS {
+            if fields.contains(name) {
+                columns.push(name.to_string());
+            }
+        }
+        for name in fields {
+            if name != key_column && !BQR_TICK_COLUMNS.contains(&name.as_str()) {
+                columns.push(name);
+            }
+        }
+        let mut out_fields = Vec::new();
+        let mut out_arrays = Vec::new();
+        for column in &columns {
+            let cells = records
+                .values()
+                .map(|record| {
+                    if column == key_column {
+                        CellValue::Text(ticker.to_string())
+                    } else {
+                        record.get(column).cloned().unwrap_or(CellValue::Null)
+                    }
+                })
+                .collect::<Vec<_>>();
+            let (field, array) = build_array(column, &cells);
+            out_fields.push(field);
+            out_arrays.push(array);
+        }
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_arrays).unwrap();
+        TableData::try_new(vec![batch]).unwrap()
+    }
+
+    fn validity(valid: &[bool]) -> NullBufferBuilder {
+        let mut nulls = NullBufferBuilder::new(valid.len());
+        for &is_valid in valid {
+            nulls.append(is_valid);
+        }
+        nulls
+    }
+
+    fn epoch_days(year: i32, month: u32, day: u32) -> i32 {
+        let epoch = NaiveDate::from_ymd_opt(1970, 1, 1).unwrap();
+        NaiveDate::from_ymd_opt(year, month, day)
+            .unwrap()
+            .signed_duration_since(epoch)
+            .num_days() as i32
+    }
+
+    fn single_batch_table(fields: Vec<Field>, columns: Vec<ArrayRef>) -> TableData {
+        let batch = RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).unwrap();
+        TableData::try_new(vec![batch]).unwrap()
+    }
 
     #[test]
     fn native_batch_and_table_preserve_temporal_types_precision_and_nulls() {
@@ -2293,6 +2978,666 @@ mod tests {
                     .get_item("delay_minutes")
                     .expect("delay minutes")
                     .is_none()
+            );
+        });
+    }
+
+    #[test]
+    fn column_has_value_matches_the_row_wise_cell_rule() {
+        const LONG: &str = "a value longer than twelve bytes";
+        let text = |values: Vec<Option<&str>>| Arc::new(StringArray::from(values)) as ArrayRef;
+        // Null slots that still span value bytes.
+        let (offsets, values, _) = StringArray::from(vec!["abc", ""]).into_parts();
+        let masked_utf8 = StringArray::new(offsets, values, validity(&[false, true]).finish());
+        let (offsets, values, _) = LargeStringArray::from(vec!["abc", "d"]).into_parts();
+        let masked_large =
+            LargeStringArray::new(offsets, values, validity(&[false, true]).finish());
+        let (views, buffers, _) = StringViewArray::from(vec![LONG, ""]).into_parts();
+        let masked_view = StringViewArray::new(views, buffers, validity(&[false, true]).finish());
+        let cases: Vec<(ArrayRef, bool)> = vec![
+            (text(vec![]), false),
+            (text(vec![None, Some("")]), false),
+            (text(vec![None, Some(""), Some("x")]), true),
+            (Arc::new(masked_utf8), false),
+            (text(vec![Some("x"), Some(""), None]).slice(1, 2), false),
+            (Arc::new(masked_large), true),
+            (Arc::new(LargeStringArray::from(vec![Some("")])), false),
+            (Arc::new(StringViewArray::from(vec![Some(""), None])), false),
+            (
+                Arc::new(StringViewArray::from(vec![None, Some(LONG)])),
+                true,
+            ),
+            (Arc::new(masked_view), false),
+            (Arc::new(Int64Array::from(vec![None, None])), false),
+            (Arc::new(Int64Array::from(vec![None, Some(0)])), true),
+            (Arc::new(Float64Array::from(vec![f64::NAN])), true),
+            (Arc::new(BooleanArray::from(vec![Some(false)])), true),
+            (Arc::new(UInt64Array::from(vec![u64::MAX])), true),
+            (Arc::new(Time32SecondArray::from(vec![1])), true),
+            (Arc::new(Date32Array::from(vec![i32::MAX])), false),
+            (
+                Arc::new(Date32Array::from(vec![Some(i32::MIN), None, Some(0)])),
+                true,
+            ),
+            (Arc::new(Date64Array::from(vec![i64::MAX])), false),
+            (Arc::new(Date64Array::from(vec![86_400_000])), true),
+            (Arc::new(TimestampSecondArray::from(vec![i64::MAX])), false),
+            (Arc::new(TimestampSecondArray::from(vec![1])), true),
+            (
+                Arc::new(TimestampMillisecondArray::from(vec![i64::MIN])),
+                false,
+            ),
+            (
+                Arc::new(TimestampNanosecondArray::from(vec![i64::MIN])),
+                true,
+            ),
+            (Arc::new(BinaryArray::from(vec![b"x".as_slice()])), false),
+            (Arc::new(Decimal128Array::from(vec![1_i128])), false),
+            (Arc::new(DurationSecondArray::from(vec![1_i64])), false),
+            (Arc::new(NullArray::new(3)), false),
+            (
+                Arc::new(["x"].into_iter().collect::<DictionaryArray<Int32Type>>()),
+                false,
+            ),
+        ];
+        for (array, expected) in cases {
+            let label = format!("{} {array:?}", array.data_type());
+            assert_eq!(
+                reference_has_value(array.as_ref()),
+                expected,
+                "row-wise: {label}"
+            );
+            assert_eq!(
+                column_has_value(array.as_ref()),
+                expected,
+                "column: {label}"
+            );
+        }
+    }
+
+    #[test]
+    fn has_any_value_checks_named_columns_across_batches() {
+        Python::initialize();
+        Python::attach(|py| {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("brokerBuyCode", DataType::Utf8, true),
+                Field::new("size", DataType::Float64, true),
+            ]));
+            let batch = |codes: Vec<Option<&str>>| {
+                let sizes = Float64Array::from(vec![None::<f64>; codes.len()]);
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(StringArray::from(codes)), Arc::new(sizes)],
+                )
+                .unwrap()
+            };
+            let table = ArrowTable::try_new(vec![
+                batch(vec![Some(""), None]),
+                batch(vec![None, Some("DLR1")]),
+            ])
+            .unwrap();
+            assert!(table.has_any_value(py, vec!["missing".into(), "brokerBuyCode".into()]));
+            assert!(!table.has_any_value(py, vec!["size".into(), "missing".into()]));
+            assert!(!table.has_any_value(py, Vec::new()));
+        });
+    }
+
+    #[test]
+    fn period_labels_match_row_wise_labels_for_every_periodicity() {
+        let texts = vec![
+            Some("2024-03-15"),
+            Some("20240315"),
+            Some("2024-12-30T10:00:00Z"),
+            Some("not-a-date"),
+            Some(""),
+            None,
+            // Byte 10 falls inside 'é', so there is no ISO date prefix.
+            Some("2024-03-1é"),
+        ];
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Date32Array::from(vec![
+                Some(epoch_days(2024, 3, 15)),
+                None,
+                Some(i32::MAX),
+                Some(epoch_days(2024, 12, 30)),
+                Some(epoch_days(7, 7, 4)),
+                Some(epoch_days(-1, 12, 31)),
+                Some(epoch_days(10_000, 1, 1)),
+            ])),
+            Arc::new(StringArray::from(texts.clone())),
+            Arc::new(LargeStringArray::from(texts.clone())),
+            Arc::new(StringViewArray::from(texts)),
+            Arc::new(TimestampMicrosecondArray::from(vec![
+                Some(0),
+                None,
+                Some(i64::MAX),
+            ])),
+            Arc::new(Date64Array::from(vec![Some(86_400_000), None])),
+            Arc::new(Int64Array::from(vec![Some(20_240_315), None])),
+            Arc::new(UInt64Array::from(vec![u64::MAX])),
+        ];
+        let periodicities = [
+            None,
+            Some("daily"),
+            Some("Y"),
+            Some("yearly"),
+            Some("S"),
+            Some("semi_annually"),
+            Some("SemiAnnually"),
+            Some("q"),
+            Some("Quarterly"),
+            Some("M"),
+            Some("monthly"),
+            Some("w"),
+            Some("WEEKLY"),
+            Some("bogus"),
+        ];
+        for array in &arrays {
+            for periodicity in periodicities {
+                let labels = period_labels(array.as_ref(), PeriodLabel::parse(periodicity));
+                let labels = labels.as_any().downcast_ref::<StringArray>().unwrap();
+                assert_eq!(labels.null_count(), 0);
+                let expected = (0..array.len())
+                    .map(|row| reference_period_label(array.as_ref(), row, periodicity))
+                    .collect::<Vec<_>>();
+                let actual = labels
+                    .iter()
+                    .map(|label| label.unwrap().to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(actual, expected, "{} {periodicity:?}", array.data_type());
+            }
+        }
+    }
+
+    #[test]
+    fn historical_presentation_matches_cell_built_period_columns() {
+        let schema = Arc::new(
+            Schema::new(vec![
+                Field::new("ticker", DataType::Utf8, false),
+                Field::new("date", DataType::Date32, true),
+                Field::new("field", DataType::Utf8, false),
+                Field::new("value", DataType::Float64, true),
+            ])
+            .with_metadata(HashMap::from([(
+                METADATA_KEY_BLOOMBERG_REQUEST_ID.to_string(),
+                "sdk-synthetic".to_string(),
+            )])),
+        );
+        let batch = |tickers: Vec<&str>, days: Vec<Option<i32>>| {
+            let fields = vec!["PX_LAST"; tickers.len()];
+            let values = (0..tickers.len())
+                .map(|value| Some(value as f64))
+                .collect::<Vec<_>>();
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(tickers)),
+                    Arc::new(Date32Array::from(days)),
+                    Arc::new(StringArray::from(fields)),
+                    Arc::new(Float64Array::from(values)),
+                ],
+            )
+            .unwrap()
+        };
+        let data = TableData::try_new(vec![
+            batch(
+                vec!["IBM US Equity", "AAPL US Equity"],
+                vec![Some(epoch_days(2024, 6, 28)), None],
+            ),
+            batch(vec!["AAPL US Equity"], vec![Some(epoch_days(2024, 7, 1))]),
+        ])
+        .unwrap();
+        let period_cells = |table: &TableData, periodicity: Option<&str>| {
+            let date_idx = table.schema.index_of("date").unwrap();
+            table
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    let dates = batch.column(date_idx).clone();
+                    (0..dates.len()).map(move |row| {
+                        CellValue::Text(reference_period_label(dates.as_ref(), row, periodicity))
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // PERIODIC replaces the date column with its labels.
+        let periodic =
+            historical_presentation(&data, None, Some("periodic"), None, Some("q"), "ticker")
+                .unwrap();
+        let expected = data
+            .with_cells_column(1, "period", &period_cells(&data, Some("q")), true, true)
+            .unwrap();
+        assert_eq!(periodic.schema, expected.schema);
+        assert_eq!(periodic.batches, expected.batches);
+
+        // BOTH sorts first, then inserts the labels after the date column.
+        let both = historical_presentation(
+            &data,
+            None,
+            Some("Both"),
+            Some("descending"),
+            Some("W"),
+            "ticker",
+        )
+        .unwrap();
+        let sorted = data
+            .sort_by(
+                &[
+                    ("ticker".to_string(), SortDirection::Ascending),
+                    ("date".to_string(), SortDirection::Descending),
+                    ("field".to_string(), SortDirection::Ascending),
+                ],
+                false,
+            )
+            .unwrap();
+        let expected = sorted
+            .with_cells_column(2, "period", &period_cells(&sorted, Some("W")), false, true)
+            .unwrap();
+        assert_eq!(both.schema, expected.schema);
+        assert_eq!(both.batches, expected.batches);
+
+        let hidden =
+            historical_presentation(&data, Some(false), Some("BOTH"), None, None, "ticker")
+                .unwrap();
+        assert_eq!(hidden.column_names(), ["ticker", "field", "value"]);
+    }
+
+    #[test]
+    fn bqr_reshape_matches_the_cell_map_reshape() {
+        let generic = Arc::new(
+            Schema::new(vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("value_str", DataType::Utf8, true),
+                Field::new("value_num", DataType::Float64, true),
+            ])
+            .with_metadata(HashMap::from([(
+                METADATA_KEY_BLOOMBERG_REQUEST_ID.to_string(),
+                "sdk-synthetic".to_string(),
+            )])),
+        );
+        let generic_batch =
+            |paths: Vec<Option<&str>>, text: Vec<Option<&str>>, numbers: Vec<Option<f64>>| {
+                RecordBatch::try_new(
+                    generic.clone(),
+                    vec![
+                        Arc::new(StringArray::from(paths)),
+                        Arc::new(StringArray::from(text)),
+                        Arc::new(Float64Array::from(numbers)),
+                    ],
+                )
+                .unwrap()
+            };
+        let quotes = TableData::try_new(vec![
+            generic_batch(
+                vec![
+                    Some("tickData[1].time"),
+                    Some("tickData[1].value"),
+                    Some("tickData[0].type"),
+                    Some("tickData[0].value"),
+                    Some("tickData[1].brokerBuyCode"),
+                    Some("garbage"),
+                    None,
+                ],
+                vec![
+                    Some("2024-01-02T10:00:00"),
+                    Some(""),
+                    Some("BID"),
+                    None,
+                    Some("DLR1"),
+                    Some("x"),
+                    Some("y"),
+                ],
+                vec![
+                    None,
+                    Some(101.5),
+                    None,
+                    Some(99.0),
+                    None,
+                    Some(1.0),
+                    Some(2.0),
+                ],
+            ),
+            generic_batch(
+                vec![
+                    // Overwrites tick 0's numeric value with text.
+                    Some("tickData[0].value"),
+                    Some("tickData[2].ticker"),
+                    Some("tickData[2].conditionCodes"),
+                    Some("tickData[x].time"),
+                    Some("tickData[3]time"),
+                    Some("tickData[4]."),
+                    Some("tickData[5].size"),
+                    Some("tickData[5].é"),
+                ],
+                vec![
+                    Some("100.25"),
+                    Some("ignored"),
+                    Some("A"),
+                    Some("bad"),
+                    Some("bad"),
+                    Some("bad"),
+                    None,
+                    Some("bad"),
+                ],
+                vec![Some(1.0), None, None, None, None, None, Some(3.0), None],
+            ),
+        ])
+        .unwrap();
+        let typed_values = single_batch_table(
+            vec![
+                Field::new("path", DataType::LargeUtf8, false),
+                Field::new("value_str", DataType::Utf8View, true),
+                Field::new("value_num", DataType::Int64, true),
+            ],
+            vec![
+                Arc::new(LargeStringArray::from(vec![
+                    "tickData[0].size",
+                    "tickData[1].size",
+                    "tickData[0].flag",
+                    "tickData[1].flag",
+                ])),
+                Arc::new(StringViewArray::from(vec![
+                    None,
+                    None,
+                    Some(""),
+                    Some("a value longer than twelve bytes"),
+                ])),
+                Arc::new(Int64Array::from(vec![
+                    Some(5),
+                    Some(i64::MAX),
+                    None,
+                    Some(7),
+                ])),
+            ],
+        );
+        let unsigned_values = single_batch_table(
+            vec![
+                Field::new("path", DataType::Utf8View, false),
+                Field::new("value_str", DataType::Utf8, true),
+                Field::new("value_num", DataType::UInt64, true),
+            ],
+            vec![
+                Arc::new(StringViewArray::from(vec![
+                    "tickData[0].count",
+                    "tickData[1].count",
+                    "tickData[0].note",
+                ])),
+                Arc::new(StringArray::from(vec![None, Some("n/a"), None])),
+                Arc::new(UInt64Array::from(vec![Some(u64::MAX), Some(3), Some(4)])),
+            ],
+        );
+        let date_values = single_batch_table(
+            vec![
+                Field::new("path", DataType::Utf8, false),
+                Field::new("value_str", DataType::Utf8, true),
+                Field::new("value_num", DataType::Date32, true),
+            ],
+            vec![
+                Arc::new(StringArray::from(vec![
+                    "tickData[0].settle",
+                    "tickData[1].settle",
+                    "tickData[1].due",
+                ])),
+                Arc::new(StringArray::from(vec![None, Some("TBD"), None])),
+                Arc::new(Date32Array::from(vec![Some(19_000), None, Some(19_001)])),
+            ],
+        );
+        let paths_only = single_batch_table(
+            vec![Field::new("path", DataType::Utf8, false)],
+            vec![Arc::new(StringArray::from(vec!["tickData[0].time"]))],
+        );
+        let numeric_paths = single_batch_table(
+            vec![Field::new("path", DataType::Int64, false)],
+            vec![Arc::new(Int64Array::from(vec![1]))],
+        );
+        let no_paths = single_batch_table(
+            vec![Field::new("value_str", DataType::Utf8, true)],
+            vec![Arc::new(StringArray::from(vec![Some("x")]))],
+        );
+        let no_rows = TableData::try_new(vec![RecordBatch::new_empty(generic.clone())]).unwrap();
+
+        let reshaped = bqr_generic_table(&quotes, "TEST Corp", "ticker").unwrap();
+        assert_eq!(
+            reshaped.column_names(),
+            [
+                "ticker",
+                "time",
+                "type",
+                "value",
+                "size",
+                "brokerBuyCode",
+                "conditionCodes"
+            ]
+        );
+        for (label, data) in [
+            ("quotes", &quotes),
+            ("typed values", &typed_values),
+            ("unsigned values", &unsigned_values),
+            ("date values", &date_values),
+            ("paths only", &paths_only),
+            ("numeric paths", &numeric_paths),
+            ("no paths", &no_paths),
+            ("no rows", &no_rows),
+        ] {
+            for key_column in ["ticker", "security"] {
+                let actual = bqr_generic_table(data, "TEST Corp", key_column).unwrap();
+                let expected = reference_reshape_bqr_generic(data, "TEST Corp", key_column);
+                assert_eq!(actual.schema, expected.schema, "{label} {key_column}");
+                assert_eq!(actual.batches, expected.batches, "{label} {key_column}");
+            }
+        }
+    }
+
+    #[test]
+    fn pylist_resolves_zones_durations_and_decimals_per_column() {
+        Python::initialize();
+        Python::attach(|py| {
+            let schema = Schema::new(vec![
+                Field::new(
+                    "hk",
+                    DataType::Timestamp(TimeUnit::Microsecond, Some("Asia/Hong_Kong".into())),
+                    true,
+                ),
+                Field::new(
+                    "utc",
+                    DataType::Timestamp(TimeUnit::Second, Some("utc".into())),
+                    true,
+                ),
+                Field::new(
+                    "naive",
+                    DataType::Timestamp(TimeUnit::Nanosecond, None),
+                    true,
+                ),
+                Field::new("elapsed", DataType::Duration(TimeUnit::Nanosecond), true),
+                Field::new("amount", DataType::Decimal128(10, 2), true),
+            ]);
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![
+                    Arc::new(
+                        TimestampMicrosecondArray::from(vec![
+                            Some(0),
+                            None,
+                            Some(1_700_000_000_123_456),
+                        ])
+                        .with_timezone("Asia/Hong_Kong"),
+                    ),
+                    Arc::new(
+                        TimestampSecondArray::from(vec![Some(0), Some(86_400), None])
+                            .with_timezone("utc"),
+                    ),
+                    Arc::new(TimestampNanosecondArray::from(vec![
+                        Some(-1),
+                        None,
+                        Some(1_234_567_000),
+                    ])),
+                    Arc::new(DurationNanosecondArray::from(vec![
+                        Some(-1_500),
+                        Some(90_061_000_001_000),
+                        None,
+                    ])),
+                    Arc::new(
+                        Decimal128Array::from(vec![Some(12_345), Some(-5), None])
+                            .with_precision_and_scale(10, 2)
+                            .unwrap(),
+                    ),
+                ],
+            )
+            .unwrap();
+            let rows = batch_to_pylist(py, &batch).unwrap();
+            let cell = |row: usize, name: &str| rows[row].bind(py).get_item(name).unwrap();
+            let iso = |row: usize, name: &str| -> Option<String> {
+                let value = cell(row, name);
+                (!value.is_none())
+                    .then(|| value.call_method0("isoformat").unwrap().extract().unwrap())
+            };
+
+            assert_eq!(iso(0, "hk").as_deref(), Some("1970-01-01T08:00:00+08:00"));
+            assert_eq!(iso(1, "hk"), None);
+            assert_eq!(
+                iso(2, "hk").as_deref(),
+                Some("2023-11-15T06:13:20.123456+08:00")
+            );
+            let zone = cell(2, "hk").getattr("tzinfo").unwrap();
+            assert_eq!(zone.str().unwrap().to_str().unwrap(), "Asia/Hong_Kong");
+            assert_eq!(iso(0, "utc").as_deref(), Some("1970-01-01T00:00:00+00:00"));
+            assert_eq!(iso(1, "utc").as_deref(), Some("1970-01-02T00:00:00+00:00"));
+            assert_eq!(
+                iso(0, "naive").as_deref(),
+                Some("1969-12-31T23:59:59.999999+00:00")
+            );
+            assert_eq!(
+                iso(2, "naive").as_deref(),
+                Some("1970-01-01T00:00:01.234567+00:00")
+            );
+
+            let timedelta = py.import("datetime").unwrap().getattr("timedelta").unwrap();
+            assert!(
+                cell(0, "elapsed")
+                    .eq(timedelta.call1((0, 0, -1)).unwrap())
+                    .unwrap()
+            );
+            assert!(
+                cell(1, "elapsed")
+                    .eq(timedelta.call1((1, 3_661, 1)).unwrap())
+                    .unwrap()
+            );
+            assert!(cell(2, "elapsed").is_none());
+
+            let decimal = py.import("decimal").unwrap().getattr("Decimal").unwrap();
+            assert!(cell(0, "amount").is_instance(&decimal).unwrap());
+            assert_eq!(cell(0, "amount").str().unwrap().to_str().unwrap(), "123.45");
+            assert_eq!(cell(1, "amount").str().unwrap().to_str().unwrap(), "-0.05");
+            assert!(cell(2, "amount").is_none());
+
+            let keys = rows[0]
+                .bind(py)
+                .cast::<PyDict>()
+                .unwrap()
+                .keys()
+                .extract::<Vec<String>>()
+                .unwrap();
+            assert_eq!(keys, ["hk", "utc", "naive", "elapsed", "amount"]);
+        });
+    }
+
+    #[test]
+    fn python_scalars_raise_only_for_non_null_unrepresentable_values() {
+        Python::initialize();
+        Python::attach(|py| {
+            let mut scratch = String::new();
+            let max_days = 999_999_999_i64;
+            let durations = DurationSecondArray::from(vec![
+                Some(max_days * 86_400),
+                Some((max_days + 1) * 86_400),
+                Some(i64::MAX),
+                None,
+            ]);
+            let column = PyScalarColumn::new(&durations);
+            let days = column
+                .value(py, 0, &mut scratch)
+                .unwrap()
+                .bind(py)
+                .getattr("days")
+                .unwrap()
+                .extract::<i64>()
+                .unwrap();
+            assert_eq!(days, max_days);
+            for row in [1, 2] {
+                let err = column.value(py, row, &mut scratch).unwrap_err();
+                assert!(err.is_instance_of::<PyOverflowError>(py), "{err}");
+            }
+            assert!(column.value(py, 3, &mut scratch).unwrap().is_none(py));
+
+            let unknown =
+                TimestampMicrosecondArray::from(vec![None, Some(0)]).with_timezone("Not/A_Zone");
+            let column = PyScalarColumn::new(&unknown);
+            assert!(column.value(py, 0, &mut scratch).unwrap().is_none(py));
+            let err = column.value(py, 1, &mut scratch).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(
+                err.to_string()
+                    .contains("unknown timestamp timezone: Not/A_Zone")
+            );
+        });
+    }
+
+    #[test]
+    fn from_pylist_resolves_reordered_and_repeated_keys_by_name() {
+        Python::initialize();
+        Python::attach(|py| {
+            let rows = py
+                .eval(
+                    c"[{'alpha': 1, 'beta': 'x'}, {'beta': 'y', 'alpha': 2}, {'alpha': 3, 'gamma': 1.5}, {}, {'alpha': True}]",
+                    None,
+                    None,
+                )
+                .unwrap();
+            let text = |value: &str| CellValue::Text(value.to_string());
+            let expected = columns_to_batch(
+                vec![
+                    (
+                        "alpha".to_string(),
+                        vec![
+                            CellValue::Int(1),
+                            CellValue::Int(2),
+                            CellValue::Int(3),
+                            CellValue::Null,
+                            CellValue::Bool(true),
+                        ],
+                    ),
+                    (
+                        "beta".to_string(),
+                        vec![
+                            text("x"),
+                            text("y"),
+                            CellValue::Null,
+                            CellValue::Null,
+                            CellValue::Null,
+                        ],
+                    ),
+                    (
+                        "gamma".to_string(),
+                        vec![
+                            CellValue::Null,
+                            CellValue::Null,
+                            CellValue::Float(1.5),
+                            CellValue::Null,
+                            CellValue::Null,
+                        ],
+                    ),
+                ],
+                5,
+            )
+            .unwrap();
+            assert_eq!(rows_to_batch(&rows).unwrap(), expected);
+
+            // A str the fast path cannot borrow falls back to the probing chain.
+            let lone_surrogate = py.eval(c"'\\ud800'", None, None).unwrap();
+            assert_eq!(
+                py_value_to_cell(&lone_surrogate).unwrap(),
+                CellValue::Text(lone_surrogate.to_string())
             );
         });
     }

@@ -482,6 +482,10 @@ class PyEngine:
         Returns a PySubscription that supports async iteration and dynamic add/remove.
         GIL is released during async operations; iteration and add/remove use separate
         locks to avoid contention.
+        flush_threshold caps how many already-queued updates one read combines
+        into a batch (default: the engine's subscription_flush_threshold, 16).
+        Reads never wait for more updates, so quiet streams still yield one-row
+        batches.
         Aliases map Bloomberg topics to consumer labels. Delayed streams warn by
         default; on_delayed also accepts raise and ignore. Isolated subscriptions
         do not share upstream feeds with other consumers.
@@ -510,6 +514,9 @@ class PyEngine:
             tickers: List of securities to subscribe to
             fields: List of fields to subscribe to
             options: List of subscription options (e.g., ["VWAP_START_TIME=09:30"])
+            flush_threshold: Maximum number of already-queued updates combined into
+                one batch (default: the engine's subscription_flush_threshold, 16).
+                Reads never wait for more updates.
             aliases: Optional Bloomberg topic to consumer label mapping
             on_delayed: Delayed stream policy: warn, raise, or ignore
             isolated: Disable sharing of upstream market-data feeds
@@ -711,12 +718,16 @@ class PyEngineConfig:
     @property
     def subscription_flush_threshold(self) -> builtins.int:
         r"""
-        Number of ticks to buffer before flushing to Python (default: 1)
+        Maximum number of already-queued subscription updates combined into one
+        batch (default: 16). Reads never wait for more updates: a read returns as
+        soon as one update is available, so quiet streams still yield one-row batches.
         """
     @subscription_flush_threshold.setter
     def subscription_flush_threshold(self, value: builtins.int) -> None:
         r"""
-        Number of ticks to buffer before flushing to Python (default: 1)
+        Maximum number of already-queued subscription updates combined into one
+        batch (default: 16). Reads never wait for more updates: a read returns as
+        soon as one update is available, so quiet streams still yield one-row batches.
         """
     @property
     def max_event_queue_size(self) -> builtins.int:

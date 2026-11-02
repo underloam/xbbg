@@ -39,6 +39,7 @@ impl PySubscriptionFixture {
                 overflow_policy: handle.overflow_policy(),
                 consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
                 engine_shutdown: watch::channel(false).1,
+                tick_dict_keys: Arc::default(),
                 _test_fixture: Some(fixture),
                 _test_legacy_read_started: Some(legacy_read_started),
             }
