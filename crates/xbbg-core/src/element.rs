@@ -6,22 +6,25 @@
 //! **Zero allocation**: All getters return borrowed data or copy primitives.
 //! No heap allocations in hot path.
 //!
-//! # Performance (measured Jan 2025)
+//! # Performance (measured Nov 2026)
 //!
-//! | Operation | Time | Notes |
-//! |-----------|------|-------|
-//! | `get_at(i)` / `get(&name)` | ~630ns | Bloomberg SDK internal work |
-//! | `get_f64()` | ~7ns | Fast once you have the element |
-//! | `datatype()` | ~1ns | Nearly free |
-//! | `name_eq(&name)` | ~5ns | Pointer comparison |
-//! | `name_str()` | ~30ns | Borrowed field name, no `Name` duplicate or String allocation |
-//! | `name()` | ~30ns | Duplicates Bloomberg `Name` (avoid in hot paths) |
+//! Release build, SDK TestUtil fixture messages, cost per field value:
 //!
-//! **Throughput**: ~1.5M fields/sec per core.
+//! | Access pattern | Time | Notes |
+//! |----------------|------|-------|
+//! | Row access via `get_element(i)` (`getValueAsElement`) | ~2.2 ns | Array row handle |
+//! | `get(&name)` + `get_value(0)` | ~57 ns | 4 FFI calls: null check, value count, datatype, getter |
+//! | `get(&name)` + cached datatype | ~48 ns | `get_value_fast_with_datatype`: 1 FFI call for the value |
+//! | `get_at(i)` + cached datatype | ~44 ns | Positional child access |
 //!
-//! **Key insight**: Element traversal (`get_at`/`get`) is the bottleneck at ~630ns
-//! due to Bloomberg SDK internal work. Value extraction is fast (~7ns) once you
-//! have the element handle.
+//! Looking up a name that is not part of the element's definition takes the
+//! SDK's error path (~370 ns in the same measurement, against ~20 ns for a
+//! present name), so prefer iterating children (`num_children` + `get_at` +
+//! `name_index`) when probing optional elements.
+//!
+//! **Key insight**: SDK traversal plus extraction costs ~44–57 ns per value,
+//! comparable to xbbg's own per-value work. Cache datatypes, avoid
+//! `get_by_str` in loops, and keep per-value builder work minimal.
 
 use crate::{DataType, HighPrecisionDatetime, Name, ffi};
 use std::ffi::CStr;
