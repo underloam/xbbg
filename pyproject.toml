@@ -6,7 +6,11 @@ build-backend = "setuptools.build_meta"
 name = "xbbg"
 description = "Intuitive Bloomberg data API"
 readme = { file = "README.md", content-type = "text/markdown" }
-requires-python = ">=3.10,<3.15"
+# No upper bound. pip skips every release whose Requires-Python excludes the
+# running interpreter and installs the newest one that admits it, so a cap sent
+# newer CPythons (3.15 under `<3.15`) to the 2022 0.7.7, the last uncapped
+# release. The classifiers list the tested versions.
+requires-python = ">=3.10"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 authors = [
