@@ -10,7 +10,9 @@ use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router
 use serde_json::{Value, json};
 use tokio::sync::{OnceCell, Semaphore};
 use xbbg_async::BlpAsyncError;
-use xbbg_async::engine::{Engine, EngineConfig, RequestParams, RetryPolicy, ServerAddr, Transport};
+use xbbg_async::engine::{
+    Engine, EngineConfig, KeyColumn, RequestParams, RetryPolicy, ServerAddr, Transport,
+};
 use xbbg_async::error_presentation::blp_error_display;
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
@@ -50,6 +52,13 @@ impl XbbgMcpServer {
         const MAX_CONCURRENT_SERIALIZATIONS: usize = 2;
 
         let (engine_config, result_limits) = load_settings_from_env()?;
+        if engine_config.key_column == KeyColumn::Ticker {
+            xbbg_log::warn!(
+                "results name the security column 'ticker', which collides with Bloomberg's \
+                 TICKER field and becomes 'security' in the next major release; set \
+                 XBBG_MCP_KEY_COLUMN=security to switch now"
+            );
+        }
         Ok(Self {
             tool_router: Self::tool_router(),
             engine: OnceCell::new(),
@@ -397,7 +406,7 @@ impl ServerHandler for XbbgMcpServer {
                     ),
             )
             .with_instructions(
-                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, resolve_venues, auction_snapshot, check_entitlements, delay_status, or request. resolve_venues routes composite equities to primary exchange listings and preferreds to venue pricing sources, preserving one status/error row per input. auction_snapshot reads Bloomberg reference data on the primary venue; time-of-day fields are terminal-local. Bloomberg can serve delayed data without marking the rows: delay_status reports per ticker whether this session receives delayed data (check_identity=true also checks feed-EID entitlements on //blp/mktdata and needs SAPI/B-PIPE authorization or an EMRS-enrolled Desktop API user), and on_delayed on bdp, bdh, bdib, or request either reports xbbg.delayed metadata (warn and ignore behave the same) or fails the call (raise). Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block.",
+                "Use bdp, bdh, bds, bdib, bql, bsrch, bflds, resolve_venues, auction_snapshot, check_entitlements, delay_status, or request. resolve_venues routes composite equities to primary exchange listings and preferreds to venue pricing sources, preserving one status/error row per input. auction_snapshot reads Bloomberg reference data on the primary venue; time-of-day fields are terminal-local. Bloomberg can serve delayed data without marking the rows: delay_status reports per ticker whether this session receives delayed data (check_identity=true also checks feed-EID entitlements on //blp/mktdata and needs SAPI/B-PIPE authorization or an EMRS-enrolled Desktop API user), and on_delayed on bdp, bdh, bdib, or request either reports xbbg.delayed metadata (warn and ignore behave the same) or fails the call (raise). Results are structured JSON with Arrow schema and metadata, explicit truncation counts, and bounded rows, cells, strings, metadata, and total bytes. This MCP server currently exposes host/port, selected auth env vars, core pool settings, and result limits rather than the full EngineConfig surface. For XBBG_MCP_VALIDATION_MODE/XBBG_VALIDATION_MODE use disabled (default), lenient, or strict; for XBBG_MCP_SDK_LOG_LEVEL/XBBG_SDK_LOG_LEVEL use off (default), fatal, error, warn, info, debug, or trace; for XBBG_MCP_OVERFLOW_POLICY/XBBG_OVERFLOW_POLICY use drop_newest (default) or block; for XBBG_MCP_KEY_COLUMN/XBBG_KEY_COLUMN use ticker (default, deprecated) or security, the name of the result column holding each row's security.",
             )
     }
 }
@@ -473,6 +482,8 @@ fn load_settings_from_env() -> Result<(EngineConfig, ResultLimits), String> {
         "overflow_policy",
     )?
     .unwrap_or(config.overflow_policy);
+    config.key_column = env_parsed(&["XBBG_MCP_KEY_COLUMN", "XBBG_KEY_COLUMN"], "key_column")?
+        .unwrap_or(config.key_column);
     config.auth = build_auth_from_env()?;
 
     let defaults = ResultLimits::default();
