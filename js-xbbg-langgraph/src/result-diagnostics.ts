@@ -32,8 +32,19 @@ interface DiagnosticTraversal {
   jsonStringByteLength(value: string, stopAfter?: number): number;
 }
 
-function invalidMetadata(detail: string): TypeError {
-  return new TypeError(`Invalid ${FIELD_EXCEPTIONS_KEY} metadata: ${detail}`);
+/** Malformed stored diagnostics; bounded results omit them instead of failing. */
+export class InvalidFieldExceptionsMetadataError extends TypeError {
+  public override name = "InvalidFieldExceptionsMetadataError";
+}
+
+function invalidMetadata(
+  detail: string,
+  options?: ErrorOptions,
+): InvalidFieldExceptionsMetadataError {
+  return new InvalidFieldExceptionsMetadataError(
+    `Invalid ${FIELD_EXCEPTIONS_KEY} metadata: ${detail}`,
+    options,
+  );
 }
 
 /** Read only data descriptors: a core convenience getter may expand millions of occurrences. */
@@ -249,7 +260,7 @@ export function buildRawFieldExceptions(
   try {
     parsed = JSON.parse(raw);
   } catch (cause) {
-    throw new TypeError(`Invalid ${FIELD_EXCEPTIONS_KEY} metadata: expected valid JSON`, { cause });
+    throw invalidMetadata("expected valid JSON", { cause });
   }
   if (!isPlainObject(parsed)) {
     throw invalidMetadata("expected an object");

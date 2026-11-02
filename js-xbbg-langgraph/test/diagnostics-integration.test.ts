@@ -455,41 +455,35 @@ describe("current core diagnostic conversion into bounded LangGraph results", ()
   );
 
   it.each([
-    { raw: "{", reason: /valid JSON/iu },
+    { name: "invalid JSON", raw: "{" },
+    { name: "unversioned envelope", raw: JSON.stringify({ entries: [], securities: {} }) },
     {
-      raw: JSON.stringify({ entries: [], securities: {} }),
-      reason: /compact envelope/iu,
-    },
-    {
+      name: "dictionary index",
       raw: JSON.stringify({ version: 1, entries: [], securities: { SYN: [0] } }),
-      reason: /dictionary index/iu,
     },
     {
+      name: "exception entry",
       raw: JSON.stringify({
         version: 1,
         entries: [{ ...EXCEPTIONS[0], field: 42 }],
         securities: { SYN: [0] },
       }),
-      reason: /exception entry/iu,
     },
-  ])("retains malformed raw-only fallback context: $reason", async ({ raw, reason }) => {
+  ])("omits malformed raw-only fallback diagnostics without failing: $name", async ({ raw }) => {
     const { engine } = engineWithBatch(int32ArrowBatch([7]));
     const converted = asRows(await engine.bdp(["SYN"], ["BID"], { backend: "json" }));
     // Older cores may expose persisted raw metadata without a convenience accessor.
     const metadata = Object.freeze({ "xbbg.field_exceptions": raw });
     const rows = withoutExpandedAccessor(converted, metadata);
     const { guarded, readFieldExceptions } = guardLazyExceptions(rows);
-    let error: unknown;
 
-    try {
-      projectResult(guarded, resultLimits(), false);
-    } catch (cause) {
-      error = cause;
-    }
+    const limited = projectResult(guarded, resultLimits(), false);
 
-    expect(error).toBeInstanceOf(TypeError);
-    expect(error).toHaveProperty("message", expect.stringMatching(/xbbg\.field_exceptions/iu));
-    expect(error).toHaveProperty("message", expect.stringMatching(reason));
+    // Like the Python adapter: keep the result, never report it clean.
+    expect(limited.hasErrors).toBe(true);
+    expect(limited.truncation?.reasons).toContain("unsupported_value");
+    expect(Object.hasOwn(limited.value as object, "fieldExceptions")).toBe(false);
+    expect((limited.value as Record<string, unknown>).rows).toEqual([{ answer: 7 }]);
     expect(readFieldExceptions).not.toHaveBeenCalled();
     expect(Object.getOwnPropertyDescriptor(rows, "metadata")?.value).toEqual(metadata);
     expect(Object.getOwnPropertyDescriptor(converted, "metadata")?.value).toEqual({});
@@ -598,9 +592,16 @@ describe("current core diagnostic conversion into bounded LangGraph results", ()
         }),
       });
 
-      expect(() =>
-        projectResult(rows, resultLimits({ maxResultBytes: 2_048, maxResultNodes: 10_000 }), false),
-      ).toThrow(/xbbg\.field_exceptions.*(?:entry|index)/iu);
+      const limited = projectResult(
+        rows,
+        resultLimits({ maxResultBytes: 2_048, maxResultNodes: 10_000 }),
+        false,
+      );
+
+      // A late invalid reference omits the whole dictionary, never a valid-looking prefix.
+      expect(limited.truncation?.reasons).toContain("unsupported_value");
+      expect(Object.hasOwn(limited.value as object, "fieldExceptions")).toBe(false);
+      expect(limited.hasErrors).toBe(true);
     },
   );
 
