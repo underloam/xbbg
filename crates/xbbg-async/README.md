@@ -90,8 +90,11 @@ neither combine messages nor wait for another event before delivering an update.
 
 `SubscriptionState` emits updates immediately; it has no flush threshold or
 `flush()` operation. `SubscriptionArrowBatcher` owns Arrow batching. The public
-`EngineConfig::subscription_flush_threshold` and `SubscribeRequest::flush_threshold`
-options remain consumer-side hints used by bindings, not engine buffering settings.
+`EngineConfig::subscription_flush_threshold` (default 16) and
+`SubscribeRequest::flush_threshold` are consumer-side maximums, not engine
+buffering settings: a read returns as soon as the first update arrives and
+combines only updates already waiting, so quiet streams still produce one-row
+batches and bursts are combined up to the maximum.
 
 Arrow conversion appends non-null binary `__xbbg_present`. Bit `i`, LSB-first,
 maps to schema field `i + 2` after `timestamp` and `topic`. A present-null field

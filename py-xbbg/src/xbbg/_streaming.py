@@ -768,7 +768,9 @@ async def asubscribe(
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
             Quote updates are conflated by Bloomberg; trades are still delivered as received.
         tick_mode: If True, return native dict ticks without building Arrow (implies raw=True)
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates, so a
+            quiet stream still yields one-row batches.
         stream_capacity: Backpressure capacity of the native subscription stream.
         overflow_policy: ``"drop_newest"`` (default) fails on a full consumer
             buffer; ``"block"`` waits briefly on a bounded forwarder and fails
@@ -986,7 +988,8 @@ async def astream(
         callback: Optional callback function to invoke on each batch
         tick_mode: If True, convert batches to dicts
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates.
         stream_capacity: Capacity of the native subscription stream.
         overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve
             strict delta output. ``"drop_oldest"`` yields marked batch envelopes.
@@ -1101,7 +1104,8 @@ def stream(
         callback: Optional callback function to invoke on each batch
         tick_mode: If True, convert batches to dicts
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates.
         stream_capacity: Capacity of both the native subscription stream and the
             sync bridge. Defaults to 256.
         overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve

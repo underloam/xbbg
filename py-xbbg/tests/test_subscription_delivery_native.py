@@ -444,11 +444,10 @@ async def test_interrupted_loop_conversion_rolls_back_native_receipt(native_fact
     publish(owner, BID=12.0)
     restored = await read(sub.deliveries())
     if mode == "deltas":
-        assert rows(restored)[0]["BID"] == 11.0
+        # The restored receipt keeps its gap and, under the default
+        # flush_threshold, also carries the update queued behind it.
+        assert [row["BID"] for row in rows(restored)] == [11.0, 12.0]
         assert restored.gap_before.dropped_updates == 1
-        newest = await read(sub.deliveries())
-        assert rows(newest)[0]["BID"] == 12.0
-        assert newest.gap_before is None
     else:
         assert rows(restored)[0]["BID"] == 12.0
         assert rows(restored)[0]["valid"] is True

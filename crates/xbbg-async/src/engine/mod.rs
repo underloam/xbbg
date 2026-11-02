@@ -643,7 +643,12 @@ pub struct EngineConfig {
     pub max_event_queue_size: usize,
     /// Command channel capacity (backpressure)
     pub command_queue_size: usize,
-    /// Consumer-side Arrow batch size hint; the engine emits subscription updates immediately.
+    /// Maximum number of already-queued subscription updates (or dirty state
+    /// topics) combined into one Arrow batch per read (default: 16). A read
+    /// returns as soon as the first update arrives and adds only updates that
+    /// are already waiting, so quiet streams still get one-row batches; nothing
+    /// waits for a batch to fill, and the engine emits every update immediately.
+    /// `SubscribeRequest::flush_threshold` overrides it per subscription.
     pub subscription_flush_threshold: usize,
     /// Subscription stream capacity (backpressure)
     pub subscription_stream_capacity: usize,
@@ -801,7 +806,7 @@ impl Default for EngineConfig {
             tls: None,
             max_event_queue_size: 10_000,
             command_queue_size: 256,
-            subscription_flush_threshold: 1,
+            subscription_flush_threshold: 16,
             subscription_stream_capacity: 256,
             overflow_policy: OverflowPolicy::default(),
             request_pool_size: 2,
@@ -1878,6 +1883,7 @@ mod tests {
         assert_eq!(config.runtime_worker_threads, 2);
         assert_eq!(config.max_subscription_sessions, 32);
         assert!(config.max_subscription_sessions >= config.subscription_pool_size);
+        assert_eq!(config.subscription_flush_threshold, 16);
     }
 
     #[test]
