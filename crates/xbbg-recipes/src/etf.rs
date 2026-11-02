@@ -167,7 +167,7 @@ pub async fn recipe_etf_nav_snapshot(engine: &Engine, etfs: Vec<String>) -> Resu
             request_ids.collect(&batch);
             let diagnostics = parse_response_diagnostics(&batch)?;
             check_value_source_diagnostics(&fallback_sources, &diagnostics)?;
-            let values = strict_refdata_value_map(&batch)?;
+            let values = strict_refdata_value_map(&batch, engine.key_column().as_str())?;
             for source in &fallback_sources {
                 let value = values
                     .get(source)
@@ -260,7 +260,8 @@ async fn resolve_etf_nav_relationships(
     request_ids.collect(&relationship_batch);
     let relationship_diagnostics = parse_response_diagnostics(&relationship_batch)?;
     check_source_diagnostics(&sources, &relationship_diagnostics)?;
-    let relationship_values = strict_refdata_value_map(&relationship_batch)?;
+    let relationship_values =
+        strict_refdata_value_map(&relationship_batch, engine.key_column().as_str())?;
     let targets = map_relationship_targets(&sources, &relationship_values);
 
     let validation_targets = validation_securities(&sources, &targets);
@@ -272,7 +273,8 @@ async fn resolve_etf_nav_relationships(
             .await?;
         request_ids.collect(&validation_batch);
         let validation_diagnostics = parse_response_diagnostics(&validation_batch)?;
-        let validation_values = strict_refdata_value_map(&validation_batch)?;
+        let validation_values =
+            strict_refdata_value_map(&validation_batch, engine.key_column().as_str())?;
         for target in &validation_targets {
             target_info.insert(
                 target.clone(),
@@ -695,19 +697,20 @@ async fn request_history_series(
             end_date,
         ))
         .await?;
-    parse_history_series(&batch, &securities)
+    parse_history_series(&batch, &securities, engine.key_column().as_str())
 }
 
 fn parse_history_series(
     batch: &RecordBatch,
     securities: &[String],
+    key: &str,
 ) -> Result<(HistorySeries, BloombergRequestIds)> {
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(batch);
     let result = (|| {
         let diagnostics = parse_response_diagnostics(batch)?;
         check_value_source_diagnostics(securities, &diagnostics)?;
-        strict_history_value_map(batch)
+        strict_history_value_map(batch, key)
     })();
     let history =
         result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
@@ -880,12 +883,13 @@ fn enforce_snapshot_value_exceptions(
     Ok(())
 }
 
-/// Strict generic long `ticker`/`field`/`value` parse.
+/// Strict generic long key/`field`/`value` parse, keyed by the engine's `key`
+/// column.
 ///
 /// Identical duplicate rows coalesce; conflicting duplicate values abort.
 /// Blank and sentinel values are dropped so they surface as `None`.
-fn strict_refdata_value_map(batch: &RecordBatch) -> Result<RefValues> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+fn strict_refdata_value_map(batch: &RecordBatch, key: &str) -> Result<RefValues> {
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -925,9 +929,9 @@ fn strict_refdata_value_map(batch: &RecordBatch) -> Result<RefValues> {
     Ok(values)
 }
 
-/// Strict historical long parse keyed by `(ticker, date, field)`.
-fn strict_history_value_map(batch: &RecordBatch) -> Result<HistorySeries> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+/// Strict historical long parse keyed by `(security, date, field)`.
+fn strict_history_value_map(batch: &RecordBatch, key: &str) -> Result<HistorySeries> {
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -1603,7 +1607,8 @@ mod tests {
                 (METADATA_KEY_SECURITY_ERRORS, "synthetic invalid metadata"),
             ],
         );
-        let error = parse_history_series(&source, &["SYNTH_HISTORY Index".into()]).unwrap_err();
+        let error =
+            parse_history_series(&source, &["SYNTH_HISTORY Index".into()], "ticker").unwrap_err();
         assert!(
             error
                 .to_string()
@@ -1681,8 +1686,14 @@ mod tests {
         let mut fund_ids = BloombergRequestIds::default();
         fund_ids.collect(&fund_source);
         let (px_history, fund_history, history_ids) = ordered_history_results(
-            Ok((strict_history_value_map(&px_source).unwrap(), px_ids)),
-            Ok((strict_history_value_map(&fund_source).unwrap(), fund_ids)),
+            Ok((
+                strict_history_value_map(&px_source, "ticker").unwrap(),
+                px_ids,
+            )),
+            Ok((
+                strict_history_value_map(&fund_source, "ticker").unwrap(),
+                fund_ids,
+            )),
         )
         .unwrap();
         request_ids.extend(history_ids.iter().cloned());
@@ -1715,14 +1726,14 @@ mod tests {
             (QQQ, "ETF_NAV_TICKER", Some("QQQNV")),
             (QQQ, "ETF_NAV_TICKER", Some("QQQNV")),
         ]);
-        let values = strict_refdata_value_map(&identical).unwrap();
+        let values = strict_refdata_value_map(&identical, "ticker").unwrap();
         assert_eq!(values[QQQ]["ETF_NAV_TICKER"], "QQQNV");
 
         let conflicting = refdata_batch(&[
             (QQQ, "ETF_NAV_TICKER", Some("QQQNV")),
             (QQQ, "etf_nav_ticker", Some("OTHER")),
         ]);
-        let error = strict_refdata_value_map(&conflicting).unwrap_err();
+        let error = strict_refdata_value_map(&conflicting, "ticker").unwrap_err();
         assert!(error.to_string().contains("conflicting values"));
     }
 
@@ -1740,7 +1751,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let error = strict_refdata_value_map(&batch).unwrap_err();
+        let error = strict_refdata_value_map(&batch, "ticker").unwrap_err();
         assert!(error.to_string().contains("missing 'value' column"));
 
         let wrong_type = Arc::new(Schema::new(vec![
@@ -1757,7 +1768,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let error = strict_refdata_value_map(&batch).unwrap_err();
+        let error = strict_refdata_value_map(&batch, "ticker").unwrap_err();
         assert!(error.to_string().contains("'ticker' column must be Utf8"));
     }
 
@@ -1768,7 +1779,7 @@ mod tests {
             (QQQ_NAV, "PX_LAST", Some(500.25), day),
             (QQQ_NAV, "PX_LAST", Some(500.25), day),
         ]);
-        let values = strict_history_value_map(&identical).unwrap();
+        let values = strict_history_value_map(&identical, "ticker").unwrap();
         assert_eq!(
             values[&(QQQ_NAV.to_string(), "PX_LAST".to_string())][&day],
             500.25
@@ -1778,11 +1789,11 @@ mod tests {
             (QQQ_NAV, "PX_LAST", Some(500.25), day),
             (QQQ_NAV, "PX_LAST", Some(501.0), day),
         ]);
-        let error = strict_history_value_map(&conflicting).unwrap_err();
+        let error = strict_history_value_map(&conflicting, "ticker").unwrap_err();
         assert!(error.to_string().contains("conflicting values"));
 
         let missing_date = refdata_batch(&[(QQQ_NAV, "PX_LAST", Some("500.25"))]);
-        let error = strict_history_value_map(&missing_date).unwrap_err();
+        let error = strict_history_value_map(&missing_date, "ticker").unwrap_err();
         assert!(error.to_string().contains("missing 'date' column"));
     }
 
@@ -2110,7 +2121,7 @@ mod tests {
             (AT1, "ETF_NAV_TICKER", Some("nan")),
             (AT1, "ETF_INAV_TICKER", Some("AT1IN Index")),
         ]);
-        let values = strict_refdata_value_map(&batch).unwrap();
+        let values = strict_refdata_value_map(&batch, "ticker").unwrap();
         let sources = vec![QQQ.to_string(), AT1.to_string()];
         let targets = map_relationship_targets(&sources, &values);
 
@@ -2309,8 +2320,8 @@ mod tests {
             (AT1_INAV, "PX_LAST", Some(9.9), d1),
         ]);
         let fund_batch = history_batch(&[(AT1, "FUND_NET_ASSET_VAL", Some(10.5), d2)]);
-        let px_history = strict_history_value_map(&px_batch).unwrap();
-        let fund_history = strict_history_value_map(&fund_batch).unwrap();
+        let px_history = strict_history_value_map(&px_batch, "ticker").unwrap();
+        let fund_history = strict_history_value_map(&fund_batch, "ticker").unwrap();
 
         let resolutions = vec![
             resolution(

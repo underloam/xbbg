@@ -41,11 +41,19 @@ pub async fn recipe_index_members(
     };
 
     let batch = engine.request(params).await?;
-    normalize_index_members_batch(batch, &index, &normalized_field)
+    normalize_index_members_batch(
+        batch,
+        engine.key_column().as_str(),
+        &index,
+        &normalized_field,
+    )
 }
 
+/// Rename the member identifier column of bulk output keyed by the engine's
+/// `key` column to `member`.
 pub(crate) fn normalize_index_members_batch(
     batch: RecordBatch,
+    key: &str,
     index: &str,
     field: &str,
 ) -> Result<RecordBatch> {
@@ -55,7 +63,7 @@ pub(crate) fn normalize_index_members_batch(
         )));
     }
 
-    let member_col_idx = find_member_column_index(&batch).ok_or_else(|| {
+    let member_col_idx = find_member_column_index(&batch, key).ok_or_else(|| {
         RecipeError::Other(format!(
             "Bloomberg returned no recognizable member identifier column for index '{index}' field '{field}'"
         ))
@@ -90,7 +98,7 @@ pub(crate) fn normalize_index_members_batch(
     RecordBatch::try_new(schema, columns).map_err(Into::into)
 }
 
-fn find_member_column_index(batch: &RecordBatch) -> Option<usize> {
+fn find_member_column_index(batch: &RecordBatch, key: &str) -> Option<usize> {
     let preferred = [
         "member",
         "member ticker and exchange code",
@@ -108,7 +116,7 @@ fn find_member_column_index(batch: &RecordBatch) -> Option<usize> {
 
     for (idx, field) in batch.schema().fields().iter().enumerate() {
         let name = field.name();
-        if name == "ticker" || name == "field" {
+        if name == key || name == "field" {
             continue;
         }
         let key = canonical_name(name);
@@ -124,7 +132,7 @@ fn find_member_column_index(batch: &RecordBatch) -> Option<usize> {
         .enumerate()
         .find_map(|(idx, field)| {
             let name = field.name();
-            (name != "ticker" && name != "field").then_some(idx)
+            (name != key && name != "field").then_some(idx)
         })
 }
 
@@ -152,9 +160,33 @@ mod tests {
         )
         .unwrap();
 
-        let normalized = normalize_index_members_batch(batch, "SPX Index", "INDX_MWEIGHT").unwrap();
+        let normalized =
+            normalize_index_members_batch(batch, "ticker", "SPX Index", "INDX_MWEIGHT").unwrap();
         assert!(normalized.column_by_name("member").is_some());
         assert!(normalized.column_by_name("Percent Weight").is_some());
+    }
+
+    #[test]
+    fn unrecognized_member_column_is_never_the_key_column() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "security",
+                Arc::new(StringArray::from(vec!["SPX Index"])) as ArrayRef,
+            ),
+            ("field", Arc::new(StringArray::from(vec!["INDX_MEMBERS"]))),
+            ("Constituent", Arc::new(StringArray::from(vec!["AAPL US"]))),
+        ])
+        .unwrap();
+
+        let normalized =
+            normalize_index_members_batch(batch, "security", "SPX Index", "INDX_MEMBERS").unwrap();
+        let names: Vec<_> = normalized
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, ["security", "field", "member"]);
     }
 
     #[test]
@@ -165,7 +197,8 @@ mod tests {
             false,
         )]));
         let batch = RecordBatch::new_empty(schema);
-        let err = normalize_index_members_batch(batch, "BAD Index", "INDX_MWEIGHT").unwrap_err();
+        let err = normalize_index_members_batch(batch, "ticker", "BAD Index", "INDX_MWEIGHT")
+            .unwrap_err();
         assert!(err.to_string().contains("no rows"));
     }
 }

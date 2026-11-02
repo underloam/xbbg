@@ -69,7 +69,7 @@ use xbbg_async::engine::{
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, OverflowPolicy, SubscribeRequest,
+    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, KeyColumn, OverflowPolicy, SubscribeRequest,
     SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
@@ -397,6 +397,11 @@ pub struct PyEngineConfig {
     /// Also accepts "off" and "none" as aliases for "disabled".
     #[pyo3(get, set)]
     pub validation_mode: String,
+    /// Name of the result column holding each row's security: "ticker"
+    /// (default, deprecated) or "security", which becomes the default in the
+    /// next major release.
+    #[pyo3(get, set)]
+    pub key_column: String,
     /// Number of ticks to buffer before flushing to Python (default: 1)
     #[pyo3(get, set)]
     pub subscription_flush_threshold: usize,
@@ -529,6 +534,7 @@ impl PyEngineConfig {
             shard_chunk_size: defaults.shard_chunk_size,
             shard_max_concurrent: defaults.shard_max_concurrent,
             validation_mode: defaults.validation_mode.to_string(),
+            key_column: defaults.key_column.to_string(),
             subscription_flush_threshold: defaults.subscription_flush_threshold,
             max_event_queue_size: defaults.max_event_queue_size,
             command_queue_size: defaults.command_queue_size,
@@ -605,6 +611,9 @@ impl PyEngineConfig {
             }
             if let Some(v) = kw.get_item("validation_mode")? {
                 config.validation_mode = v.extract()?;
+            }
+            if let Some(v) = kw.get_item("key_column")? {
+                config.key_column = v.extract()?;
             }
             if let Some(v) = kw.get_item("subscription_flush_threshold")? {
                 config.subscription_flush_threshold = v.extract()?;
@@ -723,7 +732,8 @@ impl PyEngineConfig {
             "EngineConfig(host='{}', port={}, request_pool_size={}, subscription_pool_size={}, \
              runtime_worker_threads={}, max_subscription_sessions={}, shard_requests={}, \
              shard_threshold={}, shard_chunk_size={}, shard_max_concurrent={}, validation_mode='{}', \
-             overflow_policy='{}', auth_method='{}', field_cache_path='{}', warmup_services={:?})",
+             key_column='{}', overflow_policy='{}', auth_method='{}', field_cache_path='{}', \
+             warmup_services={:?})",
             self.host,
             self.port,
             self.request_pool_size,
@@ -735,6 +745,7 @@ impl PyEngineConfig {
             self.shard_chunk_size,
             self.shard_max_concurrent,
             self.validation_mode,
+            self.key_column,
             self.overflow_policy,
             auth_method,
             fcp_display,
@@ -770,6 +781,11 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
             .parse()
             .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
 
+        let key_column: KeyColumn = py_config
+            .key_column
+            .parse()
+            .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
+
         let config = EngineConfig {
             transport: Transport::Direct(Vec::new()),
             tls: None,
@@ -782,6 +798,7 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
             shard_chunk_size: py_config.shard_chunk_size,
             shard_max_concurrent: py_config.shard_max_concurrent,
             validation_mode,
+            key_column,
             subscription_flush_threshold: py_config.subscription_flush_threshold,
             max_event_queue_size: py_config.max_event_queue_size,
             command_queue_size: py_config.command_queue_size,

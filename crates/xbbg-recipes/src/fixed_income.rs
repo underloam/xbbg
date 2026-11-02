@@ -245,7 +245,12 @@ pub async fn recipe_bqr(
         &options,
     )?;
     let batch = engine.request(params).await?;
-    shape_bqr_quotes(batch, &ticker, include_broker_codes)
+    shape_bqr_quotes(
+        batch,
+        &ticker,
+        engine.key_column().as_str(),
+        include_broker_codes,
+    )
 }
 
 fn bqr_request(
@@ -319,13 +324,16 @@ fn bqr_hour_before(end: &str) -> Result<String> {
         .ok_or_else(invalid)
 }
 
+/// Normalize quote rows; generic extractor output is reshaped with the
+/// security in the engine's `key` column.
 fn shape_bqr_quotes(
     mut batch: RecordBatch,
     ticker: &str,
+    key: &str,
     enforce_broker_codes: bool,
 ) -> Result<RecordBatch> {
     if batch.column_by_name("path").is_some() {
-        batch = reshape_bqr_generic(&batch, ticker)?;
+        batch = reshape_bqr_generic(&batch, ticker, key)?;
     }
     if enforce_broker_codes && batch.num_rows() > 0 && !bqr_has_broker_codes(&batch) {
         return Err(RecipeError::Other(
@@ -413,7 +421,7 @@ fn bqr_path(path: &str) -> Option<(usize, &str)> {
     (len > 0).then_some((row, &field[..len]))
 }
 
-fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str) -> Result<RecordBatch> {
+fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str, key: &str) -> Result<RecordBatch> {
     let paths = as_string_col(batch, "path")?;
     let strings = batch
         .column_by_name("value_str")
@@ -435,22 +443,23 @@ fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str) -> Result<RecordBatch>
         fields.insert(field);
         records.entry(index).or_default().insert(field, row);
     }
-    let priority = ["ticker", "time", "type", "value", "size"];
-    let mut names = vec!["ticker"];
+    const TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
+    let mut names = vec![key];
     names.extend(
-        priority[1..]
+        TICK_COLUMNS
             .iter()
             .copied()
-            .filter(|name| fields.contains(name)),
+            .filter(|name| records.is_empty() || fields.contains(name)),
     );
-    names.extend(fields.into_iter().filter(|name| !priority.contains(name)));
-    if records.is_empty() {
-        names = priority.to_vec();
-    }
+    names.extend(
+        fields
+            .into_iter()
+            .filter(|name| *name != key && !TICK_COLUMNS.contains(name)),
+    );
     let mut out_fields = Vec::with_capacity(names.len());
     let mut columns: Vec<ArrayRef> = Vec::with_capacity(names.len());
     for name in names {
-        let array: ArrayRef = if name == "ticker" {
+        let array: ArrayRef = if name == key {
             let mut builder =
                 StringBuilder::with_capacity(records.len(), records.len() * ticker.len());
             for _ in 0..records.len() {
@@ -829,6 +838,7 @@ mod tests {
         let batch = shape_bqr_quotes(
             typed_quotes([Some("DLRA"), Some("DLRB")]),
             "TEST Corp",
+            "ticker",
             true,
         )
         .unwrap();
@@ -895,21 +905,29 @@ mod tests {
     #[test]
     fn bqr_requires_attribution_only_for_nonempty_attributed_requests() {
         let batch = typed_quotes([None, Some("")]);
-        let error = shape_bqr_quotes(batch.clone(), "TEST Corp", true).unwrap_err();
+        let error = shape_bqr_quotes(batch.clone(), "TEST Corp", "ticker", true).unwrap_err();
         assert!(error.to_string().contains("without broker attribution"));
         assert_eq!(
-            shape_bqr_quotes(batch.clone(), "TEST Corp", false)
+            shape_bqr_quotes(batch.clone(), "TEST Corp", "ticker", false)
                 .unwrap()
                 .num_rows(),
             2
         );
         assert_eq!(
-            shape_bqr_quotes(batch.slice(0, 0), "TEST Corp", true)
+            shape_bqr_quotes(batch.slice(0, 0), "TEST Corp", "ticker", true)
                 .unwrap()
                 .num_rows(),
             0
         );
-        assert!(shape_bqr_quotes(typed_quotes([None, Some("DLRA")]), "TEST Corp", true).is_ok());
+        assert!(
+            shape_bqr_quotes(
+                typed_quotes([None, Some("DLRA")]),
+                "TEST Corp",
+                "ticker",
+                true
+            )
+            .is_ok()
+        );
     }
 
     #[test]
@@ -959,10 +977,11 @@ mod tests {
             Field::new("value_num", DataType::Float64, true),
         ]);
         let source = RecordBatch::try_new(Arc::new(schema), columns).unwrap();
-        let batch = shape_bqr_quotes(source, "TEST Corp", true).unwrap();
+        let batch = shape_bqr_quotes(source, "TEST Corp", "security", true).unwrap();
         assert_eq!(batch.num_rows(), 2);
+        assert_eq!(batch.schema_ref().field(0).name(), "security");
         assert_eq!(
-            as_string_col(&batch, "ticker").unwrap().value(0),
+            as_string_col(&batch, "security").unwrap().value(0),
             "TEST Corp"
         );
         assert_eq!(as_string_col(&batch, "event_type").unwrap().value(0), "BID");

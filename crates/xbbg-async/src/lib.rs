@@ -18,8 +18,8 @@ pub use errors::BlpAsyncError;
 
 // Worker-pool Engine — the primary API
 pub use engine::{
-    DelayedPolicy, Engine, EngineConfig, FeedInfo, FieldErrorPolicy, OverflowPolicy, RequestStream,
-    SlabKey, SubscribeRequest, SubscriptionDeliveries, SubscriptionDelivery,
+    DelayedPolicy, Engine, EngineConfig, FeedInfo, FieldErrorPolicy, KeyColumn, OverflowPolicy,
+    RequestStream, SlabKey, SubscribeRequest, SubscriptionDeliveries, SubscriptionDelivery,
     SubscriptionDeliveryMode, SubscriptionGap, SubscriptionHandle, SubscriptionStream,
     ValidationMode,
 };

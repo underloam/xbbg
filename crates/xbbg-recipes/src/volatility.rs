@@ -99,10 +99,12 @@ pub async fn recipe_vol_surface(
         ..Default::default()
     };
     let batch = engine.request(params).await?;
+    let key = engine.key_column().as_str();
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&batch);
     let rows = build_vol_surface_rows(
         &batch,
+        key,
         &specs,
         as_decimal,
         include_derived,
@@ -110,7 +112,7 @@ pub async fn recipe_vol_surface(
         &dividend_yield_field,
     )
     .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
-    build_surface_batch(&rows, request_ids)
+    build_surface_batch(&rows, key, request_ids)
 }
 
 pub(crate) fn expand_surface_specs(
@@ -300,15 +302,17 @@ fn tenor_to_years(tenor: &str) -> Option<f64> {
     None
 }
 
+/// Surface rows from long history keyed by the engine's `key` column.
 pub(crate) fn build_vol_surface_rows(
     batch: &RecordBatch,
+    key: &str,
     specs: &[VolFieldSpec],
     as_decimal: bool,
     include_derived: bool,
     risk_free_rate: Option<f64>,
     dividend_yield_field: &str,
 ) -> Result<Vec<SurfaceRow>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -504,6 +508,7 @@ fn append_derived_rows(
 
 fn build_surface_batch(
     rows: &[SurfaceRow],
+    key: &str,
     request_ids: BloombergRequestIds,
 ) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
@@ -527,7 +532,7 @@ fn build_surface_batch(
     }
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("ticker", DataType::Utf8, false),
+        Field::new(key, DataType::Utf8, false),
         Field::new("date", DataType::Date32, false),
         Field::new("metric", DataType::Utf8, false),
         Field::new("tenor", DataType::Utf8, true),
@@ -593,9 +598,10 @@ mod tests {
             "SYNTH_VOL|implied_volatility|1M|moneyness|100",
         )];
         let rows =
-            build_vol_surface_rows(&source, &specs, true, false, None, "SYNTH_YIELD").unwrap();
+            build_vol_surface_rows(&source, "ticker", &specs, true, false, None, "SYNTH_YIELD")
+                .unwrap();
         drop(source);
-        let result = build_surface_batch(&rows, request_ids).unwrap();
+        let result = build_surface_batch(&rows, "ticker", request_ids).unwrap();
 
         assert_eq!((result.num_rows(), result.num_columns()), (1, 8));
         assert_eq!(rows[0].value, 0.25);
@@ -613,7 +619,7 @@ mod tests {
                 .contains_key(METADATA_KEY_BLOOMBERG_REQUEST_IDS)
         );
 
-        let local = build_surface_batch(&[], BloombergRequestIds::default()).unwrap();
+        let local = build_surface_batch(&[], "ticker", BloombergRequestIds::default()).unwrap();
         assert!(local.schema_ref().metadata().is_empty());
     }
 
@@ -666,8 +672,16 @@ mod tests {
         let specs = vec![parse_field_spec(
             "30DAY_IMPVOL_100.0%MNY_DF|implied_volatility|30D|moneyness|100",
         )];
-        let rows = build_vol_surface_rows(&batch, &specs, true, true, Some(5.0), "EQY_DVD_YLD_12M")
-            .unwrap();
+        let rows = build_vol_surface_rows(
+            &batch,
+            "ticker",
+            &specs,
+            true,
+            true,
+            Some(5.0),
+            "EQY_DVD_YLD_12M",
+        )
+        .unwrap();
         assert!(
             rows.iter()
                 .any(|row| row.metric == "implied_volatility" && row.value == 0.20)
@@ -702,8 +716,16 @@ mod tests {
         let specs = vec![parse_field_spec(
             "30DAY_IMPVOL_100.0%MNY_DF|implied_volatility|30D|moneyness|100",
         )];
-        let rows = build_vol_surface_rows(&batch, &specs, true, true, Some(5.0), "EQY_DVD_YLD_12M")
-            .unwrap();
+        let rows = build_vol_surface_rows(
+            &batch,
+            "ticker",
+            &specs,
+            true,
+            true,
+            Some(5.0),
+            "EQY_DVD_YLD_12M",
+        )
+        .unwrap();
         let yield_row = rows
             .iter()
             .find(|row| row.metric == "dividend_yield")

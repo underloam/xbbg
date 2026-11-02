@@ -100,7 +100,7 @@ pub fn build_earning_header_rename(
     data_columns
         .iter()
         .filter_map(|data_col| {
-            if *data_col == "ticker" {
+            if matches!(*data_col, "security" | "ticker") {
                 return None;
             }
 

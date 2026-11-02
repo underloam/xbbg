@@ -134,6 +134,22 @@ impl PlannedRequestShape {
             }
         }
     }
+
+    /// Whether results lead with the security column extractors name `ticker`.
+    ///
+    /// BSRCH, generic, and field-info results carry Bloomberg's own columns,
+    /// so a leading `ticker` there is data and is never renamed.
+    pub(crate) fn has_key_column(self) -> bool {
+        matches!(
+            self,
+            Self::RefData(_)
+                | Self::HistData(_)
+                | Self::BulkData
+                | Self::Bql
+                | Self::IntradayBar
+                | Self::IntradayTick
+        )
+    }
 }
 
 fn selected_extractor(

@@ -37,8 +37,8 @@ use xbbg_async::engine::{
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle,
-    ValidationMode,
+    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, KeyColumn, SubscribeRequest,
+    SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
 
@@ -268,6 +268,9 @@ pub struct EngineConfigInput {
     /// Validation mode: "disabled" (default), "lenient", or "strict".
     /// Also accepts "off" and "none" as aliases for "disabled".
     pub validation_mode: Option<String>,
+    /// Result column holding each row's security: "ticker" (default, deprecated)
+    /// or "security", the default from the next major release.
+    pub key_column: Option<String>,
     pub subscription_flush_threshold: Option<u32>,
     pub max_event_queue_size: Option<u32>,
     pub command_queue_size: Option<u32>,
@@ -649,6 +652,13 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
             None => config.overflow_policy,
         };
 
+        let key_column = match input.key_column {
+            Some(key) => {
+                KeyColumn::from_str(&key).map_err(|e| Error::new(Status::InvalidArg, e))?
+            }
+            None => config.key_column,
+        };
+
         if let Some(size) = input.request_pool_size {
             config.request_pool_size = size as usize;
         }
@@ -740,6 +750,7 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
         }
         config.validation_mode = validation_mode;
         config.overflow_policy = overflow_policy;
+        config.key_column = key_column;
 
         let auth = input.auth.as_ref();
         let mut tls = input.tls;
@@ -1275,6 +1286,12 @@ impl JsEngine {
     #[napi(factory)]
     pub fn with_config(config: EngineConfigInput) -> napi::Result<Self> {
         Self::start_engine(config.try_into()?)
+    }
+
+    /// Name of the result column holding each row's security.
+    #[napi(getter)]
+    pub fn key_column(&self) -> &'static str {
+        self.engine.key_column().as_str()
     }
 
     /// Connect asynchronously with host/port defaults.
@@ -3193,6 +3210,7 @@ mod tests {
             shard_chunk_size: None,
             shard_max_concurrent: None,
             validation_mode: None,
+            key_column: None,
             subscription_flush_threshold: None,
             max_event_queue_size: None,
             command_queue_size: None,

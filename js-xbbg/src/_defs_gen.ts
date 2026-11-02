@@ -118,6 +118,32 @@ export const VALIDATION_MODE_BY_NAME = {
   STRICT: 'strict',
 } as const;
 
+/** Name of the result column holding each row's security. */
+export const KEY_COLUMNS = ['security', 'ticker'] as const;
+
+/** Name of the result column holding each row's security. */
+export type KeyColumn = (typeof KEY_COLUMNS)[number];
+
+/** Value used when the caller omits it. */
+export const KEY_COLUMN_DEFAULT: KeyColumn = 'ticker';
+
+/** Canonical values as a list, for error text and tool descriptions. */
+export const KEY_COLUMN_VALUES = 'security, ticker';
+
+/** Per-value documentation, keyed by canonical spelling. */
+export const KEY_COLUMN_DOCS: Readonly<Record<KeyColumn, string>> = {
+  security:
+    "Bloomberg's name for the requested security (securityData.security); the default from the next major release.",
+  ticker:
+    "Deprecated default. Collides with Bloomberg's TICKER field once identifiers are case-folded; removed in the next major release.",
+};
+
+/** Canonical values keyed by their defs name. */
+export const KEY_COLUMN_BY_NAME = {
+  SECURITY: 'security',
+  TICKER: 'ticker',
+} as const;
+
 /** Verbosity of the Bloomberg C SDK's own logging. */
 export const SDK_LOG_LEVELS = ['debug', 'error', 'fatal', 'info', 'off', 'trace', 'warn'] as const;
 

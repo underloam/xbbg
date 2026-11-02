@@ -10,6 +10,9 @@ use arrow_schema::{DataType, Field, Schema};
 
 use crate::error::{ExtError, Result};
 
+/// Names xbbg gives the column holding each row's security.
+const KEY_COLUMNS: [&str; 2] = ["security", "ticker"];
+
 /// Pivot a long-format DataFrame to wide format.
 ///
 /// Transforms data from:
@@ -31,28 +34,23 @@ use crate::error::{ExtError, Result};
 ///
 /// # Arguments
 ///
-/// * `batch` - Input RecordBatch with columns: `ticker`, `field`, `value`
+/// * `batch` - Input RecordBatch with a key column (`security` or `ticker`),
+///   `field`, and `value`
 ///
 /// # Returns
 ///
-/// A new RecordBatch with `ticker` column and one column per unique field value.
+/// A new RecordBatch with the input's key column and one column per unique
+/// field value.
 ///
 /// # Errors
 ///
 /// Returns error if required columns are missing or if the batch is already wide format.
 pub fn pivot_to_wide(batch: &RecordBatch) -> Result<RecordBatch> {
     let schema = batch.schema();
-    let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-
-    // Check if already wide format (doesn't have exactly ticker/field/value)
-    if columns.len() != 3
-        || !columns.contains(&"ticker")
-        || !columns.contains(&"field")
-        || !columns.contains(&"value")
-    {
-        // Already wide format or different structure, return as-is
+    // Already wide format or a different structure: return as-is.
+    let Some(key) = long_format_key(&schema) else {
         return Ok(batch.clone());
-    }
+    };
 
     if batch.num_rows() == 0 {
         return Ok(batch.clone());
@@ -60,8 +58,8 @@ pub fn pivot_to_wide(batch: &RecordBatch) -> Result<RecordBatch> {
 
     // Get column indices
     let ticker_idx = schema
-        .index_of("ticker")
-        .map_err(|_| ExtError::MissingColumn("ticker".into()))?;
+        .index_of(key)
+        .map_err(|_| ExtError::MissingColumn(key.into()))?;
     let field_idx = schema
         .index_of("field")
         .map_err(|_| ExtError::MissingColumn("field".into()))?;
@@ -73,7 +71,7 @@ pub fn pivot_to_wide(batch: &RecordBatch) -> Result<RecordBatch> {
         .column(ticker_idx)
         .as_any()
         .downcast_ref::<StringArray>()
-        .ok_or_else(|| ExtError::MissingColumn("ticker must be string".into()))?;
+        .ok_or_else(|| ExtError::MissingColumn(format!("{key} must be string")))?;
 
     let field_col = batch
         .column(field_idx)
@@ -134,8 +132,8 @@ pub fn pivot_to_wide(batch: &RecordBatch) -> Result<RecordBatch> {
         }
     }
 
-    // Build output schema: ticker + each field
-    let mut fields = vec![Field::new("ticker", DataType::Utf8, false)];
+    // Build output schema: key + each field
+    let mut fields = vec![Field::new(key, DataType::Utf8, false)];
     for field_name in &unique_fields {
         fields.push(Field::new(field_name, DataType::Utf8, true));
     }
@@ -159,15 +157,19 @@ pub fn pivot_to_wide(batch: &RecordBatch) -> Result<RecordBatch> {
     RecordBatch::try_new(out_schema, columns).map_err(ExtError::Arrow)
 }
 
-/// Check if a RecordBatch is in long format (ticker, field, value).
+/// Check if a RecordBatch is in long format (`security` or `ticker`, `field`,
+/// `value`).
 pub fn is_long_format(batch: &RecordBatch) -> bool {
-    let schema = batch.schema();
-    let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    long_format_key(&batch.schema()).is_some()
+}
 
-    columns.len() == 3
-        && columns.contains(&"ticker")
-        && columns.contains(&"field")
-        && columns.contains(&"value")
+/// The key column of a long `(key, field, value)` schema.
+fn long_format_key(schema: &Schema) -> Option<&'static str> {
+    let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+    if columns.len() != 3 || !columns.contains(&"field") || !columns.contains(&"value") {
+        return None;
+    }
+    KEY_COLUMNS.into_iter().find(|key| columns.contains(key))
 }
 
 #[cfg(test)]
@@ -210,6 +212,27 @@ mod tests {
         assert!(schema.field_with_name("ticker").is_ok());
         assert!(schema.field_with_name("PX_LAST").is_ok());
         assert!(schema.field_with_name("VOLUME").is_ok());
+    }
+
+    #[test]
+    fn security_keyed_batch_pivots_under_its_own_key() {
+        let input = make_long_batch();
+        let schema = Schema::new(vec![
+            Field::new("security", DataType::Utf8, false),
+            Field::new("field", DataType::Utf8, false),
+            Field::new("value", DataType::Utf8, true),
+        ]);
+        let input = RecordBatch::try_new(Arc::new(schema), input.columns().to_vec()).unwrap();
+
+        assert!(is_long_format(&input));
+        let output = pivot_to_wide(&input).unwrap();
+        let names: Vec<_> = output
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, ["security", "PX_LAST", "VOLUME"]);
     }
 
     #[test]

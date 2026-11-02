@@ -69,7 +69,7 @@ pub async fn recipe_resolve_isins(engine: &Engine, isins: Vec<String>) -> Result
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&batch);
     let result = (|| {
-        let values = refdata_value_map(&batch)?;
+        let values = refdata_value_map(&batch, engine.key_column().as_str())?;
         let rows = build_resolve_isin_rows(&isins, &lookups, &values);
         build_resolve_isins_batch(&rows)
     })();
@@ -99,7 +99,7 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&bond_batch);
     let result: Result<_> = async {
-        let bond_values = refdata_value_map(&bond_batch)?;
+        let bond_values = refdata_value_map(&bond_batch, engine.key_column().as_str())?;
 
         let mut rows = build_issuer_rows_without_isin(&bond_isins, &lookups, &bond_values);
         let parent_tickers = rows
@@ -117,7 +117,7 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
             };
             let parent_batch = engine.request(params).await?;
             request_ids.collect(&parent_batch);
-            let parent_values = refdata_value_map(&parent_batch)?;
+            let parent_values = refdata_value_map(&parent_batch, engine.key_column().as_str())?;
             for row in &mut rows {
                 let Some(parent_ticker) = row.parent_ticker.as_ref() else {
                     continue;
@@ -276,10 +276,13 @@ fn first_clean_field(fields: Option<&HashMap<String, String>>, names: &[&str]) -
     })
 }
 
+/// Long reference values keyed by security then field, read from the engine's
+/// `key` column.
 pub(crate) fn refdata_value_map(
     batch: &RecordBatch,
+    key: &str,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -539,7 +542,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let mapped = refdata_value_map(&batch).unwrap();
+        let mapped = refdata_value_map(&batch, "ticker").unwrap();
         assert_eq!(mapped["/ISIN/US0378331005"]["PARSEKYABLE_DES"], "AAPL US");
     }
 }

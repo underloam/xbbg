@@ -59,7 +59,8 @@ struct DelayStatusRow {
 
 /// Delayed-data status for each security, plus optional identity entitlements.
 ///
-/// Columns: `ticker`, `delayed` (this session receives delayed data),
+/// Columns: the engine's key column (`ticker` or `security`), `delayed` (this
+/// session receives delayed data),
 /// `delay_minutes` (minutes behind real time; null when real time),
 /// `exchange_delay` (Bloomberg's `EXCHANGE_DELAY` text), `exch_code`,
 /// `realtime_eid1..4` (`FEED_EID1..4`), `delayed_eid` (`FEED_DELAYED_EID1`),
@@ -79,8 +80,9 @@ pub async fn recipe_delay_status(
         .into_iter()
         .filter(|ticker| seen.insert(ticker.clone()))
         .collect();
+    let key = engine.key_column().as_str();
     if tickers.is_empty() {
-        return build_delay_status_batch(&[]);
+        return build_delay_status_batch(&[], key);
     }
 
     let batch = engine
@@ -107,7 +109,7 @@ pub async fn recipe_delay_status(
     let result: Result<_> = async {
         let mut rows = delay_status_rows(
             &tickers,
-            &refdata_value_map(&batch)?,
+            &refdata_value_map(&batch, key)?,
             &delayed_metadata(&batch).unwrap_or_default(),
             &security_error_messages(&batch),
         );
@@ -122,7 +124,7 @@ pub async fn recipe_delay_status(
                 apply_identity_check(&mut rows, &check.failed_eids, denied_all);
             }
         }
-        build_delay_status_batch(&rows)
+        build_delay_status_batch(&rows, key)
     }
     .await;
     let output =
@@ -211,7 +213,7 @@ fn apply_identity_check(rows: &mut [DelayStatusRow], failed_eids: &[i32], denied
     }
 }
 
-fn build_delay_status_batch(rows: &[DelayStatusRow]) -> Result<RecordBatch> {
+fn build_delay_status_batch(rows: &[DelayStatusRow], key: &str) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
     let mut delayed = BooleanBuilder::new();
     let mut delay_minutes = Int32Builder::new();
@@ -242,7 +244,7 @@ fn build_delay_status_batch(rows: &[DelayStatusRow]) -> Result<RecordBatch> {
     }
 
     let mut fields = vec![
-        Field::new("ticker", DataType::Utf8, false),
+        Field::new(key, DataType::Utf8, false),
         Field::new("delayed", DataType::Boolean, true),
         Field::new("delay_minutes", DataType::Int32, true),
         Field::new("exchange_delay", DataType::Utf8, true),
@@ -414,7 +416,7 @@ mod tests {
     fn batch_has_one_scalar_column_per_status_field() {
         let mut rows = sample_rows();
         apply_identity_check(&mut rows, &[14076], false);
-        let batch = build_delay_status_batch(&rows).unwrap();
+        let batch = build_delay_status_batch(&rows, "security").unwrap();
         let names: Vec<_> = batch
             .schema()
             .fields()
@@ -424,7 +426,7 @@ mod tests {
         assert_eq!(
             names,
             [
-                "ticker",
+                "security",
                 "delayed",
                 "delay_minutes",
                 "exchange_delay",
@@ -471,7 +473,7 @@ mod tests {
         assert_eq!(error.null_count(), 3);
         assert_eq!(error.value(3), "Unknown/Invalid Security");
 
-        let empty = build_delay_status_batch(&[]).unwrap();
+        let empty = build_delay_status_batch(&[], "ticker").unwrap();
         assert_eq!((empty.num_rows(), empty.num_columns()), (0, 13));
     }
 }

@@ -895,6 +895,58 @@ mod defs_contract {
     }
 
     #[test]
+    fn key_column_accepts_every_defs_spelling() {
+        for spelling in ["security", "ticker"] {
+            assert!(
+                crate::engine::KeyColumn::from_str(spelling).is_ok(),
+                "defs/bloomberg.toml declares {spelling} but the parser rejects it"
+            );
+        }
+    }
+
+    #[test]
+    fn key_column_defs_covers_every_variant() {
+        // Non-exhaustive matches do not compile, so adding a variant to the
+        // enum without declaring it in defs breaks the build instead of
+        // silently leaving it out of every advertised value set.
+        fn canonical(value: crate::engine::KeyColumn) -> &'static str {
+            match value {
+                crate::engine::KeyColumn::Security => "security",
+                crate::engine::KeyColumn::Ticker => "ticker",
+            }
+        }
+        for spelling in ["security", "ticker"] {
+            assert_eq!(
+                canonical(crate::engine::KeyColumn::from_str(spelling).unwrap()),
+                spelling,
+                "defs maps this spelling to a different variant than the parser does"
+            );
+        }
+    }
+
+    #[test]
+    fn key_column_display_matches_defs() {
+        for canonical in ["security", "ticker"] {
+            assert_eq!(
+                crate::engine::KeyColumn::from_str(canonical)
+                    .unwrap()
+                    .to_string(),
+                canonical,
+                "the canonical defs value must be the value the engine emits"
+            );
+        }
+    }
+
+    #[test]
+    fn key_column_default_matches_defs() {
+        assert_eq!(
+            crate::engine::KeyColumn::from_str("ticker").unwrap(),
+            crate::engine::KeyColumn::default(),
+            "defs marks a different member as default than the parser does"
+        );
+    }
+
+    #[test]
     fn sdk_log_level_accepts_every_defs_spelling() {
         for spelling in [
             "debug", "error", "fatal", "info", "off", "trace", "warn", "warning",

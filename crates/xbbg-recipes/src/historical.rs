@@ -156,11 +156,13 @@ pub async fn recipe_dividend_yield(
         ..Default::default()
     };
     let dividend_batch = engine.request(dividend_params).await?;
+    let key = engine.key_column().as_str();
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&dividend_batch);
     let result: Result<_> = async {
         let events = aggregate_dividend_events(extract_dividend_events(
             &dividend_batch,
+            key,
             dividend_type_filter.as_ref(),
         )?);
         drop(dividend_batch);
@@ -176,10 +178,10 @@ pub async fn recipe_dividend_yield(
         };
         let price_batch = engine.request(price_params).await?;
         request_ids.collect(&price_batch);
-        let prices = extract_price_history(&price_batch)?;
+        let prices = extract_price_history(&price_batch, key)?;
         drop(price_batch);
         let rows = build_dividend_yield_rows(&tickers, start, end, window_days, &events, &prices);
-        build_dividend_yield_batch(&rows)
+        build_dividend_yield_batch(&rows, key)
     }
     .await;
     let batch =
@@ -210,13 +212,16 @@ fn dividend_type_allowed(value: Option<&str>, filter: Option<&HashSet<String>>) 
     filter.contains(&canonical_name(value))
 }
 
+/// Dividend events from `DVD_HIST_ALL` bulk output keyed by the engine's `key`
+/// column.
 pub(crate) fn extract_dividend_events(
     batch: &RecordBatch,
+    key: &str,
     dividend_type_filter: Option<&HashSet<String>>,
 ) -> Result<Vec<DividendEvent>> {
     let ticker_col = batch
-        .column_by_name("ticker")
-        .ok_or_else(|| RecipeError::Other("missing 'ticker' column".to_string()))?;
+        .column_by_name(key)
+        .ok_or_else(|| RecipeError::Other(format!("missing '{key}' column")))?;
     let ex_date_col = find_column(
         batch,
         &[
@@ -346,8 +351,11 @@ pub(crate) fn aggregate_dividend_events(events: Vec<DividendEvent>) -> Vec<Divid
     output
 }
 
-fn extract_price_history(batch: &RecordBatch) -> Result<HashMap<(String, NaiveDate), f64>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+fn extract_price_history(
+    batch: &RecordBatch,
+    key: &str,
+) -> Result<HashMap<(String, NaiveDate), f64>> {
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -525,7 +533,7 @@ fn sum_optional(values: impl Iterator<Item = f64>) -> Option<f64> {
     seen.then_some(total)
 }
 
-fn build_dividend_yield_batch(rows: &[DividendYieldRow]) -> Result<RecordBatch> {
+fn build_dividend_yield_batch(rows: &[DividendYieldRow], key: &str) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
     let mut date = Date32Builder::new();
     let mut amount = Float64Builder::new();
@@ -551,7 +559,7 @@ fn build_dividend_yield_batch(rows: &[DividendYieldRow]) -> Result<RecordBatch> 
     }
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("ticker", DataType::Utf8, false),
+        Field::new(key, DataType::Utf8, false),
         Field::new("date", DataType::Date32, false),
         Field::new("dividend_amount", DataType::Float64, true),
         Field::new("trailing_dividend_amount", DataType::Float64, true),
@@ -628,7 +636,7 @@ pub async fn recipe_earning(
     let data_batch = engine.request(data_params).await.map_err(|error| {
         RecipeError::from(error).with_bloomberg_request_ids_from_batch(&header_batch)
     })?;
-    shape_earning_output(&header_batch, data_batch)
+    shape_earning_output(&header_batch, data_batch, engine.key_column().as_str())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -676,12 +684,13 @@ fn build_earning_requests(
 fn shape_earning_output(
     header_batch: &RecordBatch,
     mut data_batch: RecordBatch,
+    key: &str,
 ) -> Result<RecordBatch> {
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(header_batch);
     let result: Result<_> = (|| {
         if header_batch.num_rows() > 0 && data_batch.num_rows() > 0 {
-            let renames = build_earning_header_rename(header_batch, &data_batch);
+            let renames = build_earning_header_rename(header_batch, &data_batch, key);
             if !renames.is_empty() {
                 request_ids.collect(&data_batch);
                 data_batch = apply_column_renames(&data_batch, &renames)?;
@@ -775,15 +784,18 @@ fn to_option_overrides(overrides: Vec<(String, String)>) -> Option<Vec<(String, 
     }
 }
 
+/// Rename data columns after the header row; the engine's `key` column and
+/// `field` are never renamed.
 fn build_earning_header_rename(
     header_batch: &RecordBatch,
     data_batch: &RecordBatch,
+    key: &str,
 ) -> Vec<(String, String)> {
     let mut header_values: HashMap<String, String> = HashMap::new();
 
     for field in header_batch.schema().fields() {
         let column_name = field.name();
-        if column_name == "ticker" || column_name == "field" {
+        if column_name == key || column_name == "field" {
             continue;
         }
 
@@ -815,7 +827,7 @@ fn build_earning_header_rename(
     let mut renames = Vec::new();
     for field in data_batch.schema().fields() {
         let data_col = field.name();
-        if data_col == "ticker" || data_col == "field" {
+        if data_col == key || data_col == "field" {
             continue;
         }
 
@@ -1137,6 +1149,7 @@ pub async fn recipe_turnover(
     let format = TurnoverFormat::parse(options.format.as_deref())?;
     let params = build_turnover_request(tickers.clone(), &start, &end, false, &options);
     let direct = engine.request(params).await?;
+    let key = engine.key_column().as_str();
     let numeric_long = direct
         .column_by_name("value")
         .is_some_and(|column| column.data_type().is_numeric());
@@ -1144,17 +1157,17 @@ pub async fn recipe_turnover(
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&direct);
     let result: Result<_> = async {
-        let mut rows = extract_turnover_rows(&direct)?;
+        let mut rows = extract_turnover_rows(&direct, key)?;
         drop(direct);
         let missing = missing_turnover_tickers(&tickers, &rows);
         if !missing.is_empty() {
             let params = build_turnover_request(missing.clone(), &start, &end, true, &options);
             let fallback = engine.request(params).await?;
             request_ids.collect(&fallback);
-            append_turnover_fallback(&mut rows, &missing, &fallback)?;
+            append_turnover_fallback(&mut rows, &missing, &fallback, key)?;
             merge_turnover_metadata(&mut metadata, fallback.schema().metadata())?;
         }
-        build_turnover_batch(rows, metadata)
+        build_turnover_batch(rows, metadata, key)
     }
     .await;
     let batch =
@@ -1165,7 +1178,7 @@ pub async fn recipe_turnover(
             crate::currency::recipe_adjust_ccy(engine, data, target, start, end, options).await?;
     }
     let output = shape_turnover_output(data, factor, format, numeric_long)?;
-    apply_turnover_presentation(output, &presentation)
+    apply_turnover_presentation(output, &presentation, key)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1325,13 +1338,14 @@ fn take_turnover_alias(kwargs: &mut HashMap<String, String>, aliases: &[&str]) -
 fn apply_turnover_presentation(
     mut batch: RecordBatch,
     presentation: &TurnoverPresentation,
+    key: &str,
 ) -> Result<RecordBatch> {
     if let Some(descending) = presentation.descending
         && batch.num_rows() > 1
         && batch.column_by_name("date").is_some()
     {
         let mut columns = Vec::with_capacity(3);
-        for (name, descending) in [("ticker", false), ("date", descending), ("field", false)] {
+        for (name, descending) in [(key, false), ("date", descending), ("field", false)] {
             if let Some(column) = batch.column_by_name(name) {
                 columns.push(SortColumn {
                     values: column.clone(),
@@ -1504,11 +1518,11 @@ struct TurnoverRow {
     value: Option<f64>,
 }
 
-fn extract_turnover_rows(batch: &RecordBatch) -> Result<Vec<TurnoverRow>> {
+fn extract_turnover_rows(batch: &RecordBatch, key: &str) -> Result<Vec<TurnoverRow>> {
     if batch.num_rows() == 0 {
         return Ok(Vec::new());
     }
-    let tickers = as_string_col(batch, "ticker")?;
+    let tickers = as_string_col(batch, key)?;
     let fields = as_string_col(batch, "field")?;
     let dates = batch
         .column_by_name("date")
@@ -1552,11 +1566,12 @@ fn append_turnover_fallback(
     rows: &mut Vec<TurnoverRow>,
     missing: &[String],
     batch: &RecordBatch,
+    key: &str,
 ) -> Result<()> {
     if batch.num_rows() == 0 {
         return Ok(());
     }
-    let tickers = as_string_col(batch, "ticker")?;
+    let tickers = as_string_col(batch, key)?;
     let fields = as_string_col(batch, "field")?;
     let dates = batch
         .column_by_name("date")
@@ -1655,6 +1670,7 @@ fn merge_turnover_metadata(
 fn build_turnover_batch(
     rows: Vec<TurnoverRow>,
     metadata: HashMap<String, String>,
+    key: &str,
 ) -> Result<RecordBatch> {
     let mut tickers = StringBuilder::with_capacity(rows.len(), rows.len() * 24);
     let mut dates = Date32Builder::with_capacity(rows.len());
@@ -1668,7 +1684,7 @@ fn build_turnover_batch(
     }
     let schema = Schema::new_with_metadata(
         vec![
-            Field::new("ticker", DataType::Utf8, true),
+            Field::new(key, DataType::Utf8, true),
             Field::new("date", DataType::Date32, true),
             Field::new("field", DataType::Utf8, true),
             Field::new("value", DataType::Float64, true),
@@ -1894,7 +1910,7 @@ mod tests {
         )
         .unwrap();
 
-        let rename_map = build_earning_header_rename(&header_batch, &data_batch);
+        let rename_map = build_earning_header_rename(&header_batch, &data_batch, "ticker");
 
         assert!(rename_map.contains(&("Period 1 Value".to_string(), "fy2023".to_string())));
         assert!(rename_map.contains(&("Period 2 Value".to_string(), "fy2024".to_string())));
@@ -2215,7 +2231,7 @@ mod tests {
             r#"["synthetic-value-request","synthetic-shard-request","synthetic-value-request"]"#
                 .to_string(),
         );
-        let output = shape_earning_output(&header, data.clone()).unwrap();
+        let output = shape_earning_output(&header, data.clone(), "ticker").unwrap();
         assert_eq!(
             output
                 .schema()
@@ -2242,7 +2258,7 @@ mod tests {
                 .metadata()
                 .contains_key("xbbg.bloomberg_request_id")
         );
-        let output = shape_earning_output(&header.slice(0, 0), data).unwrap();
+        let output = shape_earning_output(&header.slice(0, 0), data, "ticker").unwrap();
         assert!(output.column_by_name("Period 1 Value_pct").is_some());
         assert_eq!(
             output.schema().metadata()["xbbg.bloomberg_request_ids"],
@@ -2335,7 +2351,7 @@ mod tests {
             ("ABC US Equity", "20240101", "TURNOVER", Some("12")),
             ("XYZ US Equity", "20240101", "turnover", None),
         ]);
-        let rows = extract_turnover_rows(&batch).unwrap();
+        let rows = extract_turnover_rows(&batch, "ticker").unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].value, None);
         assert_eq!(
@@ -2389,13 +2405,14 @@ mod tests {
             ("XYZ US Equity", "20240103", "VOLUME", Some("10")),
         ]);
         let mut rows = Vec::new();
-        append_turnover_fallback(&mut rows, &["ABC US Equity".to_string()], &batch).unwrap();
+        append_turnover_fallback(&mut rows, &["ABC US Equity".to_string()], &batch, "ticker")
+            .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].value, Some(12.0));
         assert_eq!(rows[1].value, Some(0.0));
         assert!(rows.iter().all(|row| row.ticker == "ABC US Equity"));
         assert!(rows[0].date < rows[1].date);
-        let output = build_turnover_batch(rows, HashMap::new()).unwrap();
+        let output = build_turnover_batch(rows, HashMap::new(), "ticker").unwrap();
         assert_eq!(
             as_string_col(&output, "field").unwrap().value(0),
             "TURNOVER"
@@ -2421,6 +2438,7 @@ mod tests {
                 "xbbg.eid_data".to_string(),
                 r#"{"ABC US Equity":[1]}"#.to_string(),
             )]),
+            "ticker",
         )
         .unwrap();
         for (name, expected_columns) in [
@@ -2711,6 +2729,7 @@ mod tests {
                 },
             ],
             HashMap::from([("xbbg.eid_data".into(), r#"{"ABC US Equity":[1]}"#.into())]),
+            "security",
         )
         .unwrap();
         let metadata = source.schema().metadata().clone();
@@ -2721,7 +2740,7 @@ mod tests {
         ]);
         let presentation = take_turnover_presentation(&mut options).unwrap();
         let shaped = shape_turnover_output(source, 2.0, TurnoverFormat::Long, false).unwrap();
-        let output = apply_turnover_presentation(shaped, &presentation).unwrap();
+        let output = apply_turnover_presentation(shaped, &presentation, "security").unwrap();
         assert_eq!(
             output
                 .schema()
@@ -2729,10 +2748,10 @@ mod tests {
                 .iter()
                 .map(|field| field.name().as_str())
                 .collect::<Vec<_>>(),
-            vec!["ticker", "date", "period", "field", "value"]
+            vec!["security", "date", "period", "field", "value"]
         );
         assert_eq!(
-            as_string_col(&output, "ticker")
+            as_string_col(&output, "security")
                 .unwrap()
                 .iter()
                 .collect::<Vec<_>>(),
@@ -2787,7 +2806,8 @@ mod tests {
                 ("periodicitySelection", periodicity),
             ]);
             let presentation = take_turnover_presentation(&mut options).unwrap();
-            let output = apply_turnover_presentation(source.clone(), &presentation).unwrap();
+            let output =
+                apply_turnover_presentation(source.clone(), &presentation, "ticker").unwrap();
             assert_eq!(
                 output
                     .schema()
@@ -2800,7 +2820,8 @@ mod tests {
             let periods = as_string_col(&output, "period").unwrap();
             assert_eq!(periods.value(0), expected[0]);
             assert_eq!(periods.value(1), expected[1]);
-            let empty = apply_turnover_presentation(source.slice(0, 0), &presentation).unwrap();
+            let empty =
+                apply_turnover_presentation(source.slice(0, 0), &presentation, "ticker").unwrap();
             assert_eq!(empty.schema(), output.schema());
             assert_eq!(empty.num_rows(), 0);
         }
@@ -2815,12 +2836,16 @@ mod tests {
     #[test]
     fn test_turnover_presentation_hides_dates_last_for_every_output_format() {
         let source = build_turnover_batch(
-            extract_turnover_rows(&historical_batch(&[
-                ("ABC US Equity", "20240102", "TURNOVER", Some("12")),
-                ("ABC US Equity", "20240705", "TURNOVER", Some("24")),
-            ]))
+            extract_turnover_rows(
+                &historical_batch(&[
+                    ("ABC US Equity", "20240102", "TURNOVER", Some("12")),
+                    ("ABC US Equity", "20240705", "TURNOVER", Some("24")),
+                ]),
+                "ticker",
+            )
             .unwrap(),
             HashMap::new(),
+            "ticker",
         )
         .unwrap();
         for format in ["long", "wide", "long_typed", "long_metadata"] {
@@ -2839,7 +2864,7 @@ mod tests {
                 false,
             )
             .unwrap();
-            let output = apply_turnover_presentation(shaped, &presentation).unwrap();
+            let output = apply_turnover_presentation(shaped, &presentation, "ticker").unwrap();
             assert_eq!(output.num_rows(), 2);
             assert!(output.column_by_name("date").is_none());
             assert!(output.column_by_name("period").is_none());
@@ -2861,7 +2886,8 @@ mod tests {
         for pairs in [Vec::new(), vec![("Dates", "Show"), ("DateFormat", "D")]] {
             let mut options = turnover_presentation_options(&pairs);
             let presentation = take_turnover_presentation(&mut options).unwrap();
-            let output = apply_turnover_presentation(source.clone(), &presentation).unwrap();
+            let output =
+                apply_turnover_presentation(source.clone(), &presentation, "ticker").unwrap();
             assert_eq!(output.schema(), source.schema());
             for (original, result) in source.columns().iter().zip(output.columns()) {
                 assert!(Arc::ptr_eq(original, result));

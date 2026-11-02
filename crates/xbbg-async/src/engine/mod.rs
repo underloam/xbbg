@@ -12,6 +12,7 @@ mod dispatch;
 mod exchange;
 mod exchange_cache;
 mod intraday_timezone;
+mod key_column;
 mod request_plan;
 mod request_pool;
 mod request_sharding;
@@ -48,6 +49,7 @@ use exchange_cache::ExchangeCache;
 pub use crate::services::ExtractorType;
 
 pub use delayed::DelayedPolicy;
+pub use key_column::KeyColumn;
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
 use request_sharding::sharded_requests;
@@ -672,6 +674,9 @@ pub struct EngineConfig {
     pub warmup_services: Vec<String>,
     /// Validation mode for requests (default: Strict)
     pub validation_mode: ValidationMode,
+    /// Name of the result column holding each row's security (default: the
+    /// deprecated `ticker`). See [`KeyColumn`].
+    pub key_column: KeyColumn,
     /// Custom path for the field cache JSON file (default: ~/.xbbg/field_cache.json)
     pub field_cache_path: Option<std::path::PathBuf>,
     /// Structured Bloomberg session auth configuration.
@@ -812,6 +817,7 @@ impl Default for EngineConfig {
                 crate::services::Service::ApiFlds.to_string(),
             ],
             validation_mode: ValidationMode::default(),
+            key_column: KeyColumn::default(),
             field_cache_path: None,
             auth: None,
             bql_app_name: None,
@@ -969,6 +975,7 @@ impl Engine {
         self.apply_intraday_request_timezone(&mut builder).await?;
         let prepared = builder.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
+        let key = self.output_key_column(&prepared);
         let output_params = prepared.params().clone();
         let operation = prepared.effective_operation().to_string();
         let delay_lookup = delayed::lookup_securities(&prepared, chrono::Utc::now());
@@ -989,7 +996,24 @@ impl Engine {
         let batch =
             intraday_timezone::apply_intraday_output_timezone(self, batch, &output_params).await?;
         state::ResponseMetadata::warn_batch_type_misses(&batch);
-        delayed::enforce(&output_params, &operation, batch)
+        let batch = delayed::enforce(&output_params, &operation, batch)?;
+        Ok(match key {
+            Some(key) => key_column::name_key_column(batch, key),
+            None => batch,
+        })
+    }
+
+    /// Name of the result column holding each row's security.
+    pub fn key_column(&self) -> KeyColumn {
+        self.config.key_column
+    }
+
+    /// The key column for a request whose results lead with a security column.
+    fn output_key_column(&self, request: &PreparedRequest) -> Option<KeyColumn> {
+        request
+            .shape()
+            .has_key_column()
+            .then_some(self.config.key_column)
     }
 
     /// Streaming generic request - dispatches to worker pool.
@@ -1011,8 +1035,9 @@ impl Engine {
         let out_iana = intraday_timezone::resolve_output_tz_iana(self, builder.params()).await?;
         let prepared = builder.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
+        let key = self.output_key_column(&prepared);
         let stream = self.request_pool.request_stream(prepared).await?;
-        Ok(stream.with_output_timezone(out_iana))
+        Ok(stream.with_output_timezone(out_iana).with_key_column(key))
     }
 
     /// Resolve defaults, validate, schema-route kwargs, and apply field-cache hints.
