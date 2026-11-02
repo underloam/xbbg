@@ -66,7 +66,7 @@
       "enabled": false
     },
     {
-      "description": "Pixi pins that encode support contracts: python mirrors requires-python and the per-version test environments, rust tracks the workspace rust-version (MSRV), libclang is the bindgen floor, and nodejs mirrors engines. Lock-file maintenance still refreshes them within range.",
+      "description": "Pixi pins that encode support contracts: python matches the tested CPython range (the requires-python floor up to the newest wheel-matrix version, a ceiling requires-python deliberately omits) and the per-version test environments, rust tracks the workspace rust-version (MSRV), libclang is the bindgen floor, and nodejs mirrors engines. Lock-file maintenance still refreshes them within range.",
       "matchManagers": ["pixi"],
       "matchPackageNames": ["python", "rust", "libclang", "nodejs"],
       "enabled": false
