@@ -14,7 +14,9 @@ use arrow_select::take::take_record_batch;
 
 use crate::column::{ColumnData, compact_array};
 use crate::error::{ArrowCoreError, Result};
-use crate::scalar::{CellValue, InferredKind, build_array_for_kind, cell_matches, infer_kind};
+use crate::scalar::{
+    CellValue, InferredKind, array_has_value, build_array_for_kind, cell_matches, infer_kind,
+};
 
 const TYPE_MISSES_METADATA_KEY: &str = "xbbg.type_misses";
 const BLOOMBERG_REQUEST_ID_METADATA_KEY: &str = "xbbg.bloomberg_request_id";
@@ -358,6 +360,20 @@ impl TableData {
             })
             .collect::<Result<Vec<_>>>()?;
         Self::try_new(filtered)
+    }
+
+    /// Whether any named column holds a present value (non-null, non-empty text).
+    ///
+    /// Unknown names are ignored.
+    pub fn has_any_value(&self, names: &[String]) -> bool {
+        names
+            .iter()
+            .filter_map(|name| self.schema.index_of(name).ok())
+            .any(|idx| {
+                self.batches
+                    .iter()
+                    .any(|batch| array_has_value(batch.column(idx).as_ref()))
+            })
     }
 
     /// Insert a scalar-built column at `index`.
@@ -1241,5 +1257,80 @@ mod tests {
                 None,
             ]
         );
+    }
+
+    #[test]
+    fn has_any_value_matches_per_cell_presence_without_decoding_cells() {
+        use arrow_array::{
+            BinaryArray, Date32Array, LargeStringArray, StringViewArray, TimestampSecondArray,
+            UInt64Array,
+        };
+
+        use crate::scalar::{array_has_value, cell_from_array, cell_has_value};
+
+        let cases: Vec<(ArrayRef, bool)> = vec![
+            (Arc::new(StringArray::from(vec![Some(""), None])), false),
+            (Arc::new(StringArray::from(vec![Some(""), Some("x")])), true),
+            (
+                Arc::new(LargeStringArray::from(vec![Some(""), None])),
+                false,
+            ),
+            (
+                Arc::new(LargeStringArray::from(vec![None, Some("x")])),
+                true,
+            ),
+            (Arc::new(StringViewArray::from(vec![Some(""), None])), false),
+            (
+                Arc::new(StringViewArray::from(vec![
+                    None,
+                    Some("long enough to spill"),
+                ])),
+                true,
+            ),
+            (Arc::new(Int64Array::from(vec![None, Some(0)])), true),
+            (Arc::new(Int64Array::from(vec![None::<i64>, None])), false),
+            (Arc::new(Float64Array::from(vec![f64::NAN])), true),
+            (Arc::new(UInt64Array::from(vec![u64::MAX])), true),
+            // Unsupported scalar types decode to absent.
+            (Arc::new(BinaryArray::from(vec![b"x".as_slice()])), false),
+            (Arc::new(Date32Array::from(vec![Some(0)])), true),
+            (Arc::new(Date32Array::from(vec![Some(i32::MAX)])), false),
+            (Arc::new(TimestampSecondArray::from(vec![i64::MAX])), false),
+            (Arc::new(TimestampSecondArray::from(vec![1])), true),
+        ];
+        for (array, expected) in cases {
+            let reference =
+                (0..array.len()).any(|row| cell_has_value(&cell_from_array(array.as_ref(), row)));
+            assert_eq!(reference, expected, "{}", array.data_type());
+            assert_eq!(
+                array_has_value(array.as_ref()),
+                expected,
+                "{}",
+                array.data_type()
+            );
+        }
+
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("value_str", DataType::Utf8, true),
+            Field::new("value_num", DataType::Float64, true),
+        ]));
+        let batch = |text: Vec<Option<&str>>, num: Vec<Option<f64>>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(text)),
+                    Arc::new(Float64Array::from(num)),
+                ],
+            )
+            .unwrap()
+        };
+        let table = TableData::try_new(vec![
+            batch(vec![Some(""), None], vec![None, None]),
+            batch(vec![None, Some("")], vec![None, Some(0.0)]),
+        ])
+        .unwrap();
+        assert!(!table.has_any_value(&["value_str".into(), "missing".into()]));
+        assert!(table.has_any_value(&["missing".into(), "value_num".into()]));
+        assert!(!table.has_any_value(&[]));
     }
 }

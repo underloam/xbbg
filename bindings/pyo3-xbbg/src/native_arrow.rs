@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Arc;
 
@@ -19,10 +19,11 @@ use pyo3::exceptions::{
     PyImportError, PyIndexError, PyKeyError, PyOverflowError, PyRuntimeError, PyTypeError,
     PyValueError,
 };
+use pyo3::marker::Ungil;
 use pyo3::prelude::*;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyCapsule, PyDate, PyDateTime, PyDict, PyInt, PyIterator, PyList,
-    PyTime, PyTuple, PyType, PyTzInfo,
+    PyMapping, PyString, PyTime, PyTuple, PyType, PyTzInfo,
 };
 use pyo3_arrow::ffi::{
     ArrayIterator, to_array_pycapsules, to_schema_pycapsule, to_stream_pycapsule,
@@ -32,7 +33,7 @@ use pyo3_arrow::{PyChunkedArray, PyRecordBatch, PyTable};
 use pyo3_stub_gen::derive::*;
 use xbbg_arrow::{
     ArrowCoreError, CellValue, ColumnData, SortDirection, TableData, build_array, cell_from_array,
-    cell_has_value, cell_to_string,
+    cell_to_string,
 };
 use xbbg_async::diagnostics::{
     FieldExceptions, METADATA_KEY_FIELD_ERRORS, METADATA_KEY_FIELD_EXCEPTIONS,
@@ -42,7 +43,9 @@ use xbbg_async::engine::state::{
     METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
 };
 
-fn core_err_to_py(err: ArrowCoreError) -> PyErr {
+use crate::shaping::reshape_bqr_generic_table;
+
+pub(crate) fn core_err_to_py(err: ArrowCoreError) -> PyErr {
     match err {
         ArrowCoreError::UnknownColumn(name) => {
             PyKeyError::new_err(format!("unknown column: {name}"))
@@ -55,6 +58,41 @@ fn core_err_to_py(err: ArrowCoreError) -> PyErr {
 
 fn map_core<T>(result: xbbg_arrow::Result<T>) -> PyResult<T> {
     result.map_err(core_err_to_py)
+}
+
+/// Run a data-sized Arrow kernel with the interpreter detached.
+///
+/// Callers extract Python inputs before and publish Python results after;
+/// the kernel touches only Rust data. Errors are mapped once reattached.
+fn detach_core<T, F>(py: Python<'_>, kernel: F) -> PyResult<T>
+where
+    F: Ungil + FnOnce() -> xbbg_arrow::Result<T>,
+    xbbg_arrow::Result<T>: Ungil,
+{
+    py.detach(kernel).map_err(core_err_to_py)
+}
+
+/// Schema-metadata JSON values at least this long are parsed detached.
+///
+/// Typical diagnostics metadata is well under a kilobyte and parses in
+/// microseconds, less than re-acquiring a contended interpreter can cost (up
+/// to one switch interval, 5 ms by default). Metadata has no size cap, though:
+/// field exceptions grow with securities x failing fields. At serde_json's
+/// parse rate, 64 KiB takes on the order of 100 us, the point where parsing
+/// starts to outweigh the reattach cost.
+const DETACHED_METADATA_PARSE_MIN_BYTES: usize = 64 * 1024;
+
+/// Parse `len` bytes of metadata, detached once it reaches the threshold.
+fn parse_metadata_value<T, F>(py: Python<'_>, len: usize, parse: F) -> T
+where
+    F: Ungil + FnOnce() -> T,
+    T: Ungil,
+{
+    if len >= DETACHED_METADATA_PARSE_MIN_BYTES {
+        py.detach(parse)
+    } else {
+        parse()
+    }
 }
 
 fn serde_json_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult<Py<PyAny>> {
@@ -100,19 +138,26 @@ fn parse_metadata_json(
     let Some(raw) = metadata.get(key) else {
         return Ok(py.None());
     };
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|err| PyValueError::new_err(format!("invalid JSON in {key}: {err}")))?;
+    let value = parse_metadata_value(py, raw.len(), || {
+        serde_json::from_str::<serde_json::Value>(raw)
+    })
+    .map_err(|err| PyValueError::new_err(format!("invalid JSON in {key}: {err}")))?;
     serde_json_value_to_py(py, &value)
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-fn _decode_field_exceptions(py: Python<'_>, raw: &str) -> PyResult<Py<PyAny>> {
-    let exceptions = FieldExceptions::from_json(raw).map_err(|err| {
-        PyValueError::new_err(format!(
-            "invalid JSON in {METADATA_KEY_FIELD_EXCEPTIONS}: {err}"
-        ))
-    })?;
+fn _decode_field_exceptions(py: Python<'_>, raw: String) -> PyResult<Py<PyAny>> {
+    field_exceptions_to_py(py, &raw)
+}
+
+fn field_exceptions_to_py(py: Python<'_>, raw: &str) -> PyResult<Py<PyAny>> {
+    let exceptions = parse_metadata_value(py, raw.len(), || FieldExceptions::from_json(raw))
+        .map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid JSON in {METADATA_KEY_FIELD_EXCEPTIONS}: {err}"
+            ))
+        })?;
     let securities = PyDict::new(py);
     for ticker in exceptions.securities() {
         let values = PyList::empty(py);
@@ -135,9 +180,32 @@ fn parse_field_exceptions_metadata(
     metadata: &HashMap<String, String>,
 ) -> PyResult<Py<PyAny>> {
     match metadata.get(METADATA_KEY_FIELD_EXCEPTIONS) {
-        Some(raw) => _decode_field_exceptions(py, raw),
+        Some(raw) => field_exceptions_to_py(py, raw),
         None => Ok(py.None()),
     }
+}
+
+fn metadata_sizes(metadata: &HashMap<String, String>) -> HashMap<String, usize> {
+    metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), value.len()))
+        .collect()
+}
+
+fn metadata_value<'a>(
+    metadata: &'a HashMap<String, String>,
+    key: &str,
+    max_bytes: Option<usize>,
+) -> Option<&'a str> {
+    let value = metadata.get(key)?.as_str();
+    let Some(max_bytes) = max_bytes.filter(|max_bytes| *max_bytes < value.len()) else {
+        return Some(value);
+    };
+    let end = (0..=max_bytes)
+        .rev()
+        .find(|end| value.is_char_boundary(*end))
+        .unwrap_or(0);
+    Some(&value[..end])
 }
 
 fn ensure_optional_module(
@@ -234,9 +302,14 @@ fn filter_value_supported(data_type: &DataType, needle: &CellValue) -> bool {
     )
 }
 
-fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
+/// Owned per-column cells extracted from Python input, in column order.
+type CellColumns = Vec<(String, Vec<CellValue>)>;
+
+/// Iterate dict rows into owned cells: first-seen column order, with nulls for
+/// keys a row lacks.
+fn rows_to_cell_columns(rows: &Bound<'_, PyAny>) -> PyResult<(CellColumns, usize)> {
     let iterator = PyIterator::from_object(rows)?;
-    let mut columns: Vec<(String, Vec<CellValue>)> = Vec::new();
+    let mut columns: CellColumns = Vec::new();
     let mut column_indices: HashMap<String, usize> = HashMap::new();
     let mut row_count = 0usize;
 
@@ -267,11 +340,54 @@ fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
         }
         row_count += 1;
     }
+    Ok((columns, row_count))
+}
 
+/// Iterate a column mapping into owned cells, in mapping order.
+fn pydict_to_cell_columns(columns: &Bound<'_, PyAny>) -> PyResult<(CellColumns, usize)> {
+    let mapping = columns.cast::<PyMapping>().map_err(|_| {
+        PyTypeError::new_err(
+            "ArrowTable.from_pydict expects a mapping of column names to value sequences",
+        )
+    })?;
+    let mut out: CellColumns = Vec::new();
+    let mut row_count = None;
+    for item in mapping.items()?.iter() {
+        let (key, values) = item.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+        let name = key.extract::<String>()?;
+        if values.is_instance_of::<PyString>() || values.is_instance_of::<PyBytes>() {
+            return Err(PyTypeError::new_err(format!(
+                "ArrowTable.from_pydict column {name:?} must be a sequence of values"
+            )));
+        }
+        let cells = py_sequence_to_cells(&values)?;
+        match row_count {
+            None => row_count = Some(cells.len()),
+            Some(expected) if expected != cells.len() => {
+                return Err(PyValueError::new_err(format!(
+                    "ArrowTable.from_pydict column {name:?} has {} values; expected {expected}",
+                    cells.len()
+                )));
+            }
+            Some(_) => {}
+        }
+        out.push((name, cells));
+    }
+    Ok((out, row_count.unwrap_or(0)))
+}
+
+/// Build typed arrays and one record batch from owned cells.
+fn cell_columns_to_batch(
+    columns: CellColumns,
+    row_count: usize,
+) -> xbbg_arrow::Result<RecordBatch> {
     if columns.is_empty() {
         let options = RecordBatchOptions::new().with_row_count(Some(row_count));
-        return RecordBatch::try_new_with_options(Arc::new(Schema::empty()), vec![], &options)
-            .map_err(|e| PyValueError::new_err(e.to_string()));
+        return Ok(RecordBatch::try_new_with_options(
+            Arc::new(Schema::empty()),
+            vec![],
+            &options,
+        )?);
     }
 
     let mut fields = Vec::with_capacity(columns.len());
@@ -282,8 +398,7 @@ fn rows_to_batch(rows: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
         arrays.push(array);
     }
 
-    RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
-        .map_err(|e| PyValueError::new_err(e.to_string()))
+    Ok(RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)?)
 }
 
 fn py_sequence_to_cells(values: &Bound<'_, PyAny>) -> PyResult<Vec<CellValue>> {
@@ -728,45 +843,118 @@ fn column_to_pylist(py: Python<'_>, column: &ColumnData) -> PyResult<Vec<Py<PyAn
     Ok(values)
 }
 
-fn period_label(array: &dyn Array, row: usize, periodicity: Option<&str>) -> String {
-    let Some(parsed) = xbbg_arrow::scalar::date_from_array(array, row) else {
-        return cell_to_string(&cell_from_array(array, row)).unwrap_or_default();
-    };
-    match periodicity.unwrap_or("DAILY").to_ascii_uppercase().as_str() {
-        "YEARLY" | "Y" => format!("{:04}", parsed.year()),
-        "SEMI_ANNUALLY" | "SEMIANNUALLY" | "S" => {
-            let half = if parsed.month() <= 6 { 1 } else { 2 };
-            format!("{:04}H{}", parsed.year(), half)
+/// Period granularity for BDH `PERIODIC`/`BOTH` date labels.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PeriodLabel {
+    Yearly,
+    SemiAnnual,
+    Quarterly,
+    Monthly,
+    Weekly,
+    Daily,
+}
+
+impl PeriodLabel {
+    /// Normalize a periodicity once per table; unknown values label by day.
+    fn from_periodicity(periodicity: Option<&str>) -> Self {
+        match periodicity.unwrap_or("DAILY").to_ascii_uppercase().as_str() {
+            "YEARLY" | "Y" => Self::Yearly,
+            "SEMI_ANNUALLY" | "SEMIANNUALLY" | "S" => Self::SemiAnnual,
+            "QUARTERLY" | "Q" => Self::Quarterly,
+            "MONTHLY" | "M" => Self::Monthly,
+            "WEEKLY" | "W" => Self::Weekly,
+            _ => Self::Daily,
         }
-        "QUARTERLY" | "Q" => {
-            let quarter = ((parsed.month() - 1) / 3) + 1;
-            format!("{:04}Q{}", parsed.year(), quarter)
+    }
+
+    fn label(self, array: &dyn Array, row: usize) -> String {
+        let Some(parsed) = xbbg_arrow::scalar::date_from_array(array, row) else {
+            return cell_to_string(&cell_from_array(array, row)).unwrap_or_default();
+        };
+        match self {
+            Self::Yearly => format!("{:04}", parsed.year()),
+            Self::SemiAnnual => {
+                let half = if parsed.month() <= 6 { 1 } else { 2 };
+                format!("{:04}H{}", parsed.year(), half)
+            }
+            Self::Quarterly => {
+                let quarter = ((parsed.month() - 1) / 3) + 1;
+                format!("{:04}Q{}", parsed.year(), quarter)
+            }
+            Self::Monthly => format!("{:04}-{:02}", parsed.year(), parsed.month()),
+            Self::Weekly => {
+                let iso = parsed.iso_week();
+                format!("{:04}-W{:02}", iso.year(), iso.week())
+            }
+            Self::Daily => parsed.to_string(),
         }
-        "MONTHLY" | "M" => format!("{:04}-{:02}", parsed.year(), parsed.month()),
-        "WEEKLY" | "W" => {
-            let iso = parsed.iso_week();
-            format!("{:04}-W{:02}", iso.year(), iso.week())
-        }
-        _ => parsed.to_string(),
     }
 }
 
-fn parse_bqr_path(path: &str) -> Option<(usize, String)> {
-    let start = path.find("tickData[")? + "tickData[".len();
-    let rest = &path[start..];
-    let end = rest.find(']')?;
-    let idx = rest[..end].parse::<usize>().ok()?;
-    let after = rest.get(end + 1..)?;
-    let field_start = after.strip_prefix('.')?;
-    let field = field_start
-        .chars()
-        .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-        .collect::<String>();
-    if field.is_empty() {
-        None
-    } else {
-        Some((idx, field))
+/// Apply BDH presentation options: sort, period labels, and date visibility.
+///
+/// - `sort` orders by `ticker` ascending, `date` (descending only for
+///   `"DESCENDING"`), then `field` ascending, each when present, nulls last.
+/// - `date_format` `PERIODIC` replaces `date` with a UTF-8 `period` column;
+///   `BOTH` inserts `period` after `date`.
+/// - `show_date=Some(false)` drops `date` and `period`.
+///
+/// Pure Arrow work with no Python state: `apply_historical_presentation`
+/// runs it detached and `apresent_historical` on the blocking pool.
+pub(crate) fn historical_presentation(
+    data: &TableData,
+    show_date: Option<bool>,
+    date_format: Option<&str>,
+    sort: Option<&str>,
+    periodicity: Option<&str>,
+) -> xbbg_arrow::Result<TableData> {
+    let mut result = data.clone();
+
+    if let Some(sort) = sort
+        && result.schema.index_of("date").is_ok()
+    {
+        let date_order = if sort.eq_ignore_ascii_case("DESCENDING") {
+            SortDirection::Descending
+        } else {
+            SortDirection::Ascending
+        };
+        let mut sort_keys = Vec::with_capacity(3);
+        if result.schema.index_of("ticker").is_ok() {
+            sort_keys.push(("ticker".to_string(), SortDirection::Ascending));
+        }
+        sort_keys.push(("date".to_string(), date_order));
+        if result.schema.index_of("field").is_ok() {
+            sort_keys.push(("field".to_string(), SortDirection::Ascending));
+        }
+        result = result.sort_by(&sort_keys, false)?;
     }
+
+    if let Some(date_format) = date_format {
+        let periodic = date_format.eq_ignore_ascii_case("PERIODIC");
+        if (periodic || date_format.eq_ignore_ascii_case("BOTH"))
+            && let Ok(date_idx) = result.schema.index_of("date")
+        {
+            let label = PeriodLabel::from_periodicity(periodicity);
+            let mut period_cells = Vec::with_capacity(result.num_rows());
+            for batch in &result.batches {
+                let date_array = batch.column(date_idx).as_ref();
+                period_cells.extend(
+                    (0..date_array.len()).map(|row| CellValue::Text(label.label(date_array, row))),
+                );
+            }
+            result = if periodic {
+                result.with_cells_column(date_idx, "period", &period_cells, true, true)?
+            } else {
+                result.with_cells_column(date_idx + 1, "period", &period_cells, false, true)?
+            };
+        }
+    }
+
+    if show_date == Some(false) {
+        result = result.drop_columns(&["date".to_string(), "period".to_string()])?;
+    }
+
+    Ok(result)
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
@@ -888,14 +1076,27 @@ impl ArrowColumn {
         self.data.nbytes()
     }
 
+    /// Bytes a right-sized copy of this column's logical slice would occupy.
+    ///
+    /// Computed without copying, unlike `compact().nbytes`, and unlike
+    /// `nbytes`, which counts the full buffers a slice still references.
+    /// Counts value bytes, offsets or 16-byte views, and validity bitmaps:
+    /// variable-width types count only the sliced value span, and
+    /// `Utf8View`/`BinaryView` count the out-of-line bytes of values longer
+    /// than 12 bytes. List children and dictionary values are counted in full.
+    #[getter]
+    fn logical_nbytes(&self) -> PyResult<usize> {
+        map_core(self.data.logical_nbytes())
+    }
+
     #[pyo3(signature = (offset=0, length=None))]
     fn slice(&self, offset: usize, length: Option<usize>) -> Self {
         Self::new(self.data.slice(offset, length))
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        map_core(self.data.compact()).map(Self::new)
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        detach_core(py, || self.data.compact()).map(Self::new)
     }
 
     fn to_pylist(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
@@ -965,7 +1166,7 @@ pub(crate) struct ArrowRecordBatch {
 }
 
 impl ArrowRecordBatch {
-    fn new(batch: RecordBatch) -> Self {
+    pub(crate) fn new(batch: RecordBatch) -> Self {
         Self { batch }
     }
 
@@ -1045,6 +1246,18 @@ impl ArrowRecordBatch {
     #[getter]
     fn metadata(&self) -> HashMap<String, String> {
         self.batch.schema_ref().metadata().clone()
+    }
+
+    /// UTF-8 byte length of each schema-metadata value, without copying values.
+    fn metadata_sizes(&self) -> HashMap<String, usize> {
+        metadata_sizes(self.batch.schema_ref().metadata())
+    }
+
+    /// One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+    /// to a character boundary; `None` when the key is absent.
+    #[pyo3(signature = (key, max_bytes=None))]
+    fn metadata_value(&self, key: &str, max_bytes: Option<usize>) -> Option<&str> {
+        metadata_value(self.batch.schema_ref().metadata(), key, max_bytes)
     }
 
     #[getter]
@@ -1134,8 +1347,10 @@ impl ArrowRecordBatch {
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        let table = map_core(self.table_data()?.compact())?;
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        let table = detach_core(py, || {
+            TableData::try_new(vec![self.batch.clone()])?.compact()
+        })?;
         let batch = table
             .batches
             .into_iter()
@@ -1170,8 +1385,20 @@ impl ArrowTable {
         map_core(TableData::try_new(batches)).map(Self::from_data)
     }
 
-    fn from_data(data: TableData) -> Self {
+    pub(crate) fn from_data(data: TableData) -> Self {
         Self { data }
+    }
+
+    /// Build arrays and the table from extracted cells with the interpreter detached.
+    fn from_cell_columns(py: Python<'_>, columns: CellColumns, row_count: usize) -> PyResult<Self> {
+        detach_core(py, move || {
+            TableData::try_new(vec![cell_columns_to_batch(columns, row_count)?])
+        })
+        .map(Self::from_data)
+    }
+
+    pub(crate) fn table_data(&self) -> &TableData {
+        &self.data
     }
 
     fn to_stream_pycapsule<'py>(
@@ -1198,7 +1425,7 @@ impl ArrowTable {
     #[classmethod]
     #[pyo3(signature = (rows, schema=None))]
     fn from_pylist(
-        _cls: &Bound<'_, PyType>,
+        cls: &Bound<'_, PyType>,
         rows: &Bound<'_, PyAny>,
         schema: Option<&Bound<'_, PyAny>>,
     ) -> PyResult<Self> {
@@ -1207,7 +1434,18 @@ impl ArrowTable {
                 "ArrowTable.from_pylist schema override is not implemented; pass dict rows with desired keys",
             ));
         }
-        Self::try_new(vec![rows_to_batch(rows)?])
+        let (columns, row_count) = rows_to_cell_columns(rows)?;
+        Self::from_cell_columns(cls.py(), columns, row_count)
+    }
+
+    /// Build a table from a mapping of column name to values, in mapping order.
+    ///
+    /// Cells are typed like `from_pylist`; every column must have the same
+    /// length.
+    #[classmethod]
+    fn from_pydict(cls: &Bound<'_, PyType>, columns: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let (columns, row_count) = pydict_to_cell_columns(columns)?;
+        Self::from_cell_columns(cls.py(), columns, row_count)
     }
 
     #[classmethod]
@@ -1224,25 +1462,25 @@ impl ArrowTable {
     }
 
     #[classmethod]
-    fn from_batches(_cls: &Bound<'_, PyType>, batches: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn from_batches(cls: &Bound<'_, PyType>, batches: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut rust_batches = Vec::new();
         for item in PyIterator::from_object(batches)? {
             let item = item?;
             let batch = item.extract::<PyRef<'_, ArrowRecordBatch>>()?;
             rust_batches.push(batch.batch.clone());
         }
-        Self::try_new(rust_batches)
+        detach_core(cls.py(), move || TableData::try_new(rust_batches)).map(Self::from_data)
     }
 
     #[classmethod]
-    fn concat_tables(_cls: &Bound<'_, PyType>, tables: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn concat_tables(cls: &Bound<'_, PyType>, tables: &Bound<'_, PyAny>) -> PyResult<Self> {
         let mut rust_tables = Vec::new();
         for item in PyIterator::from_object(tables)? {
             let item = item?;
             let table = item.extract::<PyRef<'_, ArrowTable>>()?;
             rust_tables.push(table.data.clone());
         }
-        map_core(TableData::concat_tables(&rust_tables)).map(Self::from_data)
+        detach_core(cls.py(), move || TableData::concat_tables(&rust_tables)).map(Self::from_data)
     }
 
     #[getter]
@@ -1292,6 +1530,18 @@ impl ArrowTable {
     #[getter]
     fn metadata(&self) -> HashMap<String, String> {
         self.data.schema.metadata().clone()
+    }
+
+    /// UTF-8 byte length of each schema-metadata value, without copying values.
+    fn metadata_sizes(&self) -> HashMap<String, usize> {
+        metadata_sizes(self.data.schema.metadata())
+    }
+
+    /// One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+    /// to a character boundary; `None` when the key is absent.
+    #[pyo3(signature = (key, max_bytes=None))]
+    fn metadata_value(&self, key: &str, max_bytes: Option<usize>) -> Option<&str> {
+        metadata_value(self.data.schema.metadata(), key, max_bytes)
     }
 
     #[getter]
@@ -1400,8 +1650,8 @@ impl ArrowTable {
             .collect()
     }
 
-    fn to_record_batch(&self) -> PyResult<ArrowRecordBatch> {
-        map_core(self.data.combined_batch()).map(ArrowRecordBatch::new)
+    fn to_record_batch(&self, py: Python<'_>) -> PyResult<ArrowRecordBatch> {
+        detach_core(py, || self.data.combined_batch()).map(ArrowRecordBatch::new)
     }
 
     fn to_pylist(&self, py: Python<'_>) -> PyResult<Vec<Py<PyAny>>> {
@@ -1439,25 +1689,10 @@ impl ArrowTable {
             .call_method1("_attach_xbbg_metadata_attrs", (frame, slf))
     }
 
-    fn to_polars<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        ensure_optional_module(
-            py,
-            "polars",
-            "pip install xbbg[polars]",
-            "ArrowTable.to_polars()",
-        )?;
-        let polars = py.import("polars")?;
-        let table = Py::new(py, self.clone())?;
-        match polars.call_method1("from_arrow", (table,)) {
-            Ok(frame) => Ok(frame),
-            Err(err) if err.to_string().contains("pyarrow") => {
-                let dataframe = polars.getattr("DataFrame")?;
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("schema", self.column_names())?;
-                dataframe.call((self.to_pylist(py)?,), Some(&kwargs))
-            }
-            Err(err) => Err(err),
-        }
+    /// Convert to a Polars DataFrame through `xbbg.backend`, keeping native chunks.
+    fn to_polars<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("xbbg.backend")?
+            .call_method1("_to_polars_frame", (slf,))
     }
 
     fn column(&self, column: &Bound<'_, PyAny>) -> PyResult<ArrowColumn> {
@@ -1507,8 +1742,8 @@ impl ArrowTable {
     }
 
     /// Copy logical values into independent, right-sized Arrow buffers.
-    fn compact(&self) -> PyResult<Self> {
-        map_core(self.data.compact()).map(Self::from_data)
+    fn compact(&self, py: Python<'_>) -> PyResult<Self> {
+        detach_core(py, || self.data.compact()).map(Self::from_data)
     }
 
     fn tail(&self, n: usize) -> PyResult<Self> {
@@ -1516,7 +1751,12 @@ impl ArrowTable {
     }
 
     #[pyo3(signature = (sort_keys, *, nulls_last=true))]
-    fn sort_by(&self, sort_keys: Vec<(String, String)>, nulls_last: bool) -> PyResult<Self> {
+    fn sort_by(
+        &self,
+        py: Python<'_>,
+        sort_keys: Vec<(String, String)>,
+        nulls_last: bool,
+    ) -> PyResult<Self> {
         let keys = sort_keys
             .into_iter()
             .map(|(name, direction)| {
@@ -1529,10 +1769,10 @@ impl ArrowTable {
                     })
             })
             .collect::<PyResult<Vec<_>>>()?;
-        map_core(self.data.sort_by(&keys, !nulls_last)).map(Self::from_data)
+        detach_core(py, || self.data.sort_by(&keys, !nulls_last)).map(Self::from_data)
     }
 
-    fn filter_eq(&self, column: &str, value: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn filter_eq(&self, py: Python<'_>, column: &str, value: &Bound<'_, PyAny>) -> PyResult<Self> {
         let needle = py_value_to_cell(value)?;
         let column_index = map_core(self.data.column_index(column))?;
         let data_type = self.data.schema.field(column_index).data_type();
@@ -1541,193 +1781,71 @@ impl ArrowTable {
                 "cannot compare Python value to Arrow column {column:?} with dtype {data_type}"
             )));
         }
-        map_core(self.data.filter_eq(column, &needle)).map(Self::from_data)
+        detach_core(py, || self.data.filter_eq(column, &needle)).map(Self::from_data)
     }
 
-    fn add_column(&self, index: usize, name: &str, values: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn add_column(
+        &self,
+        py: Python<'_>,
+        index: usize,
+        name: &str,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
         let cells = py_sequence_to_cells(values)?;
-        map_core(self.data.add_column(index, name, &cells)).map(Self::from_data)
+        detach_core(py, || self.data.add_column(index, name, &cells)).map(Self::from_data)
     }
 
-    fn set_column(&self, index: usize, name: &str, values: &Bound<'_, PyAny>) -> PyResult<Self> {
+    fn set_column(
+        &self,
+        py: Python<'_>,
+        index: usize,
+        name: &str,
+        values: &Bound<'_, PyAny>,
+    ) -> PyResult<Self> {
         let cells = py_sequence_to_cells(values)?;
-        map_core(self.data.set_column(index, name, &cells)).map(Self::from_data)
+        detach_core(py, || self.data.set_column(index, name, &cells)).map(Self::from_data)
     }
 
     fn head(&self, n: usize) -> PyResult<Self> {
         map_core(self.data.head(n)).map(Self::from_data)
     }
 
-    fn has_any_value(&self, names: Vec<String>) -> bool {
-        for name in names {
-            let Ok(idx) = self.data.schema.index_of(&name) else {
-                continue;
-            };
-            for batch in &self.data.batches {
-                let array = batch.column(idx);
-                for row in 0..array.len() {
-                    if cell_has_value(&cell_from_array(array.as_ref(), row)) {
-                        return true;
-                    }
-                }
-            }
-        }
-        false
+    /// Whether any named column holds a value other than null or empty text.
+    ///
+    /// Unknown column names are ignored.
+    fn has_any_value(&self, py: Python<'_>, names: Vec<String>) -> bool {
+        py.detach(|| self.data.has_any_value(&names))
     }
 
     fn apply_historical_presentation(
         &self,
+        py: Python<'_>,
         show_date: Option<bool>,
         date_format: Option<String>,
         sort: Option<String>,
         periodicity: Option<String>,
     ) -> PyResult<Self> {
-        let mut result = self.clone();
-
-        if let Some(sort) = sort
-            && result.data.schema.index_of("date").is_ok()
-        {
-            let date_order = if sort.eq_ignore_ascii_case("DESCENDING") {
-                "descending"
-            } else {
-                "ascending"
-            };
-            let mut sort_keys = Vec::new();
-            if result.data.schema.index_of("ticker").is_ok() {
-                sort_keys.push(("ticker".to_string(), "ascending".to_string()));
-            }
-            sort_keys.push(("date".to_string(), date_order.to_string()));
-            if result.data.schema.index_of("field").is_ok() {
-                sort_keys.push(("field".to_string(), "ascending".to_string()));
-            }
-            result = result.sort_by(sort_keys, true)?;
-        }
-
-        if let Some(date_format) = date_format {
-            let normalized = date_format.to_ascii_uppercase();
-            if matches!(normalized.as_str(), "PERIODIC" | "BOTH")
-                && let Ok(date_idx) = result.data.schema.index_of("date")
-            {
-                let mut period_cells = Vec::with_capacity(result.num_rows());
-                for batch in &result.data.batches {
-                    let date_array = batch.column(date_idx);
-                    for row in 0..date_array.len() {
-                        period_cells.push(CellValue::Text(period_label(
-                            date_array.as_ref(),
-                            row,
-                            periodicity.as_deref(),
-                        )));
-                    }
-                }
-                let data = if normalized == "PERIODIC" {
-                    result
-                        .data
-                        .with_cells_column(date_idx, "period", &period_cells, true, true)
-                } else {
-                    result.data.with_cells_column(
-                        date_idx + 1,
-                        "period",
-                        &period_cells,
-                        false,
-                        true,
-                    )
-                };
-                result = Self::from_data(map_core(data)?);
-            }
-        }
-
-        if show_date == Some(false) {
-            result = result.drop_columns(vec!["date".to_string(), "period".to_string()])?;
-        }
-
-        Ok(result)
+        detach_core(py, || {
+            historical_presentation(
+                &self.data,
+                show_date,
+                date_format.as_deref(),
+                sort.as_deref(),
+                periodicity.as_deref(),
+            )
+        })
+        .map(Self::from_data)
     }
 
-    fn reshape_bqr_generic(&self, ticker: &str) -> PyResult<Self> {
-        let Ok(path_idx) = self.data.schema.index_of("path") else {
-            return map_core(TableData::empty_from_columns(vec![
-                "ticker".to_string(),
-                "time".to_string(),
-                "type".to_string(),
-                "value".to_string(),
-                "size".to_string(),
-            ]))
-            .map(Self::from_data);
-        };
-        let value_str_idx = self.data.schema.index_of("value_str").ok();
-        let value_num_idx = self.data.schema.index_of("value_num").ok();
-        let batch = map_core(self.data.combined_batch())?;
-        let mut fields = BTreeSet::new();
-        let mut records: BTreeMap<usize, HashMap<String, CellValue>> = BTreeMap::new();
-
-        for row in 0..batch.num_rows() {
-            let Some(path) = cell_to_string(&cell_from_array(batch.column(path_idx).as_ref(), row))
-            else {
-                continue;
-            };
-            let Some((idx, field)) = parse_bqr_path(&path) else {
-                continue;
-            };
-            fields.insert(field.clone());
-            let value_str = value_str_idx
-                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
-                .unwrap_or(CellValue::Null);
-            let value_num = value_num_idx
-                .map(|idx| cell_from_array(batch.column(idx).as_ref(), row))
-                .unwrap_or(CellValue::Null);
-            let value = if cell_has_value(&value_str) {
-                value_str
-            } else {
-                value_num
-            };
-            records.entry(idx).or_default().insert(field, value);
-        }
-
-        if records.is_empty() {
-            return map_core(TableData::empty_from_columns(vec![
-                "ticker".to_string(),
-                "time".to_string(),
-                "type".to_string(),
-                "value".to_string(),
-                "size".to_string(),
-            ]))
-            .map(Self::from_data);
-        }
-
-        let priority = ["ticker", "time", "type", "value", "size"];
-        let mut columns = vec!["ticker".to_string()];
-        for name in priority.iter().skip(1) {
-            if fields.contains(*name) {
-                columns.push((*name).to_string());
-            }
-        }
-        for name in fields {
-            if !priority.contains(&name.as_str()) {
-                columns.push(name);
-            }
-        }
-
-        let mut out_fields = Vec::with_capacity(columns.len());
-        let mut out_arrays = Vec::with_capacity(columns.len());
-        for column in &columns {
-            let cells = records
-                .values()
-                .map(|record| {
-                    if column == "ticker" {
-                        CellValue::Text(ticker.to_string())
-                    } else {
-                        record.get(column).cloned().unwrap_or(CellValue::Null)
-                    }
-                })
-                .collect::<Vec<_>>();
-            let (field, array) = build_array(column, &cells);
-            out_fields.push(field);
-            out_arrays.push(array);
-        }
-
-        let batch = RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_arrays)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
-        Self::try_new(vec![batch])
+    /// Pivot generic BQR `path`/`value_str`/`value_num` rows into one row per tick.
+    ///
+    /// Uses the BQR quote shaper's reshape, as `ashape_bqr` does: fields holding
+    /// only numbers are Float64, other fields UTF-8, and schema metadata is
+    /// kept. Without tick rows the result is the empty
+    /// `ticker`/`time`/`type`/`value`/`size` table.
+    fn reshape_bqr_generic(&self, py: Python<'_>, ticker: &str) -> PyResult<Self> {
+        py.detach(|| reshape_bqr_generic_table(&self.data, ticker))
+            .map(Self::from_data)
     }
 
     fn __repr__(&self) -> String {
@@ -1758,8 +1876,192 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detach_core_runs_kernels_detached_and_maps_errors_after_reattaching() {
+        Python::initialize();
+        Python::attach(|py| {
+            assert_ne!(unsafe { pyo3::ffi::PyGILState_Check() }, 0);
+            let attached_inside = detach_core(py, || Ok(unsafe { pyo3::ffi::PyGILState_Check() }));
+            assert_eq!(attached_inside.unwrap(), 0);
+            assert_ne!(unsafe { pyo3::ffi::PyGILState_Check() }, 0);
+
+            let error = |err: ArrowCoreError| detach_core::<(), _>(py, || Err(err)).unwrap_err();
+            let unknown = error(ArrowCoreError::UnknownColumn("missing".into()));
+            assert!(unknown.is_instance_of::<PyKeyError>(py));
+            assert!(unknown.to_string().contains("unknown column: missing"));
+            for index_error in [
+                ArrowCoreError::ColumnIndexOutOfRange,
+                ArrowCoreError::RowIndexOutOfRange,
+            ] {
+                assert!(error(index_error).is_instance_of::<PyIndexError>(py));
+            }
+            for value_error in [
+                ArrowCoreError::IncompatibleSchemas,
+                ArrowCoreError::ColumnLengthMismatch {
+                    actual: 1,
+                    expected: 2,
+                },
+            ] {
+                assert!(error(value_error).is_instance_of::<PyValueError>(py));
+            }
+        });
+    }
+
+    #[test]
+    fn field_exceptions_above_the_detach_threshold_decode_like_small_ones() {
+        Python::initialize();
+        Python::attach(|py| {
+            let entry = serde_json::json!({
+                "field": "PX_BAD", "category": "BAD_FLD", "code": 2,
+                "subcategory": "INVALID", "message": "bad field"
+            });
+            let securities = (0..4_000)
+                .map(|idx| (format!("SYNTH{idx:05} Equity"), serde_json::json!([0])))
+                .collect::<serde_json::Map<_, _>>();
+            let raw =
+                serde_json::json!({"version": 1, "entries": [entry], "securities": securities})
+                    .to_string();
+            assert!(raw.len() >= DETACHED_METADATA_PARSE_MIN_BYTES);
+
+            let decoded = _decode_field_exceptions(py, raw.clone()).unwrap();
+            let decoded = decoded.bind(py).cast::<PyDict>().unwrap().clone();
+            assert_eq!(decoded.len(), 4_000);
+            let first = decoded.get_item("SYNTH00000 Equity").unwrap().unwrap();
+            assert!(
+                first
+                    .get_item(0)
+                    .unwrap()
+                    .get_item("field")
+                    .unwrap()
+                    .eq("PX_BAD")
+                    .unwrap()
+            );
+
+            let malformed = format!("{}x", &raw[..raw.len() - 1]);
+            let err = _decode_field_exceptions(py, malformed).unwrap_err();
+            assert!(err.is_instance_of::<PyValueError>(py));
+            assert!(err.to_string().contains(METADATA_KEY_FIELD_EXCEPTIONS));
+        });
+    }
+
+    #[test]
+    fn logical_nbytes_counts_one_cell_of_large_variable_width_columns() {
+        Python::initialize();
+        Python::attach(|py| {
+            let cells = (0..1_000)
+                .map(|row| format!("{row:04}").repeat(25))
+                .collect::<Vec<_>>();
+            let text = cells.iter().map(String::as_str).collect::<Vec<_>>();
+            let bytes = cells.iter().map(String::as_bytes).collect::<Vec<_>>();
+            let columns: Vec<(ArrayRef, usize)> = vec![
+                (Arc::new(StringArray::from(text.clone())), 2 * 4 + 100),
+                (Arc::new(LargeStringArray::from(text.clone())), 2 * 8 + 100),
+                (Arc::new(BinaryArray::from(bytes)), 2 * 4 + 100),
+                (
+                    Arc::new(StringViewArray::from_iter_values(text.iter().copied())),
+                    16 + 100,
+                ),
+            ];
+            for (array, expected) in columns {
+                let data_type = array.data_type().clone();
+                let schema = Arc::new(Schema::new(vec![Field::new(
+                    "payload",
+                    data_type.clone(),
+                    false,
+                )]));
+                let batch = RecordBatch::try_new(schema, vec![array]).unwrap();
+                let batch = record_batch_to_arrow_record_batch(py, batch).unwrap();
+                let cell = batch
+                    .bind(py)
+                    .call_method1("column", ("payload",))
+                    .unwrap()
+                    .call_method1("slice", (500, 1))
+                    .unwrap();
+                let logical = cell
+                    .getattr("logical_nbytes")
+                    .unwrap()
+                    .extract::<usize>()
+                    .unwrap();
+                let physical = cell.getattr("nbytes").unwrap().extract::<usize>().unwrap();
+                assert_eq!(logical, expected, "{data_type}");
+                assert!(physical >= 100_000, "{data_type}");
+            }
+        });
+    }
+
+    #[test]
+    fn metadata_sizes_and_bounded_values_match_the_metadata_mapping() {
+        Python::initialize();
+        Python::attach(|py| {
+            let metadata = HashMap::from([
+                ("xbbg.synthetic".to_string(), "\u{e9}".repeat(10)),
+                (
+                    METADATA_KEY_DELAYED.to_string(),
+                    r#"{"SYN1 Equity":{"delayed":false,"delay_minutes":null}}"#.to_string(),
+                ),
+            ]);
+            let schema = Schema::new(vec![Field::new("ticker", DataType::Utf8, false)])
+                .with_metadata(metadata.clone());
+            let batch = RecordBatch::try_new(
+                Arc::new(schema),
+                vec![Arc::new(StringArray::from(vec!["SYN1 Equity"]))],
+            )
+            .unwrap();
+            let batch = record_batch_to_arrow_record_batch(py, batch).unwrap();
+            let table = batch.bind(py).call_method0("to_table").unwrap();
+            for carrier in [batch.bind(py), &table] {
+                let full = carrier
+                    .getattr("metadata")
+                    .unwrap()
+                    .extract::<HashMap<String, String>>()
+                    .unwrap();
+                assert_eq!(full, metadata);
+                let sizes = carrier
+                    .call_method0("metadata_sizes")
+                    .unwrap()
+                    .extract::<HashMap<String, usize>>()
+                    .unwrap();
+                assert_eq!(
+                    sizes,
+                    full.iter()
+                        .map(|(key, value)| (key.clone(), value.len()))
+                        .collect::<HashMap<_, _>>()
+                );
+                for (key, value) in &full {
+                    let fetched = carrier
+                        .call_method1("metadata_value", (key,))
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap();
+                    assert_eq!(&fetched, value);
+                }
+                assert!(
+                    carrier
+                        .call_method1("metadata_value", ("absent",))
+                        .unwrap()
+                        .is_none()
+                );
+                let prefix = |max_bytes: usize| {
+                    carrier
+                        .call_method1("metadata_value", ("xbbg.synthetic", max_bytes))
+                        .unwrap()
+                        .extract::<String>()
+                        .unwrap()
+                };
+                // Each character is two UTF-8 bytes: odd bounds cut back a byte.
+                assert_eq!(prefix(5), "\u{e9}".repeat(2));
+                assert_eq!(prefix(4), "\u{e9}".repeat(2));
+                assert_eq!(prefix(1), "");
+                assert_eq!(prefix(0), "");
+                assert_eq!(prefix(20), "\u{e9}".repeat(10));
+                assert_eq!(prefix(1_000), "\u{e9}".repeat(10));
+            }
+        });
+    }
 
     #[test]
     fn native_batch_and_table_preserve_temporal_types_precision_and_nulls() {
@@ -1938,14 +2240,16 @@ mod tests {
         Python::initialize();
         Python::attach(|py| {
             let rows = PyList::empty(py).into_any();
-            let empty = rows_to_batch(&rows).unwrap();
+            let (columns, row_count) = rows_to_cell_columns(&rows).unwrap();
+            let empty = cell_columns_to_batch(columns, row_count).unwrap();
             assert_eq!(empty.num_rows(), 0);
             assert_eq!(empty.num_columns(), 0);
 
             let rows = PyList::empty(py);
             rows.append(PyDict::new(py)).unwrap();
             rows.append(PyDict::new(py)).unwrap();
-            let empty_columns = rows_to_batch(&rows.into_any()).unwrap();
+            let (columns, row_count) = rows_to_cell_columns(&rows.into_any()).unwrap();
+            let empty_columns = cell_columns_to_batch(columns, row_count).unwrap();
             assert_eq!(empty_columns.num_rows(), 2);
             assert_eq!(empty_columns.num_columns(), 0);
 

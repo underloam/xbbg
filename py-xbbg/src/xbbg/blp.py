@@ -951,7 +951,7 @@ async def _execute_generated_endpoint(
     )
 
     if plan.postprocess is not None:
-        return plan.postprocess(raw)
+        return await plan.postprocess(raw)
 
     return _backend._convert_result_backend(raw, plan.backend)
 

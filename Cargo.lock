@@ -1737,6 +1737,7 @@ dependencies = [
  "pyo3",
  "pyo3-arrow",
  "pyo3-async-runtimes",
+ "pyo3-build-config",
  "pyo3-stub-gen",
  "serde_json",
  "tokio",

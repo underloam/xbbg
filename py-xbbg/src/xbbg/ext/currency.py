@@ -37,7 +37,9 @@ async def aconvert_ccy(
             from xbbg._core import ArrowTable
 
             data = (
-                ArrowTable.from_pylist(frame.iter_rows(named=True)) if len(frame) else ArrowTable.empty(frame.columns)
+                ArrowTable.from_pydict({name: frame.get_column(name).to_list() for name in frame.columns})
+                if len(frame)
+                else ArrowTable.empty(frame.columns)
             )
     return await _call_native_recipe(
         "recipe_adjust_ccy",

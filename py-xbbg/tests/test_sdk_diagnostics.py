@@ -1,13 +1,29 @@
 from __future__ import annotations
 
 import importlib
+import json
 import logging
+import os
 from pathlib import Path
+import subprocess
 import sys
+import textwrap
+import threading
 from unittest import TestCase
 import warnings
 
 _CASE = TestCase()
+
+
+def _isolate_sdk_state(monkeypatch) -> None:
+    """Start from an empty SDK cache with no discoverable sources."""
+    from xbbg import _sdk
+
+    monkeypatch.setattr(_sdk, "_sdk_info", None)
+    monkeypatch.setattr(_sdk, "_manual_sdk_path", None)
+    monkeypatch.setattr(_sdk, "_blpapi_package_location", lambda: None)
+    monkeypatch.setattr(_sdk, "_dapi_candidate_paths", list)
+    monkeypatch.delenv("BLPAPI_ROOT", raising=False)
 
 
 def test_import_xbbg_is_warning_free():
@@ -18,43 +34,60 @@ def test_import_xbbg_is_warning_free():
     _CASE.assertEqual(recorded, [])
 
 
-def _write_fake_blpapi(root: Path) -> Path:
-    """Create a stand-in blpapi wheel carrying Bloomberg's invalid escape sequence."""
-    package = root / "blpapi"
-    package.mkdir()
-    # Mirrors the docstrings in Bloomberg's resolutionlist.py / topiclist.py,
-    # which Python 3.12+ reports as SyntaxWarning when first compiled.
+def test_blpapi_package_is_located_without_running_it(tmp_path):
+    """SDK discovery reads blpapi's location and metadata; the package's own code never runs."""
+    import xbbg
+
+    site = tmp_path / "site"
+    package = site / "blpapi"
+    package.mkdir(parents=True)
     package.joinpath("__init__.py").write_text(
-        '"""Stand-in for Bloomberg\'s wheel.\n'
-        "\n"
-        "InvalidArgumentException: If adding :class:`Message`\\s received\n"
-        '"""\n'
-        "\n"
-        '__version__ = "0.0.0-fake"\n',
+        "import builtins\n"
+        "builtins.STAND_IN_BLPAPI_EXECUTED = True\n"
+        "raise RuntimeError('stand-in blpapi must not be executed')\n",
         encoding="utf-8",
     )
-    return package
+    dist_info = site / "blpapi-9.9.9.dist-info"
+    dist_info.mkdir()
+    dist_info.joinpath("METADATA").write_text(
+        "Metadata-Version: 2.1\nName: blpapi\nVersion: 9.9.9\n",
+        encoding="utf-8",
+    )
+    script = textwrap.dedent(
+        """
+        import builtins
+        import json
+        import sys
 
+        import xbbg
 
-def test_blpapi_discovery_import_suppresses_upstream_syntax_warning(tmp_path, monkeypatch):
-    """xbbg imports blpapi only to locate the SDK, so the wheel's own warnings must not leak.
+        info = xbbg.get_sdk_info()
+        print(json.dumps({
+            "executed": getattr(builtins, "STAND_IN_BLPAPI_EXECUTED", False),
+            "imported": "blpapi" in sys.modules,
+            "sources": [
+                {"version": source["version"], "path": str(source["path"])}
+                for source in info["sources"]
+                if source["name"] == "blpapi_python"
+            ],
+        }))
+        """
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([str(site), str(Path(xbbg.__file__).resolve().parents[1])]),
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=120, check=False
+    )
 
-    Bloomberg ships invalid escape sequences in its Python package. Users who never
-    touch blpapi themselves would otherwise see SyntaxWarnings from `import xbbg`.
-    """
-    from xbbg import _sdk
-
-    _write_fake_blpapi(tmp_path)
-    monkeypatch.syspath_prepend(str(tmp_path))
-    monkeypatch.delitem(sys.modules, "blpapi", raising=False)
-
-    with warnings.catch_warnings(record=True) as recorded:
-        warnings.simplefilter("always")
-        module = _sdk._import_blpapi_module()
-
-    _CASE.assertIsNotNone(module)
-    _CASE.assertEqual(getattr(module, "__version__", None), "0.0.0-fake")
-    _CASE.assertEqual([entry for entry in recorded if issubclass(entry.category, SyntaxWarning)], [])
+    _CASE.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+    payload = json.loads(result.stdout.strip().splitlines()[-1])
+    _CASE.assertFalse(payload["executed"])
+    _CASE.assertFalse(payload["imported"])
+    _CASE.assertEqual(len(payload["sources"]), 1, payload)
+    _CASE.assertEqual(payload["sources"][0]["version"], "9.9.9")
+    _CASE.assertEqual(Path(payload["sources"][0]["path"]).resolve(), (package / "__init__.py").resolve())
 
 
 def test_get_lib_version_failure_is_debug_observable(monkeypatch, caplog):
@@ -111,25 +144,93 @@ def test_prepare_sdk_failure_is_debug_observable(monkeypatch, caplog):
     _CASE.assertTrue(any(record.exc_info for record in caplog.records))
 
 
-def test_set_sdk_path_prepares_manual_sdk(monkeypatch, tmp_path):
+def _manual_sdk(monkeypatch, tmp_path) -> Path:
+    """Create a manual SDK directory that ``set_sdk_path`` accepts without loading anything."""
     from xbbg import _sdk
 
     sdk_dir = tmp_path / "sdk"
     sdk_dir.mkdir()
     lib_path = sdk_dir / "blpapi3_64.dll"
     lib_path.write_text("placeholder")
-    calls = []
-
     monkeypatch.setattr(_sdk, "_find_sdk_lib", lambda path: lib_path if path == sdk_dir else None)
-    monkeypatch.setattr(_sdk, "_prepare_sdk_for_core_import", lambda: calls.append("prepare"))
-    monkeypatch.setattr(_sdk, "_manual_sdk_path", None)
-    monkeypatch.setattr(_sdk, "_sdk_info", {"cached": True})
+    monkeypatch.setattr(_sdk, "_get_lib_version", lambda _lib_path: "3.0.0.0")
+    return sdk_dir
 
+
+def test_set_sdk_path_prepares_manual_sdk(monkeypatch, tmp_path):
+    from xbbg import _sdk
+
+    _isolate_sdk_state(monkeypatch)
+    sdk_dir = _manual_sdk(monkeypatch, tmp_path)
+    calls = []
+    monkeypatch.setattr(_sdk, "_prepare_sdk_for_core_import", lambda: calls.append("prepare"))
+
+    _CASE.assertIsNone(_sdk.get_sdk_info()["active"])
     _sdk.set_sdk_path(sdk_dir)
 
-    _CASE.assertEqual(_sdk._manual_sdk_path, sdk_dir)
-    _CASE.assertIsNone(_sdk._sdk_info)
+    info = _sdk.get_sdk_info()
+    _CASE.assertEqual(info["active"], "manual")
+    _CASE.assertEqual(info["sources"][0]["path"], sdk_dir)
     _CASE.assertEqual(calls, ["prepare"])
+
+
+def test_get_sdk_info_returns_caller_owned_copies(monkeypatch, tmp_path):
+    from xbbg import _sdk
+
+    _isolate_sdk_state(monkeypatch)
+    sdk_dir = _manual_sdk(monkeypatch, tmp_path)
+    monkeypatch.setattr(_sdk, "_prepare_sdk_for_core_import", lambda: None)
+    _sdk.set_sdk_path(sdk_dir)
+
+    first = _sdk.get_sdk_info()
+    expected = {**first, "sources": [dict(source) for source in first["sources"]]}
+    first["sources"][0]["name"] = "mutated"
+    first["sources"].append({"name": "extra"})
+    first["active"] = "mutated"
+
+    _CASE.assertEqual(_sdk.get_sdk_info(), expected)
+
+
+def test_sdk_info_computed_before_clear_sdk_path_is_not_published(monkeypatch, tmp_path):
+    """A detection that started before ``clear_sdk_path`` must not repopulate the cache."""
+    from xbbg import _sdk
+
+    _isolate_sdk_state(monkeypatch)
+    sdk_dir = _manual_sdk(monkeypatch, tmp_path)
+    monkeypatch.setattr(_sdk, "_prepare_sdk_for_core_import", lambda: None)
+    _sdk.set_sdk_path(sdk_dir)
+
+    probing = threading.Event()
+    release = threading.Event()
+    probes = []
+
+    def dapi_candidates() -> list[Path]:
+        probes.append(threading.current_thread().name)
+        if len(probes) == 1:
+            probing.set()
+            if not release.wait(30):
+                raise TimeoutError("detection was never released")
+        return []
+
+    monkeypatch.setattr(_sdk, "_dapi_candidate_paths", dapi_candidates)
+    stale: dict = {}
+    detector = threading.Thread(target=lambda: stale.update(_sdk.get_sdk_info()), name="detector")
+    detector.start()
+    try:
+        _CASE.assertTrue(probing.wait(30))
+        _sdk.clear_sdk_path()
+    finally:
+        release.set()
+        detector.join(30)
+
+    _CASE.assertFalse(detector.is_alive())
+    # The in-flight caller gets the answer for the state it started from...
+    _CASE.assertEqual(stale["active"], "manual")
+    # ...but the next call re-detects instead of reading that stale answer.
+    fresh = _sdk.get_sdk_info()
+    _CASE.assertIsNone(fresh["active"])
+    _CASE.assertEqual(fresh["sources"], [])
+    _CASE.assertEqual(probes, ["detector", threading.current_thread().name])
 
 
 def test_find_sdk_lib_checks_windows_bin_dir(monkeypatch, tmp_path):

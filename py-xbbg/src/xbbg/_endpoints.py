@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 class _EndpointPlan:
     request_kwargs: dict[str, Any]
     backend: Backend | str | None
-    postprocess: Callable[[Any], DataFrameResult] | None = None
+    postprocess: Callable[[Any], Awaitable[DataFrameResult]] | None = None
     service: Service | None = None
     operation: Operation | None = None
     extractor: ExtractorHint | None = None
@@ -479,21 +479,6 @@ def _parse_date_offset(offset: str, reference: datetime) -> datetime:
     raise ValueError(f"Unknown time unit: {unit}")
 
 
-def _reshape_bqr_generic(table: Any, ticker: str) -> Any:
-    """Reshape generic extractor output into structured BQR rows via native Arrow."""
-    return table.reshape_bqr_generic(ticker)
-
-
-_BQR_RENAME_MAP: dict[str, str] = {
-    "type": "event_type",
-    "value": "price",
-    "brokerBuyCode": "broker_buy",
-    "brokerSellCode": "broker_sell",
-    "spreadPrice": "spread_price",
-    "conditionCodes": "condition_codes",
-    "exchangeCode": "exchange",
-}
-_BQR_BROKER_COLUMNS = ("brokerBuyCode", "brokerSellCode", "broker_buy", "broker_sell")
 _BQR_DEALER_INPUT_EXAMPLE = "/isin/US037833FB15@MSG1 Corp"
 
 
@@ -515,34 +500,23 @@ def _warn_bqr_dealer_input(ticker: str, *, stacklevel: int = 3) -> None:
     )
 
 
-def _bqr_has_broker_code_value(table: Any) -> bool:
-    return table.has_any_value(list(_BQR_BROKER_COLUMNS))
-
-
-def _postprocess_bqr_result(
+async def _postprocess_bqr_result(
     result: Any,
     *,
     ticker: str,
     backend: Backend | str | None,
     enforce_broker_codes: bool,
 ) -> DataFrameResult:
-    table = ensure_arrow_table(result)
+    """Shape raw BQR ticks natively, off the event loop, then convert the backend.
 
-    if "path" in table.column_names:
-        table = _reshape_bqr_generic(table, ticker)
+    The shaper is shared with ``xbbg.ext.abqr``: generic ``path`` output is
+    pivoted into one row per tick, attributed requests require a broker code
+    (``RuntimeError`` otherwise), rows are sorted by ``time`` and Bloomberg
+    names are normalized.
+    """
+    from . import _core
 
-    if enforce_broker_codes and table.num_rows > 0 and not _bqr_has_broker_code_value(table):
-        raise RuntimeError(
-            "BQR returned quote rows without broker attribution. "
-            "Use a fixed-income ticker with a dealer quote pricing source such as '@MSG1 Corp', "
-            "or pass include_broker_codes=False if raw quote ticks without dealer codes are intentional."
-        )
-
-    if table.num_rows > 0 and "time" in table.column_names:
-        table = table.sort_by([("time", "ascending")])
-
-    rename_map = {column: _BQR_RENAME_MAP[column] for column in table.column_names if column in _BQR_RENAME_MAP}
-    table = table.rename_columns(rename_map)
+    table = await _core.ashape_bqr(result, ticker, enforce_broker_codes)
     return _backend._convert_result_backend(table, backend)
 
 
@@ -584,7 +558,14 @@ async def abqr(
 
     Returns:
         DataFrame with columns: ticker, time, event_type, price, size,
-        plus optional broker_buy, broker_sell, spread_price, etc.
+        plus optional broker_buy, broker_sell, spread_price, etc., sorted by
+        time. Shaping matches ``xbbg.ext.abqr``: schema metadata is kept, and
+        fields of generic (``path``) output are float64 when every value is
+        numeric and strings otherwise.
+
+    Raises:
+        RuntimeError: ``include_broker_codes`` is set and the quote rows carry
+            no broker codes.
 
     Example::
 
@@ -882,11 +863,9 @@ async def _build_abdp_plan(args: dict[str, Any]) -> _EndpointPlan:
     elements, overrides = await _request_options._aroute_kwargs(Service.REFDATA, Operation.REFERENCE_DATA, kwargs)
     fmt = Format(args["format"]) if isinstance(args.get("format"), str) else args.get("format")
 
-    resolved_types = await _engine._resolve_field_types_cached(
-        field_list,
-        args.get("field_types"),
-        "string",
-    )
+    # The engine owns field-type caching; caller overrides win over resolved types.
+    resolved_types = dict(await _engine._get_engine().resolve_field_types(field_list, None, "string"))
+    resolved_types.update(args.get("field_types") or {})
 
     return _EndpointPlan(
         request_kwargs={
@@ -955,11 +934,9 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
     elements, overrides = await _request_options._aroute_kwargs(Service.REFDATA, Operation.HISTORICAL_DATA, kwargs)
     presentation_periodicity = _request_options._periodicity_selection(elements)
 
-    resolved_types = await _engine._resolve_field_types_cached(
-        field_list,
-        args.get("field_types"),
-        "float64",
-    )
+    # The engine owns field-type caching; caller overrides win over resolved types.
+    resolved_types = dict(await _engine._get_engine().resolve_field_types(field_list, None, "float64"))
+    resolved_types.update(args.get("field_types") or {})
 
     backend = args.get("backend")
     needs_presentation_postprocess = (
@@ -968,8 +945,8 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
         or presentation.date_format in {"PERIODIC", "BOTH"}
     )
 
-    def postprocess(raw: Any) -> DataFrameResult:
-        shaped = _request_options._apply_historical_presentation(
+    async def postprocess(raw: Any) -> DataFrameResult:
+        shaped = await _request_options._apresent_historical(
             raw,
             presentation,
             periodicity=presentation_periodicity,
@@ -1207,9 +1184,9 @@ async def _build_abqr_plan(args: dict[str, Any]) -> _EndpointPlan:
         event_types,
     )
 
-    def postprocess(nw_df: Any) -> DataFrameResult:
+    async def postprocess(nw_df: Any) -> DataFrameResult:
         logger.debug("abqr: received %d rows", ensure_arrow_table(nw_df).num_rows)
-        return _postprocess_bqr_result(
+        return await _postprocess_bqr_result(
             nw_df,
             ticker=ticker,
             backend=backend,

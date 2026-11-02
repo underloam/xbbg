@@ -37,9 +37,6 @@ def _normalize_fields(fields: str | Sequence[str] | None) -> list[str]:
     return list(fields)
 
 
-# Cache for valid request elements per (service, operation)
-_VALID_ELEMENTS_CACHE: dict[tuple[str, str], set[str]] = {}
-
 _ELEMENT_KEY_ALIASES: dict[str, str] = {
     # Bloomberg request element aliases inherited from xbbg 0.x / Excel BDH conventions.
     "PeriodAdj": "periodicityAdjustment",
@@ -282,14 +279,17 @@ def _presentation_format(fmt: Format | None, presentation: _PresentationOptions)
     return fmt
 
 
-def _apply_historical_presentation(
+async def _apresent_historical(
     table: Any,
     presentation: _PresentationOptions,
     *,
     periodicity: str | None,
 ) -> Any:
-    """Apply Excel-style BDH presentation options through native Arrow operations."""
-    return table.apply_historical_presentation(
+    """Apply Excel-style BDH presentation options natively, off the event loop."""
+    from . import _core
+
+    return await _core.apresent_historical(
+        table,
         presentation.show_date,
         presentation.date_format,
         presentation.sort,
@@ -298,24 +298,17 @@ def _apply_historical_presentation(
 
 
 async def _aget_valid_elements(service: str, operation: str) -> set[str]:
-    """Get valid request element names from schema cache (async).
+    """Get valid request element names from the active engine's schema (async).
 
-    Returns cached set of valid element names for the operation.
+    The engine owns schema caching and invalidation, so every call asks it.
     Falls back to empty set if schema not available.
     """
-    cache_key = (service, operation)
-    if cache_key in _VALID_ELEMENTS_CACHE:
-        return _VALID_ELEMENTS_CACHE[cache_key]
-
     try:
-        engine = _engine._get_engine()
-        elements = await engine.list_valid_elements(service, operation)
-        valid = set(elements) if elements else set()
-        _VALID_ELEMENTS_CACHE[cache_key] = valid
-        return valid
+        elements = await _engine._get_engine().list_valid_elements(service, operation)
     except Exception:
         logger.debug("Schema lookup failed for %s/%s, using empty set", service, operation, exc_info=True)
         return set()
+    return set(elements) if elements else set()
 
 
 # ISO date pattern for the override-path value-based normalizer. Matches the

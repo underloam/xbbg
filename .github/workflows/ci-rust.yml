@@ -607,13 +607,16 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   # Build wheels via setuptools-rust + uv (matrix: OS × Python version)
   # ════════════════════════════════════════════════════════════════════════════
+  # 3.14t/3.15t build free-threaded (cp314t/cp315t) wheels. These legs gate like
+  # the others because releases ship them; the test-freethreaded job that runs
+  # them stays advisory.
   build:
     name: Build (Python ${{ matrix.python }}, ${{ matrix.os }})
     needs: [sdk-version, generate-bindings, check-linux, check-windows, check-macos]
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
         exclude:
@@ -705,6 +708,7 @@ jobs:
           os: macOS
 
       - name: Setup Python ${{ matrix.python }}
+        id: setup-python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -718,6 +722,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
 
       - name: Build wheel (setuptools-rust via uv)
+        env:
+          # Build for the interpreter setup-python selected (free-threaded on the
+          # t legs), not whichever one uv's discovery reaches first.
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: uv build --wheel --out-dir dist/
 
       - name: Upload wheel
@@ -828,20 +836,20 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-      - name: Setup Rust for subscription native smoke
+      - name: Setup Rust for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
 
-      - name: Download bindings for subscription native smoke
+      - name: Download bindings for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: actions/download-artifact@v8
         with:
           name: blpapi-bindings
           path: ci-bindings
 
-      - name: Exercise Python native subscription deliveries
+      - name: Exercise Python native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         shell: bash
         env:
@@ -857,7 +865,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py -q
           )
 
       # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
@@ -876,6 +884,131 @@ jobs:
       - name: Test Python LangGraph adapter
         if: matrix.python != '3.15'
         run: pytest py-xbbg-langgraph/tests -v
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Test free-threaded wheels (advisory: not a ci-status requirement)
+  # ════════════════════════════════════════════════════════════════════════════
+  # Installs only the optional dependencies xbbg supports on free-threaded Python
+  # (pyarrow, pandas): polars and duckdb publish no free-threaded wheels, so their
+  # tests skip. The LangGraph adapter is not installed either, because langsmith
+  # requires zstandard and orjson, which publish none. PYTHON_GIL stays unset so
+  # an import that re-enables the GIL fails the run instead of going unnoticed.
+  test-freethreaded:
+    name: Test free-threaded (Python ${{ matrix.python }}, ${{ matrix.os }})
+    needs: [sdk-version, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.14t", "3.15t"]
+
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python ${{ matrix.python }}
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.os }}-py${{ matrix.python }}
+          path: dist
+
+      - name: Setup Bloomberg SDK (Linux)
+        if: runner.os == 'Linux'
+        id: sdk-linux
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Setup Bloomberg SDK (macOS)
+        if: runner.os == 'macOS'
+        id: sdk-macos
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: macOS
+
+      - name: Setup Bloomberg SDK (Windows)
+        if: runner.os == 'Windows'
+        id: sdk-windows
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Windows
+
+      - name: Install wheel and free-threaded test dependencies
+        shell: bash
+        env:
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        # --no-build: a dependency without a free-threaded wheel fails here
+        # instead of compiling from source.
+        run: |
+          WHEEL=$(echo dist/*.whl)
+          uv pip install --system --no-build "${WHEEL}" "pytest>=8.4" "pytest-asyncio>=0.24" "pyarrow>=22.0.0" "pandas>=3"
+
+      - name: Copy tests to temp directory
+        # Run from temp dir to avoid importing local source instead of installed package
+        run: |
+          mkdir -p "${{ runner.temp }}/test-run"
+          cp -r py-xbbg/tests "${{ runner.temp }}/test-run/"
+        shell: bash
+
+      - name: Run tests
+        working-directory: ${{ runner.temp }}/test-run
+        shell: bash
+        run: |
+          python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED'), 'setup-python selected a GIL build'"
+          python -W error::RuntimeWarning -c "import sys, xbbg, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
+          python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
+          pytest tests -v -m "not live"
+
+      - name: Setup Rust for native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+
+      - name: Download bindings for native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Exercise Python native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        shell: bash
+        env:
+          BLPAPI_PREGENERATED_BINDINGS: ${{ github.workspace }}/ci-bindings/bindings.rs
+        run: |
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export XBBG_DIST_VERSION="$(python -c 'from importlib.metadata import version; print(version("xbbg"))')"
+          cargo build --locked -p pyo3-xbbg --features test-support
+          CORE_TARGET="$(python -c 'from importlib.metadata import distribution; print(next(distribution("xbbg").locate_file("xbbg").glob("_core*.so")))')"
+          CORE_BACKUP="$RUNNER_TEMP/core-delivery-original.so"
+          cp "$CORE_TARGET" "$CORE_BACKUP"
+          trap 'cp "$CORE_BACKUP" "$CORE_TARGET"; rm -f "$CORE_BACKUP"' EXIT
+          cp target/debug/lib_core.so "$CORE_TARGET"
+          (
+            cd "$RUNNER_TEMP/test-run"
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py -q
+          )
 
   # ════════════════════════════════════════════════════════════════════════════
   # Declared floors - resolve the lower bounds we advertise and actually run them
@@ -1127,7 +1260,7 @@ jobs:
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    # geiger, abi-compat, and semver are intentionally advisory.
+    # geiger, abi-compat, semver, and test-freethreaded are intentionally advisory.
     needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, build, test, floors, dataframe-previous-majors]
     if: always()
     steps:

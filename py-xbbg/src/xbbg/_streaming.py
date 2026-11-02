@@ -601,7 +601,14 @@ class Subscription:
 
 
 class DeliveryStream:
-    """Async batch-delivery view sharing its subscription's native lifecycle."""
+    """Async batch-delivery view sharing its subscription's native lifecycle.
+
+    Backend conversion of each delivery runs on a native completion thread,
+    attached to the interpreter but off the event loop, before the consuming
+    task resumes and ``publish()`` commits the batch. A read cancelled before
+    its native completion never converts; failed or unpublished conversions
+    leave the batch and its gap unread.
+    """
 
     __slots__ = ("_convert_delivery", "_owner")
 

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from xbbg import _engine, _request_options, backend as backend_module, blp
+from xbbg import _engine, backend as backend_module, blp
 from xbbg.services import Operation, Service
 
 
@@ -13,7 +13,6 @@ class FakeEngine:
 
 @pytest.fixture(autouse=True)
 def stub_engine(monkeypatch):
-    _request_options._VALID_ELEMENTS_CACHE.clear()
     monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
 

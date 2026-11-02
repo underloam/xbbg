@@ -21,7 +21,6 @@ Example:
 from __future__ import annotations
 
 from dataclasses import dataclass
-import functools
 import json
 from pathlib import Path
 import tomllib
@@ -100,8 +99,8 @@ class ServiceSchema:
 
     @classmethod
     def from_json(cls, json_str: str) -> ServiceSchema:
-        """Create from JSON string; Rust owns service-schema invalidation."""
-        return _parse_service_schema_json(json_str)
+        """Create from JSON string; Rust owns service-schema caching and invalidation."""
+        return cls.from_dict(json.loads(json_str))
 
     def get_operation(self, name: str) -> OperationSchema | None:
         """Get an operation by name."""
@@ -109,12 +108,6 @@ class ServiceSchema:
             if op.name == name:
                 return op
         return None
-
-
-@functools.lru_cache(maxsize=128)
-def _parse_service_schema_json(json_str: str) -> ServiceSchema:
-    """Parse a Rust-owned schema JSON snapshot into dataclass objects."""
-    return ServiceSchema.from_dict(json.loads(json_str))
 
 
 # Async API functions
@@ -228,16 +221,12 @@ def invalidate_schema(service: str) -> None:
     """Invalidate a cached schema."""
     engine = _engine._get_engine()
     engine.invalidate_schema(service)
-    _parse_service_schema_json.cache_clear()
-    _engine._clear_field_type_resolution_cache()
 
 
 def clear_schema_cache() -> None:
     """Clear all cached schemas."""
     engine = _engine._get_engine()
     engine.clear_schema_cache()
-    _parse_service_schema_json.cache_clear()
-    _engine._clear_field_type_resolution_cache()
 
 
 # IDE configuration

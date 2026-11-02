@@ -42,6 +42,90 @@ def _block_imports(monkeypatch: pytest.MonkeyPatch, *roots: str) -> None:
     monkeypatch.setattr(builtins, "__import__", guarded_import)
 
 
+def _without_pyarrow(monkeypatch: pytest.MonkeyPatch) -> None:
+    import xbbg.backend as backend_module
+
+    real_import_backend = backend_module._import_backend_module
+
+    def import_backend(backend: Backend | str, *, feature: str | None = None) -> Any:
+        if Backend(backend) is Backend.PYARROW:
+            raise ImportError("pyarrow unavailable")
+        return real_import_backend(backend, feature=feature)
+
+    monkeypatch.setattr(backend_module, "_import_backend_module", import_backend)
+
+
+class _RowlessBatch:
+    """Native batch view whose row materialization fails."""
+
+    def __init__(self, batch: Any) -> None:
+        self._batch = batch
+
+    @property
+    def num_rows(self) -> int:
+        return self._batch.num_rows
+
+    def column(self, index: int) -> Any:
+        return self._batch.column(index)
+
+    def to_pylist(self) -> list[dict[str, Any]]:
+        raise AssertionError("conversion must not build row dicts")
+
+
+class _RowlessTable:
+    """Native table view with optional metadata whose row materialization fails."""
+
+    def __init__(self, table: Any, metadata: dict[str, str] | None = None) -> None:
+        self._table = table
+        self.metadata = metadata or {}
+
+    @property
+    def schema(self) -> Any:
+        return self._table.schema
+
+    @property
+    def column_names(self) -> list[str]:
+        return self._table.column_names
+
+    @property
+    def num_rows(self) -> int:
+        return self._table.num_rows
+
+    def column(self, index: int) -> Any:
+        return self._table.column(index)
+
+    def to_batches(self) -> list[_RowlessBatch]:
+        return [_RowlessBatch(batch) for batch in self._table.to_batches()]
+
+    def to_pylist(self) -> list[dict[str, Any]]:
+        raise AssertionError("conversion must not build row dicts")
+
+
+def _mixed_native_table() -> Any:
+    timestamp = datetime(2024, 1, 1, 12, 30, 1, 123456, tzinfo=UTC)
+    return ArrowTable.from_pylist(
+        [
+            {
+                "ticker": "AAA US Equity",
+                "count": 1,
+                "px": 1.5,
+                "flag": True,
+                "when": date(2024, 1, 1),
+                "timestamp": timestamp,
+            },
+            {"ticker": None, "count": None, "px": None, "flag": None, "when": None, "timestamp": None},
+            {
+                "ticker": "BBB US Equity",
+                "count": 3,
+                "px": 2.5,
+                "flag": False,
+                "when": date(2024, 1, 3),
+                "timestamp": timestamp,
+            },
+        ]
+    )
+
+
 class TestConvertBackendNative:
     def test_convert_native_returns_identity(self, arrow_table: Any):
         result = convert_backend_frame(arrow_table, Backend.NATIVE)
@@ -409,16 +493,7 @@ class TestConvertBackendPandas:
         self, arrow_table: Any, monkeypatch: pytest.MonkeyPatch
     ):
         pd = pytest.importorskip("pandas")
-        import xbbg.backend as backend_module
-
-        real_import_backend = backend_module._import_backend_module
-
-        def import_backend(backend: Backend | str, *, feature: str | None = None) -> Any:
-            if Backend(backend) is Backend.PYARROW:
-                raise ImportError("pyarrow unavailable")
-            return real_import_backend(backend, feature=feature)
-
-        monkeypatch.setattr(backend_module, "_import_backend_module", import_backend)
+        _without_pyarrow(monkeypatch)
 
         result = convert_backend_frame(arrow_table, Backend.PANDAS)
 
@@ -427,6 +502,39 @@ class TestConvertBackendPandas:
         assert list(result.columns) == arrow_table.column_names
         assert result["ticker"].tolist() == ["AAPL US Equity", "MSFT US Equity"]
         assert result["px_last"].tolist() == [150.0, 380.0]
+
+    @pytest.mark.parametrize("shape", ["single-batch", "multi-batch", "empty"])
+    def test_pandas_without_pyarrow_matches_row_records(self, shape: str, monkeypatch: pytest.MonkeyPatch):
+        pd = pytest.importorskip("pandas")
+        from pandas.testing import assert_frame_equal
+
+        import xbbg.backend as backend_module
+
+        source = _mixed_native_table()
+        if shape == "multi-batch":
+            table = ArrowTable.from_batches([source.slice(0, 1).to_batches()[0], source.slice(1, 2).to_batches()[0]])
+        elif shape == "empty":
+            table = source.slice(0, 0)
+        else:
+            table = source
+        metadata = {
+            "xbbg.delayed": json.dumps({"AAA US Equity": {"delayed": True, "delay_minutes": 15}}),
+            "xbbg.bloomberg_request_id": "sdk-synthetic-a",
+        }
+        reference = _attach_xbbg_metadata_attrs(
+            pd.DataFrame.from_records(table.to_pylist(), columns=table.column_names),
+            _RowlessTable(table, metadata),
+        )
+        _without_pyarrow(monkeypatch)
+
+        result = backend_module._to_pandas_frame(_RowlessTable(table, metadata))
+
+        assert_frame_equal(result, reference)
+        assert result.attrs == reference.attrs
+        assert result.attrs == {
+            "xbbg_delayed": {"AAA US Equity": {"delayed": True, "delay_minutes": 15}},
+            "xbbg_bloomberg_request_id": "sdk-synthetic-a",
+        }
 
 
 class TestConvertBackendPolars:
@@ -472,18 +580,11 @@ class TestConvertBackendPolars:
             ]
         )
         assert nw.from_native(table).schema["timestamp"] == nw.Datetime("us", "UTC")
-        real_import_backend = backend_module._import_backend_module
-
-        def import_backend(backend: Backend | str, *, feature: str | None = None) -> Any:
-            if Backend(backend) is Backend.PYARROW:
-                raise ImportError("pyarrow unavailable")
-            return real_import_backend(backend, feature=feature)
-
-        monkeypatch.setattr(backend_module, "_import_backend_module", import_backend)
+        _without_pyarrow(monkeypatch)
         monkeypatch.setattr(backend_module, "_get_module_version", lambda _module: (0, 20, 4))
 
-        result = backend_module._to_polars_frame(table)
-        empty = backend_module._to_polars_frame(source.slice(0, 0))
+        result = backend_module._to_polars_frame(_RowlessTable(table))
+        empty = backend_module._to_polars_frame(_RowlessTable(source.slice(0, 0)))
 
         assert dict(result.schema) == {"value": pl.Int64, "when": pl.Date, "timestamp": pl.Datetime("us", "UTC")}
         assert result.to_dicts() == [
@@ -509,6 +610,22 @@ class TestConvertBackendPolars:
 
         with pytest.raises(TypeError):
             backend_module._to_polars_frame(UnsupportedTable())
+
+    def test_legacy_polars_column_keeps_non_utc_time_zone(self):
+        pl = pytest.importorskip("polars")
+        from zoneinfo import ZoneInfo
+
+        import xbbg.backend as backend_module
+
+        new_york = ZoneInfo("America/New_York")
+        instants = [datetime(2024, 1, 1, 14, 30, tzinfo=UTC), None, datetime(2024, 7, 1, 13, 30, tzinfo=UTC)]
+        # Native ``to_pylist`` yields values in the column's own time zone.
+        values = [None if value is None else value.astimezone(new_york) for value in instants]
+
+        column = backend_module._legacy_polars_series(pl, "timestamp", values, pl.Datetime("us", "America/New_York"))
+
+        assert column.dtype == pl.Datetime("us", "America/New_York")
+        assert column.to_list() == instants
 
     def test_convert_polars_lazy_returns_lazyframe(self, arrow_table: Any):
         pl = pytest.importorskip("polars")

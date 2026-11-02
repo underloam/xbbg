@@ -17,44 +17,47 @@ use crate::error::{ExtError, Result};
 ///
 /// # Arguments
 ///
-/// * `columns` - Slice of column names to rename
+/// * `columns` - Owned column names; matched names are moved into the result
 ///
 /// # Returns
 ///
-/// A vector of (old_name, new_name) pairs for columns that need renaming.
+/// (old_name, new_name) pairs for columns that need renaming, in input order.
 ///
 /// # Examples
 ///
 /// ```
 /// use xbbg_ext::transforms::historical::rename_dividend_columns;
 ///
-/// let columns = vec!["ticker", "Declared Date", "Ex-Date", "Dividend Amount"];
-/// let renames = rename_dividend_columns(&columns);
+/// let columns = ["ticker", "Declared Date", "Ex-Date", "Dividend Amount"]
+///     .map(String::from)
+///     .to_vec();
+/// let renames = rename_dividend_columns(columns);
 ///
 /// assert_eq!(renames.len(), 3);
 /// assert!(renames.iter().any(|(old, new)| old == "Declared Date" && new == "dec_date"));
 /// ```
-pub fn rename_dividend_columns(columns: &[&str]) -> Vec<(String, String)> {
+pub fn rename_dividend_columns(columns: Vec<String>) -> Vec<(String, String)> {
     columns
-        .iter()
+        .into_iter()
         .filter_map(|col| {
             DVD_COLS
-                .get(*col)
-                .map(|new_name| (col.to_string(), new_name.to_string()))
+                .get(col.as_str())
+                .map(|new_name| (col, new_name.to_string()))
         })
         .collect()
 }
 
 /// Rename ETF holdings columns from Bloomberg names to clean names.
 ///
-/// Uses the `ETF_COLS` mapping.
-pub fn rename_etf_columns(columns: &[&str]) -> Vec<(String, String)> {
+/// Uses the `ETF_COLS` mapping. Matched names are moved into the result,
+/// which keeps input order.
+pub fn rename_etf_columns(columns: Vec<String>) -> Vec<(String, String)> {
     columns
-        .iter()
+        .into_iter()
         .filter_map(|col| {
             ETF_COLS
-                .get(*col)
-                .map(|new_name| (col.to_string(), new_name.to_string()))
+                .get(col.as_str())
+                .map(|new_name| (col, new_name.to_string()))
         })
         .collect()
 }
@@ -88,9 +91,9 @@ pub fn rename_etf_columns(columns: &[&str]) -> Vec<(String, String)> {
 /// assert!(renames.iter().any(|(old, new)| old == "Period 1 Value" && new == "fy2023"));
 /// assert!(renames.iter().any(|(old, new)| old == "Period 2 Value" && new == "fy2022"));
 /// ```
-pub fn build_earning_header_rename(
+pub fn build_earning_header_rename<S: AsRef<str>>(
     header_row: &[(String, String)],
-    data_columns: &[&str],
+    data_columns: &[S],
 ) -> Vec<(String, String)> {
     let header_map: std::collections::HashMap<&str, &str> = header_row
         .iter()
@@ -99,8 +102,9 @@ pub fn build_earning_header_rename(
 
     data_columns
         .iter()
+        .map(AsRef::<str>::as_ref)
         .filter_map(|data_col| {
-            if *data_col == "ticker" {
+            if data_col == "ticker" {
                 return None;
             }
 
@@ -244,22 +248,41 @@ mod tests {
 
     #[test]
     fn test_rename_dividend_columns() {
-        let columns = vec!["ticker", "Declared Date", "Ex-Date", "Unknown"];
-        let renames = rename_dividend_columns(&columns);
+        let columns = [
+            "ticker",
+            "Declared Date",
+            "Ex-Date",
+            "Unknown",
+            "Declared Date",
+        ]
+        .map(String::from)
+        .to_vec();
+        let renames = rename_dividend_columns(columns);
 
-        assert_eq!(renames.len(), 2);
-        assert!(renames.contains(&("Declared Date".to_string(), "dec_date".to_string())));
-        assert!(renames.contains(&("Ex-Date".to_string(), "ex_date".to_string())));
+        assert_eq!(
+            renames,
+            vec![
+                ("Declared Date".to_string(), "dec_date".to_string()),
+                ("Ex-Date".to_string(), "ex_date".to_string()),
+                ("Declared Date".to_string(), "dec_date".to_string()),
+            ]
+        );
     }
 
     #[test]
     fn test_rename_etf_columns() {
-        let columns = vec!["Holding Name", "Weight", "Unknown"];
-        let renames = rename_etf_columns(&columns);
+        let columns = ["Holding Name", "Weight", "Unknown"]
+            .map(String::from)
+            .to_vec();
+        let renames = rename_etf_columns(columns);
 
-        assert_eq!(renames.len(), 2);
-        assert!(renames.contains(&("Holding Name".to_string(), "name".to_string())));
-        assert!(renames.contains(&("Weight".to_string(), "weight".to_string())));
+        assert_eq!(
+            renames,
+            vec![
+                ("Holding Name".to_string(), "name".to_string()),
+                ("Weight".to_string(), "weight".to_string()),
+            ]
+        );
     }
 
     #[test]

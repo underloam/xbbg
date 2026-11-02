@@ -242,7 +242,8 @@ def ta_study_params(study: str) -> dict[str, Any]:
         {'period': 20, 'upperBand': 2.0, 'lowerBand': 2.0, 'priceSourceClose': 'PX_LAST'}
     """
     attr_name = _get_study_attr_name(study)
-    return TA_DEFAULTS.get(attr_name, {})
+    # Copy so callers cannot mutate the defaults merged into later requests.
+    return dict(TA_DEFAULTS.get(attr_name, {}))
 
 
 def generate_ta_stubs(output_dir: str | None = None) -> str:

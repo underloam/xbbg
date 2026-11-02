@@ -9,6 +9,7 @@ imported until an instance of that library actually needs materialization.
 from __future__ import annotations
 
 import base64
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
@@ -87,6 +88,8 @@ def _row_count(value: Any) -> int | None:
 def _reported_error(value: Any) -> bool:
     if isinstance(value, _FieldExceptions):
         return value.has_errors
+    if isinstance(value, _NativeMetadataText):
+        return value.size > 0
     if value is None or value is False:
         return False
     if isinstance(value, (str, bytes, bytearray, list, tuple, dict)):
@@ -183,6 +186,34 @@ def _field_exceptions(value: Any) -> _FieldExceptions:
     )
 
 
+@dataclass(slots=True)
+class _NativeMetadataText:
+    """A native schema-metadata value, fetched only as a bounded prefix when projected."""
+
+    carrier: Any
+    key: str
+    size: int
+
+
+class _NativeMetadata(Mapping[str, Any]):
+    """Native schema metadata keyed by name; values stay in Arrow until projected."""
+
+    __slots__ = ("_carrier", "_sizes")
+
+    def __init__(self, carrier: Any, sizes: dict[str, int]) -> None:
+        self._carrier = carrier
+        self._sizes = sizes
+
+    def __getitem__(self, key: str) -> _NativeMetadataText:
+        return _NativeMetadataText(self._carrier, key, self._sizes[key])
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(self._sizes)
+
+    def __len__(self) -> int:
+        return len(self._sizes)
+
+
 def _pyarrow_cost(array: Any, budget: int, depth: int = 0) -> int | None:
     """Bound Python container expansion, including zero-byte Arrow null arrays."""
     import pyarrow as pa
@@ -260,26 +291,35 @@ class _ArrowSource:
         self.rows: list[dict[str, Any]] = []
         self.reasons: set[str] = set()
         self.diagnostics: dict[str, Any] = {}
-        self.metadata: dict[Any, Any] = {}
         self.exhausted = False
         self.selected: Any = None
-        # These native/PyArrow getters copy schema metadata. There is no bounded
-        # metadata getter in either public API; do not also invoke eager parsed
-        # native diagnostics getters, which would duplicate and expand the copy.
-        if self.kind == "native":
-            carrier = value.to_table() if type(value).__name__ == "ArrowRecordBatch" else value
-            raw = carrier.metadata
-        else:
-            raw = value.schema.metadata or {}
-        self.metadata = raw
+        # Native carriers report metadata sizes without copying any value, so
+        # every value is gated before it is copied or decoded. PyArrow exposes
+        # only a full bytes copy of its metadata, which is never decoded here.
+        native = self.kind == "native"
+        raw: Mapping[Any, Any] = {} if native else value.schema.metadata or {}
+        sizes: dict[str, int] = value.metadata_sizes() if native else {}
+        self.metadata: Mapping[Any, Any] = _NativeMetadata(value, sizes) if native else raw
         for key, target in _METADATA_KEYS.items():
-            encoded = raw.get(key, raw.get(key.encode()))
-            if encoded is None:
+            encoded: str | bytes | None = None if native else raw.get(key, raw.get(key.encode()))
+            size = sizes.get(key) if native else None if encoded is None else len(encoded)
+            if size is None:
                 continue
-            if len(encoded) > min(work.nodes_left, work.bytes_left):
-                self.diagnostics[target] = _OMITTED_DIAGNOSTIC if target == "fieldExceptions" else encoded
-                self.reasons.add("max_result_nodes" if len(encoded) > work.nodes_left else "max_result_bytes")
-            elif not _json_depth_fits(encoded):
+            if size > min(work.nodes_left, work.bytes_left):
+                self.diagnostics[target] = (
+                    _OMITTED_DIAGNOSTIC
+                    if target == "fieldExceptions"
+                    else _NativeMetadataText(value, key, size)
+                    if encoded is None
+                    else encoded
+                )
+                self.reasons.add("max_result_nodes" if size > work.nodes_left else "max_result_bytes")
+                continue
+            if encoded is None:
+                encoded = value.metadata_value(key)
+                if encoded is None:
+                    continue
+            if not _json_depth_fits(encoded):
                 self.diagnostics[target] = _OMITTED_DIAGNOSTIC if target == "fieldExceptions" else encoded
                 self.reasons.add("max_result_depth")
             else:
@@ -340,15 +380,10 @@ class _ArrowSource:
                     self.reasons.add("unsupported_value")
                     continue
                 cost = 1
-                # nbytes includes parent buffers. Compact just this logical cell,
-                # never the table, before measuring variable-width allocation.
-                # The native API necessarily copies a single oversized cell here;
-                # the size check still prevents expanding that cell into Python.
-                if dtype.startswith(_NATIVE_VARIABLE):
-                    column = column.compact()
-                    allocation = column.nbytes
-                else:
-                    allocation = 32
+                # nbytes includes parent buffers; logical_nbytes measures only
+                # this cell's bytes without copying them, so an oversized cell
+                # is rejected before it is expanded into Python.
+                allocation = column.logical_nbytes if dtype.startswith(_NATIVE_VARIABLE) else 32
             else:
                 name = sliced.schema.field(column_index).name
                 cost = _pyarrow_cost(column, work.nodes_left)
@@ -375,7 +410,7 @@ class _ArrowRows:
 
 @dataclass(slots=True)
 class _Metadata:
-    value: dict[Any, Any]
+    value: Mapping[Any, Any]
 
 
 @dataclass(slots=True)
@@ -465,6 +500,11 @@ class _Projection:
             value = None
         if value is _OMITTED_DIAGNOSTIC:
             return _Built({}, 2)
+        if isinstance(value, _NativeMetadataText):
+            # One character more than max_string_chars is enough for string()
+            # to truncate exactly as it would the whole value; a character
+            # needs at most four UTF-8 bytes.
+            value = value.carrier.metadata_value(value.key, 4 * (self.options.max_string_chars + 1))
         if isinstance(value, str):
             return self.string(value, budget)
         if isinstance(value, (bytes, bytearray)):
@@ -543,7 +583,7 @@ class _Projection:
             self.ancestors.remove(identity)
 
     def mapping(
-        self, value: dict[Any, Any], budget: int, depth: int, metadata: bool, raw_metadata: bool = False
+        self, value: Mapping[Any, Any], budget: int, depth: int, metadata: bool, raw_metadata: bool = False
     ) -> _Built:
         result: dict[str, Any] = {}
         size, nodes = 2, 1

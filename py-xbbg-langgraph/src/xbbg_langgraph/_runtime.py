@@ -37,6 +37,9 @@ def make_tool(
         parsed = schema.model_validate(kwargs)
         with options.engine if options.engine is not None else nullcontext():
             value = await asyncio.wait_for(handler(parsed), timeout=options.request_timeout)
+        # request_timeout covers only the handler. Projection stays inline and
+        # outside it: its work is bounded by the result budgets, and a thread
+        # offload could neither be cancelled by the timeout nor release the GIL.
         return create_tool_result(name, value, options)
 
     def invoke_sync(**kwargs: Any) -> tuple[str, dict[str, Any]]:

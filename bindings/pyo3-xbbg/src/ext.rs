@@ -35,10 +35,6 @@ use xbbg_ext::utils::ticker::{
     parse_ticker_parts,
 };
 
-fn string_refs(values: &[String]) -> Vec<&str> {
-    values.iter().map(String::as_str).collect()
-}
-
 fn date_from_parts(year: i32, month: u32, day: u32) -> PyResult<chrono::NaiveDate> {
     chrono::NaiveDate::from_ymd_opt(year, month, day)
         .ok_or_else(|| PyValueError::new_err(format!("invalid date: {year}-{month}-{day}")))
@@ -125,19 +121,19 @@ fn ext_build_futures_ticker(prefix: &str, month_code: &str, year: &str, asset: &
 }
 
 /// Normalize tickers to a list.
+///
+/// Returns the tickers unchanged: order, duplicates and whitespace are preserved.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_normalize_tickers(tickers: Vec<String>) -> Vec<String> {
-    let refs = string_refs(&tickers);
-    normalize_tickers(&refs)
+    normalize_tickers(tickers)
 }
 
 /// Filter to equity tickers only.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-fn ext_filter_equity_tickers(tickers: Vec<String>) -> Vec<String> {
-    let refs = string_refs(&tickers);
-    filter_equity_tickers(&refs)
+fn ext_filter_equity_tickers(py: Python<'_>, tickers: Vec<String>) -> Vec<String> {
+    py.detach(move || filter_equity_tickers(tickers))
 }
 
 // =============================================================================
@@ -146,11 +142,14 @@ fn ext_filter_equity_tickers(tickers: Vec<String>) -> Vec<String> {
 
 /// Generate futures contract candidates.
 ///
+/// ``count`` is at most 10,000; larger values raise ``ValueError``.
+///
 /// Returns list of (ticker, year, month) tuples.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 #[pyo3(signature = (gen_ticker, year, month, day, freq="M", count=4))]
 fn ext_generate_futures_candidates(
+    py: Python<'_>,
     gen_ticker: &str,
     year: i32,
     month: u32,
@@ -163,13 +162,15 @@ fn ext_generate_futures_candidates(
     use std::str::FromStr;
     let roll_freq = RollFrequency::from_str(freq).unwrap_or(RollFrequency::Monthly);
 
-    let candidates = generate_futures_candidates(gen_ticker, dt, roll_freq, count)
-        .map_err(|e| PyValueError::new_err(e.to_string()))?;
-
-    Ok(candidates
-        .into_iter()
-        .map(|c| (c.ticker, c.month.year(), c.month.month()))
-        .collect())
+    py.detach(move || {
+        generate_futures_candidates(gen_ticker, dt, roll_freq, count).map(|candidates| {
+            candidates
+                .into_iter()
+                .map(|c| (c.ticker, c.month.year(), c.month.month()))
+                .collect::<Vec<_>>()
+        })
+    })
+    .map_err(|e| PyValueError::new_err(e.to_string()))
 }
 
 /// Validate that a ticker is generic (not specific).
@@ -255,9 +256,12 @@ fn ext_same_currency(ccy1: &str, ccy2: &str) -> bool {
 /// Get currencies that need FX conversion.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-fn ext_currencies_needing_conversion(currencies: Vec<String>, target: &str) -> Vec<String> {
-    let refs = string_refs(&currencies);
-    currencies_needing_conversion(&refs, target)
+fn ext_currencies_needing_conversion(
+    py: Python<'_>,
+    currencies: Vec<String>,
+    target: &str,
+) -> Vec<String> {
+    py.detach(move || currencies_needing_conversion(&currencies, target))
 }
 
 // =============================================================================
@@ -267,17 +271,15 @@ fn ext_currencies_needing_conversion(currencies: Vec<String>, target: &str) -> V
 /// Get dividend column rename mapping.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-fn ext_rename_dividend_columns(columns: Vec<String>) -> Vec<(String, String)> {
-    let refs = string_refs(&columns);
-    rename_dividend_columns(&refs)
+fn ext_rename_dividend_columns(py: Python<'_>, columns: Vec<String>) -> Vec<(String, String)> {
+    py.detach(move || rename_dividend_columns(columns))
 }
 
 /// Get ETF holdings column rename mapping.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-fn ext_rename_etf_columns(columns: Vec<String>) -> Vec<(String, String)> {
-    let refs = string_refs(&columns);
-    rename_etf_columns(&refs)
+fn ext_rename_etf_columns(py: Python<'_>, columns: Vec<String>) -> Vec<(String, String)> {
+    py.detach(move || rename_etf_columns(columns))
 }
 
 // =============================================================================
@@ -374,10 +376,11 @@ fn ext_imbalance_side(code: &str) -> Option<&'static str> {
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_filter_candidates_by_cycle(
+    py: Python<'_>,
     candidates: Vec<(String, i32, u32)>,
     cycle: &str,
 ) -> Vec<(String, i32, u32)> {
-    filter_candidates_by_cycle(&candidates, cycle)
+    py.detach(move || filter_candidates_by_cycle(candidates, cycle))
 }
 
 /// Filter and sort futures contracts by maturity date.
@@ -387,10 +390,11 @@ fn ext_filter_candidates_by_cycle(
 ///     year, month, day: Reference date components.
 ///
 /// Returns: List of ticker strings for contracts maturing after the reference date,
-///     sorted by maturity date ascending.
+///     sorted by maturity date ascending (equal maturities keep input order).
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_filter_valid_contracts(
+    py: Python<'_>,
     contracts: Vec<(String, String)>,
     year: i32,
     month: u32,
@@ -398,7 +402,7 @@ fn ext_filter_valid_contracts(
 ) -> PyResult<Vec<String>> {
     let ref_date = date_from_parts(year, month, day)?;
 
-    Ok(filter_valid_contracts(&contracts, ref_date))
+    Ok(py.detach(move || filter_valid_contracts(contracts, ref_date)))
 }
 
 // =============================================================================
@@ -451,11 +455,11 @@ fn ext_build_yas_overrides(
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_build_earning_header_rename(
+    py: Python<'_>,
     header_row: Vec<(String, String)>,
     data_columns: Vec<String>,
 ) -> Vec<(String, String)> {
-    let refs = string_refs(&data_columns);
-    build_earning_header_rename(&header_row, &refs)
+    py.detach(move || build_earning_header_rename(&header_row, &data_columns))
 }
 
 /// Calculate level-based percentages for earnings data.
@@ -468,10 +472,11 @@ fn ext_build_earning_header_rename(
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_calculate_level_percentages(
+    py: Python<'_>,
     values: Vec<Option<f64>>,
     levels: Vec<Option<i64>>,
 ) -> Vec<Option<f64>> {
-    calculate_level_percentages(&values, &levels)
+    py.detach(move || calculate_level_percentages(&values, &levels))
 }
 
 // =============================================================================
@@ -489,7 +494,7 @@ fn ext_calculate_level_percentages(
 #[pyfunction]
 #[pyo3(signature = (equity_ticker, extra_fields=vec![]))]
 fn ext_build_preferreds_query(equity_ticker: &str, extra_fields: Vec<String>) -> String {
-    let refs = string_refs(&extra_fields);
+    let refs: Vec<&str> = extra_fields.iter().map(String::as_str).collect();
     build_preferreds_query(equity_ticker, &refs)
 }
 
@@ -509,7 +514,7 @@ fn ext_build_corporate_bonds_query(
     ccy: Option<&str>,
     extra_fields: Vec<String>,
 ) -> String {
-    let refs = string_refs(&extra_fields);
+    let refs: Vec<&str> = extra_fields.iter().map(String::as_str).collect();
     build_corporate_bonds_query(ticker, ccy, &refs)
 }
 
@@ -524,7 +529,7 @@ fn ext_build_corporate_bonds_query(
 #[pyfunction]
 #[pyo3(signature = (etf_ticker, extra_fields=vec![]))]
 fn ext_build_etf_holdings_query(etf_ticker: &str, extra_fields: Vec<String>) -> String {
-    let refs = string_refs(&extra_fields);
+    let refs: Vec<&str> = extra_fields.iter().map(String::as_str).collect();
     build_etf_holdings_query(etf_ticker, &refs)
 }
 

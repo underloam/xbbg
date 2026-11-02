@@ -4,7 +4,7 @@ from typing import Any
 
 import pytest
 
-from xbbg import _endpoints, _engine, _request_options, backend as backend_module, blp
+from xbbg import _endpoints, _engine, backend as backend_module, blp
 from xbbg._core import ArrowTable
 from xbbg.ext import fixed_income
 from xbbg.services import Operation, Service
@@ -24,7 +24,6 @@ class FakeEngine:
 
 @pytest.fixture
 def stub_engine(monkeypatch):
-    _request_options._VALID_ELEMENTS_CACHE.clear()
     monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
 
 
@@ -152,11 +151,7 @@ async def test_abqr_generated_keeps_typed_include_output(monkeypatch, stub_engin
         captured["kwargs"] = kwargs
         return typed_table
 
-    def fail_reshape(_pdf, _ticker):
-        raise AssertionError("typed bqr output must not use generic reshaper")
-
     monkeypatch.setattr(blp, "arequest", fake_arequest)
-    monkeypatch.setattr(_endpoints, "_reshape_bqr_generic", fail_reshape)
     monkeypatch.setattr(backend_module, "convert_backend_frame", lambda df, _backend: df)
 
     result = await blp.abqr(
@@ -169,8 +164,28 @@ async def test_abqr_generated_keeps_typed_include_output(monkeypatch, stub_engin
     assert captured["operation"] == Operation.INTRADAY_TICK
     assert captured["backend"] is None
     assert captured["kwargs"]["elements"] == [("includeBrokerCodes", "true"), ("includeConditionCodes", "true")]
-    assert "condition_codes" in result.column_names
-    assert result.to_pylist()[0]["broker_sell"] == "CTSD"
+    # Typed output is renamed in place: no generic reshape, so types survive.
+    assert result.column_names == [
+        "ticker",
+        "time",
+        "event_type",
+        "price",
+        "size",
+        "broker_sell",
+        "condition_codes",
+    ]
+    assert result.column("size").data_type == "Int64"
+    assert result.to_pylist() == [
+        {
+            "ticker": "/isin/US037833FB15@MSG1 Corp",
+            "time": "2026-04-24T19:55:58",
+            "event_type": "ASK",
+            "price": 101.972,
+            "size": 75000,
+            "broker_sell": "CTSD",
+            "condition_codes": "R",
+        }
+    ]
 
 
 @pytest.mark.asyncio
@@ -208,27 +223,48 @@ async def test_abqr_generated_uses_explicit_datetime_range_and_event_types(monke
     assert result.column_names == ["ticker", "time", "event_type", "price", "size"]
 
 
-def test_bqr_postprocess_requires_broker_codes_for_attributed_quotes():
-    with pytest.raises(RuntimeError, match="without broker attribution"):
-        _endpoints._postprocess_bqr_result(
+_MISSING_BROKER_ATTRIBUTION = (
+    "BQR returned quote rows without broker attribution. "
+    "Use a fixed-income ticker with a dealer quote pricing source such as '@MSG1 Corp', "
+    "or pass include_broker_codes=False if raw quote ticks without dealer codes are intentional."
+)
+
+
+@pytest.mark.asyncio
+async def test_bqr_postprocess_requires_broker_codes_for_attributed_quotes():
+    with pytest.raises(RuntimeError) as raised:
+        await _endpoints._postprocess_bqr_result(
             _raw_bqr_table(broker=False),
             ticker="/isin/US037833FB15",
             backend="pyarrow",
             enforce_broker_codes=True,
         )
 
+    assert str(raised.value) == _MISSING_BROKER_ATTRIBUTION
 
-def test_reshape_bqr_generic_uses_arrow_table_without_pandas():
-    result = _endpoints._reshape_bqr_generic(_generic_bqr_table(), "AAPL US Equity")
-    rows = result.to_pylist()
 
-    assert len(rows) == 1
-    assert rows[0]["ticker"] == "AAPL US Equity"
-    assert rows[0]["time"] == "2026-03-03T09:30:00"
-    assert rows[0]["type"] == "BID"
-    assert rows[0]["value"] == 123.45
-    assert rows[0]["size"] == 1000.0
-    assert rows[0]["brokerBuyCode"] == "DLRA"
+@pytest.mark.asyncio
+async def test_bqr_postprocess_reshapes_generic_output_natively():
+    result = await _endpoints._postprocess_bqr_result(
+        _generic_bqr_table(),
+        ticker="AAPL US Equity",
+        backend="native",
+        enforce_broker_codes=True,
+    )
+
+    assert result.column_names == ["ticker", "time", "event_type", "price", "size", "broker_buy", "spread_price"]
+    assert [result.column(name).data_type for name in ("price", "size", "spread_price")] == ["Float64"] * 3
+    assert result.to_pylist() == [
+        {
+            "ticker": "AAPL US Equity",
+            "time": "2026-03-03T09:30:00",
+            "event_type": "BID",
+            "price": 123.45,
+            "size": 1000.0,
+            "broker_buy": "DLRA",
+            "spread_price": 29.0,
+        }
+    ]
 
 
 @pytest.mark.asyncio

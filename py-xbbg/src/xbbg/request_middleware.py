@@ -104,11 +104,15 @@ async def run_request_middleware(
     context: RequestContext,
     terminal: RequestHandler,
 ) -> DataFrameResult:
+    # One snapshot per request: middleware added or removed while this request
+    # runs only affects later requests.
+    chain = tuple(_request_middleware)
+
     async def invoke(index: int, current_context: RequestContext) -> DataFrameResult:
-        if index >= len(_request_middleware):
+        if index >= len(chain):
             return await terminal(current_context)
 
-        middleware = _request_middleware[index]
+        middleware = chain[index]
 
         async def call_next(next_context: RequestContext) -> DataFrameResult:
             return await invoke(index + 1, next_context)

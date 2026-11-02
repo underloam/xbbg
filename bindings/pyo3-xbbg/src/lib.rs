@@ -3,12 +3,32 @@
 //! This module provides Python bindings for the Rust xbbg Engine,
 //! exposing a generic `request()` method that accepts parameters from Python.
 //!
-//! # GIL Handling
+//! # Interpreter attachment
 //!
-//! The async API releases the GIL during Bloomberg SDK operations:
-//! - `future_into_py` schedules work on tokio (no GIL held)
-//! - GIL is only acquired via `Python::try_attach()` to attach finished Rust Arrow buffers
-//! - `py.detach()` releases GIL during blocking `Engine::start()`
+//! - Synchronous methods run on the calling Python thread with the caller's
+//!   `Python` token; blocking native work such as `Engine::start()`, shutdown
+//!   signalling and cache file I/O runs detached (`py.detach`).
+//! - Async methods return awaitables built by `completion::shutdown_safe_future`.
+//!   Their futures run on a two-worker bridge runtime and yield owned Rust
+//!   payloads; bridge workers never attach to the interpreter.
+//!   pyo3-async-runtimes attaches once per completion on its blocking pool,
+//!   where payloads become Python objects, including marked-delivery converter
+//!   calls and publication receipts. Cancelled awaitables drop their payload
+//!   there without converting it.
+//! - Exceptions are lazy plans (class, message, attributes): the instance is
+//!   created only when Python observes the error, wherever it was raised.
+//! - Once interpreter finalization begins, completed results are dropped
+//!   natively and their awaitables never resolve.
+//! - Non-test code never calls `Python::attach`/`Python::try_attach`; the
+//!   crate's `clippy.toml` disallows both.
+//!
+//! # Teardown
+//!
+//! The last release of a native engine, by a `PyEngine` or one of its futures,
+//! only hands the engine to a native teardown thread, which joins its runtime
+//! and stops its SDK sessions. A subscription consumer released after its
+//! engine follows it there (`teardown`). Interpreter exit waits for that
+//! teardown from `_engine._atexit_cleanup` and again after finalization.
 //!
 //! # Exception Mapping
 //!
@@ -43,29 +63,26 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::collections::{HashMap, VecDeque};
-use std::future::Future;
 use std::str::FromStr;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use arrow_array::RecordBatch;
-use chrono::{DateTime, Datelike, NaiveDate, Timelike};
+use chrono::NaiveDate;
+use pyo3::PyErrArguments;
 use pyo3::exceptions::{PyRuntimeError, PyStopAsyncIteration, PyValueError};
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyBytes, PyDate, PyDateTime, PyDict, PyString, PyTime, PyTzInfo};
-use pyo3_async_runtimes::tokio::future_into_py;
+use pyo3::types::{PyBytes, PyDict, PyString, PyType};
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 use tokio::sync::watch;
 use xbbg_log::{debug, info, warn};
 
-use xbbg_async::engine::state::{
-    SubscriptionArrowBatcher, SubscriptionMetrics, SubscriptionUpdate, UpdateValue,
-};
+use xbbg_async::engine::state::{SubscriptionArrowBatcher, SubscriptionMetrics};
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
-    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDelivery, SubscriptionDeliveryMode,
-    SubscriptionEventInfo, SubscriptionFailureInfo, TlsMaterial, TopicStatusInfo, Transport,
+    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDeliveryMode, SubscriptionEventInfo,
+    SubscriptionFailureInfo, TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
@@ -73,94 +90,33 @@ use xbbg_async::{
     SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
-use xbbg_ext::{ExchangeInfo, MarketInfo, MarketTiming};
+use xbbg_ext::MarketTiming;
 
+mod completion;
 mod ext;
 mod markets;
 mod native_arrow;
 mod recipes;
 mod request;
+mod shaping;
 #[cfg(feature = "test-support")]
 mod subscription_fixture;
+mod teardown;
 
+use completion::{
+    DeliveryPayload, DrainPayload, ExchangeInfoDict, Guarded, MarketInfoDict, TickDict,
+    Unsubscribed, record_batch_future, shutdown_safe_future,
+};
 use request::dict_to_request_params;
+use teardown::{EngineOwner, SubscriptionOwner};
 
 use xbbg_async::subscription_consumer::{
-    SubscriptionConsumer, SubscriptionDeliveryAck, SubscriptionDeliveryDrainAck,
-    SubscriptionDeliveryDrainLease, SubscriptionDeliveryLease, SubscriptionRead,
-    receive_subscription_updates, subscription_batch_capacity_hint, wait_for_subscription_close,
+    SubscriptionConsumer, SubscriptionRead, receive_subscription_updates,
+    subscription_batch_capacity_hint,
 };
 type SubscriptionMetricsMap = HashMap<usize, Arc<SubscriptionMetrics>>;
 type SubscriptionEventTuple = (i64, String, String, String, Option<String>, Option<String>);
 type SubscriptionTopicStateTuple = (String, String, i64, Option<bool>, String);
-
-static INTERPRETER_SHUTDOWN: LazyLock<watch::Sender<bool>> =
-    LazyLock::new(|| watch::channel(false).0);
-
-fn interpreter_shutdown_receiver() -> watch::Receiver<bool> {
-    INTERPRETER_SHUTDOWN.subscribe()
-}
-
-async fn complete_unless_interpreter_finalizing<F>(
-    finalizing_rx: &mut watch::Receiver<bool>,
-    fut: F,
-) -> F::Output
-where
-    F: Future,
-{
-    if *finalizing_rx.borrow() {
-        return std::future::pending::<F::Output>().await;
-    }
-    tokio::select! {
-        biased;
-        _ = wait_for_subscription_close(finalizing_rx) => {
-            std::future::pending::<F::Output>().await
-        }
-        result = fut => result,
-    }
-}
-
-/// Interpreter-finalization-safe wrapper for [`future_into_py`].
-///
-/// Ordinary engine shutdown is deliberately not a completion barrier: request
-/// errors, subscription termination, and buffered drains must still reach the
-/// caller. Only the distinct atexit finalization signal suppresses completion.
-/// The current value is checked before polling and the finalization branch is
-/// biased, while every completed result is also gated by [`Python::try_attach`].
-fn shutdown_safe_future<'py, F, T>(py: Python<'py>, fut: F) -> PyResult<Bound<'py, PyAny>>
-where
-    F: Future<Output = PyResult<T>> + Send + 'static,
-    T: for<'a> IntoPyObject<'a> + Send + 'static,
-{
-    let mut finalizing_rx = interpreter_shutdown_receiver();
-    future_into_py(py, async move {
-        let result = complete_unless_interpreter_finalizing(&mut finalizing_rx, fut).await;
-        if Python::try_attach(|_| ()).is_some() {
-            result
-        } else {
-            std::future::pending::<PyResult<T>>().await
-        }
-    })
-}
-
-/// Defense-in-depth for `future_into_py` closures that lack an `Arc<Engine>`.
-///
-/// Attempts `Python::attach` to run `f`. If the interpreter has already been
-/// finalized, suspends the future forever instead of panicking — the tokio
-/// runtime drops the suspended future during process exit.
-///
-/// Payload conversions use this as defense in depth before returning to the
-/// common finalization-safe completion boundary.
-async fn try_attach_or_suspend<F, T>(f: F) -> PyResult<T>
-where
-    F: FnOnce(Python<'_>) -> PyResult<T> + Send,
-    T: Send,
-{
-    match Python::try_attach(f) {
-        Some(result) => result,
-        None => std::future::pending().await,
-    }
-}
 
 fn subscription_metrics_totals(
     metrics: &SubscriptionMetricsMap,
@@ -221,54 +177,183 @@ pyo3::create_exception!(xbbg._core, BlpValidationError, BlpErrorBase);
 pyo3::create_exception!(xbbg._core, BlpTimeoutError, BlpErrorBase);
 pyo3::create_exception!(xbbg._core, BlpInternalError, BlpErrorBase);
 
+/// Python exception classes raised for native errors.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum ExceptionClass {
+    Session,
+    Request,
+    Limit,
+    DataLoss,
+    Validation,
+    Timeout,
+    Internal,
+    /// Recipe argument errors.
+    Value,
+    /// Recipe failures outside the engine.
+    Runtime,
+}
+
+impl From<ErrorKind> for ExceptionClass {
+    fn from(kind: ErrorKind) -> Self {
+        match kind {
+            ErrorKind::Session => Self::Session,
+            ErrorKind::Request => Self::Request,
+            ErrorKind::Limit => Self::Limit,
+            ErrorKind::DataLoss => Self::DataLoss,
+            ErrorKind::Validation => Self::Validation,
+            ErrorKind::Timeout => Self::Timeout,
+            ErrorKind::Internal => Self::Internal,
+        }
+    }
+}
+
+impl ExceptionClass {
+    fn type_object(self, py: Python<'_>) -> Bound<'_, PyType> {
+        match self {
+            Self::Session => py.get_type::<BlpSessionError>(),
+            Self::Request => py.get_type::<BlpRequestError>(),
+            Self::Limit => py.get_type::<BlpLimitError>(),
+            Self::DataLoss => py.get_type::<BlpSubscriptionDataLossError>(),
+            Self::Validation => py.get_type::<BlpValidationError>(),
+            Self::Timeout => py.get_type::<BlpTimeoutError>(),
+            Self::Internal => py.get_type::<BlpInternalError>(),
+            Self::Value => py.get_type::<PyValueError>(),
+            Self::Runtime => py.get_type::<PyRuntimeError>(),
+        }
+    }
+}
+
+/// One structured exception attribute value.
+enum ExceptionAttr {
+    None,
+    Text(String),
+    Texts(Vec<Arc<str>>),
+}
+
+impl From<Option<String>> for ExceptionAttr {
+    fn from(value: Option<String>) -> Self {
+        value.map_or(Self::None, Self::Text)
+    }
+}
+
+/// Exception class, message and attributes captured without the interpreter.
+///
+/// The plan becomes a lazy `PyErr`: PyO3 builds the exception only when Python
+/// observes it, so errors can be created and dropped on any native thread.
+pub(crate) struct ExceptionPlan {
+    class: ExceptionClass,
+    message: String,
+    attrs: Vec<(&'static str, ExceptionAttr)>,
+}
+
+impl ExceptionPlan {
+    pub(crate) fn new(class: ExceptionClass, message: String) -> Self {
+        Self {
+            class,
+            message,
+            attrs: Vec::new(),
+        }
+    }
+
+    fn set(&mut self, name: &'static str, value: ExceptionAttr) {
+        match self
+            .attrs
+            .iter_mut()
+            .find(|(existing, _)| *existing == name)
+        {
+            Some((_, slot)) => *slot = value,
+            None => self.attrs.push((name, value)),
+        }
+    }
+
+    /// SDK support identifiers; the singular attribute holds exactly one ID.
+    pub(crate) fn set_bloomberg_request_ids(&mut self, ids: Vec<Arc<str>>) {
+        let singular = match ids.as_slice() {
+            [id] => ExceptionAttr::Text(id.to_string()),
+            _ => ExceptionAttr::None,
+        };
+        self.set("bloomberg_request_id", singular);
+        self.set("bloomberg_request_ids", ExceptionAttr::Texts(ids));
+    }
+
+    fn instantiate<'py>(&self, class: &Bound<'py, PyType>) -> PyResult<Bound<'py, PyAny>> {
+        let py = class.py();
+        let instance = class.call1((self.message.as_str(),))?;
+        for (name, value) in &self.attrs {
+            match value {
+                ExceptionAttr::None => instance.setattr(*name, py.None())?,
+                ExceptionAttr::Text(text) => instance.setattr(*name, text.as_str())?,
+                ExceptionAttr::Texts(texts) => {
+                    let texts: Vec<&str> = texts.iter().map(|text| &**text).collect();
+                    instance.setattr(*name, texts)?
+                }
+            }
+        }
+        Ok(instance)
+    }
+}
+
+impl From<ErrorPresentation> for ExceptionPlan {
+    fn from(presentation: ErrorPresentation) -> Self {
+        let kind = presentation.kind;
+        let mut plan = Self::new(kind.into(), presentation.message);
+        if let Some(context) = presentation.request_context {
+            plan.set("service", context.service.into());
+            plan.set("operation", context.operation.into());
+            plan.set("request_id", context.request_id.into());
+            plan.set_bloomberg_request_ids(context.bloomberg_request_ids);
+        } else if matches!(
+            kind,
+            ErrorKind::Request | ErrorKind::Limit | ErrorKind::DataLoss | ErrorKind::Timeout
+        ) {
+            for name in ["service", "operation", "request_id"] {
+                plan.set(name, ExceptionAttr::None);
+            }
+            plan.set_bloomberg_request_ids(Vec::new());
+        }
+        if let Some(context) = presentation.data_loss {
+            plan.set("topic", ExceptionAttr::Text(context.topic));
+            plan.set("detail", ExceptionAttr::Text(context.detail));
+        }
+        plan
+    }
+}
+
+impl PyErrArguments for ExceptionPlan {
+    /// `PyErr_SetObject` raises an instance of the error's class as-is, so the
+    /// fully attributed instance is the raised exception. If attributes cannot
+    /// be set the plain instance is raised; if construction fails, CPython
+    /// instantiates the class from the message itself.
+    fn arguments(self, py: Python<'_>) -> Py<PyAny> {
+        let class = self.class.type_object(py);
+        self.instantiate(&class)
+            .or_else(|_| class.call1((self.message.as_str(),)))
+            .map_or_else(
+                |_| PyString::new(py, &self.message).into_any().unbind(),
+                Bound::unbind,
+            )
+    }
+}
+
+impl From<ExceptionPlan> for PyErr {
+    fn from(plan: ExceptionPlan) -> Self {
+        match plan.class {
+            ExceptionClass::Session => PyErr::new::<BlpSessionError, _>(plan),
+            ExceptionClass::Request => PyErr::new::<BlpRequestError, _>(plan),
+            ExceptionClass::Limit => PyErr::new::<BlpLimitError, _>(plan),
+            ExceptionClass::DataLoss => PyErr::new::<BlpSubscriptionDataLossError, _>(plan),
+            ExceptionClass::Validation => PyErr::new::<BlpValidationError, _>(plan),
+            ExceptionClass::Timeout => PyErr::new::<BlpTimeoutError, _>(plan),
+            ExceptionClass::Internal => PyErr::new::<BlpInternalError, _>(plan),
+            ExceptionClass::Value => PyErr::new::<PyValueError, _>(plan),
+            ExceptionClass::Runtime => PyErr::new::<PyRuntimeError, _>(plan),
+        }
+    }
+}
+
+/// Convert a classified error into a lazy Python exception with its attributes.
 fn error_presentation_to_pyerr(presentation: ErrorPresentation) -> PyErr {
-    let error = match presentation.kind {
-        ErrorKind::Session => BlpSessionError::new_err(presentation.message),
-        ErrorKind::Request => BlpRequestError::new_err(presentation.message),
-        ErrorKind::Limit => BlpLimitError::new_err(presentation.message),
-        ErrorKind::DataLoss => BlpSubscriptionDataLossError::new_err(presentation.message),
-        ErrorKind::Validation => BlpValidationError::new_err(presentation.message),
-        ErrorKind::Timeout => BlpTimeoutError::new_err(presentation.message),
-        ErrorKind::Internal => BlpInternalError::new_err(presentation.message),
-    };
-    if let Some(context) = presentation.request_context {
-        let _ = Python::try_attach(|py| {
-            let value = error.value(py);
-            value.setattr("service", context.service)?;
-            value.setattr("operation", context.operation)?;
-            value.setattr("request_id", context.request_id)?;
-            let singular = (context.bloomberg_request_ids.len() == 1)
-                .then(|| context.bloomberg_request_ids[0].as_ref());
-            value.setattr("bloomberg_request_id", singular)?;
-            let ids: Vec<&str> = context
-                .bloomberg_request_ids
-                .iter()
-                .map(AsRef::as_ref)
-                .collect();
-            value.setattr("bloomberg_request_ids", ids)
-        });
-    } else if matches!(
-        presentation.kind,
-        ErrorKind::Request | ErrorKind::Limit | ErrorKind::DataLoss | ErrorKind::Timeout
-    ) {
-        let _ = Python::try_attach(|py| {
-            error.value(py).setattr("service", py.None())?;
-            error.value(py).setattr("operation", py.None())?;
-            error.value(py).setattr("request_id", py.None())?;
-            error.value(py).setattr("bloomberg_request_id", py.None())?;
-            error
-                .value(py)
-                .setattr("bloomberg_request_ids", Vec::<String>::new())
-        });
-    }
-    if let Some(context) = presentation.data_loss {
-        let _ = Python::try_attach(|py| {
-            let value = error.value(py);
-            value.setattr("topic", &context.topic)?;
-            value.setattr("detail", &context.detail)
-        });
-    }
-    error
+    ExceptionPlan::from(presentation).into()
 }
 
 /// Convert a core error into its Python exception, retaining structured attributes.
@@ -887,10 +972,14 @@ impl EntitlementReport {
 }
 
 /// Python wrapper for the xbbg Engine.
+///
+/// Releasing the last reference stops the engine's Bloomberg sessions on a
+/// native background thread.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
-#[pyclass]
+#[pyclass(frozen)]
 struct PyEngine {
-    engine: Arc<Engine>,
+    /// Shared with in-flight futures; the last release defers native teardown.
+    engine: Arc<EngineOwner>,
     subscription_batch_items: usize,
 }
 
@@ -934,7 +1023,7 @@ impl PyEngine {
     /// engine = Engine.with_config(config)
     /// ```
     #[staticmethod]
-    fn with_config(py: Python<'_>, config: &PyEngineConfig) -> PyResult<Self> {
+    fn with_config(py: Python<'_>, config: PyRef<'_, PyEngineConfig>) -> PyResult<Self> {
         info!(
             host = %config.host,
             port = config.port,
@@ -943,7 +1032,9 @@ impl PyEngine {
             "PyEngine: connecting with custom config"
         );
 
-        let rust_config: EngineConfig = config.try_into()?;
+        let rust_config = EngineConfig::try_from(&*config)?;
+        // Other threads may read or update the config while this one connects.
+        drop(config);
 
         Self::start_engine(py, rust_config)
     }
@@ -996,15 +1087,14 @@ impl PyEngine {
             "PyEngine: sending request"
         );
 
-        shutdown_safe_future(py, async move {
+        record_batch_future(py, async move {
             let batch = engine.request(rust_params).await.map_err(|e| {
                 warn!(error = %e, "PyEngine: request failed");
                 blp_async_error_to_pyerr(e)
             })?;
 
             debug!(num_rows = batch.num_rows(), "PyEngine: request completed");
-
-            Python::attach(|py| native_arrow::record_batch_to_arrow_record_batch(py, batch))
+            Ok(batch)
         })
     }
 
@@ -1017,7 +1107,7 @@ impl PyEngine {
         let engine = self.engine.clone();
         shutdown_safe_future(py, async move {
             let seat_type = engine.seat_type().await.map_err(blp_async_error_to_pyerr)?;
-            Python::attach(|py| Ok(seat_type.as_str().into_pyobject(py)?.into_any().unbind()))
+            Ok(seat_type.as_str())
         })
     }
 
@@ -1039,15 +1129,9 @@ impl PyEngine {
                 .check_entitlements(&service, &eids)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
-            Python::attach(|py| {
-                Py::new(
-                    py,
-                    EntitlementReport {
-                        entitled: report.entitled,
-                        failed_eids: report.failed_eids,
-                    },
-                )
-                .map(|obj| obj.into_any())
+            Ok(EntitlementReport {
+                entitled: report.entitled,
+                failed_eids: report.failed_eids,
             })
         })
     }
@@ -1065,11 +1149,10 @@ impl PyEngine {
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
         shutdown_safe_future(py, async move {
-            let authorized = engine
+            engine
                 .identity_is_authorized(&service)
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-            Python::attach(|py| Ok(PyBool::new(py, authorized).to_owned().into_any().unbind()))
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
@@ -1081,8 +1164,7 @@ impl PyEngine {
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
         shutdown_safe_future(py, async move {
-            let info = engine.resolve_exchange(&ticker).await;
-            Python::attach(|py| exchange_info_to_pydict(py, &info))
+            Ok(ExchangeInfoDict(engine.resolve_exchange(&ticker).await))
         })
     }
 
@@ -1098,7 +1180,7 @@ impl PyEngine {
                 .fetch_market_info(&ticker)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
-            Python::attach(|py| market_info_to_pydict(py, &info))
+            Ok(MarketInfoDict(info))
         })
     }
 
@@ -1119,11 +1201,10 @@ impl PyEngine {
             .map_err(|_| PyValueError::new_err("date must be YYYY-MM-DD"))?;
 
         shutdown_safe_future(py, async move {
-            let value = engine
+            engine
                 .resolve_market_timing(&ticker, date, timing, tz.as_deref())
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-            Python::attach(|py| Ok(value.into_pyobject(py)?.into_any().unbind()))
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
@@ -1144,18 +1225,10 @@ impl PyEngine {
         let default = default_type.to_string();
 
         shutdown_safe_future(py, async move {
-            let resolved = engine
+            engine
                 .resolve_field_types(&fields, overrides.as_ref(), &default)
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-
-            Python::attach(|py| {
-                let dict = PyDict::new(py);
-                for (k, v) in resolved {
-                    dict.set_item(k, v)?;
-                }
-                Ok(dict.into_any().unbind())
-            })
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
@@ -1171,10 +1244,9 @@ impl PyEngine {
         })
     }
 
-    /// Clear the field type cache.
-    fn clear_field_cache(&self) -> PyResult<()> {
-        self.engine
-            .clear_field_cache()
+    /// Clear the field type cache, including its persisted file.
+    fn clear_field_cache(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.engine.clear_field_cache())
             .map_err(PyRuntimeError::new_err)
     }
 
@@ -1206,10 +1278,8 @@ impl PyEngine {
                 .map_err(blp_async_error_to_pyerr)?;
 
             // Convert to JSON string for Python (dereference Arc)
-            let json = serde_json::to_string(&*schema)
-                .map_err(|e| PyRuntimeError::new_err(format!("serialize schema: {e}")))?;
-
-            Python::attach(|py| Ok(json.into_pyobject(py)?.into_any().unbind()))
+            serde_json::to_string(&*schema)
+                .map_err(|e| PyRuntimeError::new_err(format!("serialize schema: {e}")))
         })
     }
 
@@ -1231,10 +1301,8 @@ impl PyEngine {
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
 
-            let json = serde_json::to_string(&op)
-                .map_err(|e| PyRuntimeError::new_err(format!("serialize operation: {e}")))?;
-
-            Python::attach(|py| Ok(json.into_pyobject(py)?.into_any().unbind()))
+            serde_json::to_string(&op)
+                .map_err(|e| PyRuntimeError::new_err(format!("serialize operation: {e}")))
         })
     }
 
@@ -1248,35 +1316,28 @@ impl PyEngine {
         let engine = self.engine.clone();
 
         shutdown_safe_future(py, async move {
-            let ops = engine
+            engine
                 .list_operations(&service)
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-
-            Python::attach(|py| {
-                let list = pyo3::types::PyList::new(py, ops)?;
-                Ok(list.into_any().unbind())
-            })
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
     /// Invalidate a cached schema.
-    fn invalidate_schema(&self, service: &str) -> PyResult<()> {
-        self.engine
-            .invalidate_schema(service)
+    fn invalidate_schema(&self, py: Python<'_>, service: &str) -> PyResult<()> {
+        py.detach(|| self.engine.invalidate_schema(service))
             .map_err(PyRuntimeError::new_err)
     }
 
     /// Clear all cached schemas.
-    fn clear_schema_cache(&self) -> PyResult<()> {
-        self.engine
-            .clear_schema_cache()
+    fn clear_schema_cache(&self, py: Python<'_>) -> PyResult<()> {
+        py.detach(|| self.engine.clear_schema_cache())
             .map_err(PyRuntimeError::new_err)
     }
 
     /// List all cached service URIs.
-    fn list_cached_schemas(&self) -> Vec<String> {
-        self.engine.list_cached_schemas()
+    fn list_cached_schemas(&self, py: Python<'_>) -> Vec<String> {
+        py.detach(|| self.engine.list_cached_schemas())
     }
 
     // =========================================================================
@@ -1297,18 +1358,10 @@ impl PyEngine {
         let engine = self.engine.clone();
 
         shutdown_safe_future(py, async move {
-            let values = engine
+            engine
                 .get_enum_values(&service, &operation, &element)
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-
-            Python::attach(|py| match values {
-                Some(v) => {
-                    let list = pyo3::types::PyList::new(py, v)?;
-                    Ok(list.into_any().unbind())
-                }
-                None => Ok(py.None()),
-            })
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
@@ -1323,18 +1376,10 @@ impl PyEngine {
         let engine = self.engine.clone();
 
         shutdown_safe_future(py, async move {
-            let elements = engine
+            engine
                 .list_valid_elements(&service, &operation)
                 .await
-                .map_err(blp_async_error_to_pyerr)?;
-
-            Python::attach(|py| match elements {
-                Some(v) => {
-                    let list = pyo3::types::PyList::new(py, v)?;
-                    Ok(list.into_any().unbind())
-                }
-                None => Ok(py.None()),
-            })
+                .map_err(blp_async_error_to_pyerr)
         })
     }
 
@@ -1437,21 +1482,23 @@ impl PyEngine {
             // Keep iteration and control on separate locks.
             let (rx, handle) = stream.into_parts();
 
-            let py_sub = PySubscription {
+            Ok(PySubscription {
                 legacy_arrow: (!rx.requires_deliveries())
                     .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
                 batch_items,
                 status: handle.status(),
                 deliver_rows: handle.delivers_rows(),
                 overflow_policy: handle.overflow_policy(),
-                consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
+                consumer: Arc::new(SubscriptionOwner::hosted(
+                    SubscriptionConsumer::new(rx, handle),
+                    &engine,
+                )),
                 engine_shutdown: engine.shutdown_receiver(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
                 _test_legacy_read_started: None,
-            };
-            py_sub.into_python().await
+            })
         })
     }
 
@@ -1562,21 +1609,23 @@ impl PyEngine {
 
             let (rx, handle) = stream.into_parts();
 
-            let py_sub = PySubscription {
+            Ok(PySubscription {
                 legacy_arrow: (!rx.requires_deliveries())
                     .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
                 batch_items,
                 status: handle.status(),
                 deliver_rows: handle.delivers_rows(),
                 overflow_policy: handle.overflow_policy(),
-                consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
+                consumer: Arc::new(SubscriptionOwner::hosted(
+                    SubscriptionConsumer::new(rx, handle),
+                    &engine,
+                )),
                 engine_shutdown: engine.shutdown_receiver(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
                 _test_legacy_read_started: None,
-            };
-            py_sub.into_python().await
+            })
         })
     }
 
@@ -1605,15 +1654,17 @@ impl PyEngine {
     // Lifecycle Management
     // =========================================================================
 
-    /// Signal engine shutdown (non-blocking).
+    /// Signal engine shutdown.
     ///
-    /// Signals all worker threads to stop. They will terminate when they
-    /// finish their current work or see the shutdown signal.
-    ///
-    /// Public/manual shutdown remains observable by pending Python operations.
-    fn signal_shutdown(&self) {
+    /// Signals all worker threads to stop; they terminate when they finish
+    /// their current work or see the shutdown signal. Pending Python operations
+    /// observe the shutdown. Workers are not joined, but this can wait for
+    /// native lifecycle locks and in-flight partial-response decoding, and it
+    /// stops idle pooled Bloomberg sessions; the interpreter is released while
+    /// it runs.
+    fn signal_shutdown(&self, py: Python<'_>) {
         info!("PyEngine: signal_shutdown called");
-        self.engine.signal_shutdown();
+        py.detach(|| self.engine.signal_shutdown());
     }
 
     fn worker_health(&self) -> PyResult<Vec<(usize, String)>> {
@@ -1652,7 +1703,7 @@ impl PyEngine {
         info!("PyEngine: connected successfully");
 
         Ok(Self {
-            engine: Arc::new(engine),
+            engine: Arc::new(EngineOwner::new(engine)),
             subscription_batch_items,
         })
     }
@@ -1678,9 +1729,11 @@ impl PyEngine {
 /// plus a dedicated operation lock to serialize add/remove/unsubscribe without holding
 /// the stream metadata lock across Bloomberg awaits.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
-#[pyclass]
+#[pyclass(frozen)]
 pub struct PySubscription {
-    consumer: Arc<SubscriptionConsumer>,
+    /// Shared with in-flight futures; after the engine is released, the last
+    /// release defers to a teardown thread (`teardown::HostedDrop`).
+    consumer: Arc<SubscriptionOwner>,
     /// Existing strict Arrow batching; advanced readers use native receipts.
     legacy_arrow: Option<Arc<LegacySubscriptionArrow>>,
     /// Maximum immediately available updates returned by one Arrow iteration.
@@ -1740,10 +1793,6 @@ struct SubscriptionSnapshot {
 }
 
 impl PySubscription {
-    async fn into_python(self) -> PyResult<Py<PyAny>> {
-        try_attach_or_suspend(move |py| Ok(Py::new(py, self)?.into_any())).await
-    }
-
     fn snapshot_from_stream(&self) -> SubscriptionSnapshot {
         let control = self.consumer.handle();
         let handle = control.as_ref();
@@ -1845,7 +1894,7 @@ impl PySubscription {
             if let Some(signal) = read_started {
                 signal.notify_one();
             }
-            let (mut guard, _publication) = consumer
+            let (mut guard, publication) = consumer
                 .lock_plain_receiver(&mut close_rx)
                 .await
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
@@ -1856,11 +1905,12 @@ impl PySubscription {
                 .pop_front();
             if let Some(batch) = ready_batch {
                 // Without a gate, rx itself owns the first-use publication boundary.
-                let _receiver = _publication.is_none().then_some(guard);
-                return try_attach_or_suspend(|py| {
-                    native_arrow::record_batch_to_arrow_record_batch(py, batch)
-                })
-                .await;
+                // The owner is released last, after the guards it backs.
+                let receiver = publication.is_none().then_some(guard);
+                return Ok(Guarded::new(
+                    native_arrow::ArrowRecordBatch::new(batch),
+                    (receiver, publication, consumer),
+                ));
             }
             let rx_ref = guard
                 .as_mut()
@@ -1900,12 +1950,12 @@ impl PySubscription {
                             .pop_front()
                             .expect("a non-empty update set must produce an Arrow batch")
                     };
-                    // Retain rx until attachment unless the publication gate owns ordering.
-                    let _receiver = _publication.is_none().then_some(guard);
-                    try_attach_or_suspend(|py| {
-                        native_arrow::record_batch_to_arrow_record_batch(py, batch)
-                    })
-                    .await
+                    // Retain rx through conversion unless the publication gate owns ordering.
+                    let receiver = publication.is_none().then_some(guard);
+                    Ok(Guarded::new(
+                        native_arrow::ArrowRecordBatch::new(batch),
+                        (receiver, publication, consumer),
+                    ))
                 }
                 SubscriptionRead::Error(error) => Err(blp_error_to_pyerr(error)),
                 SubscriptionRead::Ended => Err(PyStopAsyncIteration::new_err("subscription ended")),
@@ -1917,7 +1967,9 @@ impl PySubscription {
     }
 
     /// Prepare a marked batch for publication on the consuming Python loop.
-    /// The converter runs before the returned receipt's publish() commits it.
+    /// The converter runs on a native completion thread (attached, off the event
+    /// loop) before the returned receipt's publish() commits the batch; a read
+    /// cancelled before completion never runs it.
     #[pyo3(signature = (converter=None))]
     fn next_delivery<'py>(
         &self,
@@ -1933,10 +1985,7 @@ impl PySubscription {
                 .next_delivery(batch_items)
                 .await
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription ended"))?;
-            prepare_subscription_delivery(lease, move |py, delivery| {
-                subscription_delivery_to_python(py, delivery, converter.as_ref())
-            })
-            .await
+            Ok(DeliveryPayload::new(lease, converter, consumer))
         })
     }
 
@@ -1954,7 +2003,7 @@ impl PySubscription {
             if let Some(signal) = read_started {
                 signal.notify_one();
             }
-            let (mut guard, _publication) = consumer
+            let (mut guard, publication) = consumer
                 .lock_plain_receiver(&mut close_rx)
                 .await
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription closed"))?;
@@ -1970,9 +2019,12 @@ impl PySubscription {
                     let update = updates
                         .pop()
                         .expect("one-update read must contain an update");
-                    // Retain rx until attachment unless the publication gate owns ordering.
-                    let _receiver = _publication.is_none().then_some(guard);
-                    try_attach_or_suspend(|py| subscription_update_to_pydict(py, update)).await
+                    // Retain rx through conversion unless the publication gate owns ordering.
+                    let receiver = publication.is_none().then_some(guard);
+                    Ok(Guarded::new(
+                        TickDict(update),
+                        (receiver, publication, consumer),
+                    ))
                 }
                 SubscriptionRead::Error(error) => Err(blp_error_to_pyerr(error)),
                 SubscriptionRead::Ended => Err(PyStopAsyncIteration::new_err("subscription ended")),
@@ -2307,7 +2359,7 @@ impl PySubscription {
         debug!(drain, tick_mode, "PySubscription: unsubscribing");
 
         shutdown_safe_future(py, async move {
-            let (_operation, remaining) = consumer.unsubscribe(drain, Some(&engine_shutdown)).await;
+            let (operation, remaining) = consumer.unsubscribe(drain, Some(&engine_shutdown)).await;
             if !drain {
                 if let Some(arrow) = &legacy_arrow {
                     arrow
@@ -2317,7 +2369,7 @@ impl PySubscription {
                         .clear();
                 }
                 remaining.map_err(|error| blp_async_error_to_pyerr(*error))?;
-                return try_attach_or_suspend(|py| Ok(py.None())).await;
+                return Ok(Guarded::new(Unsubscribed::Closed, (operation, consumer)));
             }
             let remaining = match remaining {
                 Ok(remaining) => remaining,
@@ -2340,14 +2392,10 @@ impl PySubscription {
                         .expect("subscription Arrow output queue poisoned")
                         .clear();
                 }
-                return try_attach_or_suspend(|py| {
-                    let list = pyo3::types::PyList::empty(py);
-                    for update in remaining {
-                        list.append(subscription_update_to_pydict(py, update)?)?;
-                    }
-                    Ok(list.into_any().unbind())
-                })
-                .await;
+                return Ok(Guarded::new(
+                    Unsubscribed::Ticks(remaining),
+                    (operation, consumer),
+                ));
             }
             let arrow = legacy_arrow.expect("plain Arrow drains have a legacy batcher");
             let queued_batches: Vec<RecordBatch> = arrow
@@ -2377,14 +2425,10 @@ impl PySubscription {
                 }
                 batches
             };
-            try_attach_or_suspend(|py| {
-                let list = pyo3::types::PyList::empty(py);
-                for batch in remaining {
-                    list.append(native_arrow::record_batch_to_arrow_record_batch(py, batch)?)?;
-                }
-                Ok(list.into_any().unbind())
-            })
-            .await
+            Ok(Guarded::new(
+                Unsubscribed::Batches(remaining),
+                (operation, consumer),
+            ))
         })
     }
 
@@ -2401,7 +2445,7 @@ impl PySubscription {
         let engine_shutdown = self.engine_shutdown.clone();
         shutdown_safe_future(py, async move {
             if !drain {
-                let (_operation, remaining) =
+                let (operation, remaining) =
                     consumer.unsubscribe(false, Some(&engine_shutdown)).await;
                 if let Some(arrow) = legacy_arrow {
                     arrow
@@ -2411,12 +2455,16 @@ impl PySubscription {
                         .clear();
                 }
                 remaining.map_err(|error| blp_async_error_to_pyerr(*error))?;
-                return try_attach_or_suspend(|py| Ok(py.None())).await;
+                return Ok(Guarded::new(None, (Some(operation), consumer)));
             }
             let lease = consumer
                 .prepare_unsubscribe_deliveries(true, Some(&engine_shutdown))
                 .await;
-            prepare_subscription_drain(lease, converter).await
+            let owner = consumer.clone();
+            Ok(Guarded::new(
+                Some(DrainPayload::new(lease, converter, owner)),
+                (None, consumer),
+            ))
         })
     }
 
@@ -2450,266 +2498,11 @@ impl PySubscription {
     }
 }
 
-enum SubscriptionPublicationLease {
-    ReadAck(SubscriptionDeliveryAck),
-    ReadError(SubscriptionDeliveryLease),
-    DrainAck(SubscriptionDeliveryDrainAck),
-    DrainError(SubscriptionDeliveryDrainLease),
-}
-
-impl SubscriptionPublicationLease {
-    fn commit(self) -> PyResult<()> {
-        match self {
-            Self::ReadAck(ack) => {
-                ack.commit();
-                Ok(())
-            }
-            Self::ReadError(lease) => lease.commit().map(|_| ()).map_err(blp_error_to_pyerr),
-            Self::DrainAck(ack) => {
-                ack.commit();
-                Ok(())
-            }
-            Self::DrainError(lease) => lease
-                .commit()
-                .map(|_| ())
-                .map_err(|error| blp_async_error_to_pyerr(*error)),
-        }
-    }
-}
-
-/// Retains the native receipt until the consuming Python task actually resumes.
-/// Dropping an unpublished result restores updates/gaps, re-dirties state, or
-/// retains a frozen drain for a later publication attempt.
-#[pyclass(frozen)]
-struct PySubscriptionDeliveryReceipt {
-    lease: StdMutex<Option<SubscriptionPublicationLease>>,
-    result: Option<Py<PyAny>>,
-}
-
-#[pymethods]
-impl PySubscriptionDeliveryReceipt {
-    fn publish(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
-        let lease = self
-            .lease
-            .lock()
-            .expect("subscription delivery receipt poisoned")
-            .take()
-            .ok_or_else(|| PyRuntimeError::new_err("subscription delivery already published"))?;
-        lease.commit()?;
-        Ok(self
-            .result
-            .as_ref()
-            .expect("a successful receipt has a converted result")
-            .clone_ref(py))
-    }
-
-    #[getter]
-    fn has_error(&self) -> bool {
-        self.result.is_none()
-    }
-
-    fn discard(&self) {
-        let lease = self
-            .lease
-            .lock()
-            .expect("subscription delivery receipt poisoned")
-            .take();
-        drop(lease);
-    }
-}
-
-async fn prepare_subscription_delivery<F>(
-    lease: SubscriptionDeliveryLease,
-    convert: F,
-) -> PyResult<Py<PyAny>>
-where
-    F: FnOnce(Python<'_>, SubscriptionDelivery) -> PyResult<Py<PyAny>> + Send,
-{
-    try_attach_or_suspend(move |py| {
-        let (publication, result) = match lease.prepare_success() {
-            Ok((delivery, ack)) => {
-                let result = convert(py, delivery)?;
-                (SubscriptionPublicationLease::ReadAck(ack), Some(result))
-            }
-            Err(lease) => (SubscriptionPublicationLease::ReadError(lease), None),
-        };
-        Py::new(
-            py,
-            PySubscriptionDeliveryReceipt {
-                lease: StdMutex::new(Some(publication)),
-                result,
-            },
-        )
-        .map(Py::into_any)
-    })
-    .await
-}
-
-async fn prepare_subscription_drain(
-    lease: SubscriptionDeliveryDrainLease,
-    converter: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    try_attach_or_suspend(move |py| {
-        let (publication, result) = match lease.prepare_success() {
-            Ok((deliveries, ack)) => {
-                let list = pyo3::types::PyList::empty(py);
-                for delivery in deliveries {
-                    list.append(subscription_delivery_to_python(
-                        py,
-                        delivery,
-                        converter.as_ref(),
-                    )?)?;
-                }
-                (
-                    SubscriptionPublicationLease::DrainAck(ack),
-                    Some(list.into_any().unbind()),
-                )
-            }
-            Err(lease) => (SubscriptionPublicationLease::DrainError(lease), None),
-        };
-        Py::new(
-            py,
-            PySubscriptionDeliveryReceipt {
-                lease: StdMutex::new(Some(publication)),
-                result,
-            },
-        )
-        .map(Py::into_any)
-    })
-    .await
-}
-
-fn subscription_delivery_to_python(
-    py: Python<'_>,
-    delivery: SubscriptionDelivery,
-    converter: Option<&Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
-    let SubscriptionDelivery {
-        kind,
-        data,
-        gap_before,
-    } = delivery;
-    let batch = native_arrow::record_batch_to_arrow_record_batch(py, data)?;
-    let dropped_updates = gap_before.map(|gap| gap.dropped_updates);
-    let args = (kind.as_str(), batch, dropped_updates);
-    match converter {
-        Some(converter) => Ok(converter.bind(py).call1(args)?.unbind()),
-        None => Ok(args.into_pyobject(py)?.into_any().unbind()),
-    }
-}
-
-fn exchange_info_to_pydict(py: Python<'_>, info: &ExchangeInfo) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item("ticker", &info.ticker)?;
-    dict.set_item("mic", info.mic.clone())?;
-    dict.set_item("exch_code", info.exch_code.clone())?;
-    dict.set_item("timezone", &info.timezone)?;
-    dict.set_item("utc_offset", info.utc_offset)?;
-    dict.set_item("source", info.source.as_str())?;
-    dict.set_item("day", info.sessions.day.clone())?;
-    dict.set_item("allday", info.sessions.allday.clone())?;
-    dict.set_item("pre", info.sessions.pre.clone())?;
-    dict.set_item("post", info.sessions.post.clone())?;
-    dict.set_item("am", info.sessions.am.clone())?;
-    dict.set_item("pm", info.sessions.pm.clone())?;
-    Ok(dict.into_any().unbind())
-}
-
-fn market_info_to_pydict(py: Python<'_>, info: &MarketInfo) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item("exch", info.exch.clone())?;
-    dict.set_item("tz", info.tz.clone())?;
-    dict.set_item("freq", info.freq.clone())?;
-    dict.set_item("is_fut", info.is_fut)?;
-    Ok(dict.into_any().unbind())
-}
-
-fn date32_to_py(py: Python<'_>, days: i32) -> PyResult<Py<PyAny>> {
-    let Some(epoch) = NaiveDate::from_ymd_opt(1970, 1, 1) else {
-        return Ok(py.None());
-    };
-    let Some(date) = epoch.checked_add_signed(chrono::Duration::days(days as i64)) else {
-        return Ok(py.None());
-    };
-    Ok(
-        PyDate::new(py, date.year(), date.month() as u8, date.day() as u8)?
-            .into_any()
-            .unbind(),
-    )
-}
-
-fn time64_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
-    if !(0..86_400_000_000).contains(&micros) {
-        return Ok(py.None());
-    }
-    let seconds = micros / 1_000_000;
-    let microsecond = (micros % 1_000_000) as u32;
-    let hour = (seconds / 3_600) as u8;
-    let minute = ((seconds % 3_600) / 60) as u8;
-    let second = (seconds % 60) as u8;
-    Ok(PyTime::new(py, hour, minute, second, microsecond, None)?
-        .into_any()
-        .unbind())
-}
-
-fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
-    let Some(dt) = DateTime::from_timestamp_micros(micros) else {
-        return Ok(py.None());
-    };
-    let utc = PyTzInfo::utc(py)?;
-    Ok(PyDateTime::new(
-        py,
-        dt.year(),
-        dt.month() as u8,
-        dt.day() as u8,
-        dt.hour() as u8,
-        dt.minute() as u8,
-        dt.second() as u8,
-        dt.timestamp_subsec_micros(),
-        Some(&utc),
-    )?
-    .into_any()
-    .unbind())
-}
-
-fn subscription_update_to_pydict(
-    py: Python<'_>,
-    update: SubscriptionUpdate,
-) -> PyResult<Py<PyAny>> {
-    let dict = PyDict::new(py);
-    dict.set_item(
-        "timestamp",
-        timestamp_micros_to_py(py, update.timestamp_us)?,
-    )?;
-    dict.set_item("topic", update.topic.as_ref())?;
-    for field in update.values.iter() {
-        let Some(meta) = update.layout.fields.get(field.index as usize) else {
-            continue;
-        };
-        match &field.value {
-            UpdateValue::Null => dict.set_item(meta.name.as_ref(), py.None())?,
-            UpdateValue::Bool(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::I32(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::I64(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::F64(v) => dict.set_item(meta.name.as_ref(), *v)?,
-            UpdateValue::Str(v) => dict.set_item(meta.name.as_ref(), v.as_ref())?,
-            UpdateValue::Date32(v) => dict.set_item(meta.name.as_ref(), date32_to_py(py, *v)?)?,
-            UpdateValue::Time64Micros(v) => {
-                dict.set_item(meta.name.as_ref(), time64_micros_to_py(py, *v)?)?
-            }
-            UpdateValue::TimestampMicros(v) => {
-                dict.set_item(meta.name.as_ref(), timestamp_micros_to_py(py, *v)?)?
-            }
-        }
-    }
-    Ok(dict.into_any().unbind())
-}
-
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn _signal_interpreter_shutdown() {
     info!("PyO3 interpreter finalization signalled");
-    INTERPRETER_SHUTDOWN.send_replace(true);
+    completion::signal_interpreter_shutdown();
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
@@ -2770,7 +2563,9 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(version, m)?)?;
     m.add_function(wrap_pyfunction!(sdk_version, m)?)?;
     m.add_function(wrap_pyfunction!(_signal_interpreter_shutdown, m)?)?;
+    teardown::register(m)?;
     native_arrow::register(m)?;
+    shaping::register(m)?;
     m.add_class::<EntitlementReport>()?;
     m.add_class::<PyEngineConfig>()?;
     m.add_class::<PySubscription>()?;
@@ -2861,20 +2656,41 @@ fn enable_sdk_logging(level: &str) -> PyResult<()> {
 define_stub_info_gatherer!(stub_info);
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use tokio::sync::Mutex;
     use xbbg_async::engine::state::{
-        FieldKind, FieldLayout, FieldMeta, UpdateField, subscription_channel,
+        FieldKind, FieldLayout, FieldMeta, SubscriptionUpdate, subscription_channel,
         subscription_channel_with_policy,
     };
     use xbbg_async::engine::{
         ExtractorType, SubscriptionEventCategory, SubscriptionEventLevel, SubscriptionStatusHandle,
         SubscriptionStatusState,
     };
-    use xbbg_async::subscription_consumer::PendingUpdates;
+    use xbbg_async::error_presentation::{RequestErrorContext, SubscriptionDataLossContext};
+    use xbbg_async::subscription_consumer::{PendingUpdates, wait_for_subscription_close};
     use xbbg_core::AuthConfig;
+
+    /// Run `work` on another thread while this thread holds the interpreter.
+    ///
+    /// On GIL builds any attach inside `work` blocks until the deadline, so
+    /// finishing in time shows the work never waited for the interpreter.
+    pub(crate) fn run_while_interpreter_held<T: Send + 'static>(
+        work: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        Python::initialize();
+        Python::attach(|_py| {
+            let (done_tx, done_rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done_tx.send(work());
+            });
+            done_rx
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .expect("native work must not wait for the interpreter")
+        })
+    }
 
     fn metrics(
         messages_received: u64,
@@ -2912,7 +2728,7 @@ mod tests {
 
     fn closed_subscription(deliver_rows: bool) -> PySubscription {
         PySubscription {
-            consumer: Arc::new(SubscriptionConsumer::default()),
+            consumer: Arc::new(SubscriptionOwner::unhosted(SubscriptionConsumer::default())),
             legacy_arrow: Some(Arc::new(LegacySubscriptionArrow::new(1))),
             batch_items: 1,
             status: Arc::new(SubscriptionStatusHandle::new(
@@ -2926,6 +2742,111 @@ mod tests {
             #[cfg(feature = "test-support")]
             _test_legacy_read_started: None,
         }
+    }
+
+    #[test]
+    fn lazy_errors_are_built_without_the_interpreter_with_attribute_parity() {
+        const KINDS: [(ErrorKind, &str, bool); 7] = [
+            (ErrorKind::Session, "BlpSessionError", false),
+            (ErrorKind::Request, "BlpRequestError", true),
+            (ErrorKind::Limit, "BlpLimitError", true),
+            (ErrorKind::DataLoss, "BlpSubscriptionDataLossError", true),
+            (ErrorKind::Validation, "BlpValidationError", false),
+            (ErrorKind::Timeout, "BlpTimeoutError", true),
+            (ErrorKind::Internal, "BlpInternalError", false),
+        ];
+        const REQUEST_ATTRS: [&str; 4] =
+            ["service", "operation", "request_id", "bloomberg_request_id"];
+        let (plain, contextual, composed, closed) = run_while_interpreter_held(|| {
+            let plain = KINDS.map(|(kind, _, _)| {
+                error_presentation_to_pyerr(ErrorPresentation {
+                    kind,
+                    message: format!("synthetic {kind:?} failure"),
+                    data_loss: None,
+                    request_context: None,
+                })
+            });
+            let contextual = KINDS.map(|(kind, _, _)| {
+                error_presentation_to_pyerr(ErrorPresentation {
+                    kind,
+                    message: "synthetic contextual failure".into(),
+                    data_loss: Some(SubscriptionDataLossContext {
+                        topic: "SYNTHETIC Index".into(),
+                        detail: "synthetic gap".into(),
+                    }),
+                    request_context: Some(RequestErrorContext {
+                        service: Some("//synthetic/refdata".into()),
+                        operation: None,
+                        request_id: Some("synthetic-label".into()),
+                        bloomberg_request_ids: vec![Arc::from("synthetic-a")],
+                    }),
+                })
+            });
+            let composed = blp_error_to_pyerr(BlpError::RequestTimeout {
+                request_id: None,
+                bloomberg_request_ids: vec![Arc::from("synthetic-a"), Arc::from("synthetic-z")],
+            });
+            let closed = subscription_control_error_to_pyerr(BlpAsyncError::ChannelClosed);
+            (plain, contextual, composed, closed)
+        });
+        Python::attach(|py| {
+            for ((kind, class, defaults), error) in KINDS.iter().zip(&plain) {
+                assert_eq!(error.get_type(py).name().unwrap().to_str().unwrap(), *class);
+                let value = error.value(py);
+                assert_eq!(value.to_string(), format!("synthetic {kind:?} failure"));
+                for name in REQUEST_ATTRS {
+                    assert_eq!(value.hasattr(name).unwrap(), *defaults, "{class}.{name}");
+                    if *defaults {
+                        assert!(value.getattr(name).unwrap().is_none(), "{class}.{name}");
+                    }
+                }
+                assert_eq!(value.hasattr("bloomberg_request_ids").unwrap(), *defaults);
+                if *defaults {
+                    let ids: Vec<String> = value
+                        .getattr("bloomberg_request_ids")
+                        .unwrap()
+                        .extract()
+                        .unwrap();
+                    assert!(ids.is_empty(), "{class}.bloomberg_request_ids");
+                }
+                for name in ["topic", "detail"] {
+                    assert!(!value.hasattr(name).unwrap(), "{class}.{name}");
+                }
+            }
+            for ((_, class, _), error) in KINDS.iter().zip(&contextual) {
+                assert_eq!(error.get_type(py).name().unwrap().to_str().unwrap(), *class);
+                let value = error.value(py);
+                assert_eq!(value.to_string(), "synthetic contextual failure");
+                let text = |name: &str| -> Option<String> {
+                    value.getattr(name).unwrap().extract().unwrap()
+                };
+                assert_eq!(text("service").as_deref(), Some("//synthetic/refdata"));
+                assert_eq!(text("operation"), None);
+                assert_eq!(text("request_id").as_deref(), Some("synthetic-label"));
+                assert_eq!(text("bloomberg_request_id").as_deref(), Some("synthetic-a"));
+                let ids: Vec<String> = value
+                    .getattr("bloomberg_request_ids")
+                    .unwrap()
+                    .extract()
+                    .unwrap();
+                assert_eq!(ids, ["synthetic-a"]);
+                assert_eq!(text("topic").as_deref(), Some("SYNTHETIC Index"));
+                assert_eq!(text("detail").as_deref(), Some("synthetic gap"));
+            }
+
+            assert!(composed.is_instance_of::<BlpTimeoutError>(py));
+            let value = composed.value(py);
+            assert!(value.getattr("bloomberg_request_id").unwrap().is_none());
+            let ids: Vec<String> = value
+                .getattr("bloomberg_request_ids")
+                .unwrap()
+                .extract()
+                .unwrap();
+            assert_eq!(ids, ["synthetic-a", "synthetic-z"]);
+
+            assert!(closed.is_instance_of::<PyRuntimeError>(py));
+            assert_eq!(closed.value(py).to_string(), "subscription already closed");
+        });
     }
 
     #[test]
@@ -3003,158 +2924,6 @@ mod tests {
     }
 
     #[test]
-    fn delivery_conversion_failure_restores_real_native_batch_and_gap() {
-        Python::initialize();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
-            for timestamp_us in [10, 20] {
-                let mut update = subscription_update(timestamp_us);
-                update.topic = Arc::from("SYNTHETIC Index");
-                tx.try_send(Ok(update)).expect("synthetic update");
-            }
-            let consumer = SubscriptionConsumer::from_receiver(rx);
-            let lease = consumer.next_delivery(1).await.expect("first receipt");
-            let error = prepare_subscription_delivery(lease, |_py, _delivery| {
-                Err(PyValueError::new_err(
-                    "synthetic backend conversion failure",
-                ))
-            })
-            .await
-            .expect_err("conversion failure");
-            Python::attach(|py| assert!(error.is_instance_of::<PyValueError>(py)));
-
-            let lease = consumer.next_delivery(1).await.expect("restored receipt");
-            assert_eq!(
-                lease.as_ref().unwrap().gap_before.unwrap().dropped_updates,
-                1
-            );
-            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
-                subscription_delivery_to_python(py, delivery, None)
-            })
-            .await
-            .expect("converted delivery");
-            Python::attach(|py| {
-                let output = prepared.bind(py).call_method0("publish").unwrap();
-                assert_eq!(
-                    output.get_item(0).unwrap().extract::<String>().unwrap(),
-                    "deltas"
-                );
-                assert_eq!(output.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
-                let batch = output.get_item(1).unwrap();
-                assert_eq!(
-                    batch
-                        .getattr("num_rows")
-                        .unwrap()
-                        .extract::<usize>()
-                        .unwrap(),
-                    1
-                );
-                let rows = batch.call_method0("to_pylist").unwrap();
-                assert_eq!(
-                    rows.get_item(0)
-                        .unwrap()
-                        .get_item("topic")
-                        .unwrap()
-                        .extract::<String>()
-                        .unwrap(),
-                    "SYNTHETIC Index",
-                );
-            });
-            drop(tx);
-            assert!(consumer.next_delivery(1).await.is_none());
-        });
-    }
-
-    #[test]
-    fn delivery_error_publication_preserves_context_and_commits_once() {
-        Python::initialize();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let (tx, rx) = subscription_channel(1);
-            tx.fail(BlpError::SubscriptionDataLoss {
-                topic: "SYNTHETIC Index".into(),
-                detail: "synthetic SDK DATALOSS".into(),
-            });
-            let consumer = SubscriptionConsumer::from_receiver(rx);
-            let lease = consumer.next_delivery(1).await.expect("terminal receipt");
-            let prepared = prepare_subscription_delivery(lease, |_py, _delivery| {
-                panic!("terminal receipts must not run the batch converter")
-            })
-            .await
-            .expect("prepared terminal receipt");
-            Python::attach(|py| {
-                let error = prepared
-                    .bind(py)
-                    .call_method0("publish")
-                    .expect_err("terminal source loss");
-                assert!(error.is_instance_of::<BlpSubscriptionDataLossError>(py));
-                assert_eq!(
-                    error
-                        .value(py)
-                        .getattr("topic")
-                        .unwrap()
-                        .extract::<String>()
-                        .unwrap(),
-                    "SYNTHETIC Index",
-                );
-                assert_eq!(
-                    error
-                        .value(py)
-                        .getattr("detail")
-                        .unwrap()
-                        .extract::<String>()
-                        .unwrap(),
-                    "synthetic SDK DATALOSS",
-                );
-            });
-            assert!(consumer.next_delivery(1).await.is_none());
-        });
-    }
-
-    #[test]
-    fn dropping_unpublished_python_receipt_restores_data_and_gap() {
-        Python::initialize();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
-            tx.try_send(Ok(subscription_update(10))).unwrap();
-            tx.try_send(Ok(subscription_update(20))).unwrap();
-            let consumer = SubscriptionConsumer::from_receiver(rx);
-            let lease = consumer.next_delivery(1).await.unwrap();
-            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
-                subscription_delivery_to_python(py, delivery, None)
-            })
-            .await
-            .unwrap();
-            Python::attach(|_| drop(prepared));
-            let restored = consumer
-                .next_delivery(1)
-                .await
-                .expect("unpublished receipt restored");
-            assert_eq!(
-                restored
-                    .as_ref()
-                    .unwrap()
-                    .gap_before
-                    .unwrap()
-                    .dropped_updates,
-                1
-            );
-            assert_eq!(restored.commit().unwrap().data.num_rows(), 1);
-        });
-    }
-
-    #[test]
     fn advanced_python_iteration_guards_retain_real_native_receipts() {
         Python::initialize();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3165,7 +2934,9 @@ mod tests {
             let (tx, rx) = subscription_channel_with_policy(1, OverflowPolicy::DropOldest);
             tx.try_send(Ok(subscription_update(10))).unwrap();
             tx.try_send(Ok(subscription_update(20))).unwrap();
-            let consumer = Arc::new(SubscriptionConsumer::from_receiver(rx));
+            let consumer = Arc::new(SubscriptionOwner::unhosted(
+                SubscriptionConsumer::from_receiver(rx),
+            ));
             Python::attach(|py| {
                 let mut subscription = closed_subscription(true);
                 subscription.consumer = consumer.clone();
@@ -4138,50 +3909,6 @@ mod tests {
     }
 
     #[test]
-    fn timestamp_micros_to_py_returns_utc_aware_datetime() {
-        Python::initialize();
-        Python::attach(|py| {
-            let value = timestamp_micros_to_py(py, 1_704_067_200_123_456).expect("timestamp");
-            let dt = value.bind(py);
-            let tzinfo = dt.getattr("tzinfo").expect("tzinfo");
-            assert!(
-                tzinfo
-                    .eq(PyTzInfo::utc(py).expect("utc"))
-                    .expect("tz equality")
-            );
-        });
-    }
-    #[test]
-    fn tick_dict_preserves_present_null_and_omits_absent_fields() {
-        Python::initialize();
-        Python::attach(|py| {
-            let layout = Arc::new(FieldLayout::new(
-                1,
-                vec![
-                    FieldMeta::new("PX_LAST", 0, FieldKind::F64),
-                    FieldMeta::new("BID", 1, FieldKind::F64),
-                ],
-            ));
-            let mut update = subscription_update_with_layout(layout, 10);
-            update.values.push(UpdateField {
-                index: 0,
-                value: UpdateValue::Null,
-            });
-
-            let value = subscription_update_to_pydict(py, update).expect("tick dict");
-            let dict = value.bind(py).cast::<PyDict>().expect("dict");
-            assert!(dict.contains("PX_LAST").expect("present field"));
-            assert!(
-                dict.get_item("PX_LAST")
-                    .expect("lookup")
-                    .expect("present value")
-                    .is_none()
-            );
-            assert!(!dict.contains("BID").expect("absent field"));
-        });
-    }
-
-    #[test]
     fn python_subscription_batch_limits_preserve_default_one_update() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -4356,67 +4083,6 @@ mod tests {
             let mut close_rx = close_signal.subscribe();
             wait_for_subscription_close(&mut close_rx).await;
             assert!(*close_rx.borrow());
-        });
-    }
-
-    #[test]
-    fn subscription_result_attachment_respects_finalization() {
-        Python::initialize();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let (finalizing, mut finalizing_rx) = watch::channel(false);
-            let subscription = complete_unless_interpreter_finalizing(
-                &mut finalizing_rx,
-                closed_subscription(true).into_python(),
-            )
-            .await
-            .expect("subscription attachment");
-            Python::attach(|py| {
-                assert!(subscription.bind(py).is_instance_of::<PySubscription>());
-            });
-
-            finalizing.send_replace(true);
-            let suppressed = tokio::time::timeout(
-                std::time::Duration::from_millis(1),
-                complete_unless_interpreter_finalizing(
-                    &mut finalizing_rx,
-                    closed_subscription(false).into_python(),
-                ),
-            )
-            .await;
-            assert!(suppressed.is_err());
-        });
-    }
-
-    #[test]
-    fn engine_shutdown_completes_but_interpreter_finalization_suppresses() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("runtime");
-        runtime.block_on(async {
-            let (engine_shutdown, mut engine_shutdown_rx) = watch::channel(false);
-            let (_finalizing, mut finalizing_rx) = watch::channel(false);
-            engine_shutdown.send_replace(true);
-            let completed =
-                complete_unless_interpreter_finalizing(&mut finalizing_rx, async move {
-                    wait_for_subscription_close(&mut engine_shutdown_rx).await;
-                    42
-                })
-                .await;
-            assert_eq!(completed, 42);
-
-            let (finalizing, mut finalizing_rx) = watch::channel(false);
-            finalizing.send_replace(true);
-            let suppressed = tokio::time::timeout(
-                std::time::Duration::from_millis(1),
-                complete_unless_interpreter_finalizing(&mut finalizing_rx, async { 7 }),
-            )
-            .await;
-            assert!(suppressed.is_err());
         });
     }
 }

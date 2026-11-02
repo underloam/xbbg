@@ -6,7 +6,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, StringBuilder};
-use arrow_array::{Array, ArrayRef, LargeStringArray, RecordBatch, StringArray};
+use arrow_array::{
+    Array, ArrayRef, LargeStringArray, RecordBatch, RecordBatchOptions, StringArray,
+    StringViewArray,
+};
 use arrow_ord::sort::{SortOptions, sort_to_indices};
 use arrow_schema::{Field, Schema};
 use arrow_select::take::take_record_batch;
@@ -18,7 +21,7 @@ use xbbg_ext::transforms::fixed_income::{YieldType, build_yas_overrides};
 use xbbg_ext::utils::date::parse_date;
 
 use crate::error::{RecipeError, Result};
-use crate::utils::{apply_request_options, array_value_as_f64, as_string_col};
+use crate::utils::{apply_request_options, array_value_as_f64};
 
 /// YAS (Yield & Spread Analysis) recipe.
 ///
@@ -223,10 +226,11 @@ fn corporate_bonds_request(
 ///
 /// # Returns
 ///
-/// Time-sorted Arrow quote rows, retaining extra include fields and timestamp
-/// timezones. Bloomberg names are normalized to `event_type`, `price`,
-/// `broker_buy`, `broker_sell`, `spread_price`, `condition_codes`, and `exchange`.
-/// Nonempty results without broker attribution fail when it is required.
+/// Quote rows shaped by [`shape_bqr_quotes`]: time-sorted, retaining extra
+/// include fields, timestamp timezones and schema metadata, with Bloomberg
+/// names normalized to `event_type`, `price`, `broker_buy`, `broker_sell`,
+/// `spread_price`, `condition_codes`, and `exchange`. Nonempty results without
+/// broker attribution fail when it is required.
 pub async fn recipe_bqr(
     engine: &Engine,
     ticker: String,
@@ -319,7 +323,21 @@ fn bqr_hour_before(end: &str) -> Result<String> {
         .ok_or_else(invalid)
 }
 
-fn shape_bqr_quotes(
+/// Shape raw BQR IntradayTick output into time-sorted, normalized quote rows.
+///
+/// The one BQR shaper, used by [`recipe_bqr`] (Node and `xbbg.ext`) and by
+/// Python's `blp.abqr`:
+///
+/// 1. Generic extractor output (with a `path` column) is pivoted by
+///    [`reshape_bqr_generic`]; typed output passes through.
+/// 2. With `enforce_broker_codes`, nonempty quotes without any nonempty broker
+///    code fail with [`RecipeError::Other`].
+/// 3. Rows are sorted by `time` ascending, nulls last.
+/// 4. Bloomberg names become `event_type`, `price`, `broker_buy`,
+///    `broker_sell`, `spread_price`, `condition_codes` and `exchange`.
+///
+/// Other columns, column types and schema metadata are kept.
+pub fn shape_bqr_quotes(
     mut batch: RecordBatch,
     ticker: &str,
     enforce_broker_codes: bool,
@@ -374,9 +392,11 @@ fn shape_bqr_quotes(
         })
         .collect::<Vec<_>>();
     let schema = Schema::new_with_metadata(fields, batch.schema().metadata().clone());
-    Ok(RecordBatch::try_new(
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    Ok(RecordBatch::try_new_with_options(
         Arc::new(schema),
         batch.columns().to_vec(),
+        &options,
     )?)
 }
 
@@ -389,15 +409,56 @@ fn bqr_has_broker_codes(batch: &RecordBatch) -> bool {
     ]
     .iter()
     .filter_map(|name| batch.column_by_name(name))
-    .any(|column| {
-        if let Some(values) = column.as_any().downcast_ref::<StringArray>() {
-            values.iter().flatten().any(|value| !value.is_empty())
-        } else if let Some(values) = column.as_any().downcast_ref::<LargeStringArray>() {
-            values.iter().flatten().any(|value| !value.is_empty())
-        } else {
-            column.null_count() < column.len()
-        }
+    .any(|column| match TextColumn::new(column.as_ref()) {
+        Some(text) => text.has_nonempty(),
+        None => column.null_count() < column.len(),
     })
+}
+
+/// Values of a string column in any Arrow string layout.
+#[derive(Clone, Copy)]
+enum TextColumn<'a> {
+    Utf8(&'a StringArray),
+    LargeUtf8(&'a LargeStringArray),
+    Utf8View(&'a StringViewArray),
+}
+
+impl<'a> TextColumn<'a> {
+    /// The named column of `batch`, when it holds strings.
+    fn named(batch: &'a RecordBatch, name: &str) -> Option<Self> {
+        batch
+            .column_by_name(name)
+            .and_then(|array| Self::new(array.as_ref()))
+    }
+
+    fn new(array: &'a dyn Array) -> Option<Self> {
+        let array = array.as_any();
+        if let Some(values) = array.downcast_ref::<StringArray>() {
+            Some(Self::Utf8(values))
+        } else if let Some(values) = array.downcast_ref::<LargeStringArray>() {
+            Some(Self::LargeUtf8(values))
+        } else {
+            array.downcast_ref::<StringViewArray>().map(Self::Utf8View)
+        }
+    }
+
+    /// The value at `row`, or `None` when it is null.
+    fn get(self, row: usize) -> Option<&'a str> {
+        match self {
+            Self::Utf8(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::LargeUtf8(values) => values.is_valid(row).then(|| values.value(row)),
+            Self::Utf8View(values) => values.is_valid(row).then(|| values.value(row)),
+        }
+    }
+
+    /// Whether any value is nonempty text.
+    fn has_nonempty(self) -> bool {
+        match self {
+            Self::Utf8(values) => values.iter().flatten().any(|value| !value.is_empty()),
+            Self::LargeUtf8(values) => values.iter().flatten().any(|value| !value.is_empty()),
+            Self::Utf8View(values) => values.iter().flatten().any(|value| !value.is_empty()),
+        }
+    }
 }
 
 fn bqr_path(path: &str) -> Option<(usize, &str)> {
@@ -413,22 +474,30 @@ fn bqr_path(path: &str) -> Option<(usize, &str)> {
     (len > 0).then_some((row, &field[..len]))
 }
 
-fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str) -> Result<RecordBatch> {
-    let paths = as_string_col(batch, "path")?;
-    let strings = batch
-        .column_by_name("value_str")
-        .and_then(|array| array.as_any().downcast_ref::<StringArray>());
+/// Pivot generic BQR `path`/`value_str`/`value_num` rows into one row per tick.
+///
+/// A row whose `path` names `tickData[i].<field>` sets `<field>` of tick `i`
+/// (a later row for the same field wins); other rows are skipped. Ticks are
+/// ordered by index. Columns are `ticker`, then `time`, `type`, `value` and
+/// `size` when present, then the other fields by name. A nonempty `value_str`
+/// wins over `value_num`. A field is Float64 when every present value is
+/// numeric and UTF-8 otherwise, with numbers formatted as text. Without tick
+/// rows, including without a `path` column, the result is the empty
+/// five-column UTF-8 quote table. Schema metadata is kept.
+pub fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str) -> Result<RecordBatch> {
+    let paths = TextColumn::named(batch, "path");
+    let strings = TextColumn::named(batch, "value_str");
     let numbers = batch.column_by_name("value_num");
     let text = |row| {
         strings
-            .filter(|array| array.is_valid(row))
-            .map(|array| array.value(row))
+            .and_then(|values| values.get(row))
             .filter(|value| !value.is_empty())
     };
     let number = |row| numbers.and_then(|array| array_value_as_f64(array, row));
     let mut fields = BTreeSet::new();
     let mut records: BTreeMap<usize, HashMap<&str, usize>> = BTreeMap::new();
-    for (row, path) in paths.iter().enumerate() {
+    for row in 0..batch.num_rows() {
+        let path = paths.and_then(|values| values.get(row));
         let Some((index, field)) = path.and_then(bqr_path) else {
             continue;
         };
@@ -497,6 +566,7 @@ mod tests {
     use arrow_schema::{DataType, TimeUnit};
 
     use super::*;
+    use crate::utils::as_string_col;
 
     #[test]
     fn yas_merges_caller_overrides_without_replacing_request_identity() {
@@ -980,5 +1050,276 @@ mod tests {
             Some(20.0)
         );
         assert!(batch.column_by_name("spread_price").unwrap().is_null(1));
+    }
+
+    fn synthetic_metadata() -> HashMap<String, String> {
+        HashMap::from([("xbbg.eid_data".to_string(), "{}".to_string())])
+    }
+
+    fn generic_ticks(
+        rows: &[(Option<&str>, Option<&str>, Option<f64>)],
+        metadata: HashMap<String, String>,
+    ) -> RecordBatch {
+        let columns: Vec<ArrayRef> = vec![
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.0).collect::<Vec<_>>(),
+            )),
+            Arc::new(StringArray::from(
+                rows.iter().map(|row| row.1).collect::<Vec<_>>(),
+            )),
+            Arc::new(Float64Array::from(
+                rows.iter().map(|row| row.2).collect::<Vec<_>>(),
+            )),
+        ];
+        let schema = Schema::new_with_metadata(
+            vec![
+                Field::new("path", DataType::Utf8, true),
+                Field::new("value_str", DataType::Utf8, true),
+                Field::new("value_num", DataType::Float64, true),
+            ],
+            metadata,
+        );
+        RecordBatch::try_new(Arc::new(schema), columns).unwrap()
+    }
+
+    fn column_names(batch: &RecordBatch) -> Vec<String> {
+        batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect()
+    }
+
+    fn texts<'a>(batch: &'a RecordBatch, name: &str) -> Vec<Option<&'a str>> {
+        as_string_col(batch, name).unwrap().iter().collect()
+    }
+
+    fn floats(batch: &RecordBatch, name: &str) -> Vec<Option<f64>> {
+        batch
+            .column_by_name(name)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap()
+            .iter()
+            .collect()
+    }
+
+    #[test]
+    fn bqr_generic_reshape_types_fields_and_keeps_metadata() {
+        let source = generic_ticks(
+            &[
+                (
+                    Some("result.tickData[2].time"),
+                    Some("2024-01-15T09:00:02"),
+                    None,
+                ),
+                (Some("result.tickData[2].value"), Some(""), Some(101.5)),
+                (Some("result.tickData[2].conditionCodes"), None, Some(7.0)),
+                (
+                    Some("result.tickData[0].time"),
+                    Some("2024-01-15T09:00:00"),
+                    None,
+                ),
+                (Some("result.tickData[0].type"), Some("BID"), None),
+                (Some("result.tickData[0].value"), None, Some(100.25)),
+                (Some("result.tickData[0].size"), None, Some(5.0)),
+                (Some("result.tickData[0].brokerBuyCode"), Some("DLRA"), None),
+                (Some("result.tickData[0].conditionCodes"), Some("R"), None),
+                (Some("summary.count"), None, Some(2.0)),
+                (None, Some("ignored"), Some(1.0)),
+            ],
+            synthetic_metadata(),
+        );
+
+        let reshaped = reshape_bqr_generic(&source, "SYN1 Corp").unwrap();
+        assert_eq!(
+            column_names(&reshaped),
+            [
+                "ticker",
+                "time",
+                "type",
+                "value",
+                "size",
+                "brokerBuyCode",
+                "conditionCodes"
+            ]
+        );
+        let types = reshaped
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.data_type().clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            types,
+            [
+                DataType::Utf8,
+                DataType::Utf8,
+                DataType::Utf8,
+                DataType::Float64,
+                DataType::Float64,
+                DataType::Utf8,
+                DataType::Utf8,
+            ]
+        );
+        assert_eq!(
+            texts(&reshaped, "ticker"),
+            [Some("SYN1 Corp"), Some("SYN1 Corp")]
+        );
+        assert_eq!(
+            texts(&reshaped, "time"),
+            [Some("2024-01-15T09:00:00"), Some("2024-01-15T09:00:02")]
+        );
+        assert_eq!(texts(&reshaped, "type"), [Some("BID"), None]);
+        // An empty `value_str` falls back to `value_num`.
+        assert_eq!(floats(&reshaped, "value"), [Some(100.25), Some(101.5)]);
+        assert_eq!(floats(&reshaped, "size"), [Some(5.0), None]);
+        assert_eq!(texts(&reshaped, "brokerBuyCode"), [Some("DLRA"), None]);
+        // Mixed text and numbers stay UTF-8, numbers formatted as text.
+        assert_eq!(texts(&reshaped, "conditionCodes"), [Some("R"), Some("7")]);
+        assert_eq!(reshaped.schema().metadata(), &synthetic_metadata());
+
+        let shaped = shape_bqr_quotes(source, "SYN1 Corp", true).unwrap();
+        assert_eq!(
+            column_names(&shaped),
+            [
+                "ticker",
+                "time",
+                "event_type",
+                "price",
+                "size",
+                "broker_buy",
+                "condition_codes"
+            ]
+        );
+        assert_eq!(floats(&shaped, "price"), [Some(100.25), Some(101.5)]);
+        assert_eq!(shaped.schema().metadata(), &synthetic_metadata());
+    }
+
+    #[test]
+    fn bqr_generic_reshape_without_ticks_is_the_empty_quote_table() {
+        let no_ticks = generic_ticks(
+            &[
+                (Some("summary.count"), None, Some(1.0)),
+                (None, Some("x"), None),
+            ],
+            synthetic_metadata(),
+        );
+        let no_paths = no_ticks.project(&[1, 2]).unwrap();
+        for source in [no_ticks.clone(), no_paths, no_ticks.slice(0, 0)] {
+            let reshaped = reshape_bqr_generic(&source, "SYN1 Corp").unwrap();
+            assert_eq!(
+                column_names(&reshaped),
+                ["ticker", "time", "type", "value", "size"]
+            );
+            assert_eq!(reshaped.num_rows(), 0);
+            assert!(
+                reshaped
+                    .schema()
+                    .fields()
+                    .iter()
+                    .all(|field| field.data_type() == &DataType::Utf8)
+            );
+            assert_eq!(reshaped.schema().metadata(), &synthetic_metadata());
+        }
+
+        let shaped = shape_bqr_quotes(no_ticks, "SYN1 Corp", true).unwrap();
+        assert_eq!(
+            column_names(&shaped),
+            ["ticker", "time", "event_type", "price", "size"]
+        );
+        assert_eq!(shaped.num_rows(), 0);
+
+        // Empty responses without columns (as mocked responses are) stay empty.
+        let no_columns = RecordBatch::new_empty(Arc::new(Schema::empty()));
+        let shaped = shape_bqr_quotes(no_columns, "SYN1 Corp", true).unwrap();
+        assert_eq!((shaped.num_rows(), shaped.num_columns()), (0, 0));
+    }
+
+    #[test]
+    fn bqr_reads_every_arrow_string_layout() {
+        let utf8 = generic_ticks(
+            &[
+                (Some("tickData[0].type"), Some("BID"), None),
+                (Some("tickData[0].brokerSellCode"), Some("DLRB"), None),
+                (Some("tickData[0].value"), None, Some(99.5)),
+            ],
+            HashMap::new(),
+        );
+        let path = as_string_col(&utf8, "path").unwrap();
+        let value_str = as_string_col(&utf8, "value_str").unwrap();
+        let schema = Schema::new(vec![
+            Field::new("path", DataType::LargeUtf8, true),
+            Field::new("value_str", DataType::Utf8View, true),
+            Field::new("value_num", DataType::Float64, true),
+        ]);
+        let other_layouts = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(path.iter().collect::<LargeStringArray>()),
+                Arc::new(value_str.iter().collect::<StringViewArray>()),
+                Arc::clone(utf8.column(2)),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            reshape_bqr_generic(&other_layouts, "SYN1 Corp").unwrap(),
+            reshape_bqr_generic(&utf8, "SYN1 Corp").unwrap()
+        );
+
+        let view_codes = |codes: Vec<Option<&str>>| {
+            let schema = Schema::new(vec![Field::new("brokerSellCode", DataType::Utf8View, true)]);
+            let codes: ArrayRef = Arc::new(StringViewArray::from(codes));
+            RecordBatch::try_new(Arc::new(schema), vec![codes]).unwrap()
+        };
+        assert!(shape_bqr_quotes(view_codes(vec![Some(""), None]), "SYN1 Corp", true).is_err());
+        assert!(
+            shape_bqr_quotes(view_codes(vec![Some(""), Some("DLRA")]), "SYN1 Corp", true).is_ok()
+        );
+    }
+
+    #[test]
+    fn bqr_missing_attribution_keeps_the_python_message() {
+        match shape_bqr_quotes(typed_quotes([None, Some("")]), "TEST Corp", true) {
+            Err(RecipeError::Other(message)) => assert_eq!(
+                message,
+                "BQR returned quote rows without broker attribution. Use a fixed-income ticker \
+                 with a dealer quote pricing source such as '@MSG1 Corp', or pass \
+                 include_broker_codes=False if raw quote ticks without dealer codes are \
+                 intentional."
+            ),
+            other => panic!("expected the broker-attribution failure, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bqr_sorts_quotes_by_time_with_nulls_last() {
+        let time = TimestampMicrosecondArray::from(vec![Some(2_000_000), None, Some(1_000_000)]);
+        let schema = Schema::new_with_metadata(
+            vec![
+                Field::new("time", time.data_type().clone(), true),
+                Field::new("brokerBuyCode", DataType::Utf8, true),
+            ],
+            synthetic_metadata(),
+        );
+        let batch = RecordBatch::try_new(
+            Arc::new(schema),
+            vec![
+                Arc::new(time),
+                Arc::new(StringArray::from(vec!["DLRB", "DLRN", "DLRA"])),
+            ],
+        )
+        .unwrap();
+
+        let shaped = shape_bqr_quotes(batch, "SYN1 Corp", true).unwrap();
+
+        assert_eq!(
+            texts(&shaped, "broker_buy"),
+            [Some("DLRA"), Some("DLRB"), Some("DLRN")]
+        );
+        assert!(shaped.column_by_name("time").unwrap().is_null(2));
+        assert_eq!(shaped.schema().metadata(), &synthetic_metadata());
     }
 }

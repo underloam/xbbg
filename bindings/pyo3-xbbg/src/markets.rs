@@ -226,7 +226,11 @@ fn to_exchange_info_dict(info: ExchangeInfo) -> ExchangeInfoDict {
 }
 
 /// Register all markets functions on the module.
+///
+/// Parses the embedded exchange table once, detached, so rule lookups never
+/// parse it while attached.
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.py().detach(sessions::preload);
     m.add_function(wrap_pyfunction!(ext_derive_sessions, m)?)?;
     m.add_function(wrap_pyfunction!(ext_get_market_rule, m)?)?;
     m.add_function(wrap_pyfunction!(ext_infer_timezone, m)?)?;

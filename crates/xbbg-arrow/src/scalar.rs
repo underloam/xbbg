@@ -488,6 +488,62 @@ pub fn cell_has_value(cell: &CellValue) -> bool {
     }
 }
 
+/// Whether any row of `array` is present under [`cell_has_value`] semantics.
+///
+/// Equivalent to `(0..array.len()).any(|row| cell_has_value(&cell_from_array(array, row)))`,
+/// but text arrays are tested in place and types whose every non-null value
+/// decodes to a present cell reduce to a null count, so no per-cell value is
+/// allocated.
+pub fn array_has_value(array: &dyn Array) -> bool {
+    match array.data_type() {
+        DataType::Utf8 => text_has_value(
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("StringArray")
+                .iter(),
+        ),
+        DataType::LargeUtf8 => text_has_value(
+            array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("LargeStringArray")
+                .iter(),
+        ),
+        DataType::Utf8View => text_has_value(
+            array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .expect("StringViewArray")
+                .iter(),
+        ),
+        DataType::Boolean
+        | DataType::Int8
+        | DataType::Int16
+        | DataType::Int32
+        | DataType::Int64
+        | DataType::UInt8
+        | DataType::UInt16
+        | DataType::UInt32
+        | DataType::UInt64
+        | DataType::Float16
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Time32(TimeUnit::Second | TimeUnit::Millisecond)
+        | DataType::Time64(TimeUnit::Microsecond | TimeUnit::Nanosecond)
+        | DataType::Timestamp(TimeUnit::Microsecond | TimeUnit::Nanosecond, _) => {
+            array.null_count() < array.len()
+        }
+        // Dates and coarse timestamps can decode to absent on overflow, and
+        // unsupported types always decode to absent: keep the per-cell rule.
+        _ => (0..array.len()).any(|row| cell_has_value(&cell_from_array(array, row))),
+    }
+}
+
+fn text_has_value<'a>(mut values: impl Iterator<Item = Option<&'a str>>) -> bool {
+    values.any(|value| value.is_some_and(|text| !text.is_empty()))
+}
+
 /// Parse a carrier scalar as a date when possible.
 pub fn date_from_cell(cell: &CellValue) -> Option<NaiveDate> {
     match cell {

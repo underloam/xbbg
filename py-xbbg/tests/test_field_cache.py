@@ -132,7 +132,7 @@ def test_constructor_cache_path_is_rejected():
         FieldTypeCache(cache_path="ignored.json")
 
 
-def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monkeypatch):
+def test_schema_cache_management_delegates_to_engine(monkeypatch):
     from xbbg import _engine
     import xbbg.schema as schema_module
 
@@ -140,7 +140,6 @@ def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monke
         def __init__(self):
             self.invalidated = []
             self.clear_calls = 0
-            self.resolve_calls = []
 
         def invalidate_schema(self, service: str) -> None:
             self.invalidated.append(service)
@@ -148,51 +147,42 @@ def test_schema_invalidation_clears_schema_parse_and_blp_field_type_caches(monke
         def clear_schema_cache(self) -> None:
             self.clear_calls += 1
 
-        async def resolve_field_types(self, fields, overrides, default_type):
-            self.resolve_calls.append((list(fields), overrides, default_type))
-            return dict.fromkeys(fields, default_type)
-
     fake_engine = FakeEngine()
-    json_schema = '{"service":"//blp/refdata","description":"refdata","operations":[],"cached_at":"1"}'
     monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
-    schema_module._parse_service_schema_json.cache_clear()
-    _engine._clear_field_type_resolution_cache()
 
-    try:
-        parsed_before = schema_module.ServiceSchema.from_json(json_schema)
-        _CASE.assertIs(schema_module.ServiceSchema.from_json(json_schema), parsed_before)
-        _CASE.assertEqual(
-            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
-            {"PX_LAST": "string"},
-        )
-        _CASE.assertEqual(
-            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
-            {"PX_LAST": "string"},
-        )
-        _CASE.assertEqual(len(fake_engine.resolve_calls), 1)
-
-        schema_module.invalidate_schema("//blp/refdata")
-
-        parsed_after_invalidate = schema_module.ServiceSchema.from_json(json_schema)
-        _CASE.assertIsNot(parsed_after_invalidate, parsed_before)
-        _CASE.assertEqual(
-            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
-            {"PX_LAST": "string"},
-        )
-        _CASE.assertEqual(len(fake_engine.resolve_calls), 2)
-
-        schema_module.clear_schema_cache()
-
-        parsed_after_clear = schema_module.ServiceSchema.from_json(json_schema)
-        _CASE.assertIsNot(parsed_after_clear, parsed_after_invalidate)
-        _CASE.assertEqual(
-            asyncio.run(_engine._resolve_field_types_cached(["PX_LAST"], None, "string")),
-            {"PX_LAST": "string"},
-        )
-        _CASE.assertEqual(len(fake_engine.resolve_calls), 3)
-    finally:
-        schema_module._parse_service_schema_json.cache_clear()
-        _engine._clear_field_type_resolution_cache()
+    schema_module.invalidate_schema("//blp/refdata")
+    schema_module.clear_schema_cache()
 
     _CASE.assertEqual(fake_engine.invalidated, ["//blp/refdata"])
     _CASE.assertEqual(fake_engine.clear_calls, 1)
+
+
+def test_parsed_schemas_are_caller_owned(monkeypatch):
+    from xbbg import _engine
+    import xbbg.schema as schema_module
+
+    json_schema = (
+        '{"service":"//blp/refdata","description":"refdata","cached_at":"1",'
+        '"operations":[{"name":"ReferenceDataRequest","description":"","request":{"name":"Request"},'
+        '"responses":[]}]}'
+    )
+
+    class FakeEngine:
+        async def get_schema(self, service: str) -> str:
+            return json_schema
+
+    monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
+
+    parsed = schema_module.ServiceSchema.from_json(json_schema)
+    parsed.operations.clear()
+    _CASE.assertEqual(
+        [op.name for op in schema_module.ServiceSchema.from_json(json_schema).operations],
+        ["ReferenceDataRequest"],
+    )
+
+    fetched = asyncio.run(schema_module.aget_schema("//blp/refdata"))
+    fetched.operations.clear()
+    _CASE.assertEqual(
+        [op.name for op in asyncio.run(schema_module.aget_schema("//blp/refdata")).operations],
+        ["ReferenceDataRequest"],
+    )
