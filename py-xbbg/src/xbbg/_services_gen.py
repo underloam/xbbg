@@ -104,7 +104,7 @@ class ExtractorHint(str, Enum):
     """Bulk data extractor: [ticker, field, row_idx, col1, col2, ...]"""
 
     FIELD_INFO = "fieldinfo"
-    """Field info extractor: [field, type, description, category]"""
+    """Field info extractor: [field, type, description, category, id]"""
 
     GENERIC = "generic"
     """Generic flattener: [path, type, value_str, value_num, value_date]"""

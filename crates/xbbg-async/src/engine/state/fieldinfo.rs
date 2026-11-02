@@ -5,7 +5,7 @@
 //! - type: Arrow type string (e.g., "float64", "string", "date32")
 //! - description: Field description
 //! - category: Category name
-//! - id: Echoed request id (falls back to the mnemonic when absent)
+//! - id: Bloomberg field id of the answered item (falls back to the mnemonic when absent)
 //!
 //! Extracts directly from Bloomberg Elements without JSON intermediate.
 
@@ -33,7 +33,7 @@ pub struct FieldInfoState {
     description_builder: StringBuilder,
     /// Category builder
     category_builder: StringBuilder,
-    /// Enclosing echoed field id builder
+    /// Bloomberg field id builder (refused request ids go to `field_errors`)
     id_builder: StringBuilder,
     /// Field lookup refusals, retained across partial responses
     field_errors: BTreeMap<String, FieldErrorMeta>,
@@ -147,7 +147,7 @@ impl FieldInfoState {
                 continue;
             };
 
-            // Keep the canonical mnemonic separate from the echoed request id.
+            // Keep the canonical mnemonic separate from Bloomberg's field id.
             let field = field_info
                 .get_by_str("mnemonic")
                 .and_then(|e| e.get_str(0))
@@ -594,6 +594,13 @@ mod tests {
             ] {
                 assert!(warnings.contains(expected), "{warnings}");
             }
+            assert_eq!(
+                warnings
+                    .matches("Bloomberg refused field type metadata")
+                    .count(),
+                1,
+                "a refused id is reported once across repeated lookups: {warnings}"
+            );
             assert!(cache.get("REFUSED_FIELD").is_none());
             assert_eq!(cache.get("synthetic_alias").is_some(), answered);
             assert_eq!(cache.get("SYNTHETIC_DATE").is_some(), answered);

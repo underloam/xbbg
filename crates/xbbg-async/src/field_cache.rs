@@ -449,7 +449,7 @@ impl FieldTypeResolver {
     /// - type: Arrow type string (e.g., "float64")
     /// - description: Field description
     /// - category: Category name
-    /// - id: Echoed request id, indexed alongside the mnemonic when present
+    /// - id: Bloomberg field id (e.g. `PR005`), indexed alongside the mnemonic when present
     pub fn insert_from_response(&self, batch: &RecordBatch) {
         self.ensure_loaded();
 
@@ -507,10 +507,10 @@ impl FieldTypeResolver {
                 .and_then(|column| (!column.is_null(i)).then(|| column.value(i)))
                 .filter(|id| !id.is_empty())
             {
-                let echoed_id = id.to_uppercase();
-                if echoed_id != info.field_id {
+                let bloomberg_id = id.to_uppercase();
+                if bloomberg_id != info.field_id {
                     entries.push(FieldInfo {
-                        field_id: echoed_id,
+                        field_id: bloomberg_id,
                         arrow_type: info.arrow_type.clone(),
                         description: info.description.clone(),
                         category: info.category.clone(),

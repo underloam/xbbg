@@ -108,11 +108,15 @@ fn parse_metadata_json(
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn _decode_field_exceptions(py: Python<'_>, raw: &str) -> PyResult<Py<PyAny>> {
-    let exceptions = FieldExceptions::from_json(raw).map_err(|err| {
-        PyValueError::new_err(format!(
-            "invalid JSON in {METADATA_KEY_FIELD_EXCEPTIONS}: {err}"
-        ))
-    })?;
+    // Decoding (including large historical maps) is pure Rust; only the
+    // expanded Python objects below need the GIL.
+    let exceptions = py
+        .detach(|| FieldExceptions::from_json(raw))
+        .map_err(|err| {
+            PyValueError::new_err(format!(
+                "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {err}"
+            ))
+        })?;
     let securities = PyDict::new(py);
     for ticker in exceptions.securities() {
         let values = PyList::empty(py);

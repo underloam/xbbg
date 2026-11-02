@@ -238,7 +238,7 @@ doc = "BSRCH: Bloomberg Search responses."
 [extractors.FIELD_INFO]
 rust_name = "FieldInfo"
 value = "fieldinfo"
-doc = "Field info extractor: [field, type, description, category]"
+doc = "Field info extractor: [field, type, description, category, id]"
 
 
 # ============================================================================

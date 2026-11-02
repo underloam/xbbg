@@ -317,7 +317,7 @@ pub enum ExtractorType {
     Bsrch,
     /// Bulk data extractor: [ticker, field, row_idx, col1, col2, ...]
     BulkData,
-    /// Field info extractor: [field, type, description, category]
+    /// Field info extractor: [field, type, description, category, id]
     FieldInfo,
     /// Generic flattener: [path, type, value_str, value_num, value_date]
     Generic,

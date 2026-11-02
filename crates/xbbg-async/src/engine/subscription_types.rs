@@ -4,7 +4,7 @@
 //! seeding is best-effort: one deadline covers metadata lookup and persistence,
 //! and missing or unsupported metadata never establishes a string field kind.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -66,6 +66,9 @@ pub(crate) struct SubscriptionTypeResolver {
     query: FieldInfoQuery,
     cache: Arc<FieldTypeResolver>,
     runtime: Handle,
+    /// Refused ids are never cached, so each lookup re-queries them; report
+    /// each one once per resolver instead of on every subscribe.
+    reported_refusals: parking_lot::Mutex<HashSet<String>>,
 }
 
 impl SubscriptionTypeResolver {
@@ -82,6 +85,7 @@ impl SubscriptionTypeResolver {
             query: FieldInfoQuery::Worker { pool, schema_cache },
             cache,
             runtime,
+            reported_refusals: parking_lot::Mutex::new(HashSet::new()),
         }
     }
 
@@ -99,6 +103,7 @@ impl SubscriptionTypeResolver {
             query: FieldInfoQuery::Injected(Box::new(query)),
             cache,
             runtime,
+            reported_refusals: parking_lot::Mutex::new(HashSet::new()),
         }
     }
 
@@ -128,11 +133,20 @@ impl SubscriptionTypeResolver {
                 Ok(batch) => {
                     match field_errors_from_response(&batch) {
                         Ok(errors) if !errors.is_empty() => {
-                            xbbg_log::warn!(
-                                refused_count = errors.len(),
-                                field_errors = ?errors,
-                                "Bloomberg refused field type metadata; using cached types and defaults for refused ids"
-                            );
+                            let unreported: BTreeMap<_, _> = {
+                                let mut reported = self.reported_refusals.lock();
+                                errors
+                                    .into_iter()
+                                    .filter(|(id, _)| reported.insert(id.clone()))
+                                    .collect()
+                            };
+                            if !unreported.is_empty() {
+                                xbbg_log::warn!(
+                                    refused_count = unreported.len(),
+                                    field_errors = ?unreported,
+                                    "Bloomberg refused field type metadata; using cached types and defaults for refused ids"
+                                );
+                            }
                         }
                         Ok(_) => {}
                         Err(error) => {

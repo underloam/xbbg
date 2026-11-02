@@ -62,8 +62,8 @@ Response diagnostics use `xbbg_async::diagnostics` for compact field exceptions 
 per-id field metadata errors. `xbbg.field_exceptions` writes a version-1 dictionary
 of unique exception payloads with ordered per-security indices; the shared codec
 also reads historical expanded maps and validates every index before merging.
-FieldInfo tables retain the enclosing echoed `id` alongside the mnemonic and
-preserve refused ids under `xbbg.field_errors`, including metadata-only failures.
+FieldInfo tables add Bloomberg's field `id` alongside the mnemonic and
+preserve refused request ids under `xbbg.field_errors`, including metadata-only failures.
 See the [response diagnostic contract](../../README.md#response-diagnostics).
 
 Historical and intraday-bar streams never silently drop a chunk when their

@@ -521,7 +521,7 @@ Bloomberg returns EIDs only for exchanges the requester is entitled to, so a sec
 
 ## Response diagnostics
 
-`bflds(fields=...)` and `FieldInfoRequest` tables append an `id` column containing Bloomberg's echoed request identifier, separately from the canonical `field` mnemonic. Refused ids remain available in `xbbg.field_errors` schema metadata, including their category, code, subcategory, message, and source when supplied. A result with no successful rows still retains these diagnostics.
+`bflds()` tables, for both `fields=` and `search_spec=`, and `FieldInfoRequest` tables append an `id` column holding Bloomberg's field id for each answered field (for example `PR005`), separately from the canonical `field` mnemonic. Request ids Bloomberg refuses are keyed verbatim in `xbbg.field_errors` schema metadata, including their category, code, subcategory, message, and source when supplied. A result with no successful rows still retains these diagnostics.
 
 Native Python tables and batches expose `.field_errors` and `.field_exceptions`; pandas retains them in `attrs["xbbg_field_errors"]` and `attrs["xbbg_field_exceptions"]`. Node result containers expose `fieldErrors` and `fieldExceptions`. PyArrow retains the raw UTF-8 JSON in schema metadata.
 

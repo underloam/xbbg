@@ -1187,7 +1187,7 @@ impl Engine {
     ///
     /// Queries `//blp/apiflds` for the given fields and returns a list of
     /// invalid or refused field names, warning with Bloomberg's refusal details.
-    /// Echoed ids and canonical mnemonics both identify successful responses.
+    /// Bloomberg field ids and canonical mnemonics both identify successful responses.
     ///
     /// # Example
     /// ```ignore
@@ -1195,7 +1195,17 @@ impl Engine {
     /// // invalid = ["INVALID_FIELD"]
     /// ```
     pub async fn validate_fields(&self, fields: &[String]) -> Result<Vec<String>, BlpAsyncError> {
-        Ok(self.validate_field_metadata(fields).await?.invalid_fields)
+        let validation = self.validate_field_metadata(fields).await?;
+        // The returned names cannot carry Bloomberg's reasons, so report them here.
+        // Request validation warns (lenient) or raises (strict) with them instead.
+        if !validation.field_errors.is_empty() {
+            xbbg_log::warn!(
+                refused_count = validation.field_errors.len(),
+                field_errors = ?validation.field_errors,
+                "Bloomberg refused field validation ids"
+            );
+        }
+        Ok(validation.invalid_fields)
     }
 
     async fn validate_field_metadata(
@@ -1218,15 +1228,7 @@ impl Engine {
         let params = self.prepare_request_builder(params)?.finalize()?;
         let batch = self.request_pool.request(params).await?;
 
-        let validation = FieldValidation::from_response(fields, &batch)?;
-        if !validation.field_errors.is_empty() {
-            xbbg_log::warn!(
-                refused_count = validation.field_errors.len(),
-                field_errors = ?validation.field_errors,
-                "Bloomberg refused field validation ids"
-            );
-        }
-        Ok(validation)
+        FieldValidation::from_response(fields, &batch)
     }
 
     /// Check if field validation is enabled based on validation mode.
