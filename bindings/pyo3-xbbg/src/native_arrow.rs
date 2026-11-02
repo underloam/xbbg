@@ -1579,12 +1579,14 @@ impl ArrowTable {
         false
     }
 
+    /// Excel-style BDH presentation; sorting keys rows by `key_column`.
     fn apply_historical_presentation(
         &self,
         show_date: Option<bool>,
         date_format: Option<String>,
         sort: Option<String>,
         periodicity: Option<String>,
+        key_column: &str,
     ) -> PyResult<Self> {
         let mut result = self.clone();
 
@@ -1597,8 +1599,8 @@ impl ArrowTable {
                 "ascending"
             };
             let mut sort_keys = Vec::new();
-            if result.data.schema.index_of("ticker").is_ok() {
-                sort_keys.push(("ticker".to_string(), "ascending".to_string()));
+            if result.data.schema.index_of(key_column).is_ok() {
+                sort_keys.push((key_column.to_string(), "ascending".to_string()));
             }
             sort_keys.push(("date".to_string(), date_order.to_string()));
             if result.data.schema.index_of("field").is_ok() {
@@ -1647,10 +1649,11 @@ impl ArrowTable {
         Ok(result)
     }
 
-    fn reshape_bqr_generic(&self, ticker: &str) -> PyResult<Self> {
+    /// Quote rows from generic tick output, with the security in `key_column`.
+    fn reshape_bqr_generic(&self, ticker: &str, key_column: &str) -> PyResult<Self> {
         let Ok(path_idx) = self.data.schema.index_of("path") else {
             return map_core(TableData::empty_from_columns(vec![
-                "ticker".to_string(),
+                key_column.to_string(),
                 "time".to_string(),
                 "type".to_string(),
                 "value".to_string(),
@@ -1689,7 +1692,7 @@ impl ArrowTable {
 
         if records.is_empty() {
             return map_core(TableData::empty_from_columns(vec![
-                "ticker".to_string(),
+                key_column.to_string(),
                 "time".to_string(),
                 "type".to_string(),
                 "value".to_string(),
@@ -1698,15 +1701,15 @@ impl ArrowTable {
             .map(Self::from_data);
         }
 
-        let priority = ["ticker", "time", "type", "value", "size"];
-        let mut columns = vec!["ticker".to_string()];
-        for name in priority.iter().skip(1) {
-            if fields.contains(*name) {
-                columns.push((*name).to_string());
+        const TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
+        let mut columns = vec![key_column.to_string()];
+        for name in TICK_COLUMNS {
+            if fields.contains(name) {
+                columns.push(name.to_string());
             }
         }
         for name in fields {
-            if !priority.contains(&name.as_str()) {
+            if name != key_column && !TICK_COLUMNS.contains(&name.as_str()) {
                 columns.push(name);
             }
         }
@@ -1717,7 +1720,7 @@ impl ArrowTable {
             let cells = records
                 .values()
                 .map(|record| {
-                    if column == "ticker" {
+                    if column == key_column {
                         CellValue::Text(ticker.to_string())
                     } else {
                         record.get(column).cloned().unwrap_or(CellValue::Null)

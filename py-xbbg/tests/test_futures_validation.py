@@ -11,11 +11,10 @@ from datetime import UTC, date, datetime
 import inspect
 from typing import Any
 
-import narwhals.stable.v1 as nw
-import pyarrow as pa
 import pytest
 
 from xbbg._core import ArrowTable
+from xbbg.backend import _convert_result_backend
 from xbbg.ext import futures
 
 
@@ -23,11 +22,11 @@ class RecipeRecorder:
     """Record adapter calls without implementing contract selection."""
 
     def __init__(self) -> None:
-        self.calls: list[tuple[str, tuple[Any, ...], Any, dict[str, Any]]] = []
-        self.outcome: Any = pa.table({"ticker": ["ESH24 Index"]})
+        self.calls: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+        self.outcome: Any = ArrowTable.from_pylist([{"ticker": "ESH24 Index"}])
 
-    async def __call__(self, recipe: str, *args: Any, backend=None, **kwargs: Any) -> Any:
-        self.calls.append((recipe, args, backend, kwargs))
+    async def __call__(self, recipe: str, *args: Any, **kwargs: Any) -> Any:
+        self.calls.append((recipe, args, kwargs))
         if isinstance(self.outcome, Exception):
             raise self.outcome
         return self.outcome
@@ -36,7 +35,7 @@ class RecipeRecorder:
 @pytest.fixture
 def recipes(monkeypatch: pytest.MonkeyPatch) -> RecipeRecorder:
     recorder = RecipeRecorder()
-    monkeypatch.setattr(futures, "_call_native_recipe", recorder)
+    monkeypatch.setattr(futures, "_native_recipe", recorder)
     return recorder
 
 
@@ -66,13 +65,13 @@ async def test_futures_normalizes_dates_and_preserves_string_result(recipes, res
     assert result == "ESH24 Index"
     assert isinstance(result, str)
     assert recipes.calls == [
-        (recipe, ("ES1 Index", "20240115", None), None, {"request_options": {}}),
+        (recipe, ("ES1 Index", "20240115", None), {"request_options": {}}),
     ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
-async def test_futures_forwards_frequency_backend_and_all_request_options(recipes, resolver, recipe):
+async def test_futures_forwards_frequency_and_all_request_options(recipes, resolver, recipe):
     options = {
         "overrides": {"CHAIN_DATE": "20240112", "FUT_CHAIN_OPTION": "ALL"},
         "elements": {"periodicitySelection": "DAILY"},
@@ -91,7 +90,7 @@ async def test_futures_forwards_frequency_backend_and_all_request_options(recipe
 
     assert result == "ESH24 Index"
     assert recipes.calls == [
-        (recipe, ("ES1 Index", "20240115", "QE"), "pyarrow", {"request_options": options}),
+        (recipe, ("ES1 Index", "20240115", "QE"), {"request_options": options}),
     ]
     assert "backend" not in options
     assert "freq" not in options
@@ -109,7 +108,7 @@ async def test_futures_propagates_native_validation_without_python_ticker_parsin
 
     assert raised.value is error
     assert recipes.calls == [
-        (recipe, (ticker, "20240115", None), None, {"request_options": {}}),
+        (recipe, (ticker, "20240115", None), {"request_options": {}}),
     ]
 
 
@@ -140,7 +139,7 @@ async def test_futures_rejects_invalid_dates_before_native_dispatch(recipes, res
 @pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
 @pytest.mark.parametrize("tickers", [[], ["ESH24 Index", "ESM24 Index"]])
 async def test_futures_rejects_non_single_row_results(recipes, resolver, recipe, tickers):
-    recipes.outcome = pa.table({"ticker": pa.array(tickers, type=pa.string())})
+    recipes.outcome = ArrowTable.from_pylist([{"ticker": ticker} for ticker in tickers])
 
     with pytest.raises(ValueError, match=f"{recipe} returned .* expected exactly 1"):
         await resolver("ES1 Index", "2024-01-15")
@@ -150,7 +149,7 @@ async def test_futures_rejects_non_single_row_results(recipes, resolver, recipe,
 @pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
 @pytest.mark.parametrize("ticker", [None, ""])
 async def test_futures_rejects_missing_ticker_values(recipes, resolver, recipe, ticker):
-    recipes.outcome = pa.table({"ticker": pa.array([ticker], type=pa.string())})
+    recipes.outcome = ArrowTable.from_pylist([{"ticker": ticker}])
 
     with pytest.raises(ValueError, match=f"{recipe} returned a row without a ticker"):
         await resolver("ES1 Index", "2024-01-15")
@@ -159,7 +158,7 @@ async def test_futures_rejects_missing_ticker_values(recipes, resolver, recipe, 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
 async def test_futures_rejects_missing_ticker_column(recipes, resolver, recipe):
-    recipes.outcome = pa.table({"other": ["ESH24 Index"]})
+    recipes.outcome = ArrowTable.from_pylist([{"other": "ESH24 Index"}])
 
     with pytest.raises(ValueError, match=f"{recipe} returned a row without a ticker"):
         await resolver("ES1 Index", "2024-01-15")
@@ -168,38 +167,23 @@ async def test_futures_rejects_missing_ticker_column(recipes, resolver, recipe):
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
 @pytest.mark.parametrize(
-    "backend", ["native", "pyarrow", "narwhals", "pandas", "polars", "polars_lazy", "narwhals_lazy"]
+    "backend", ["native", "pyarrow", "narwhals", "pandas", "polars", "polars_lazy", "narwhals_lazy", "duckdb"]
 )
-async def test_futures_unwraps_supported_backends(recipes, resolver, recipe, backend):
-    table = pa.table({"ticker": ["ESH24 Index"]})
-    if backend == "native":
-        recipes.outcome = ArrowTable.from_pylist([{"ticker": "ESH24 Index"}])
-    elif backend == "pyarrow":
-        recipes.outcome = table
-    elif backend == "narwhals":
-        recipes.outcome = nw.from_native(table)
-    elif backend == "pandas":
-        pd = pytest.importorskip("pandas")
-        recipes.outcome = pd.DataFrame({"ticker": ["ESH24 Index"]})
-    else:
-        pl = pytest.importorskip("polars")
-        frame = pl.DataFrame({"ticker": ["ESH24 Index"]})
-        recipes.outcome = frame if backend == "polars" else frame.lazy()
-        if backend == "narwhals_lazy":
-            recipes.outcome = nw.from_native(recipes.outcome)
+async def test_futures_unwraps_supported_backends(recipes, monkeypatch, resolver, recipe, backend):
+    if backend in {"pandas", "duckdb"}:
+        pytest.importorskip(backend)
+    elif backend.startswith("polars") or backend == "narwhals_lazy":
+        pytest.importorskip("polars")
+    converted: list[str] = []
+
+    def convert(table: Any, selected: str) -> Any:
+        converted.append(selected)
+        return _convert_result_backend(table, selected)
+
+    monkeypatch.setattr(futures, "_convert_result_backend", convert)
 
     assert await resolver("ES1 Index", "2024-01-15", backend=backend) == "ESH24 Index"
-    assert recipes.calls[0][2] == backend
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(("resolver", "recipe"), RESOLVERS)
-async def test_futures_unwraps_duckdb_backend(recipes, resolver, recipe):
-    duckdb = pytest.importorskip("duckdb")
-    with duckdb.connect() as connection:
-        recipes.outcome = connection.sql("SELECT 'ESH24 Index' AS ticker")
-        assert await resolver("ES1 Index", "2024-01-15", backend="duckdb") == "ESH24 Index"
-    assert recipes.calls[0][2] == "duckdb"
+    assert converted == [backend]
 
 
 @pytest.mark.parametrize(
@@ -209,7 +193,7 @@ async def test_futures_unwraps_duckdb_backend(recipes, resolver, recipe):
 def test_sync_futures_dispatches_to_same_native_recipe(recipes, resolver, recipe):
     assert resolver("ES1 Index", "2024-01-15", backend="native") == "ESH24 Index"
     assert recipes.calls == [
-        (recipe, ("ES1 Index", "20240115", None), "native", {"request_options": {}}),
+        (recipe, ("ES1 Index", "20240115", None), {"request_options": {}}),
     ]
 
 

@@ -81,8 +81,8 @@ fn ext_fmt_date(year: i32, month: u32, day: u32, fmt: Option<&str>) -> PyResult<
 
 /// Pivot an xbbg ArrowRecordBatch from long to wide format.
 ///
-/// Input: ArrowRecordBatch with columns (ticker, field, value)
-/// Output: ArrowRecordBatch with columns (ticker, field1, field2, ...)
+/// Input: ArrowRecordBatch with columns (security or ticker, field, value)
+/// Output: ArrowRecordBatch with the input's key column, then one column per field
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
 fn ext_pivot_to_wide(py: Python<'_>, batch: PyRef<'_, ArrowRecordBatch>) -> PyResult<Py<PyAny>> {

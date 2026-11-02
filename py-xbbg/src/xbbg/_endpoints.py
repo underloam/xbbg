@@ -84,7 +84,8 @@ async def abdp(
         flds: Single field or list of fields to query.
         backend: DataFrame backend to return. If None, uses global default.
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
-        format: Output format. Options:
+        format: Output format. The leading ``ticker`` column is named
+            ``security`` when the engine sets ``key_column="security"``. Options:
             - Format.LONG (default): ticker, field, value (strings)
             - Format.LONG_TYPED: ticker, field, value_f64, value_i64,
               value_str, value_bool, value_date, value_ts, value_time.
@@ -155,7 +156,8 @@ async def abdh(
         end_date: End date. Defaults to 'today'.
         backend: DataFrame backend to return. If None, uses global default.
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
-        format: Output format. Options:
+        format: Output format. The leading ``ticker`` column is named
+            ``security`` when the engine sets ``key_column="security"``. Options:
             - Format.LONG (default): ticker, date, field, value (strings)
             - Format.LONG_TYPED: ticker, date, field, value_f64, value_i64,
               value_str, value_bool, value_date, value_ts, value_time.
@@ -223,7 +225,8 @@ async def abds(
 
     Returns:
         DataFrame with one row per Bloomberg bulk row. The only xbbg-added
-        columns are ``ticker`` and ``field``; bulk subfield columns preserve
+        columns are ``ticker`` (``security`` with ``key_column="security"``)
+        and ``field``; bulk subfield columns preserve
         Bloomberg's labels exactly as emitted, including spaces, punctuation,
         and case. Higher-level helpers must rename their own semantic outputs.
 
@@ -481,7 +484,7 @@ def _parse_date_offset(offset: str, reference: datetime) -> datetime:
 
 def _reshape_bqr_generic(table: Any, ticker: str) -> Any:
     """Reshape generic extractor output into structured BQR rows via native Arrow."""
-    return table.reshape_bqr_generic(ticker)
+    return table.reshape_bqr_generic(ticker, _engine._active_key_column())
 
 
 _BQR_RENAME_MAP: dict[str, str] = {
@@ -530,6 +533,7 @@ def _postprocess_bqr_result(
 
     if "path" in table.column_names:
         table = _reshape_bqr_generic(table, ticker)
+        _engine._warn_ticker_key_column(table)
 
     if enforce_broker_codes and table.num_rows > 0 and not _bqr_has_broker_code_value(table):
         raise RuntimeError(
@@ -583,7 +587,8 @@ async def abqr(
         **kwargs: Additional options.
 
     Returns:
-        DataFrame with columns: ticker, time, event_type, price, size,
+        DataFrame with columns: ticker (``security`` with
+        ``key_column="security"``), time, event_type, price, size,
         plus optional broker_buy, broker_sell, spread_price, etc.
 
     Example::

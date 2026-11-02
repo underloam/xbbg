@@ -305,8 +305,14 @@ class ArrowTable:
     def set_column(self, index: builtins.int, name: builtins.str, values: typing.Any) -> ArrowTable: ...
     def head(self, n: builtins.int) -> ArrowTable: ...
     def has_any_value(self, names: typing.Sequence[builtins.str]) -> builtins.bool: ...
-    def apply_historical_presentation(self, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str]) -> ArrowTable: ...
-    def reshape_bqr_generic(self, ticker: builtins.str) -> ArrowTable: ...
+    def apply_historical_presentation(self, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> ArrowTable:
+        r"""
+        Excel-style BDH presentation; sorting keys rows by `key_column`.
+        """
+    def reshape_bqr_generic(self, ticker: builtins.str, key_column: builtins.str) -> ArrowTable:
+        r"""
+        Quote rows from generic tick output, with the security in `key_column`.
+        """
     def __repr__(self) -> builtins.str: ...
 
 @typing.final
@@ -687,6 +693,20 @@ class PyEngineConfig:
         r"""
         Validation mode: "disabled" (default), "lenient", or "strict".
         Also accepts "off" and "none" as aliases for "disabled".
+        """
+    @property
+    def key_column(self) -> builtins.str:
+        r"""
+        Name of the result column holding each row's security: "ticker"
+        (default, deprecated) or "security", which becomes the default in the
+        next major release.
+        """
+    @key_column.setter
+    def key_column(self, value: builtins.str) -> None:
+        r"""
+        Name of the result column holding each row's security: "ticker"
+        (default, deprecated) or "security", which becomes the default in the
+        next major release.
         """
     @property
     def subscription_flush_threshold(self) -> builtins.int:
@@ -1450,8 +1470,8 @@ def ext_pivot_to_wide(batch: ArrowRecordBatch) -> typing.Any:
     r"""
     Pivot an xbbg ArrowRecordBatch from long to wide format.
     
-    Input: ArrowRecordBatch with columns (ticker, field, value)
-    Output: ArrowRecordBatch with columns (ticker, field1, field2, ...)
+    Input: ArrowRecordBatch with columns (security or ticker, field, value)
+    Output: ArrowRecordBatch with the input's key column, then one column per field
     """
 
 def ext_previous_cdx_series(ticker: builtins.str) -> typing.Optional[builtins.str]:

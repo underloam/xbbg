@@ -284,8 +284,9 @@ async def abqr(
 
     Returns:
         Time-sorted native dealer quote data in the configured backend. Columns
-        typically include ticker, time, event_type, price, size, broker_buy, and
-        broker_sell. Extra include fields and timezone metadata are preserved.
+        typically include ticker (``security`` with ``key_column="security"``),
+        time, event_type, price, size, broker_buy, and broker_sell. Extra
+        include fields and timezone metadata are preserved.
 
     Raises:
         RuntimeError: Nonempty quotes have no broker attribution when

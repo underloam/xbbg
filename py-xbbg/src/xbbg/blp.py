@@ -523,7 +523,8 @@ async def adelay_status(
         backend: DataFrame backend to return. If None, uses global default.
 
     Returns:
-        One row per ticker with columns ``ticker``, ``delayed`` (null when
+        One row per ticker with columns ``ticker`` (or ``security`` with
+        ``key_column="security"``), ``delayed`` (null when
         Bloomberg did not say), ``delay_minutes`` (null when real-time or
         unparseable), ``exchange_delay`` (raw ``EXCHANGE_DELAY`` text),
         ``exch_code``, ``realtime_eid1``-``realtime_eid4`` and ``delayed_eid``
@@ -545,6 +546,7 @@ async def adelay_status(
         if mapped is exc:
             raise
         raise mapped from exc
+    _engine._warn_ticker_key_column(batch)
     return _backend._convert_result_backend(batch, backend)
 
 
@@ -645,6 +647,7 @@ async def _execute_request_terminal(context: RequestContext) -> DataFrameResult:
     context.table = ensure_arrow_table(batch)
     if context.params.on_delayed == "warn":
         _warn_delayed_data(context.table)
+    _engine._warn_ticker_key_column(context.table)
     context.frame = context.table
     return context.table
 

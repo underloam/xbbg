@@ -16,7 +16,7 @@ async def test_recipe_dispatch_normalizes_options_before_native_call(monkeypatch
     from xbbg import _core, _engine
 
     engine = object()
-    batch = object()
+    batch = _core.ArrowTable.empty([])
     native = AsyncMock(return_value=batch)
     monkeypatch.setattr(_core, "recipe_yas", native)
     monkeypatch.setattr(_engine, "_get_engine", lambda: engine)
@@ -67,7 +67,7 @@ async def test_recipe_dispatch_normalizes_options_before_native_call(monkeypatch
 async def test_existing_recipes_do_not_receive_new_options_unless_requested(monkeypatch):
     from xbbg import _core, _engine
 
-    native = AsyncMock(return_value=object())
+    native = AsyncMock(return_value=_core.ArrowTable.empty([]))
     engine = object()
     monkeypatch.setattr(_core, "recipe_index_members", native)
     monkeypatch.setattr(_engine, "_get_engine", lambda: engine)

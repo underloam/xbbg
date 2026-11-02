@@ -37,10 +37,10 @@ def _syncify(async_func: Callable[_P, Coroutine[Any, Any, _T]]) -> Callable[_P, 
     return wrapper
 
 
-async def _call_native_recipe(
-    recipe_name: str, *args: Any, backend: Any = None, request_options: Mapping[str, Any] | None = None, **kwargs: Any
+async def _native_recipe(
+    recipe_name: str, *args: Any, request_options: Mapping[str, Any] | None = None, **kwargs: Any
 ) -> Any:
-    """Call a native recipe through the active engine and convert its Arrow output."""
+    """Call a native recipe through the active engine and return its native Arrow output."""
     from xbbg import _core, _engine
 
     recipe = getattr(_core, recipe_name)
@@ -48,12 +48,22 @@ async def _call_native_recipe(
         kwargs["request_options"] = _recipe_request_options(request_options)
     try:
         engine = _engine._get_engine()
-        batch = await recipe(engine, *args, **kwargs)
+        return await recipe(engine, *args, **kwargs)
     except Exception as exc:
         mapped = _engine._normalize_engine_exception(exc)
         if mapped is exc:
             raise
         raise mapped from exc
+
+
+async def _call_native_recipe(
+    recipe_name: str, *args: Any, backend: Any = None, request_options: Mapping[str, Any] | None = None, **kwargs: Any
+) -> Any:
+    """Call a native recipe through the active engine and convert its Arrow output."""
+    from xbbg import _engine
+
+    batch = await _native_recipe(recipe_name, *args, request_options=request_options, **kwargs)
+    _engine._warn_ticker_key_column(batch)
     return _convert_result_backend(batch, backend)
 
 

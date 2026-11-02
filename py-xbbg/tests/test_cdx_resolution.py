@@ -27,8 +27,7 @@ class RecipeRecorder:
         self.calls: list[tuple[str, tuple[Any, ...]]] = []
         self.outcome: Any = _ticker_table("CDX IG CDSI S34 V1 5Y Corp")
 
-    async def __call__(self, recipe_name: str, *args: Any, backend: Any = None, **kwargs: Any) -> Any:
-        assert backend == "native", "single-ticker recipes must bypass backend conversion"
+    async def __call__(self, recipe_name: str, *args: Any, **kwargs: Any) -> Any:
         assert not kwargs
         self.calls.append((recipe_name, args))
         if isinstance(self.outcome, Exception):
@@ -39,7 +38,7 @@ class RecipeRecorder:
 @pytest.fixture
 def recipes(monkeypatch: pytest.MonkeyPatch) -> RecipeRecorder:
     recorder = RecipeRecorder()
-    monkeypatch.setattr("xbbg.ext.futures._call_native_recipe", recorder)
+    monkeypatch.setattr("xbbg.ext.futures._native_recipe", recorder)
     return recorder
 
 

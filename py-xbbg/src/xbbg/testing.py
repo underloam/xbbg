@@ -6,7 +6,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
-from . import blp
+from . import _engine, blp
 from .backend import _convert_result_backend
 
 
@@ -99,12 +99,13 @@ def _stringify_value(value: Any) -> str | None:
 
 
 def _reference_rows(data: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any]]:
+    key_column = _engine._active_key_column()
     rows: list[dict[str, Any]] = []
     for ticker, fields in data.items():
         for field_name, value in fields.items():
             rows.append(
                 {
-                    "ticker": ticker,
+                    key_column: ticker,
                     "field": field_name,
                     "value": _stringify_value(value),
                 }
@@ -113,6 +114,7 @@ def _reference_rows(data: Mapping[str, Mapping[str, Any]]) -> list[dict[str, Any
 
 
 def _historical_rows(data: Mapping[str, Any]) -> list[dict[str, Any]]:
+    key_column = _engine._active_key_column()
     rows: list[dict[str, Any]] = []
     for ticker, ticker_payload in data.items():
         if isinstance(ticker_payload, Mapping):
@@ -122,7 +124,7 @@ def _historical_rows(data: Mapping[str, Any]) -> list[dict[str, Any]]:
                 for field_name, value in fields.items():
                     rows.append(
                         {
-                            "ticker": ticker,
+                            key_column: ticker,
                             "date": str(date_value),
                             "field": field_name,
                             "value": _stringify_value(value),
@@ -138,7 +140,7 @@ def _historical_rows(data: Mapping[str, Any]) -> list[dict[str, Any]]:
                         continue
                     rows.append(
                         {
-                            "ticker": ticker,
+                            key_column: ticker,
                             "date": str(date_value),
                             "field": key,
                             "value": _stringify_value(value),

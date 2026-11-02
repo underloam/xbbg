@@ -294,6 +294,7 @@ def _apply_historical_presentation(
         presentation.date_format,
         presentation.sort,
         periodicity,
+        _engine._active_key_column(),
     )
 
 
