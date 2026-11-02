@@ -351,6 +351,10 @@ jobs:
   release-assets:
     needs: bump-version
     if: inputs.create_release == true
+    # The repository's default GITHUB_TOKEN is read-only, and a called workflow
+    # cannot exceed its caller's grant; without this the run fails at startup.
+    permissions:
+      contents: write
     uses: ./.github/workflows/release_assets.yml
     with:
       tag: ${{ needs.bump-version.outputs.tag }}
