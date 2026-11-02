@@ -25,6 +25,8 @@ __all__ = [
     "PyEngine",
     "PyEngineConfig",
     "PySubscription",
+    "apresent_historical",
+    "ashape_bqr",
     "enable_sdk_logging",
     "ext_auction_field_groups",
     "ext_auction_zero_price_fields",
@@ -160,6 +162,18 @@ class ArrowColumn:
     def null_count(self) -> builtins.int: ...
     @property
     def nbytes(self) -> builtins.int: ...
+    @property
+    def logical_nbytes(self) -> builtins.int:
+        r"""
+        Bytes a right-sized copy of this column's logical slice would occupy.
+        
+        Computed without copying, unlike `compact().nbytes`, and unlike
+        `nbytes`, which counts the full buffers a slice still references.
+        Counts value bytes, offsets or 16-byte views, and validity bitmaps:
+        variable-width types count only the sliced value span, and
+        `Utf8View`/`BinaryView` count the out-of-line bytes of values longer
+        than 12 bytes. List children and dictionary values are counted in full.
+        """
     def slice(self, offset: builtins.int = 0, length: typing.Optional[builtins.int] = None) -> ArrowColumn: ...
     def compact(self) -> ArrowColumn:
         r"""
@@ -206,6 +220,15 @@ class ArrowRecordBatch:
     def field_exceptions(self) -> typing.Any: ...
     @property
     def field_errors(self) -> typing.Any: ...
+    def metadata_sizes(self) -> builtins.dict[builtins.str, builtins.int]:
+        r"""
+        UTF-8 byte length of each schema-metadata value, without copying values.
+        """
+    def metadata_value(self, key: builtins.str, max_bytes: typing.Optional[builtins.int] = None) -> typing.Optional[builtins.str]:
+        r"""
+        One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+        to a character boundary; `None` when the key is absent.
+        """
     def __arrow_c_array__(self, requested_schema: typing.Optional[typing.Any] = None) -> tuple: ...
     def __arrow_c_schema__(self) -> typing.Any: ...
     def to_pylist(self) -> builtins.list[typing.Any]: ...
@@ -271,11 +294,28 @@ class ArrowTable:
     @classmethod
     def from_pylist(cls, rows: typing.Any, schema: typing.Optional[typing.Any] = None) -> ArrowTable: ...
     @classmethod
+    def from_pydict(cls, columns: typing.Any) -> ArrowTable:
+        r"""
+        Build a table from a mapping of column name to values, in mapping order.
+        
+        Cells are typed like `from_pylist`; every column must have the same
+        length.
+        """
+    @classmethod
     def empty(cls, schema_or_columns: typing.Any) -> ArrowTable: ...
     @classmethod
     def from_batches(cls, batches: typing.Any) -> ArrowTable: ...
     @classmethod
     def concat_tables(cls, tables: typing.Any) -> ArrowTable: ...
+    def metadata_sizes(self) -> builtins.dict[builtins.str, builtins.int]:
+        r"""
+        UTF-8 byte length of each schema-metadata value, without copying values.
+        """
+    def metadata_value(self, key: builtins.str, max_bytes: typing.Optional[builtins.int] = None) -> typing.Optional[builtins.str]:
+        r"""
+        One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+        to a character boundary; `None` when the key is absent.
+        """
     def __arrow_c_stream__(self, requested_schema: typing.Optional[typing.Any] = None) -> typing.Any: ...
     def __arrow_c_schema__(self) -> typing.Any: ...
     def to_batches(self) -> builtins.list[ArrowRecordBatch]: ...
@@ -283,7 +323,10 @@ class ArrowTable:
     def to_pylist(self) -> builtins.list[typing.Any]: ...
     def to_pyarrow(self) -> typing.Any: ...
     def to_pandas(self) -> typing.Any: ...
-    def to_polars(self) -> typing.Any: ...
+    def to_polars(self) -> typing.Any:
+        r"""
+        Convert to a Polars DataFrame through `xbbg.backend`, keeping native chunks.
+        """
     def column(self, column: typing.Any) -> ArrowColumn: ...
     def get_column(self, column: typing.Any) -> ArrowColumn: ...
     def __getitem__(self, key: typing.Any) -> typing.Any: ...
@@ -312,6 +355,9 @@ class ArrowTable:
     def reshape_bqr_generic(self, ticker: builtins.str, key_column: builtins.str) -> ArrowTable:
         r"""
         Quote rows from generic tick output, with the security in `key_column`.
+        
+        The BQR shaper's reshape, shared with `ashape_bqr`, `xbbg.ext.abqr`
+        and Node `bqr`; schema metadata is kept.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -330,6 +376,9 @@ class EntitlementReport:
 class PyEngine:
     r"""
     Python wrapper for the xbbg Engine.
+    
+    Releasing the last reference stops the engine's Bloomberg sessions on a
+    native background thread.
     """
     def __new__(cls, host: builtins.str = 'localhost', port: builtins.int = 8194) -> PyEngine:
         r"""
@@ -430,7 +479,7 @@ class PyEngine:
         """
     def clear_field_cache(self) -> None:
         r"""
-        Clear the field type cache.
+        Clear the field type cache, including its persisted file.
         """
     def field_cache_stats(self) -> typing.Any:
         r"""
@@ -544,12 +593,14 @@ class PyEngine:
         """
     def signal_shutdown(self) -> None:
         r"""
-        Signal engine shutdown (non-blocking).
+        Signal engine shutdown.
         
-        Signals all worker threads to stop. They will terminate when they
-        finish their current work or see the shutdown signal.
-        
-        Public/manual shutdown remains observable by pending Python operations.
+        Signals all worker threads to stop; they terminate when they finish
+        their current work or see the shutdown signal. Pending Python operations
+        observe the shutdown. Workers are not joined, but this can wait for
+        native lifecycle locks and in-flight partial-response decoding, and it
+        stops idle pooled Bloomberg sessions; the interpreter is released while
+        it runs.
         """
     def worker_health(self) -> builtins.list[tuple[builtins.int, builtins.str]]: ...
     def is_connected(self) -> builtins.bool:
@@ -1145,7 +1196,9 @@ class PySubscription:
         r"""
         Lease the next marked batch as an unpublished receipt. Python converts
         `receipt.value` on its event loop, then `publish()` commits the batch or
-        `discard()` restores it; no backend conversion runs on the async bridge.
+        `discard()` restores it. The receipt is built on a native completion
+        thread; no backend conversion runs on the async bridge, and a read
+        cancelled before completion leaves the batch unread.
         """
     def __anext_tick_dict__(self) -> typing.Any:
         r"""
@@ -1205,6 +1258,58 @@ class PySubscription:
 def _decode_field_exceptions(raw: builtins.str) -> typing.Any: ...
 
 def _signal_interpreter_shutdown() -> None: ...
+
+def _wait_native_teardown() -> None:
+    r"""
+    Wait until no released engine or subscription is still in native teardown
+    (stopping Bloomberg sessions, joining runtimes).
+    
+    Returns at once when nothing is pending and releases the interpreter while
+    waiting. Interpreter exit already waits; other callers rarely need this.
+    """
+
+def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> typing.Any:
+    r"""
+    Apply BDH presentation options off the event loop.
+    
+    Same result as `ArrowTable.apply_historical_presentation`: `sort` orders
+    by `key_column`, date (descending only for "DESCENDING") and field, nulls
+    last; `date_format` "PERIODIC" replaces `date` with a UTF-8 `period` label
+    and "BOTH" inserts it after `date`; `show_date=False` drops both.
+    
+    Args:
+        data: Historical result as an xbbg ArrowTable or ArrowRecordBatch.
+        show_date: False drops the date and period columns.
+        date_format: "PERIODIC" or "BOTH" adds period labels.
+        sort: Sort rows; "DESCENDING" orders dates newest first.
+        periodicity: Label granularity, such as "MONTHLY" (default daily).
+        key_column: Name of the security column, the engine's key column.
+    
+    Returns:
+        An awaitable resolving to an ArrowTable.
+    """
+
+def ashape_bqr(data: typing.Any, ticker: builtins.str, key_column: builtins.str, enforce_broker_codes: builtins.bool = True) -> typing.Any:
+    r"""
+    Shape raw BQR IntradayTick output into quote rows, off the event loop.
+    
+    Uses the BQR recipe's shaper, shared with `xbbg.ext.abqr` and Node: generic
+    `path` output is pivoted into one row per tick with the security in
+    `key_column` (fields holding text are strings; other fields keep the
+    `value_num` type, Float64 from the generic extractor), attributed requests
+    require a broker code, rows are sorted by `time` with nulls last, and
+    Bloomberg names become `event_type`, `price`, `broker_buy`, `broker_sell`,
+    `spread_price`, `condition_codes` and `exchange`. Schema metadata is kept.
+    
+    Args:
+        data: Raw result as an xbbg ArrowTable or ArrowRecordBatch.
+        ticker: Requested security, the key of generic output rows.
+        key_column: Name of the security column, the engine's key column.
+        enforce_broker_codes: Raise RuntimeError when quote rows carry no broker code.
+    
+    Returns:
+        An awaitable resolving to an ArrowTable.
+    """
 
 def enable_sdk_logging(level: builtins.str) -> None: ...
 
@@ -1374,7 +1479,7 @@ def ext_filter_valid_contracts(contracts: typing.Sequence[tuple[builtins.str, bu
         year, month, day: Reference date components.
     
     Returns: List of ticker strings for contracts maturing after the reference date,
-        sorted by maturity date ascending.
+        sorted by maturity date ascending (equal maturities keep input order).
     """
 
 def ext_fmt_date(year: builtins.int, month: builtins.int, day: builtins.int, fmt: typing.Optional[builtins.str] = None) -> builtins.str:
@@ -1385,6 +1490,8 @@ def ext_fmt_date(year: builtins.int, month: builtins.int, day: builtins.int, fmt
 def ext_generate_futures_candidates(gen_ticker: builtins.str, year: builtins.int, month: builtins.int, day: builtins.int, freq: builtins.str = 'M', count: builtins.int = 4) -> builtins.list[tuple[builtins.str, builtins.int, builtins.int]]:
     r"""
     Generate futures contract candidates.
+    
+    ``count`` is at most 10,000; larger values raise ``ValueError``.
     
     Returns list of (ticker, year, month) tuples.
     """
@@ -1449,6 +1556,8 @@ def ext_list_exchange_overrides() -> builtins.dict[builtins.str, typing.Any]:
 def ext_normalize_tickers(tickers: typing.Sequence[builtins.str]) -> builtins.list[builtins.str]:
     r"""
     Normalize tickers to a list.
+    
+    Returns the tickers unchanged: order, duplicates and whitespace are preserved.
     """
 
 def ext_parse_cdx_ticker(ticker: builtins.str) -> tuple[builtins.str, builtins.str, builtins.str, builtins.str, builtins.bool, typing.Optional[builtins.int]]:

@@ -88,7 +88,8 @@ pub fn same_currency(ccy1: &str, ccy2: &str) -> bool {
 
 /// Extract unique currencies from a list that need FX conversion.
 ///
-/// Returns currencies that differ from the target currency.
+/// Returns the upper-cased currencies that differ from the target currency,
+/// sorted and deduplicated. Accepts `&str` or `String` items.
 ///
 /// # Examples
 ///
@@ -97,15 +98,13 @@ pub fn same_currency(ccy1: &str, ccy2: &str) -> bool {
 ///
 /// let currencies = vec!["USD", "GBP", "EUR", "USD"];
 /// let need_fx = currencies_needing_conversion(&currencies, "USD");
-/// assert_eq!(need_fx.len(), 2);
-/// assert!(need_fx.contains(&"GBP".to_string()));
-/// assert!(need_fx.contains(&"EUR".to_string()));
+/// assert_eq!(need_fx, vec!["EUR", "GBP"]);
 /// ```
-pub fn currencies_needing_conversion(currencies: &[&str], target: &str) -> Vec<String> {
+pub fn currencies_needing_conversion<S: AsRef<str>>(currencies: &[S], target: &str) -> Vec<String> {
     let target_upper = target.to_uppercase();
     let mut unique: Vec<String> = currencies
         .iter()
-        .map(|c| c.to_uppercase())
+        .map(|c| AsRef::<str>::as_ref(c).to_uppercase())
         .filter(|c| *c != target_upper)
         .collect();
 
@@ -144,11 +143,12 @@ mod tests {
 
     #[test]
     fn test_currencies_needing_conversion() {
-        let currencies = vec!["USD", "GBP", "EUR", "USD", "GBP"];
-        let need_fx = currencies_needing_conversion(&currencies, "USD");
-        assert_eq!(need_fx.len(), 2);
-        assert!(need_fx.contains(&"EUR".to_string()));
-        assert!(need_fx.contains(&"GBP".to_string()));
+        let currencies = vec!["USD", "GBP", "eur", "USD", "GBP"];
+        let need_fx = currencies_needing_conversion(&currencies, "usd");
+        assert_eq!(need_fx, vec!["EUR", "GBP"]);
+
+        let owned: Vec<String> = currencies.iter().map(|c| c.to_string()).collect();
+        assert_eq!(currencies_needing_conversion(&owned, "USD"), need_fx);
     }
 
     #[test]

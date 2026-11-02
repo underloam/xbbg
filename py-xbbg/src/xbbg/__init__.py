@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 from importlib.metadata import PackageNotFoundError, version
 import logging
+import threading
 from typing import TYPE_CHECKING
 
 from . import _core_guard
@@ -57,7 +58,11 @@ try:
 except Exception:
     logger.debug("Failed to prepare Bloomberg SDK for package import", exc_info=True)
 
-_importing_core = False
+# Same-thread re-entry detection only. Other threads importing concurrently wait
+# on importlib's per-module lock instead of tripping the recursion check.
+_core_import_state = threading.local()
+# Published only after a successful import: importlib inserts the module into
+# sys.modules before its exec (and the build guard) has finished.
 _core_module = None
 
 __all__ = list(PACKAGE_EXPORTS)
@@ -65,17 +70,16 @@ __all__ = list(PACKAGE_EXPORTS)
 
 def _import_core():
     """Import and cache the native extension with a friendlier DLL error."""
-    global _importing_core, _core_module
-    if _core_module is not None:
-        return _core_module
-    if _importing_core:
+    global _core_module
+    core = _core_module
+    if core is not None:
+        return core
+    if getattr(_core_import_state, "active", False):
         raise ImportError("Recursive import of _core detected")
 
-    _importing_core = True
+    _core_import_state.active = True
     try:
-        mod = importlib.import_module("xbbg._core")
-        _core_module = mod
-        return mod
+        core = importlib.import_module("xbbg._core")
     except ImportError as e:
         msg = str(e)
         if (
@@ -97,7 +101,9 @@ def _import_core():
             ) from e
         raise
     finally:
-        _importing_core = False
+        _core_import_state.active = False
+    _core_module = core
+    return core
 
 
 def _build_lazy_attr_exports() -> dict[str, tuple[str, str]]:

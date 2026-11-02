@@ -3,11 +3,15 @@
 use std::sync::Arc;
 
 use arrow_array::builder::PrimitiveBuilder;
+use arrow_array::cast::AsArray;
 use arrow_array::types::{
-    ArrowDictionaryKeyType, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type, UInt16Type,
-    UInt32Type, UInt64Type,
+    ArrowDictionaryKeyType, ByteViewType, Int8Type, Int16Type, Int32Type, Int64Type, UInt8Type,
+    UInt16Type, UInt32Type, UInt64Type,
 };
-use arrow_array::{Array, ArrayRef, BinaryViewArray, DictionaryArray, StringViewArray, make_array};
+use arrow_array::{
+    Array, ArrayRef, BinaryViewArray, DictionaryArray, GenericByteViewArray, StringViewArray,
+    make_array,
+};
 use arrow_buffer::ArrowNativeType;
 use arrow_data::transform::{Capacities, MutableArrayData};
 use arrow_data::{ArrayData, ArrayDataBuilder};
@@ -71,6 +75,28 @@ impl ColumnData {
             .sum()
     }
 
+    /// Bytes a right-sized copy of this column's logical slice would occupy,
+    /// computed without copying.
+    ///
+    /// Unlike [`Self::nbytes`], which reports the full backing buffers a
+    /// zero-copy slice still references, this counts only the sliced values:
+    ///
+    /// - fixed-width types: element width x length;
+    /// - `Utf8`/`Binary` and their `Large` forms: the offsets for the slice plus
+    ///   the value bytes between its first and last offset;
+    /// - `Utf8View`/`BinaryView`: 16 bytes per view plus the out-of-line bytes
+    ///   of each non-null value longer than the 12 bytes a view stores inline;
+    /// - validity bitmaps are included (one bit per row, rounded up to bytes).
+    ///
+    /// Nested and dictionary types follow arrow-data's
+    /// `ArrayData::get_slice_memory_size`, which counts list children and
+    /// dictionary values in full, so their figure is an upper bound.
+    pub fn logical_nbytes(&self) -> Result<usize> {
+        self.chunks.iter().try_fold(0usize, |total, chunk| {
+            Ok(total + array_logical_nbytes(chunk.as_ref())?)
+        })
+    }
+
     /// Return the chunk and local index for a logical row index.
     pub fn chunk_for_index(&self, index: usize) -> Result<(&ArrayRef, usize)> {
         let mut offset = 0;
@@ -132,6 +158,31 @@ impl ColumnData {
             .collect::<Result<Vec<_>>>()?;
         Self::new(self.name.clone(), self.field.clone(), chunks)
     }
+}
+
+fn array_logical_nbytes(array: &dyn Array) -> Result<usize> {
+    match array.data_type() {
+        DataType::Utf8View => Ok(view_logical_nbytes(array.as_string_view())),
+        DataType::BinaryView => Ok(view_logical_nbytes(array.as_binary_view())),
+        _ => Ok(array.to_data().get_slice_memory_size()?),
+    }
+}
+
+/// Longest value a byte view stores inline, without a data buffer reference.
+const MAX_INLINE_VIEW_LEN: usize = 12;
+
+fn view_logical_nbytes<T: ByteViewType + ?Sized>(array: &GenericByteViewArray<T>) -> usize {
+    let views = array.views();
+    let validity = array.nulls().map_or(0, |nulls| nulls.len().div_ceil(8));
+    let out_of_line = views
+        .iter()
+        .enumerate()
+        .filter(|(row, _)| array.is_valid(*row))
+        // The low 32 bits of a view hold the value length.
+        .map(|(_, view)| *view as u32 as usize)
+        .filter(|len| *len > MAX_INLINE_VIEW_LEN)
+        .sum::<usize>();
+    views.len() * std::mem::size_of::<u128>() + validity + out_of_line
 }
 
 pub(crate) fn compact_array(array: &dyn Array) -> Result<ArrayRef> {
@@ -320,10 +371,113 @@ fn compact_owned_array(array: ArrayRef) -> Result<ArrayRef> {
 mod tests {
     use arrow_array::{
         BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array,
-        LargeStringArray, NullArray, StringArray, TimestampMicrosecondArray,
+        LargeBinaryArray, LargeStringArray, NullArray, StringArray, TimestampMicrosecondArray,
     };
+    use arrow_schema::Field;
 
     use super::*;
+
+    const ROWS: usize = 1_000;
+    const CELL_LEN: usize = 100;
+
+    fn column(array: ArrayRef) -> ColumnData {
+        let field = Arc::new(Field::new("payload", array.data_type().clone(), true));
+        ColumnData::new("payload".into(), field, vec![array]).unwrap()
+    }
+
+    fn cells() -> Vec<String> {
+        (0..ROWS)
+            .map(|row| format!("{row:04}").repeat(CELL_LEN / 4))
+            .collect()
+    }
+
+    fn one_cell_slice(array: ArrayRef) -> (ColumnData, ColumnData) {
+        let parent = column(array);
+        let slice = parent.slice(ROWS / 2, Some(1));
+        (parent, slice)
+    }
+
+    #[test]
+    fn offset_types_count_only_the_sliced_offsets_and_value_bytes() {
+        let values = cells();
+        let refs = values.iter().map(String::as_str).collect::<Vec<_>>();
+        let bytes = values.iter().map(String::as_bytes).collect::<Vec<_>>();
+        for (array, offset_width) in [
+            (Arc::new(StringArray::from(refs.clone())) as ArrayRef, 4),
+            (
+                Arc::new(LargeStringArray::from(refs.clone())) as ArrayRef,
+                8,
+            ),
+            (Arc::new(BinaryArray::from(bytes.clone())) as ArrayRef, 4),
+            (
+                Arc::new(LargeBinaryArray::from(bytes.clone())) as ArrayRef,
+                8,
+            ),
+        ] {
+            let data_type = array.data_type().clone();
+            let (parent, slice) = one_cell_slice(array);
+            assert_eq!(
+                slice.logical_nbytes().unwrap(),
+                2 * offset_width + CELL_LEN,
+                "{data_type}"
+            );
+            assert!(slice.nbytes() >= ROWS * CELL_LEN, "{data_type}");
+            assert_eq!(
+                parent.logical_nbytes().unwrap(),
+                (ROWS + 1) * offset_width + ROWS * CELL_LEN,
+                "{data_type}"
+            );
+        }
+    }
+
+    #[test]
+    fn view_types_sum_out_of_line_value_lengths() {
+        let values = cells();
+        let utf8_view: ArrayRef = Arc::new(StringViewArray::from_iter_values(values.iter()));
+        let binary_view: ArrayRef = Arc::new(BinaryViewArray::from_iter_values(
+            values.iter().map(String::as_bytes),
+        ));
+        for array in [utf8_view, binary_view] {
+            let data_type = array.data_type().clone();
+            let (parent, slice) = one_cell_slice(array);
+            assert_eq!(
+                slice.logical_nbytes().unwrap(),
+                16 + CELL_LEN,
+                "{data_type}"
+            );
+            assert!(slice.nbytes() >= ROWS * CELL_LEN, "{data_type}");
+            assert_eq!(
+                parent.logical_nbytes().unwrap(),
+                ROWS * (16 + CELL_LEN),
+                "{data_type}"
+            );
+        }
+
+        let short: ArrayRef = Arc::new(StringViewArray::from(vec![
+            Some("inline"),
+            None,
+            Some("exactly12byt"),
+            Some("thirteen byte"),
+        ]));
+        let short = column(short);
+        // Four views, a one-byte validity bitmap, and only the 13-byte value out of line.
+        assert_eq!(short.logical_nbytes().unwrap(), 4 * 16 + 1 + 13);
+        assert_eq!(short.slice(1, Some(1)).logical_nbytes().unwrap(), 16 + 1);
+    }
+
+    #[test]
+    fn fixed_width_types_count_element_width_times_length_across_chunks() {
+        let field = Arc::new(Field::new("value", DataType::Int64, true));
+        let first: ArrayRef = Arc::new(Int64Array::from_iter_values(0..ROWS as i64));
+        let second: ArrayRef = Arc::new(Int64Array::from(vec![Some(1), None, Some(3)]));
+        let column = ColumnData::new("value".into(), field, vec![first, second]).unwrap();
+        assert_eq!(column.logical_nbytes().unwrap(), ROWS * 8 + 3 * 8 + 1);
+        assert_eq!(column.slice(10, Some(5)).logical_nbytes().unwrap(), 5 * 8);
+        assert_eq!(
+            column.slice(ROWS + 1, None).logical_nbytes().unwrap(),
+            2 * 8 + 1
+        );
+    }
 
     fn identity_interleave_compact(array: &dyn Array) -> ArrayRef {
         let indices = (0..array.len()).map(|row| (0, row)).collect::<Vec<_>>();

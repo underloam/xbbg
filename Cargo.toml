@@ -127,6 +127,7 @@ napi = "3.12"
 napi-build = "2.4"
 napi-derive = "3.6"
 pyo3 = "0.29.2"
+pyo3-build-config = "0.29.2"
 pyo3-arrow = "0.19"
 pyo3-async-runtimes = "0.29"
 pyo3-stub-gen = { version = "0.23", default-features = false }

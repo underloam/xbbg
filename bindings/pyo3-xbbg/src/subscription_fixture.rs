@@ -1,9 +1,22 @@
-//! Private offline subscription driver, compiled only with `test-support`.
+//! Private offline drivers, compiled only with `test-support`: a synthetic
+//! subscription engine, a request-completion driver and async-bridge probes.
 
-use super::*;
+use std::sync::Once;
+use std::sync::atomic::AtomicU64;
+use std::time::{Duration, Instant};
+
+use arrow_array::{ArrayRef, Int64Array, StringArray};
+use arrow_schema::{DataType, Field, Schema};
+use xbbg_async::error_presentation::RequestErrorContext;
 use xbbg_async::testing::SubscriptionFixture;
 
-#[pyclass(name = "_SubscriptionFixture", module = "xbbg._core")]
+use super::*;
+
+/// Ticks of the bridge probe task; advances only while a bridge worker is free.
+static BRIDGE_TICKS: AtomicU64 = AtomicU64::new(0);
+static BRIDGE_TICKER: Once = Once::new();
+
+#[pyclass(name = "_SubscriptionFixture", module = "xbbg._core", frozen)]
 struct PySubscriptionFixture {
     fixture: Arc<SubscriptionFixture>,
     batch_items: usize,
@@ -30,21 +43,21 @@ impl PySubscriptionFixture {
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
             let (rx, handle) = stream.into_parts();
-            PySubscription {
+            Ok(PySubscription {
                 legacy_arrow: (!rx.requires_deliveries())
                     .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
                 batch_items,
                 status: handle.status(),
                 deliver_rows: handle.delivers_rows(),
                 overflow_policy: handle.overflow_policy(),
-                consumer: Arc::new(SubscriptionConsumer::new(rx, handle)),
+                consumer: Arc::new(SubscriptionOwner::unhosted(SubscriptionConsumer::new(
+                    rx, handle,
+                ))),
                 engine_shutdown: watch::channel(false).1,
                 tick_dict_keys: Arc::default(),
                 _test_fixture: Some(fixture),
                 _test_legacy_read_started: Some(legacy_read_started),
-            }
-            .into_python()
-            .await
+            })
         })
     }
 }
@@ -182,6 +195,32 @@ impl PySubscriptionFixture {
     fn terminate(&self, py: Python<'_>) {
         py.detach(|| self.fixture.terminate());
     }
+
+    /// Busy-wait for `ms` milliseconds while attached to the interpreter.
+    ///
+    /// On GIL builds no other thread can attach meanwhile, which saturates
+    /// every completion waiting for the interpreter.
+    fn hold_attached(&self, _py: Python<'_>, ms: u64) {
+        let deadline = Instant::now() + Duration::from_millis(ms);
+        while Instant::now() < deadline {
+            std::hint::spin_loop();
+        }
+    }
+
+    /// Ticks of a 1 ms task on the async bridge runtime, started by the first call.
+    ///
+    /// The task only advances while a bridge worker is free to poll it.
+    fn bridge_ticks(&self) -> u64 {
+        BRIDGE_TICKER.call_once(|| {
+            pyo3_async_runtimes::tokio::get_runtime().spawn(async {
+                loop {
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                    BRIDGE_TICKS.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        });
+        BRIDGE_TICKS.load(Ordering::Relaxed)
+    }
 }
 
 #[pyfunction]
@@ -197,24 +236,137 @@ fn _test_subscription_fixture<'py>(
     config.validate().map_err(blp_async_error_to_pyerr)?;
     let batch_items = config.subscription_flush_threshold;
     shutdown_safe_future(py, async move {
-        let fixture = Arc::new(SubscriptionFixture::new(config));
-        try_attach_or_suspend(move |py| {
-            Py::new(
-                py,
-                PySubscriptionFixture {
-                    fixture,
-                    batch_items,
-                    legacy_read_started: Arc::new(tokio::sync::Notify::new()),
-                },
-            )
-            .map(Py::into_any)
+        Ok(PySubscriptionFixture {
+            fixture: Arc::new(SubscriptionFixture::new(config)),
+            batch_items,
+            legacy_read_started: Arc::new(tokio::sync::Notify::new()),
         })
-        .await
     })
+}
+
+/// Request-completion driver: synthetic Arrow results or chosen engine errors,
+/// completed through the same carrier as `PyEngine.request`.
+#[pyclass(name = "_RequestFixture", module = "xbbg._core", frozen)]
+struct PyRequestFixture {
+    /// Release generation; a gated request waits for a later generation.
+    releases: watch::Sender<u64>,
+}
+
+#[pymethods]
+impl PyRequestFixture {
+    /// Resolve to a synthetic `rows`-row ArrowRecordBatch, or fail with the
+    /// ErrorPresentation kind `error` (session, request, limit, data_loss,
+    /// validation, timeout, internal). Any of `service`, `operation`,
+    /// `request_id` or `bloomberg_request_ids` adds request context. Gated
+    /// requests wait for the next `release_requests()`.
+    #[allow(clippy::too_many_arguments)]
+    #[pyo3(signature = (rows=1, *, gated=false, error=None, message=None, service=None, operation=None, request_id=None, bloomberg_request_ids=None))]
+    fn request<'py>(
+        &self,
+        py: Python<'py>,
+        rows: usize,
+        gated: bool,
+        error: Option<&str>,
+        message: Option<String>,
+        service: Option<String>,
+        operation: Option<String>,
+        request_id: Option<String>,
+        bloomberg_request_ids: Option<Vec<String>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let failure = match error {
+            None => None,
+            Some(kind) => {
+                let has_context = service.is_some()
+                    || operation.is_some()
+                    || request_id.is_some()
+                    || bloomberg_request_ids.is_some();
+                let request_context = has_context.then(|| RequestErrorContext {
+                    service,
+                    operation,
+                    request_id,
+                    bloomberg_request_ids: bloomberg_request_ids
+                        .unwrap_or_default()
+                        .into_iter()
+                        .map(Arc::from)
+                        .collect(),
+                });
+                Some(ErrorPresentation {
+                    kind: parse_error_kind(kind)?,
+                    message: message.unwrap_or_else(|| "synthetic request failure".to_owned()),
+                    data_loss: None,
+                    request_context,
+                })
+            }
+        };
+        let gate = gated.then(|| (*self.releases.borrow(), self.releases.subscribe()));
+        record_batch_future(py, async move {
+            if let Some((generation, mut releases)) = gate {
+                let released = releases
+                    .wait_for(|current| *current > generation)
+                    .await
+                    .is_ok();
+                if !released {
+                    return Err(PyRuntimeError::new_err(
+                        "request fixture dropped before release",
+                    ));
+                }
+            }
+            match failure {
+                Some(presentation) => Err(error_presentation_to_pyerr(presentation)),
+                None => synthetic_request_batch(rows),
+            }
+        })
+    }
+
+    /// Release every gated request created so far, all at once.
+    fn release_requests(&self) {
+        self.releases.send_modify(|generation| *generation += 1);
+    }
+}
+
+fn parse_error_kind(kind: &str) -> PyResult<ErrorKind> {
+    Ok(match kind {
+        "session" => ErrorKind::Session,
+        "request" => ErrorKind::Request,
+        "limit" => ErrorKind::Limit,
+        "data_loss" => ErrorKind::DataLoss,
+        "validation" => ErrorKind::Validation,
+        "timeout" => ErrorKind::Timeout,
+        "internal" => ErrorKind::Internal,
+        other => {
+            return Err(PyValueError::new_err(format!(
+                "unknown ErrorPresentation kind: {other}"
+            )));
+        }
+    })
+}
+
+fn synthetic_request_batch(rows: usize) -> PyResult<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("ticker", DataType::Utf8, false),
+        Field::new("row", DataType::Int64, false),
+    ]));
+    let tickers: ArrayRef = Arc::new(StringArray::from_iter_values(
+        (0..rows).map(|row| format!("SYNTHETIC {row} Equity")),
+    ));
+    let values: ArrayRef = Arc::new(Int64Array::from_iter_values(
+        (0..rows).map(|row| row as i64),
+    ));
+    RecordBatch::try_new(schema, vec![tickers, values])
+        .map_err(|error| PyValueError::new_err(error.to_string()))
+}
+
+#[pyfunction]
+fn _test_request_fixture() -> PyRequestFixture {
+    PyRequestFixture {
+        releases: watch::channel(0).0,
+    }
 }
 
 pub(super) fn register(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<PySubscriptionFixture>()?;
+    module.add_class::<PyRequestFixture>()?;
     module.add_function(wrap_pyfunction!(_test_subscription_fixture, module)?)?;
+    module.add_function(wrap_pyfunction!(_test_request_fixture, module)?)?;
     Ok(())
 }

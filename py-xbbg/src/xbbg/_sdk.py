@@ -4,7 +4,13 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+import threading
 
+# ``_sdk_lock`` guards ``_sdk_info``, ``_manual_sdk_path`` and ``_sdk_generation``.
+# It is never held while probing the filesystem or importing the native module;
+# the generation lets ``get_sdk_info`` drop results computed before a path change.
+_sdk_lock = threading.Lock()
+_sdk_generation = 0
 _sdk_info: dict | None = None
 _manual_sdk_path: Path | None = None
 _dll_directory_handles: list[object] = []
@@ -103,29 +109,37 @@ def _dapi_candidate_paths() -> list[Path]:
     return candidates
 
 
-def _import_blpapi_module():
-    """Import Bloomberg's ``blpapi`` Python package, or return ``None``.
+def _blpapi_package_location() -> tuple[Path, str | None] | None:
+    """Locate Bloomberg's ``blpapi`` Python package without importing it.
 
     xbbg links the BLPAPI C++ SDK directly and never calls this package's API.
-    It is imported only because the pip wheel ships the shared library, which
-    makes its directory the most common SDK source for pip users -- probed
-    ahead of a Terminal DAPI install.
+    The pip wheel ships the shared library, which makes its directory the most
+    common SDK source for pip users -- probed ahead of a Terminal DAPI install.
+    Only the package location and distribution version are needed, so the
+    package's own code never runs.
 
-    Bloomberg's wheel contains invalid escape sequences in the docstrings of
-    ``resolutionlist.py`` and ``topiclist.py``, which Python 3.12+ reports as
-    ``SyntaxWarning`` the first time those modules are compiled. Since the user
-    never asked for this import, the upstream noise is suppressed here instead
-    of surfacing on every ``import xbbg``.
+    Returns ``(path to blpapi/__init__.py, distribution version or None)``, or
+    ``None`` when the package is not installed.
     """
-    import warnings
+    import importlib.metadata
+    import importlib.util
 
     try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", SyntaxWarning)
-            import blpapi
-    except (ImportError, OSError):
+        spec = importlib.util.find_spec("blpapi")
+    except (ImportError, ValueError):
         return None
-    return blpapi
+    if spec is None or not spec.origin:
+        return None
+    try:
+        package_version: str | None = importlib.metadata.version("blpapi")
+    except importlib.metadata.PackageNotFoundError:
+        package_version = None
+    return Path(spec.origin), package_version
+
+
+def _copy_sdk_info(info: dict) -> dict:
+    """Return a caller-owned copy of an SDK info dict."""
+    return {**info, "sources": [dict(source) for source in info["sources"]]}
 
 
 def get_sdk_info() -> dict:
@@ -140,42 +154,65 @@ def get_sdk_info() -> dict:
         - version: version string if detectable
         - path: Path to the SDK
 
+    The returned dict is a copy; mutating it does not affect later calls.
+
     Example:
         >>> import xbbg
         >>> xbbg.get_sdk_info()
         {'sources': [{'name': 'blpapi_python', 'version': '3.25.11.1', ...}], 'active': 'blpapi_python'}
     """
-    import os
-
     global _sdk_info
-    if _sdk_info is not None:
-        return _sdk_info
+
+    with _sdk_lock:
+        cached = _sdk_info
+        generation = _sdk_generation
+        manual_sdk_path = _manual_sdk_path
+    if cached is not None:
+        return _copy_sdk_info(cached)
+
+    # Probes the filesystem and imports _core: never under the lock.
+    info = _detect_sdk_info(manual_sdk_path)
+
+    with _sdk_lock:
+        # A path change after the snapshot makes this result stale: return it
+        # to this caller only and let the next call recompute.
+        if generation == _sdk_generation:
+            if _sdk_info is None:
+                _sdk_info = info
+            else:
+                info = _sdk_info
+    return _copy_sdk_info(info)
+
+
+def _detect_sdk_info(manual_sdk_path: Path | None) -> dict:
+    """Probe every SDK source for ``get_sdk_info``; touches no module state."""
+    import os
 
     sources: list[dict] = []
 
     # Check 0: Manually set SDK path (highest priority)
-    if _manual_sdk_path is not None:
+    if manual_sdk_path is not None:
         manual_version = None
-        lib_path = _find_sdk_lib(_manual_sdk_path)
+        lib_path = _find_sdk_lib(manual_sdk_path)
         if lib_path:
             manual_version = _get_lib_version(lib_path)
         sources.append(
             {
                 "name": "manual",
                 "version": manual_version,
-                "path": _manual_sdk_path,
+                "path": manual_sdk_path,
             }
         )
 
     # Check 1: blpapi Python package (most common for pip users)
-    blpapi = _import_blpapi_module()
-    if blpapi is not None:
-        blpapi_file = getattr(blpapi, "__file__", None)
+    blpapi_location = _blpapi_package_location()
+    if blpapi_location is not None:
+        blpapi_init, blpapi_version = blpapi_location
         sources.append(
             {
                 "name": "blpapi_python",
-                "version": getattr(blpapi, "__version__", None),
-                "path": Path(blpapi_file) if blpapi_file else None,
+                "version": blpapi_version,
+                "path": blpapi_init,
             }
         )
 
@@ -231,13 +268,11 @@ def get_sdk_info() -> dict:
     except Exception:
         logger.debug("Could not determine Bloomberg SDK runtime version", exc_info=True)
 
-    info = {
+    return {
         "sources": sources,
         "active": sources[0]["name"] if sources else None,
         "runtime_version": runtime_version,
     }
-    _sdk_info = info
-    return info
 
 
 def set_sdk_path(path: str | Path) -> None:
@@ -257,7 +292,7 @@ def set_sdk_path(path: str | Path) -> None:
     """
     from pathlib import Path as PathClass
 
-    global _manual_sdk_path, _sdk_info
+    global _manual_sdk_path, _sdk_info, _sdk_generation
 
     sdk_path = PathClass(path) if isinstance(path, str) else path
     if not sdk_path.is_dir():
@@ -267,8 +302,10 @@ def set_sdk_path(path: str | Path) -> None:
     if not lib_path:
         raise ValueError(f"Could not find Bloomberg SDK library in: {sdk_path}")
 
-    _manual_sdk_path = sdk_path
-    _sdk_info = None  # Clear cached info to refresh on next get_sdk_info() call
+    with _sdk_lock:
+        _manual_sdk_path = sdk_path
+        _sdk_info = None  # Refresh on next get_sdk_info() call
+        _sdk_generation += 1
     _prepare_sdk_for_core_import()
 
 
@@ -280,9 +317,11 @@ def clear_sdk_path() -> None:
         >>> xbbg.set_sdk_path("C:/custom/blpapi")
         >>> xbbg.clear_sdk_path()  # Back to auto-detection
     """
-    global _manual_sdk_path, _sdk_info
-    _manual_sdk_path = None
-    _sdk_info = None  # Clear cached info to refresh on next get_sdk_info() call
+    global _manual_sdk_path, _sdk_info, _sdk_generation
+    with _sdk_lock:
+        _manual_sdk_path = None
+        _sdk_info = None  # Refresh on next get_sdk_info() call
+        _sdk_generation += 1
 
 
 def _collect_sdk_candidate_dirs() -> list[Path]:
@@ -311,15 +350,14 @@ def _collect_sdk_candidate_dirs() -> list[Path]:
         result.append(candidate)
 
     # 1. Manual SDK path (highest priority)
-    if _manual_sdk_path is not None:
-        add(_manual_sdk_path)
+    with _sdk_lock:
+        manual_sdk_path = _manual_sdk_path
+    add(manual_sdk_path)
 
     # 2. blpapi Python package (most common for pip users)
-    blpapi = _import_blpapi_module()
-    if blpapi is not None:
-        blpapi_file = getattr(blpapi, "__file__", None)
-        if blpapi_file:
-            add(Path(blpapi_file).parent)
+    blpapi_location = _blpapi_package_location()
+    if blpapi_location is not None:
+        add(blpapi_location[0].parent)
 
     # 3. DAPI (Bloomberg Terminal)
     for dapi_path in _dapi_candidate_paths():

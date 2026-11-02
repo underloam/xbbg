@@ -102,7 +102,7 @@ the wheel is just the easiest discovery path for many users:
 pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/
 ```
 
-Supported Python versions: **3.11 through 3.15**.
+Supported Python versions: **3.11 through 3.15**. Free-threaded CPython 3.14t/3.15t wheels are available in beta with the `pyarrow` and `pandas` extras; polars, duckdb and the LangGraph adapter are not supported there. See [docs/free-threading.md](docs/free-threading.md).
 
 Requirements and notes:
 

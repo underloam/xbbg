@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::OnceLock;
+use std::sync::LazyLock;
 
 use serde::{Deserialize, Serialize};
 
@@ -48,18 +48,30 @@ struct ExchangesToml {
     country_tz: HashMap<String, String>,
 }
 
-static EXCHANGES: OnceLock<Result<ExchangesToml, toml::de::Error>> = OnceLock::new();
+/// The embedded exchange table, parsed on first use.
+///
+/// The TOML is compiled into the crate, so a parse failure is a build defect;
+/// it panics instead of reading as "no rule" for every lookup.
+static EXCHANGES: LazyLock<ExchangesToml> = LazyLock::new(|| {
+    toml::from_str(EXCHANGES_TOML)
+        .expect("embedded exchange table data/exchanges.toml must be valid TOML")
+});
 
-fn exchanges() -> Option<&'static ExchangesToml> {
-    EXCHANGES
-        .get_or_init(|| toml::from_str(EXCHANGES_TOML))
-        .as_ref()
-        .ok()
+/// Parse the embedded exchange table now instead of on the first lookup.
+///
+/// Bindings call this once at module initialization, outside any interpreter
+/// lock, so later lookups never pay the parse. Calling it again is a no-op.
+///
+/// # Panics
+///
+/// Panics if the embedded `data/exchanges.toml` does not parse.
+pub fn preload() {
+    LazyLock::force(&EXCHANGES);
 }
 
 /// Look up a MarketRule by MIC code, then fallback to exchange code.
 pub fn get_market_rule(mic: Option<&str>, exch_code: Option<&str>) -> Option<&'static MarketRule> {
-    let data = exchanges()?;
+    let data = LazyLock::force(&EXCHANGES);
     if let Some(mic_code) = mic.map(str::trim).filter(|s| !s.is_empty())
         && let Some(rule) = data.mic.get(mic_code)
     {
@@ -76,7 +88,10 @@ pub fn get_market_rule(mic: Option<&str>, exch_code: Option<&str>) -> Option<&'s
 /// Infer IANA timezone from country ISO code.
 pub fn infer_timezone_from_country(country_iso: &str) -> Option<&'static str> {
     let key = country_iso.trim().to_uppercase();
-    exchanges()?.country_tz.get(&key).map(String::as_str)
+    LazyLock::force(&EXCHANGES)
+        .country_tz
+        .get(&key)
+        .map(String::as_str)
 }
 
 /// Derive session windows from regular trading hours and a market rule.
@@ -194,6 +209,16 @@ fn add_minutes(time: (i32, i32), mins: i32) -> (i32, i32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_embedded_table_parses() {
+        let parsed: ExchangesToml =
+            toml::from_str(EXCHANGES_TOML).expect("embedded data/exchanges.toml must parse");
+        assert!(!parsed.mic.is_empty());
+        assert!(!parsed.exch_code.is_empty());
+        assert!(!parsed.country_tz.is_empty());
+        preload();
+    }
 
     #[test]
     fn test_load_toml() {

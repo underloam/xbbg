@@ -12,10 +12,6 @@ requires-pixi = ">=0.71"
 
 [dependencies]
 python = ">=3.11,<3.16"
-# conda-forge also publishes free-threaded CPython builds (`cp314t`), and the
-# solver picked them on Linux and Windows. xbbg wheels target the regular GIL
-# build, so pin that ABI for every environment.
-python-gil = "*"
 # Must track `rust-version` in the root Cargo.toml `[workspace.package]`. The
 # published sdist compiles the Rust extension on the user's machine, so this is
 # a real compatibility contract, not just a dev-env convenience.
@@ -79,13 +75,18 @@ pytest-cov = ">=5.0"
 pyarrow = ">=22.0"
 pandas = ">=2.3.3,<4"
 polars = ">=0.20.26,<3"
-duckdb = ">=1.5.0"
+duckdb = ">=1.5.1"
+
+[feature.gil.dependencies]
+# conda-forge also publishes free-threaded CPython builds (`cp314t`), and the
+# solver picked them on Linux and Windows. Every environment except py314t pins
+# the regular GIL build through this feature.
+python-gil = "*"
 
 [feature.lint.dependencies]
 # grimp (import-linter) publishes no macOS wheel for 3.15 yet, and pre-commit
 # runs this environment on every commit.
 python = ">=3.11,<3.15"
-python-gil = "*"
 
 [feature.lint.pypi-dependencies]
 ruff = ">=0.16.3"
@@ -149,18 +150,31 @@ python = "3.13.*"
 [feature.py314.dependencies]
 python = "3.14.*"
 
+# Free-threaded CPython (see docs/free-threading.md). It carries only the optional
+# dependencies xbbg supports there, pyarrow and pandas; polars and duckdb publish
+# no free-threaded wheels on PyPI, so their tests skip in this environment.
+[feature.freethreading.dependencies]
+python-freethreading = "*"
+pyarrow = ">=22.0"
+pandas = ">=2.3.3,<4"
+
+[feature.freethreading.pypi-dependencies]
+pytest = ">=8.4"
+pytest-asyncio = ">=0.24"
+
 # ── Environments ──────────────────────────────────────────────────────────────
 
 [environments]
 # The shared environments pin one Python so every platform resolves the same
 # interpreter; unpinned, the Linux solve settled on 3.13 while the others got 3.14.
-default = { features = ["test", "lint", "dev", "py314"], solve-group = "main" }
-test = { features = ["test", "py314"], solve-group = "main" }
-lint = { features = ["lint"], no-default-feature = true }
-benchmark = { features = ["test", "benchmark", "py314"], solve-group = "main" }
-py311 = { features = ["test", "py311"] }
-py312 = { features = ["test", "py312"] }
-py313 = { features = ["test", "py313"] }
-py314 = { features = ["test", "py314"] }
+default = { features = ["gil", "test", "lint", "dev", "py314"], solve-group = "main" }
+test = { features = ["gil", "test", "py314"], solve-group = "main" }
+lint = { features = ["gil", "lint"], no-default-feature = true }
+benchmark = { features = ["gil", "test", "benchmark", "py314"], solve-group = "main" }
+py311 = { features = ["gil", "test", "py311"] }
+py312 = { features = ["gil", "test", "py312"] }
+py313 = { features = ["gil", "test", "py313"] }
+py314 = { features = ["gil", "test", "py314"] }
+py314t = { features = ["freethreading", "py314"] }
 
-js = { features = ["js", "py314"], solve-group = "main" }
+js = { features = ["gil", "js", "py314"], solve-group = "main" }

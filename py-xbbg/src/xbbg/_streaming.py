@@ -603,8 +603,10 @@ class Subscription:
 class DeliveryStream:
     """Async batch-delivery view sharing its subscription's native lifecycle.
 
-    Native reads return unpublished receipts. Backend conversion runs here, on
-    the consuming event loop, before a receipt is committed.
+    Native reads return unpublished receipts, built on a native completion
+    thread without converting the batch. Backend conversion runs here, on the
+    consuming event loop, before a receipt is committed; failed or unpublished
+    conversions leave the batch and its gap unread.
     """
 
     __slots__ = ("_convert_delivery", "_owner")

@@ -78,7 +78,7 @@ deny = [
     { name = "pyo3-async-runtimes", wrappers = ["pyo3-xbbg"] },
     { name = "pyo3-stub-gen", wrappers = ["pyo3-xbbg"] },
     { name = "pyo3-stub-gen-derive", wrappers = ["pyo3-stub-gen"] },
-    { name = "pyo3-build-config", wrappers = ["pyo3", "pyo3-ffi", "numpy"] },
+    { name = "pyo3-build-config", wrappers = ["pyo3", "pyo3-ffi", "pyo3-xbbg", "numpy"] },
     { name = "pyo3-ffi", wrappers = ["pyo3"] },
     { name = "pyo3-macros", wrappers = ["pyo3"] },
     { name = "pyo3-macros-backend", wrappers = ["pyo3-macros"] },

@@ -400,71 +400,41 @@ class TestBdtick:
         _CASE.assertNotIn("__all__ = []", text)
 
 
-class TestGeneratedEndpointFieldTypeCache:
-    """Generated endpoint plans reuse resolved field metadata without leaking overrides."""
+_FIELD_TYPE_PLAN_BUILDERS = pytest.mark.parametrize(
+    ("builder_name", "default_type", "extra_args"),
+    [
+        ("_build_abdp_plan", "string", {}),
+        (
+            "_build_abdh_plan",
+            "float64",
+            {"start_date": "20240101", "end_date": "20240102"},
+        ),
+    ],
+)
 
-    def test_invalidation_during_resolution_does_not_republish_stale_entry(self, monkeypatch):
 
-        async def exercise_invalidation():
-            started = asyncio.Event()
-            release = asyncio.Event()
+class TestGeneratedEndpointFieldTypes:
+    """Generated endpoint plans take field types from the active engine on every request."""
 
-            class FakeEngine:
-                async def resolve_field_types(self, fields, overrides, default_type):
-                    started.set()
-                    await release.wait()
-                    return dict.fromkeys(fields, default_type)
+    class FakeEngine:
+        def __init__(self, label: str, answers: list[str] | None = None):
+            self.label = label
+            self.answers = list(answers or [])
+            self.calls = []
 
-            monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
-            _engine._clear_field_type_resolution_cache()
-            resolution = asyncio.create_task(_engine._resolve_field_types_cached(["PX_LAST"], None, "float64"))
-            await started.wait()
-            _engine._clear_field_type_resolution_cache()
-            release.set()
+        async def resolve_field_types(self, fields, overrides, resolved_default_type):
+            self.calls.append((list(fields), overrides, resolved_default_type))
+            arrow_type = self.answers.pop(0) if self.answers else f"{self.label}:{resolved_default_type}"
+            return dict.fromkeys(fields, arrow_type)
 
-            assert await resolution == {"PX_LAST": "float64"}
-            with _engine._FIELD_TYPE_RESOLUTION_CACHE_LOCK:
-                assert _engine._FIELD_TYPE_RESOLUTION_CACHE == {}
-
-        try:
-            asyncio.run(exercise_invalidation())
-        finally:
-            _engine._clear_field_type_resolution_cache()
-
-    @pytest.mark.parametrize(
-        ("builder_name", "default_type", "extra_args"),
-        [
-            ("_build_abdp_plan", "string", {}),
-            (
-                "_build_abdh_plan",
-                "float64",
-                {"start_date": "20240101", "end_date": "20240102"},
-            ),
-        ],
-    )
-    def test_repeated_fields_resolve_types_once(self, monkeypatch, builder_name, default_type, extra_args):
-
-        class FakeEngine:
-            def __init__(self):
-                self.calls = []
-
-            async def resolve_field_types(self, fields, overrides, resolved_default_type):
-                self.calls.append((list(fields), overrides, resolved_default_type))
-                return {field: f"{resolved_default_type}:{field}" for field in fields}
-
-        async def route_kwargs(_service, _operation, _kwargs):
-            return [], []
-
-        fake_engine = FakeEngine()
-        monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
-        monkeypatch.setattr(_request_options, "_aroute_kwargs", route_kwargs)
-        _engine._clear_field_type_resolution_cache()
-        args = {
+    @staticmethod
+    def _plan_args(extra_args, field_types=None):
+        return {
             "tickers": ["IBM US Equity"],
             "flds": ["PX_LAST", "VOLUME"],
             "backend": None,
             "format": None,
-            "field_types": None,
+            "field_types": field_types,
             "kwargs": {},
             "include_security_errors": False,
             "return_eids": False,
@@ -472,85 +442,78 @@ class TestGeneratedEndpointFieldTypeCache:
             **extra_args,
         }
 
-        try:
-            first = asyncio.run(getattr(_endpoints, builder_name)(args))
-            second = asyncio.run(getattr(_endpoints, builder_name)(args))
-        finally:
-            _engine._clear_field_type_resolution_cache()
-
-        expected_types = {
-            "PX_LAST": f"{default_type}:PX_LAST",
-            "VOLUME": f"{default_type}:VOLUME",
-        }
-        _CASE.assertEqual(first.request_kwargs["field_types"], expected_types)
-        _CASE.assertEqual(second.request_kwargs["field_types"], expected_types)
-        _CASE.assertEqual(fake_engine.calls, [(["PX_LAST", "VOLUME"], None, default_type)])
-
-    @pytest.mark.parametrize(
-        ("builder_name", "default_type", "extra_args"),
-        [
-            ("_build_abdp_plan", "string", {}),
-            (
-                "_build_abdh_plan",
-                "float64",
-                {"start_date": "20240101", "end_date": "20240102"},
-            ),
-        ],
-    )
-    def test_per_call_field_type_overrides_do_not_poison_cached_resolution(
-        self, monkeypatch, builder_name, default_type, extra_args
-    ):
-
-        class FakeEngine:
-            def __init__(self):
-                self.calls = []
-
-            async def resolve_field_types(self, fields, overrides, resolved_default_type):
-                self.calls.append((list(fields), overrides, resolved_default_type))
-                return {field: f"{resolved_default_type}:{field}" for field in fields}
-
+    @staticmethod
+    def _route_engines(monkeypatch, active):
         async def route_kwargs(_service, _operation, _kwargs):
             return [], []
 
-        fake_engine = FakeEngine()
-        monkeypatch.setattr(_engine, "_get_engine", lambda: fake_engine)
+        monkeypatch.setattr(_engine, "_get_engine", lambda: active[0])
         monkeypatch.setattr(_request_options, "_aroute_kwargs", route_kwargs)
-        _engine._clear_field_type_resolution_cache()
 
-        def plan_args(field_types):
-            return {
-                "tickers": ["IBM US Equity"],
-                "flds": ["PX_LAST", "VOLUME"],
-                "backend": None,
-                "format": None,
-                "field_types": field_types,
-                "kwargs": {},
-                "include_security_errors": False,
-                "return_eids": False,
-                "validate_fields": None,
-                **extra_args,
-            }
+    @_FIELD_TYPE_PLAN_BUILDERS
+    def test_every_plan_asks_the_active_engine(self, monkeypatch, builder_name, default_type, extra_args):
+        fake_engine = self.FakeEngine("engine")
+        self._route_engines(monkeypatch, [fake_engine])
+        build = getattr(_endpoints, builder_name)
 
-        try:
-            override_plan = asyncio.run(
-                getattr(_endpoints, builder_name)(plan_args({"PX_LAST": "decimal128", "VOLUME": "int64"}))
-            )
-            base_plan = asyncio.run(getattr(_endpoints, builder_name)(plan_args(None)))
-        finally:
-            _engine._clear_field_type_resolution_cache()
+        first = asyncio.run(build(self._plan_args(extra_args)))
+        second = asyncio.run(build(self._plan_args(extra_args)))
+
+        expected = dict.fromkeys(["PX_LAST", "VOLUME"], f"engine:{default_type}")
+        _CASE.assertEqual(first.request_kwargs["field_types"], expected)
+        _CASE.assertEqual(second.request_kwargs["field_types"], expected)
+        _CASE.assertEqual(fake_engine.calls, [(["PX_LAST", "VOLUME"], None, default_type)] * 2)
+
+    @_FIELD_TYPE_PLAN_BUILDERS
+    def test_scoped_engines_each_supply_their_own_types(self, monkeypatch, builder_name, default_type, extra_args):
+        engine_a = self.FakeEngine("a")
+        engine_b = self.FakeEngine("b")
+        active = [engine_a]
+        self._route_engines(monkeypatch, active)
+        build = getattr(_endpoints, builder_name)
+
+        plan_a = asyncio.run(build(self._plan_args(extra_args)))
+        active[0] = engine_b
+        plan_b = asyncio.run(build(self._plan_args(extra_args)))
+        active[0] = engine_a
+        plan_a_again = asyncio.run(build(self._plan_args(extra_args)))
+
+        _CASE.assertEqual(plan_a.request_kwargs["field_types"]["PX_LAST"], f"a:{default_type}")
+        _CASE.assertEqual(plan_b.request_kwargs["field_types"]["PX_LAST"], f"b:{default_type}")
+        _CASE.assertEqual(plan_a_again.request_kwargs["field_types"]["PX_LAST"], f"a:{default_type}")
+
+    @_FIELD_TYPE_PLAN_BUILDERS
+    def test_later_engine_answer_replaces_earlier_default(self, monkeypatch, builder_name, default_type, extra_args):
+        # First lookup falls back to the default (e.g. apiflds unavailable); the
+        # engine later learns the real type and the next plan must use it.
+        fake_engine = self.FakeEngine("engine", answers=[default_type, "int64"])
+        self._route_engines(monkeypatch, [fake_engine])
+        build = getattr(_endpoints, builder_name)
+
+        fallback_plan = asyncio.run(build(self._plan_args(extra_args)))
+        learned_plan = asyncio.run(build(self._plan_args(extra_args)))
+
+        _CASE.assertEqual(fallback_plan.request_kwargs["field_types"]["VOLUME"], default_type)
+        _CASE.assertEqual(learned_plan.request_kwargs["field_types"]["VOLUME"], "int64")
+
+    @_FIELD_TYPE_PLAN_BUILDERS
+    def test_per_call_overrides_apply_after_resolution(self, monkeypatch, builder_name, default_type, extra_args):
+        fake_engine = self.FakeEngine("engine")
+        self._route_engines(monkeypatch, [fake_engine])
+        build = getattr(_endpoints, builder_name)
+
+        override_plan = asyncio.run(build(self._plan_args(extra_args, {"PX_LAST": "decimal128"})))
+        base_plan = asyncio.run(build(self._plan_args(extra_args)))
 
         _CASE.assertEqual(
             override_plan.request_kwargs["field_types"],
-            {"PX_LAST": "decimal128", "VOLUME": "int64"},
+            {"PX_LAST": "decimal128", "VOLUME": f"engine:{default_type}"},
         )
         _CASE.assertEqual(
             base_plan.request_kwargs["field_types"],
-            {
-                "PX_LAST": f"{default_type}:PX_LAST",
-                "VOLUME": f"{default_type}:VOLUME",
-            },
+            dict.fromkeys(["PX_LAST", "VOLUME"], f"engine:{default_type}"),
         )
-        _CASE.assertEqual(fake_engine.calls, [(["PX_LAST", "VOLUME"], None, default_type)])
+        _CASE.assertEqual(fake_engine.calls, [(["PX_LAST", "VOLUME"], None, default_type)] * 2)
 
 
 @pytest.mark.parametrize(

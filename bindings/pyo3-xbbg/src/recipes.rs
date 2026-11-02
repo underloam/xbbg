@@ -4,35 +4,41 @@
 
 use std::collections::HashMap;
 
+use arrow_array::{ArrayRef, RecordBatch, RecordBatchOptions, RecordBatchReader};
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
+use xbbg_arrow::{ColumnData, TableData};
 use xbbg_async::engine::RequestParams;
+use xbbg_async::error_presentation::{ErrorPresentation, ErrorStyle};
 
 use xbbg_ext::transforms::fixed_income::YieldType;
 
-use crate::{PyEngine, native_arrow::record_batch_to_arrow_record_batch};
+use crate::completion::record_batch_future;
+use crate::native_arrow::{ArrowRecordBatch, ArrowTable};
+use crate::{ExceptionClass, ExceptionPlan, PyEngine};
 
-/// Convert a RecipeError to a Python exception.
+/// Convert a RecipeError to a lazy Python exception.
+///
+/// Recipe request IDs overlay the source's SDK support identifiers, including
+/// on argument (`ValueError`) and recipe (`RuntimeError`) failures.
 fn recipe_err(e: xbbg_recipes::RecipeError) -> PyErr {
     let (source, request_ids) = e.into_request_context();
-    let error = match source {
-        xbbg_recipes::RecipeError::Engine(error) => crate::blp_async_error_to_pyerr(*error),
-        xbbg_recipes::RecipeError::InvalidArgument(message) => {
-            PyErr::new::<pyo3::exceptions::PyValueError, _>(message)
+    let mut plan = match source {
+        xbbg_recipes::RecipeError::Engine(error) => {
+            ExceptionPlan::from(ErrorPresentation::from_async(*error, ErrorStyle::Python))
         }
-        other => PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(other.to_string()),
+        xbbg_recipes::RecipeError::InvalidArgument(message) => {
+            ExceptionPlan::new(ExceptionClass::Value, message)
+        }
+        other => ExceptionPlan::new(ExceptionClass::Runtime, other.to_string()),
     };
     if !request_ids.is_empty() {
-        let _ = Python::try_attach(|py| {
-            let ids: Vec<&str> = request_ids.iter().map(AsRef::as_ref).collect();
-            let value = error.value(py);
-            value.setattr("bloomberg_request_id", (ids.len() == 1).then(|| ids[0]))?;
-            value.setattr("bloomberg_request_ids", ids)
-        });
+        plan.set_bloomberg_request_ids(request_ids.iter().cloned().collect());
     }
-    error
+    plan.into()
 }
 
 fn recipe_request_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<RequestParams> {
@@ -45,14 +51,88 @@ fn recipe_request_options(options: Option<&Bound<'_, PyDict>>) -> PyResult<Reque
     crate::request::dict_to_request_params(&params)
 }
 
-fn recipe_arrow_batch(data: &Bound<'_, PyAny>) -> PyResult<arrow_array::RecordBatch> {
-    if data.hasattr("__arrow_c_array__")? {
-        return Ok(data.extract::<pyo3_arrow::PyRecordBatch>()?.into_inner());
+fn arrow_value_error(error: xbbg_arrow::ArrowCoreError) -> PyErr {
+    PyValueError::new_err(error.to_string())
+}
+
+/// Ingest recipe Arrow input on the calling thread.
+///
+/// xbbg `ArrowRecordBatch`/`ArrowTable` inputs share their Rust-owned batches
+/// without FFI. Foreign inputs import one C array, or only a stream's schema,
+/// while attached; draining, combining and copying into Rust-owned buffers then
+/// run in one detach on this thread. Producer callbacks and foreign buffer
+/// releases, which may reacquire the interpreter, therefore never run on async
+/// workers, and recipe futures hold no producer memory.
+fn recipe_arrow_batch(data: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
+    let py = data.py();
+    if let Ok(batch) = data.cast::<ArrowRecordBatch>() {
+        return Ok(batch.get().batch().clone());
     }
-    let (batches, schema) = data.extract::<pyo3_arrow::PyTable>()?.into_inner();
-    data.py()
-        .detach(move || xbbg_arrow::TableData { batches, schema }.combined_batch())
-        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+    if let Ok(table) = data.cast::<ArrowTable>() {
+        let table = table.get().table_data();
+        if let [batch] = table.batches.as_slice() {
+            return Ok(batch.clone());
+        }
+        let table = table.clone();
+        return py
+            .detach(move || table.combined_batch())
+            .map_err(arrow_value_error);
+    }
+    if data.hasattr("__arrow_c_array__")? {
+        let batch = data.extract::<pyo3_arrow::PyRecordBatch>()?.into_inner();
+        return py
+            .detach(move || owned_batch(batch))
+            .map_err(arrow_value_error);
+    }
+    let reader = data
+        .extract::<pyo3_arrow::PyRecordBatchReader>()?
+        .into_reader()?;
+    py.detach(move || drain_owned(reader))
+}
+
+/// Drain and release a foreign stream, then copy the combined batch.
+fn drain_owned(reader: Box<dyn RecordBatchReader + Send>) -> PyResult<RecordBatch> {
+    let schema = reader.schema();
+    // Producer failures keep the TypeError of pyo3-arrow's table import.
+    let batches = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| PyTypeError::new_err(error.to_string()))?;
+    let combined = TableData { batches, schema }
+        .combined_batch()
+        .map_err(arrow_value_error)?;
+    owned_batch(combined).map_err(arrow_value_error)
+}
+
+/// Copy a batch into Rust-owned buffers, keeping its schema unchanged.
+fn owned_batch(batch: RecordBatch) -> xbbg_arrow::Result<RecordBatch> {
+    let schema = batch.schema();
+    let options = RecordBatchOptions::new().with_row_count(Some(batch.num_rows()));
+    let columns = schema
+        .fields()
+        .iter()
+        .zip(batch.columns())
+        .map(|(field, column)| -> xbbg_arrow::Result<ArrayRef> {
+            let name = field.name().clone();
+            let column = ColumnData::new(name, field.clone(), vec![column.clone()])?;
+            let copied = column.compact()?;
+            Ok(copied
+                .chunks
+                .into_iter()
+                .next()
+                .expect("compaction keeps the single chunk"))
+        })
+        .collect::<xbbg_arrow::Result<Vec<_>>>()?;
+    drop(batch);
+    Ok(RecordBatch::try_new_with_options(
+        schema, columns, &options,
+    )?)
+}
+
+/// Ingest Arrow input exactly as `recipe_adjust_ccy` does (test-support only).
+#[cfg(feature = "test-support")]
+#[pyfunction]
+fn _test_recipe_input_fixture(data: &Bound<'_, PyAny>) -> PyResult<ArrowRecordBatch> {
+    recipe_arrow_batch(data).map(ArrowRecordBatch::new)
 }
 
 macro_rules! recipe_wrapper {
@@ -72,10 +152,7 @@ macro_rules! recipe_wrapper {
             let $eng = engine.engine.clone();
             $($($prepare)*)?
 
-            crate::shutdown_safe_future(py, async move {
-                let batch = $call.await.map_err(recipe_err)?;
-                crate::try_attach_or_suspend(|py| record_batch_to_arrow_record_batch(py, batch)).await
-            })
+            record_batch_future(py, async move { $call.await.map_err(recipe_err) })
         }
     };
 }
@@ -753,6 +830,8 @@ recipe_wrapper!(
 
 /// Register all recipe functions with the Python module.
 pub(crate) fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    #[cfg(feature = "test-support")]
+    m.add_function(wrap_pyfunction!(_test_recipe_input_fixture, m)?)?;
     register_pyfunctions!(
         m;
         recipe_yas,
@@ -785,8 +864,16 @@ pub(crate) fn register_recipes_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
+    use std::sync::{Arc, Mutex as StdMutex};
+    use std::thread::ThreadId;
+
+    use arrow_array::{Array, Int64Array};
+    use arrow_schema::{ArrowError, DataType, Field, Schema, SchemaRef};
+
     use super::*;
+    use crate::tests::run_while_interpreter_held;
     use crate::{
         BlpInternalError, BlpLimitError, BlpRequestError, BlpSessionError,
         BlpSubscriptionDataLossError, BlpTimeoutError, BlpValidationError,
@@ -796,6 +883,218 @@ mod tests {
     use xbbg_core::BlpError;
     use xbbg_core::errors::CorrelationContext;
     use xbbg_recipes::RecipeError;
+
+    /// A Rust producer exported through the Arrow C stream interface that
+    /// records how and where the importer pulls and releases it.
+    struct ObservedReader {
+        schema: SchemaRef,
+        batches: std::vec::IntoIter<RecordBatch>,
+        pulls: Arc<StdMutex<Vec<(bool, ThreadId)>>>,
+        released_on: Arc<StdMutex<Option<ThreadId>>>,
+    }
+
+    impl Iterator for ObservedReader {
+        type Item = Result<RecordBatch, ArrowError>;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            // SAFETY: PyGILState_Check only inspects the calling thread's state.
+            let attached = unsafe { pyo3::ffi::PyGILState_Check() } != 0;
+            self.pulls
+                .lock()
+                .unwrap()
+                .push((attached, std::thread::current().id()));
+            self.batches.next().map(Ok)
+        }
+    }
+
+    impl RecordBatchReader for ObservedReader {
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+    }
+
+    impl Drop for ObservedReader {
+        fn drop(&mut self) {
+            *self.released_on.lock().unwrap() = Some(std::thread::current().id());
+        }
+    }
+
+    struct Ingested {
+        batch: RecordBatch,
+        pulls: Vec<(bool, ThreadId)>,
+        released_on: Option<ThreadId>,
+    }
+
+    /// Ingest `batches` through a foreign C stream on this attached thread.
+    fn ingest_foreign_stream(batches: Vec<RecordBatch>) -> Ingested {
+        let pulls = Arc::new(StdMutex::new(Vec::new()));
+        let released_on = Arc::new(StdMutex::new(None));
+        let reader = ObservedReader {
+            schema: batches[0].schema(),
+            batches: batches.into_iter(),
+            pulls: pulls.clone(),
+            released_on: released_on.clone(),
+        };
+        let batch = Python::attach(|py| {
+            let stream = Bound::new(py, pyo3_arrow::PyRecordBatchReader::new(Box::new(reader)))
+                .expect("foreign stream");
+            recipe_arrow_batch(stream.as_any()).expect("stream ingestion")
+        });
+        let pulls = pulls.lock().unwrap().clone();
+        let released_on = *released_on.lock().unwrap();
+        Ingested {
+            batch,
+            pulls,
+            released_on,
+        }
+    }
+
+    fn synthetic_batch(start: i64, rows: i64) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "value",
+            DataType::Int64,
+            false,
+        )]));
+        let values = Int64Array::from_iter_values(start..start + rows);
+        RecordBatch::try_new(schema, vec![Arc::new(values)]).expect("synthetic batch")
+    }
+
+    fn values(batch: &RecordBatch) -> Vec<i64> {
+        let column = batch.column(0).as_any().downcast_ref::<Int64Array>();
+        column.expect("Int64 column").values().to_vec()
+    }
+
+    /// References to a batch's value buffer, including the probe's own.
+    fn value_buffer_refs(batch: &RecordBatch) -> usize {
+        batch.column(0).to_data().buffers()[0].strong_count()
+    }
+
+    #[test]
+    fn foreign_streams_drain_detached_on_the_calling_thread() {
+        Python::initialize();
+        let caller = std::thread::current().id();
+        let ingested = ingest_foreign_stream(vec![synthetic_batch(0, 3), synthetic_batch(3, 2)]);
+        assert_eq!(values(&ingested.batch), [0, 1, 2, 3, 4]);
+        assert_eq!(ingested.pulls.len(), 3, "two batches, then end of stream");
+        assert!(
+            ingested
+                .pulls
+                .iter()
+                .all(|(attached, thread)| !attached && *thread == caller),
+            "the producer is pulled detached on the calling thread: {:?}",
+            ingested.pulls
+        );
+        assert_eq!(
+            ingested.released_on,
+            Some(caller),
+            "the producer is released on the calling thread before scheduling"
+        );
+    }
+
+    #[test]
+    fn foreign_input_is_copied_into_rust_owned_buffers() {
+        Python::initialize();
+        let source = synthetic_batch(0, 3);
+        let baseline = value_buffer_refs(&source);
+        let ingested = ingest_foreign_stream(vec![source.clone()]);
+        assert_eq!(values(&ingested.batch), [0, 1, 2]);
+        assert_eq!(
+            value_buffer_refs(&source),
+            baseline,
+            "ingested data must not retain producer buffers"
+        );
+
+        let array_input = Python::attach(|py| {
+            let foreign = pyo3_arrow::PyRecordBatch::new(source.clone())
+                .into_pyobject(py)
+                .expect("foreign C array");
+            recipe_arrow_batch(foreign.as_any()).expect("array ingestion")
+        });
+        assert_eq!(values(&array_input), [0, 1, 2]);
+        assert_eq!(value_buffer_refs(&source), baseline);
+    }
+
+    #[test]
+    fn native_inputs_share_their_batches_without_ffi() {
+        Python::initialize();
+        Python::attach(|py| {
+            let source = synthetic_batch(0, 3);
+            let native = Bound::new(py, ArrowRecordBatch::new(source.clone())).unwrap();
+            let table = native.call_method0("to_table").unwrap();
+            for input in [native.as_any(), &table] {
+                let ingested = recipe_arrow_batch(input).unwrap();
+                assert!(
+                    ingested.column(0).to_data().buffers()[0]
+                        .ptr_eq(&source.column(0).to_data().buffers()[0])
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn recipe_overlays_are_built_without_the_interpreter() {
+        let [rejection, argument, timeout, plain] = run_while_interpreter_held(|| {
+            let one = || [Arc::<str>::from("synthetic_a")];
+            let two = || [Arc::<str>::from("synthetic_a"), Arc::from("synthetic_z")];
+            [
+                recipe_err(
+                    RecipeError::Other("synthetic recipe rejection".into())
+                        .with_bloomberg_request_ids(one()),
+                ),
+                recipe_err(
+                    RecipeError::InvalidArgument("synthetic recipe argument".into())
+                        .with_bloomberg_request_ids(two()),
+                ),
+                recipe_err(
+                    RecipeError::from(BlpAsyncError::from(BlpError::Timeout))
+                        .with_bloomberg_request_ids(one()),
+                ),
+                recipe_err(RecipeError::Other("synthetic plain failure".into())),
+            ]
+        });
+        Python::attach(|py| {
+            let ids = |error: &PyErr| -> (Option<String>, Vec<String>) {
+                let value = error.value(py);
+                (
+                    value
+                        .getattr("bloomberg_request_id")
+                        .unwrap()
+                        .extract()
+                        .unwrap(),
+                    value
+                        .getattr("bloomberg_request_ids")
+                        .unwrap()
+                        .extract()
+                        .unwrap(),
+                )
+            };
+            assert!(rejection.is_instance_of::<PyRuntimeError>(py));
+            assert_eq!(
+                rejection.value(py).to_string(),
+                "Recipe error: synthetic recipe rejection"
+            );
+            assert_eq!(
+                ids(&rejection),
+                (Some("synthetic_a".into()), vec!["synthetic_a".into()])
+            );
+
+            assert!(argument.is_instance_of::<PyValueError>(py));
+            assert_eq!(
+                ids(&argument),
+                (None, vec!["synthetic_a".into(), "synthetic_z".into()])
+            );
+
+            assert!(timeout.is_instance_of::<BlpTimeoutError>(py));
+            assert!(timeout.value(py).getattr("service").unwrap().is_none());
+            assert_eq!(
+                ids(&timeout),
+                (Some("synthetic_a".into()), vec!["synthetic_a".into()])
+            );
+
+            assert!(plain.is_instance_of::<PyRuntimeError>(py));
+            assert!(!plain.value(py).hasattr("bloomberg_request_ids").unwrap());
+        });
+    }
 
     #[test]
     fn recipe_validation_errors_distinguish_arguments_from_engine_configuration() {

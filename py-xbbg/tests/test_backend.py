@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from xbbg.backend import (
     Backend,
+    check_backend,
     effective_backend,
     resolve_backend,
     validate_backend_format,
@@ -121,3 +124,27 @@ class TestBackendEnum:
         assert resolve_backend(None, Backend.NATIVE) == Backend.NATIVE
         assert resolve_backend("pyarrow", Backend.NATIVE) == Backend.PYARROW
         assert effective_backend(None, Backend.NATIVE) == Backend.NATIVE
+
+
+# Floors declared by the root pyproject.toml optional dependencies.
+@pytest.mark.parametrize(
+    ("backend", "module_name", "below", "floor"),
+    [
+        (Backend.PYARROW, "pyarrow", "21.0.0", "22.0.0"),
+        (Backend.PANDAS, "pandas", "2.2.1", "2.2.2"),
+        (Backend.POLARS, "polars", "0.20.3", "0.20.4"),
+        (Backend.POLARS_LAZY, "polars", "0.20.3", "0.20.4"),
+        (Backend.NARWHALS_LAZY, "polars", "0.20.3", "0.20.4"),
+        (Backend.DUCKDB, "duckdb", "1.5.0", "1.5.1"),
+    ],
+)
+def test_runtime_version_check_matches_declared_floor(backend, module_name, below, floor, monkeypatch):
+    module = pytest.importorskip(module_name)
+
+    monkeypatch.setattr(module, "__version__", below)
+    with pytest.raises(ValueError, match=rf"but version {re.escape(below)} is installed"):
+        check_backend(backend)
+    assert check_backend(backend, raise_on_error=False) is False
+
+    monkeypatch.setattr(module, "__version__", floor)
+    assert check_backend(backend) is True

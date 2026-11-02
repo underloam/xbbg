@@ -7,8 +7,8 @@ comparisons; installing a package does not add it to every benchmark.
 ## Bloomberg Data Usage
 
 All request benchmarks require an authorized Bloomberg Terminal or B-PIPE
-connection and the relevant entitlements. Only `bench_handoff_offline.py` is
-offline.
+connection and the relevant entitlements. Only `bench_handoff_offline.py` and
+`bench_python_delivery_latency.py` are offline.
 
 With the defaults in `config.py`, each successful package/scenario pair makes one
 fresh-process call, one discarded warmup call, five measured warm calls, and one
@@ -28,6 +28,7 @@ your internal policies.
 | `harness.py` | Separate BDP, BDH, and BQL comparison with `polars-bloomberg`; reports same-process first calls and warm timings. |
 | `bench_raw_blpapi.py` | Standalone SDK BDP phase timing; not a lane in `run_all.py`. |
 | `bench_handoff_offline.py` | Native Arrow handoff into supported Python consumers using synthetic fixture data; no live requests. |
+| `bench_python_delivery_latency.py` | Publish-to-delivery latency for an asyncio consumer of the offline subscription test driver, the producer's `publish_json` call time, and event-loop lag reported separately. Requires a release build of `xbbg._core` with the `test-support` feature (see the script docstring); prints results and writes no files. |
 
 The standard runner labels the current installation `xbbg-rust`; the equivalence
 script labels it `xbbg-latest`. Both import the real `xbbg` package. There is no
@@ -73,6 +74,7 @@ python py-xbbg/benchmarks/bench_raw_blpapi.py
 
 # No Bloomberg connection needed
 python py-xbbg/benchmarks/bench_handoff_offline.py --quick
+python py-xbbg/benchmarks/bench_python_delivery_latency.py  # release test-support build only
 ```
 
 ## Configuration

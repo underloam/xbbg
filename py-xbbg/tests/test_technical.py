@@ -41,6 +41,17 @@ def test_study_request_uses_shared_aliases_defaults_and_explicit_parameters():
     assert blp.ta_study_params("sma")["period"] == 20
 
 
+def test_mutating_returned_study_params_does_not_change_later_requests():
+    params = blp.ta_study_params("sma")
+    params["period"] = 999
+    params.clear()
+
+    assert blp.ta_study_params("sma") == {"period": 20, "priceSourceClose": "PX_LAST"}
+    elements = dict(_technical._build_study_request("SYNTHETIC Equity", "sma"))
+    assert elements["studyAttributes.smavgStudyAttributes.period"] == "20"
+    assert elements["studyAttributes.smavgStudyAttributes.priceSourceClose"] == "PX_LAST"
+
+
 def test_abta_uses_shared_engine_and_backend_seams(monkeypatch):
     calls = []
     batch = ArrowTable.from_pylist([{"value": 7.0}]).to_batches()[0]

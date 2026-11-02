@@ -61,6 +61,35 @@ async def test_convert_ccy_accepts_pandas_without_pyarrow(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_convert_ccy_without_pyarrow_matches_row_construction(monkeypatch):
+    from xbbg._core import ArrowTable
+
+    monkeypatch.setattr(currency, "is_backend_available", lambda _backend: False)
+
+    async def recipe(_name, batch, *_args, **_kwargs):
+        return batch
+
+    monkeypatch.setattr(currency, "_call_native_recipe", recipe)
+    data = pd.DataFrame(
+        {
+            "ticker": ["ABC LN Equity", None, "XYZ US Equity"],
+            "date": [date(2024, 1, 2), date(2024, 1, 3), None],
+            "value": [1.25, 2.0, 3.5],
+            "count": [1, 2, 3],
+            "flag": [True, False, True],
+            "when": pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04"]).tz_localize("UTC"),
+        }
+    )
+    reference = ArrowTable.from_pylist(nw.from_native(data).iter_rows(named=True))
+
+    result = await currency.aconvert_ccy(data)
+
+    assert result.column_names == reference.column_names
+    assert nw.from_native(result).schema == nw.from_native(reference).schema
+    assert result.to_pylist() == reference.to_pylist()
+
+
+@pytest.mark.asyncio
 async def test_convert_ccy_keeps_empty_column_names_without_pyarrow(monkeypatch):
     monkeypatch.setattr(currency, "is_backend_available", lambda _backend: False)
 

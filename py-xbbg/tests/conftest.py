@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import sysconfig
 
 import pytest
 
@@ -39,6 +40,20 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip_live)
+
+
+def pytest_sessionfinish(session):
+    """Fail a free-threaded run whose imports re-enabled the GIL (unless the run forced it on)."""
+    if not sysconfig.get_config_var("Py_GIL_DISABLED") or getattr(sys.flags, "gil", None) == 1:
+        return
+    gil_enabled = getattr(sys, "_is_gil_enabled", None)
+    if gil_enabled is not None and gil_enabled():
+        if session.exitstatus == pytest.ExitCode.OK:
+            session.exitstatus = pytest.ExitCode.TESTS_FAILED
+        sys.stderr.write(
+            "An import re-enabled the GIL on this free-threaded interpreter; CPython's RuntimeWarning "
+            "about enabling the GIL names the extension module.\n"
+        )
 
 
 def _fail_engine_construction(*_args: object, **_kwargs: object) -> None:

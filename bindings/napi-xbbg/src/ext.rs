@@ -31,7 +31,7 @@ use xbbg_ext::utils::ticker::{
     build_futures_ticker, filter_equity_tickers, is_specific_contract, normalize_tickers,
     parse_ticker_parts,
 };
-use xbbg_ext::{ExchangeInfo, OverridePatch, SessionWindows};
+use xbbg_ext::{ExchangeInfo, ExtError, OverridePatch, SessionWindows};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -39,10 +39,6 @@ use xbbg_ext::{ExchangeInfo, OverridePatch, SessionWindows};
 
 fn ext_err(e: impl std::fmt::Display) -> Error {
     Error::new(Status::GenericFailure, e.to_string())
-}
-
-fn string_refs(values: &[String]) -> Vec<&str> {
-    values.iter().map(String::as_str).collect()
 }
 
 fn date_from_parts(year: i32, month: u32, day: u32) -> napi::Result<chrono::NaiveDate> {
@@ -265,15 +261,13 @@ pub fn ext_build_futures_ticker(
 /// Normalize tickers to a list.
 #[napi]
 pub fn ext_normalize_tickers(tickers: Vec<String>) -> Vec<String> {
-    let refs = string_refs(&tickers);
-    normalize_tickers(&refs)
+    normalize_tickers(tickers)
 }
 
 /// Filter to equity tickers only.
 #[napi]
 pub fn ext_filter_equity_tickers(tickers: Vec<String>) -> Vec<String> {
-    let refs = string_refs(&tickers);
-    filter_equity_tickers(&refs)
+    filter_equity_tickers(tickers)
 }
 
 // =============================================================================
@@ -298,7 +292,12 @@ pub fn ext_generate_futures_candidates(
 
     let candidates =
         generate_futures_candidates(&gen_ticker, dt, roll_freq, count.unwrap_or(4) as usize)
-            .map_err(ext_err)?;
+            .map_err(|e| match e {
+                ExtError::CandidateCountTooLarge { .. } => {
+                    Error::new(Status::InvalidArg, e.to_string())
+                }
+                other => ext_err(other),
+            })?;
 
     Ok(candidates
         .into_iter()
@@ -331,10 +330,10 @@ pub fn ext_filter_candidates_by_cycle(
     cycle: String,
 ) -> Vec<FuturesCandidateOutput> {
     let tuples: Vec<(String, i32, u32)> = candidates
-        .iter()
-        .map(|c| (c.ticker.clone(), c.year, c.month))
+        .into_iter()
+        .map(|c| (c.ticker, c.year, c.month))
         .collect();
-    let filtered = filter_candidates_by_cycle(&tuples, &cycle);
+    let filtered = filter_candidates_by_cycle(tuples, &cycle);
     filtered
         .into_iter()
         .map(|(ticker, year, month)| FuturesCandidateOutput {
@@ -355,7 +354,7 @@ pub fn ext_filter_valid_contracts(
 ) -> napi::Result<Vec<String>> {
     let ref_date = date_from_parts(year, month, day)?;
     let pairs: Vec<(String, String)> = contracts.into_iter().map(|p| (p.key, p.value)).collect();
-    Ok(filter_valid_contracts(&pairs, ref_date))
+    Ok(filter_valid_contracts(pairs, ref_date))
 }
 
 // =============================================================================
@@ -440,8 +439,7 @@ pub fn ext_same_currency(ccy1: String, ccy2: String) -> bool {
 /// Get currencies that need FX conversion.
 #[napi]
 pub fn ext_currencies_needing_conversion(currencies: Vec<String>, target: String) -> Vec<String> {
-    let refs = string_refs(&currencies);
-    currencies_needing_conversion(&refs, &target)
+    currencies_needing_conversion(&currencies, &target)
 }
 
 // =============================================================================
@@ -451,8 +449,7 @@ pub fn ext_currencies_needing_conversion(currencies: Vec<String>, target: String
 /// Get dividend column rename mapping.
 #[napi]
 pub fn ext_rename_dividend_columns(columns: Vec<String>) -> Vec<StringPair> {
-    let refs = string_refs(&columns);
-    rename_dividend_columns(&refs)
+    rename_dividend_columns(columns)
         .into_iter()
         .map(|(key, value)| StringPair { key, value })
         .collect()
@@ -461,8 +458,7 @@ pub fn ext_rename_dividend_columns(columns: Vec<String>) -> Vec<StringPair> {
 /// Get ETF holdings column rename mapping.
 #[napi]
 pub fn ext_rename_etf_columns(columns: Vec<String>) -> Vec<StringPair> {
-    let refs = string_refs(&columns);
-    rename_etf_columns(&refs)
+    rename_etf_columns(columns)
         .into_iter()
         .map(|(key, value)| StringPair { key, value })
         .collect()
@@ -585,8 +581,7 @@ pub fn ext_build_earning_header_rename(
     data_columns: Vec<String>,
 ) -> Vec<StringPair> {
     let pairs: Vec<(String, String)> = header_row.into_iter().map(|p| (p.key, p.value)).collect();
-    let refs = string_refs(&data_columns);
-    build_earning_header_rename(&pairs, &refs)
+    build_earning_header_rename(&pairs, &data_columns)
         .into_iter()
         .map(|(key, value)| StringPair { key, value })
         .collect()
@@ -612,7 +607,7 @@ pub fn ext_build_preferreds_query(
     extra_fields: Option<Vec<String>>,
 ) -> String {
     let fields = extra_fields.unwrap_or_default();
-    let refs = string_refs(&fields);
+    let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
     build_preferreds_query(&equity_ticker, &refs)
 }
 
@@ -624,7 +619,7 @@ pub fn ext_build_corporate_bonds_query(
     extra_fields: Option<Vec<String>>,
 ) -> String {
     let fields = extra_fields.unwrap_or_default();
-    let refs = string_refs(&fields);
+    let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
     build_corporate_bonds_query(&ticker, ccy.as_deref(), &refs)
 }
 
@@ -635,7 +630,7 @@ pub fn ext_build_etf_holdings_query(
     extra_fields: Option<Vec<String>>,
 ) -> String {
     let fields = extra_fields.unwrap_or_default();
-    let refs = string_refs(&fields);
+    let refs: Vec<&str> = fields.iter().map(String::as_str).collect();
     build_etf_holdings_query(&etf_ticker, &refs)
 }
 

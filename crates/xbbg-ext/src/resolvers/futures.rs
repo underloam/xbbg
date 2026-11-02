@@ -38,6 +38,12 @@ pub struct FuturesCandidate {
     pub month: NaiveDate,
 }
 
+/// Largest candidate count [`generate_futures_candidates`] accepts.
+///
+/// Real resolutions need a handful of contracts; the bound keeps a caller-supplied
+/// count from driving an unbounded allocation.
+pub const MAX_FUTURES_CANDIDATES: usize = 10_000;
+
 /// Generate futures contract candidates for a given generic ticker and date.
 ///
 /// This generates the list of potential contract tickers that need to be
@@ -48,11 +54,17 @@ pub struct FuturesCandidate {
 /// * `gen_ticker` - Generic futures ticker (e.g., "ES1 Index")
 /// * `dt` - Reference date
 /// * `freq` - Roll frequency (Monthly or Quarterly)
-/// * `count` - Number of candidates to generate
+/// * `count` - Number of candidates to generate, at most [`MAX_FUTURES_CANDIDATES`]
 ///
 /// # Returns
 ///
 /// A vector of `FuturesCandidate` with ticker strings and their contract months.
+///
+/// # Errors
+///
+/// Returns `ExtError::CandidateCountTooLarge` when `count` exceeds
+/// [`MAX_FUTURES_CANDIDATES`], `ExtError::SpecificTicker` for a specific contract,
+/// and `ExtError::InvalidTicker` for an unparsable ticker.
 ///
 /// # Examples
 ///
@@ -73,6 +85,13 @@ pub fn generate_futures_candidates(
     freq: RollFrequency,
     count: usize,
 ) -> Result<Vec<FuturesCandidate>> {
+    if count > MAX_FUTURES_CANDIDATES {
+        return Err(ExtError::CandidateCountTooLarge {
+            count,
+            max: MAX_FUTURES_CANDIDATES,
+        });
+    }
+
     // Validate it's a generic ticker
     if is_specific_contract(gen_ticker) {
         return Err(ExtError::SpecificTicker(gen_ticker.to_string()));
@@ -100,6 +119,8 @@ pub fn generate_futures_candidates(
 }
 
 /// Generate contract months starting from a given date.
+///
+/// Callers bound `count` by [`MAX_FUTURES_CANDIDATES`] before preallocating.
 fn generate_contract_months(
     start: NaiveDate,
     freq: RollFrequency,
@@ -187,13 +208,15 @@ pub fn contract_index(gen_ticker: &str) -> Result<usize> {
 
 /// Filter and sort futures contracts by maturity date.
 ///
-/// Given a list of (ticker, maturity_date_str) pairs and a reference date,
+/// Given owned (ticker, maturity_date_str) pairs and a reference date,
 /// keeps only contracts whose maturity falls after the reference date
-/// and returns them sorted by maturity date ascending.
+/// and returns their tickers sorted by maturity date ascending. The sort is
+/// stable: contracts with equal maturities keep their input order. Surviving
+/// tickers are moved, not cloned.
 ///
 /// # Arguments
 ///
-/// * `contracts` - Slice of (ticker, maturity_date_string) pairs
+/// * `contracts` - (ticker, maturity_date_string) pairs; unparsable dates are dropped
 /// * `ref_date` - Reference date; contracts maturing on or before this are excluded
 ///
 /// # Returns
@@ -213,22 +236,19 @@ pub fn contract_index(gen_ticker: &str) -> Result<usize> {
 /// ];
 /// let ref_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
 ///
-/// let valid = filter_valid_contracts(&contracts, ref_date);
-/// assert_eq!(valid.len(), 2);
-/// assert_eq!(valid[0], "ESH24 Index");
-/// assert_eq!(valid[1], "ESM24 Index");
+/// let valid = filter_valid_contracts(contracts, ref_date);
+/// assert_eq!(valid, vec!["ESH24 Index", "ESM24 Index"]);
 /// ```
-pub fn filter_valid_contracts(contracts: &[(String, String)], ref_date: NaiveDate) -> Vec<String> {
+pub fn filter_valid_contracts(
+    contracts: Vec<(String, String)>,
+    ref_date: NaiveDate,
+) -> Vec<String> {
     let mut valid: Vec<(String, NaiveDate)> = contracts
-        .iter()
+        .into_iter()
         .filter_map(|(ticker, matu_str)| {
-            crate::utils::date::try_parse_date(matu_str).and_then(|matu_dt| {
-                if matu_dt > ref_date {
-                    Some((ticker.clone(), matu_dt))
-                } else {
-                    None
-                }
-            })
+            crate::utils::date::try_parse_date(&matu_str)
+                .filter(|matu_dt| *matu_dt > ref_date)
+                .map(|matu_dt| (ticker, matu_dt))
         })
         .collect();
 
@@ -241,17 +261,17 @@ pub fn filter_valid_contracts(contracts: &[(String, String)], ref_date: NaiveDat
 /// Bloomberg's `FUT_GEN_MONTH` field returns a string of month codes
 /// (e.g., `"HMUZ"` for quarterly, `"FHKNUX"` for grains).  This function
 /// keeps only candidates whose contract month maps to a code present in
-/// `cycle`.
+/// `cycle` (case-insensitive).
 ///
 /// # Arguments
 ///
-/// * `candidates` – Slice of `(ticker, year, month)` tuples as returned by
-///   `generate_futures_candidates` (via the pyo3 binding).
+/// * `candidates` – Owned `(ticker, year, month)` tuples as returned by
+///   `generate_futures_candidates` (via the bindings); filtered in place.
 /// * `cycle` – Month-code string from Bloomberg (e.g., `"HMUZ"`).
 ///
 /// # Returns
 ///
-/// Filtered vector preserving the original order.
+/// The surviving candidates in their original order.
 ///
 /// # Examples
 ///
@@ -265,25 +285,22 @@ pub fn filter_valid_contracts(contracts: &[(String, String)], ref_date: NaiveDat
 ///     ("ESM24 Index".to_string(), 2024, 6u32),   // M = Jun
 /// ];
 ///
-/// let filtered = filter_candidates_by_cycle(&candidates, "HMUZ");
+/// let filtered = filter_candidates_by_cycle(candidates, "HMUZ");
 /// assert_eq!(filtered.len(), 2);
 /// assert_eq!(filtered[0].0, "ESH24 Index");
 /// assert_eq!(filtered[1].0, "ESM24 Index");
 /// ```
 pub fn filter_candidates_by_cycle(
-    candidates: &[(String, i32, u32)],
+    mut candidates: Vec<(String, i32, u32)>,
     cycle: &str,
 ) -> Vec<(String, i32, u32)> {
     let cycle_upper = cycle.to_uppercase();
+    candidates.retain(|(_, _, month)| {
+        MONTH_NUM_TO_CODE
+            .get(month)
+            .is_some_and(|code| cycle_upper.contains(code))
+    });
     candidates
-        .iter()
-        .filter(|(_, _, month)| {
-            MONTH_NUM_TO_CODE
-                .get(month)
-                .is_some_and(|code| cycle_upper.contains(code))
-        })
-        .cloned()
-        .collect()
 }
 
 #[cfg(test)]
@@ -343,6 +360,36 @@ mod tests {
     }
 
     #[test]
+    fn test_candidate_count_bound() {
+        let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let at_bound = generate_futures_candidates(
+            "ES1 Index",
+            dt,
+            RollFrequency::Monthly,
+            MAX_FUTURES_CANDIDATES,
+        )
+        .unwrap();
+        assert_eq!(at_bound.len(), MAX_FUTURES_CANDIDATES);
+
+        let err = generate_futures_candidates(
+            "ES1 Index",
+            dt,
+            RollFrequency::Monthly,
+            MAX_FUTURES_CANDIDATES + 1,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ExtError::CandidateCountTooLarge { count, max }
+                if count == MAX_FUTURES_CANDIDATES + 1 && max == MAX_FUTURES_CANDIDATES
+        ));
+
+        let err = generate_futures_candidates("ES1 Index", dt, RollFrequency::Monthly, usize::MAX)
+            .unwrap_err();
+        assert!(matches!(err, ExtError::CandidateCountTooLarge { .. }));
+    }
+
+    #[test]
     fn test_contract_index() {
         assert_eq!(contract_index("ES1 Index").unwrap(), 0);
         assert_eq!(contract_index("ES2 Index").unwrap(), 1);
@@ -363,7 +410,7 @@ mod tests {
             ("ESZ23 Index".to_string(), "2023-12-15".to_string()),
         ];
         let ref_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let valid = filter_valid_contracts(&contracts, ref_date);
+        let valid = filter_valid_contracts(contracts, ref_date);
 
         assert_eq!(valid.len(), 2);
         assert_eq!(valid[0], "ESH24 Index");
@@ -374,7 +421,7 @@ mod tests {
     fn test_filter_valid_contracts_empty() {
         let contracts: Vec<(String, String)> = vec![];
         let ref_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        assert!(filter_valid_contracts(&contracts, ref_date).is_empty());
+        assert!(filter_valid_contracts(contracts, ref_date).is_empty());
     }
 
     #[test]
@@ -384,10 +431,28 @@ mod tests {
             ("ESM24 Index".to_string(), "2024-06-21".to_string()),
         ];
         let ref_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
-        let valid = filter_valid_contracts(&contracts, ref_date);
+        let valid = filter_valid_contracts(contracts, ref_date);
 
         assert_eq!(valid.len(), 1);
         assert_eq!(valid[0], "ESM24 Index");
+    }
+
+    #[test]
+    fn test_filter_valid_contracts_sorts_stably_and_excludes_ref_date() {
+        let contracts = vec![
+            ("ESM24 Index".to_string(), "2024-06-21".to_string()),
+            ("ESB Index".to_string(), "2024-03-15".to_string()),
+            ("ESF24 Index".to_string(), "2024-01-15".to_string()),
+            ("ESA Index".to_string(), "2024-03-15".to_string()),
+            ("ESB Index".to_string(), "2024-03-15".to_string()),
+        ];
+        let ref_date = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
+        let valid = filter_valid_contracts(contracts, ref_date);
+
+        assert_eq!(
+            valid,
+            vec!["ESB Index", "ESA Index", "ESB Index", "ESM24 Index"]
+        );
     }
 
     #[test]
@@ -400,7 +465,7 @@ mod tests {
             ("ESK24 Index".to_string(), 2024, 5),
             ("ESM24 Index".to_string(), 2024, 6),
         ];
-        let filtered = filter_candidates_by_cycle(&candidates, "HMUZ");
+        let filtered = filter_candidates_by_cycle(candidates, "HMUZ");
         assert_eq!(filtered.len(), 2);
         assert_eq!(filtered[0].0, "ESH24 Index");
         assert_eq!(filtered[1].0, "ESM24 Index");
@@ -417,20 +482,30 @@ mod tests {
             ("ZSU24 Comdty".to_string(), 2024, 9),
             ("ZSX24 Comdty".to_string(), 2024, 11),
         ];
-        let filtered = filter_candidates_by_cycle(&candidates, "FHKNQUX");
+        let filtered = filter_candidates_by_cycle(candidates, "FHKNQUX");
         assert_eq!(filtered.len(), 7); // all match the soybean cycle
     }
 
     #[test]
     fn test_filter_candidates_by_cycle_empty() {
         let candidates: Vec<(String, i32, u32)> = vec![];
-        assert!(filter_candidates_by_cycle(&candidates, "HMUZ").is_empty());
+        assert!(filter_candidates_by_cycle(candidates, "HMUZ").is_empty());
     }
 
     #[test]
     fn test_filter_candidates_by_cycle_case_insensitive() {
-        let candidates = vec![("ESH24 Index".to_string(), 2024, 3)];
-        let filtered = filter_candidates_by_cycle(&candidates, "hmuz");
-        assert_eq!(filtered.len(), 1);
+        let candidates = vec![
+            ("ESH24 Index".to_string(), 2024, 3),
+            ("ESJ24 Index".to_string(), 2024, 4),
+            ("ESH24 Index".to_string(), 2024, 3),
+        ];
+        let filtered = filter_candidates_by_cycle(candidates, "hmuz");
+        assert_eq!(
+            filtered,
+            vec![
+                ("ESH24 Index".to_string(), 2024, 3),
+                ("ESH24 Index".to_string(), 2024, 3),
+            ]
+        );
     }
 }

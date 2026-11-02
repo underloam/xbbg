@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 import threading
 from types import SimpleNamespace
 import warnings
@@ -25,6 +26,11 @@ from xbbg import _core, _engine, backend as backend_module
 TOPIC = "SYNTHETIC DELIVERY Equity"
 SECOND = "SYNTHETIC SECOND Equity"
 LABEL = "synthetic delivery"
+HOLD_MS = 300
+requires_gil = pytest.mark.skipif(
+    getattr(sys, "_is_gil_enabled", lambda: True)() is False,
+    reason="interpreter-held completion contention needs a GIL build",
+)
 
 
 @pytest_asyncio.fixture
@@ -836,3 +842,58 @@ async def test_plain_reader_waits_for_unpublished_strict_delivery_receipt(native
         assert restored.to_pylist()[0]["BID"] == 10.0
         assert restored.num_rows == 1
     await sub.unsubscribe()
+
+
+@requires_gil
+@pytest.mark.asyncio
+async def test_completions_waiting_for_the_interpreter_leave_bridge_workers_free(native_factory):
+    owner = await native_factory()
+    topics = [f"SYNTHETIC SATURATED {index} Equity" for index in range(4)]
+    subscriptions = [await owner.subscribe([topic], ["BID"]) for topic in topics]
+    for index, topic in enumerate(topics):
+        publish(owner, topic, BID=float(index))
+    start = owner.bridge_ticks()
+    await asyncio.sleep(HOLD_MS / 1000)
+    idle = owner.bridge_ticks() - start
+    assert idle > 0
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1000)
+    try:
+        # Every read completes natively at once, then waits for the interpreter held here.
+        pending = [native.next_delivery() for native in subscriptions]
+        start = owner.bridge_ticks()
+        owner.hold_attached(HOLD_MS)
+        held = owner.bridge_ticks() - start
+    finally:
+        sys.setswitchinterval(interval)
+    receipts = await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
+    assert [receipt.value[1].to_pylist()[0]["BID"] for receipt in receipts] == [0.0, 1.0, 2.0, 3.0]
+    for receipt in receipts:
+        receipt.publish()
+    assert held >= idle / 2, f"bridge advanced {held} ticks while the interpreter was held, {idle} while idle"
+    for native in subscriptions:
+        await native.unsubscribe()
+
+
+@requires_gil
+@pytest.mark.asyncio
+async def test_read_cancelled_before_completion_keeps_rows_and_gap(native_factory):
+    owner = await native_factory()
+    native = await owner.subscribe([TOPIC], ["BID"], stream_capacity=1, overflow_policy="drop_oldest")
+    publish(owner, BID=10.0)
+    publish(owner, BID=11.0)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1000)
+    try:
+        # The read may complete natively, but its receipt is dropped unpublished.
+        cancelled = native.next_delivery()
+        cancelled.cancel()
+    finally:
+        sys.setswitchinterval(interval)
+    receipt = await asyncio.wait_for(native.next_delivery(), timeout=3)
+    kind, batch, dropped_updates = receipt.value
+    receipt.publish()
+    assert (kind, dropped_updates) == ("deltas", 1)
+    assert batch.to_pylist()[0]["BID"] == 11.0
+    await native.unsubscribe()

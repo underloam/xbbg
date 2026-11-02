@@ -28,7 +28,7 @@ use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{
     PyAny, PyBool, PyBytes, PyCapsule, PyDate, PyDateTime, PyDelta, PyDict, PyFloat, PyInt,
-    PyIterator, PyList, PyString, PyTime, PyTuple, PyType, PyTzInfo,
+    PyIterator, PyList, PyMapping, PyString, PyTime, PyTuple, PyType, PyTzInfo,
 };
 use pyo3_arrow::ffi::{
     ArrayIterator, to_array_pycapsules, to_schema_pycapsule, to_stream_pycapsule,
@@ -39,7 +39,6 @@ use pyo3_stub_gen::derive::*;
 use xbbg_arrow::scalar::{date_from_cell, date_from_days};
 use xbbg_arrow::{
     ArrowCoreError, CellValue, ColumnData, SortDirection, TableData, build_array, cell_from_array,
-    cell_has_value,
 };
 use xbbg_async::diagnostics::{
     FieldExceptions, METADATA_KEY_FIELD_ERRORS, METADATA_KEY_FIELD_EXCEPTIONS,
@@ -49,7 +48,9 @@ use xbbg_async::engine::state::{
     METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
 };
 
-fn core_err_to_py(err: ArrowCoreError) -> PyErr {
+use crate::shaping::reshape_bqr_generic_table;
+
+pub(crate) fn core_err_to_py(err: ArrowCoreError) -> PyErr {
     match err {
         ArrowCoreError::UnknownColumn(name) => {
             PyKeyError::new_err(format!("unknown column: {name}"))
@@ -99,6 +100,16 @@ fn serde_json_value_to_py(py: Python<'_>, value: &serde_json::Value) -> PyResult
     }
 }
 
+/// Schema-metadata JSON values at least this long are parsed detached.
+///
+/// Typical diagnostics metadata is well under a kilobyte and parses in
+/// microseconds, less than re-acquiring a contended interpreter can cost (up
+/// to one switch interval, 5 ms by default). Metadata has no size cap, though:
+/// diagnostics grow with securities x failing fields. At serde_json's parse
+/// rate, 64 KiB takes on the order of 100 us, the point where parsing starts
+/// to outweigh the reattach cost.
+const DETACHED_METADATA_PARSE_MIN_BYTES: usize = 64 * 1024;
+
 fn parse_metadata_json(
     py: Python<'_>,
     metadata: &HashMap<String, String>,
@@ -107,9 +118,37 @@ fn parse_metadata_json(
     let Some(raw) = metadata.get(key) else {
         return Ok(py.None());
     };
-    let value: serde_json::Value = serde_json::from_str(raw)
-        .map_err(|err| PyValueError::new_err(format!("invalid JSON in {key}: {err}")))?;
+    let parse = || serde_json::from_str::<serde_json::Value>(raw);
+    let value = if raw.len() >= DETACHED_METADATA_PARSE_MIN_BYTES {
+        py.detach(parse)
+    } else {
+        parse()
+    }
+    .map_err(|err| PyValueError::new_err(format!("invalid JSON in {key}: {err}")))?;
     serde_json_value_to_py(py, &value)
+}
+
+fn metadata_sizes(metadata: &HashMap<String, String>) -> HashMap<String, usize> {
+    metadata
+        .iter()
+        .map(|(key, value)| (key.clone(), value.len()))
+        .collect()
+}
+
+fn metadata_value<'a>(
+    metadata: &'a HashMap<String, String>,
+    key: &str,
+    max_bytes: Option<usize>,
+) -> Option<&'a str> {
+    let value = metadata.get(key)?.as_str();
+    let Some(max_bytes) = max_bytes.filter(|max_bytes| *max_bytes < value.len()) else {
+        return Some(value);
+    };
+    let end = (0..=max_bytes)
+        .rev()
+        .find(|end| value.is_char_boundary(*end))
+        .unwrap_or(0);
+    Some(&value[..end])
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
@@ -347,6 +386,39 @@ fn py_sequence_to_cells(values: &Bound<'_, PyAny>) -> PyResult<Vec<CellValue>> {
     iterator
         .map(|item| item.and_then(|value| py_value_to_cell(&value)))
         .collect()
+}
+
+/// Collect a column mapping into cell columns, in mapping order.
+fn pydict_to_columns(columns: &Bound<'_, PyAny>) -> PyResult<(CellColumns, usize)> {
+    let mapping = columns.cast::<PyMapping>().map_err(|_| {
+        PyTypeError::new_err(
+            "ArrowTable.from_pydict expects a mapping of column names to value sequences",
+        )
+    })?;
+    let mut out = CellColumns::new();
+    let mut row_count = None;
+    for item in mapping.items()?.iter() {
+        let (key, values) = item.extract::<(Bound<'_, PyAny>, Bound<'_, PyAny>)>()?;
+        let name = key.extract::<String>()?;
+        if values.is_instance_of::<PyString>() || values.is_instance_of::<PyBytes>() {
+            return Err(PyTypeError::new_err(format!(
+                "ArrowTable.from_pydict column {name:?} must be a sequence of values"
+            )));
+        }
+        let cells = py_sequence_to_cells(&values)?;
+        match row_count {
+            None => row_count = Some(cells.len()),
+            Some(expected) if expected != cells.len() => {
+                return Err(PyValueError::new_err(format!(
+                    "ArrowTable.from_pydict column {name:?} has {} values; expected {expected}",
+                    cells.len()
+                )));
+            }
+            Some(_) => {}
+        }
+        out.push((name, cells));
+    }
+    Ok((out, row_count.unwrap_or(0)))
 }
 
 fn normalize_index(index: isize, len: usize, axis: &str) -> PyResult<usize> {
@@ -1087,7 +1159,7 @@ fn with_array_column(
 
 /// Excel-style BDH presentation (`sort`, `date_format`, `show_date`) applied
 /// as pure table work; sorting keys rows by `key_column`.
-fn historical_presentation(
+pub(crate) fn historical_presentation(
     data: &TableData,
     show_date: Option<bool>,
     date_format: Option<&str>,
@@ -1140,281 +1212,6 @@ fn historical_presentation(
         result = result.drop_columns(&["date".to_string(), "period".to_string()])?;
     }
     Ok(result)
-}
-
-fn parse_bqr_path(path: &str) -> Option<(usize, &str)> {
-    let start = path.find("tickData[")? + "tickData[".len();
-    let rest = &path[start..];
-    let end = rest.find(']')?;
-    let idx = rest[..end].parse::<usize>().ok()?;
-    let field = rest.get(end + 1..)?.strip_prefix('.')?;
-    let len = field
-        .bytes()
-        .take_while(|byte| byte.is_ascii_alphanumeric() || *byte == b'_')
-        .count();
-    (len > 0).then_some((idx, &field[..len]))
-}
-
-/// Tick columns of the generic BQR reshape, in output order after the key column.
-const BQR_TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
-
-/// One `tickData[tick].field` path row of generic extractor output.
-#[derive(Clone, Copy)]
-struct BqrEntry {
-    tick: usize,
-    field: usize,
-    batch: usize,
-    row: usize,
-}
-
-/// Parsed path rows, with field names interned as borrowed ids.
-#[derive(Default)]
-struct BqrPaths<'a> {
-    field_ids: HashMap<&'a str, usize>,
-    fields: Vec<&'a str>,
-    entries: Vec<BqrEntry>,
-}
-
-impl<'a> BqrPaths<'a> {
-    fn collect(&mut self, batch: usize, paths: impl IntoIterator<Item = Option<&'a str>>) {
-        for (row, path) in paths.into_iter().enumerate() {
-            let Some((tick, name)) = path.and_then(parse_bqr_path) else {
-                continue;
-            };
-            let field = match self.field_ids.get(name) {
-                Some(&field) => field,
-                None => {
-                    self.field_ids.insert(name, self.fields.len());
-                    self.fields.push(name);
-                    self.fields.len() - 1
-                }
-            };
-            self.entries.push(BqrEntry {
-                tick,
-                field,
-                batch,
-                row,
-            });
-        }
-    }
-}
-
-/// A carrier cell whose text may still borrow from its source array.
-enum CellRef<'a> {
-    Text(&'a str),
-    Value(CellValue),
-}
-
-impl CellRef<'_> {
-    const NULL: Self = Self::Value(CellValue::Null);
-
-    /// `cell_has_value` of the equivalent owned cell.
-    fn has_value(&self) -> bool {
-        match self {
-            Self::Text(text) => !text.is_empty(),
-            Self::Value(cell) => cell_has_value(cell),
-        }
-    }
-
-    /// Whether the equivalent owned cell is `CellValue::Text`.
-    fn is_text(&self) -> bool {
-        matches!(self, Self::Text(_) | Self::Value(CellValue::Text(_)))
-    }
-
-    fn into_value(self) -> CellValue {
-        match self {
-            Self::Text(text) => CellValue::Text(text.to_owned()),
-            Self::Value(cell) => cell,
-        }
-    }
-}
-
-/// A column read as `cell_from_array` cells, with text borrowed in place.
-#[derive(Clone, Copy)]
-enum CellSource<'a> {
-    Utf8(&'a StringArray),
-    LargeUtf8(&'a LargeStringArray),
-    Utf8View(&'a StringViewArray),
-    Float64(&'a Float64Array),
-    Other(&'a dyn Array),
-}
-
-impl<'a> CellSource<'a> {
-    fn new(array: &'a dyn Array) -> Self {
-        match array.data_type() {
-            DataType::Utf8 => Self::Utf8(typed(array)),
-            DataType::LargeUtf8 => Self::LargeUtf8(typed(array)),
-            DataType::Utf8View => Self::Utf8View(typed(array)),
-            DataType::Float64 => Self::Float64(typed(array)),
-            _ => Self::Other(array),
-        }
-    }
-
-    fn cell(self, row: usize) -> CellRef<'a> {
-        let text = match self {
-            Self::Utf8(array) => array.is_valid(row).then(|| array.value(row)),
-            Self::LargeUtf8(array) => array.is_valid(row).then(|| array.value(row)),
-            Self::Utf8View(array) => array.is_valid(row).then(|| array.value(row)),
-            Self::Float64(array) => {
-                return CellRef::Value(if array.is_valid(row) {
-                    CellValue::Float(array.value(row))
-                } else {
-                    CellValue::Null
-                });
-            }
-            Self::Other(array) => return CellRef::Value(cell_from_array(array, row)),
-        };
-        text.map_or(CellRef::NULL, CellRef::Text)
-    }
-}
-
-/// The `value_str` and `value_num` sources of one batch.
-#[derive(Clone, Copy)]
-struct BqrValueSources<'a> {
-    text: Option<CellSource<'a>>,
-    number: Option<CellSource<'a>>,
-}
-
-impl<'a> BqrValueSources<'a> {
-    /// A present `value_str` cell, otherwise the `value_num` cell.
-    fn value(self, row: usize) -> CellRef<'a> {
-        let text = self.text.map_or(CellRef::NULL, |text| text.cell(row));
-        if text.has_value() {
-            text
-        } else {
-            self.number.map_or(CellRef::NULL, |number| number.cell(row))
-        }
-    }
-}
-
-/// UTF-8 column for cells that include text, rendered as `build_array`
-/// renders mixed cells.
-fn bqr_text_array(name: &str, cells: &[CellRef<'_>], scratch: &mut String) -> (Field, ArrayRef) {
-    let mut builder = StringBuilder::with_capacity(cells.len(), 0);
-    for cell in cells {
-        match cell {
-            CellRef::Text(text) => builder.append_value(text),
-            CellRef::Value(CellValue::Null) => builder.append_null(),
-            CellRef::Value(cell) => {
-                scratch.clear();
-                write_cell_text(cell, scratch);
-                builder.append_value(scratch.as_str());
-            }
-        }
-    }
-    (
-        Field::new(name, DataType::Utf8, true),
-        Arc::new(builder.finish()),
-    )
-}
-
-/// Reshape generic extractor rows (`path`, `value_str`, `value_num`) into one
-/// row per `tickData[i]`, reading paths and values in place, with the security
-/// in `key_column`.
-fn bqr_generic_table(
-    data: &TableData,
-    ticker: &str,
-    key_column: &str,
-) -> xbbg_arrow::Result<TableData> {
-    let empty = || {
-        TableData::empty_from_columns(
-            std::iter::once(key_column)
-                .chain(BQR_TICK_COLUMNS)
-                .map(ToString::to_string)
-                .collect(),
-        )
-    };
-    let Ok(path_idx) = data.schema.index_of("path") else {
-        return empty();
-    };
-    let value_str_idx = data.schema.index_of("value_str").ok();
-    let value_num_idx = data.schema.index_of("value_num").ok();
-
-    let mut paths = BqrPaths::default();
-    for (batch, record_batch) in data.batches.iter().enumerate() {
-        let column = record_batch.column(path_idx).as_ref();
-        match column.data_type() {
-            DataType::Utf8 => paths.collect(batch, typed::<StringArray>(column)),
-            DataType::LargeUtf8 => paths.collect(batch, typed::<LargeStringArray>(column)),
-            DataType::Utf8View => paths.collect(batch, typed::<StringViewArray>(column)),
-            // No other carrier scalar renders as a `tickData[...]` path.
-            _ => {}
-        }
-    }
-    if paths.entries.is_empty() {
-        return empty();
-    }
-
-    // Stable: the entries of one (field, tick) keep row order; the last wins.
-    paths.entries.sort_by_key(|entry| (entry.field, entry.tick));
-    let mut ticks = paths
-        .entries
-        .iter()
-        .map(|entry| entry.tick)
-        .collect::<Vec<_>>();
-    ticks.sort_unstable();
-    ticks.dedup();
-
-    let sources = data
-        .batches
-        .iter()
-        .map(|batch| BqrValueSources {
-            text: value_str_idx.map(|idx| CellSource::new(batch.column(idx).as_ref())),
-            number: value_num_idx.map(|idx| CellSource::new(batch.column(idx).as_ref())),
-        })
-        .collect::<Vec<_>>();
-
-    let mut order = BQR_TICK_COLUMNS
-        .iter()
-        .filter_map(|name| paths.field_ids.get(*name).copied())
-        .collect::<Vec<_>>();
-    let mut others = (0..paths.fields.len())
-        .filter(|&field| {
-            let name = paths.fields[field];
-            name != key_column && !BQR_TICK_COLUMNS.contains(&name)
-        })
-        .collect::<Vec<_>>();
-    others.sort_unstable_by_key(|&field| paths.fields[field]);
-    order.extend(others);
-
-    let mut tickers = StringBuilder::with_capacity(ticks.len(), ticks.len() * ticker.len());
-    for _ in &ticks {
-        tickers.append_value(ticker);
-    }
-    let mut out_fields = vec![Field::new(key_column, DataType::Utf8, true)];
-    let mut out_columns = vec![Arc::new(tickers.finish()) as ArrayRef];
-
-    let mut cells = Vec::with_capacity(ticks.len());
-    let mut scratch = String::new();
-    for field_id in order {
-        let name = paths.fields[field_id];
-        let start = paths
-            .entries
-            .partition_point(|entry| entry.field < field_id);
-        let end = paths
-            .entries
-            .partition_point(|entry| entry.field <= field_id);
-        let mut entries = paths.entries[start..end].iter().peekable();
-        cells.clear();
-        for &tick in &ticks {
-            let mut last = None;
-            while let Some(entry) = entries.next_if(|entry| entry.tick == tick) {
-                last = Some(entry);
-            }
-            cells.push(last.map_or(CellRef::NULL, |entry| sources[entry.batch].value(entry.row)));
-        }
-        let (field, array) = if cells.iter().any(CellRef::is_text) {
-            bqr_text_array(name, &cells, &mut scratch)
-        } else {
-            let values = cells.drain(..).map(CellRef::into_value).collect::<Vec<_>>();
-            build_array(name, &values)
-        };
-        out_fields.push(field);
-        out_columns.push(array);
-    }
-
-    let batch = RecordBatch::try_new(Arc::new(Schema::new(out_fields)), out_columns)?;
-    TableData::try_new(vec![batch])
 }
 
 #[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
@@ -1536,6 +1333,19 @@ impl ArrowColumn {
         self.data.nbytes()
     }
 
+    /// Bytes a right-sized copy of this column's logical slice would occupy.
+    ///
+    /// Computed without copying, unlike `compact().nbytes`, and unlike
+    /// `nbytes`, which counts the full buffers a slice still references.
+    /// Counts value bytes, offsets or 16-byte views, and validity bitmaps:
+    /// variable-width types count only the sliced value span, and
+    /// `Utf8View`/`BinaryView` count the out-of-line bytes of values longer
+    /// than 12 bytes. List children and dictionary values are counted in full.
+    #[getter]
+    fn logical_nbytes(&self) -> PyResult<usize> {
+        map_core(self.data.logical_nbytes())
+    }
+
     #[pyo3(signature = (offset=0, length=None))]
     fn slice(&self, offset: usize, length: Option<usize>) -> Self {
         Self::new(self.data.slice(offset, length))
@@ -1611,7 +1421,7 @@ pub(crate) struct ArrowRecordBatch {
 }
 
 impl ArrowRecordBatch {
-    fn new(batch: RecordBatch) -> Self {
+    pub(crate) fn new(batch: RecordBatch) -> Self {
         Self { batch }
     }
 
@@ -1691,6 +1501,18 @@ impl ArrowRecordBatch {
     #[getter]
     fn metadata(&self) -> HashMap<String, String> {
         self.batch.schema_ref().metadata().clone()
+    }
+
+    /// UTF-8 byte length of each schema-metadata value, without copying values.
+    fn metadata_sizes(&self) -> HashMap<String, usize> {
+        metadata_sizes(self.batch.schema_ref().metadata())
+    }
+
+    /// One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+    /// to a character boundary; `None` when the key is absent.
+    #[pyo3(signature = (key, max_bytes=None))]
+    fn metadata_value(&self, key: &str, max_bytes: Option<usize>) -> Option<&str> {
+        metadata_value(self.batch.schema_ref().metadata(), key, max_bytes)
     }
 
     #[getter]
@@ -1817,8 +1639,12 @@ impl ArrowTable {
         map_core(TableData::try_new(batches)).map(Self::from_data)
     }
 
-    fn from_data(data: TableData) -> Self {
+    pub(crate) fn from_data(data: TableData) -> Self {
         Self { data }
+    }
+
+    pub(crate) fn table_data(&self) -> &TableData {
+        &self.data
     }
 
     /// Run native table work with this thread detached from the interpreter.
@@ -1863,6 +1689,20 @@ impl ArrowTable {
             ));
         }
         Self::try_new(vec![rows_to_batch(rows)?])
+    }
+
+    /// Build a table from a mapping of column name to values, in mapping order.
+    ///
+    /// Cells are typed like `from_pylist`; every column must have the same
+    /// length.
+    #[classmethod]
+    fn from_pydict(_cls: &Bound<'_, PyType>, columns: &Bound<'_, PyAny>) -> PyResult<Self> {
+        let (columns_data, row_count) = pydict_to_columns(columns)?;
+        let batch = columns
+            .py()
+            .detach(move || columns_to_batch(columns_data, row_count))
+            .map_err(|e| PyValueError::new_err(e.to_string()))?;
+        Self::try_new(vec![batch])
     }
 
     #[classmethod]
@@ -1947,6 +1787,18 @@ impl ArrowTable {
     #[getter]
     fn metadata(&self) -> HashMap<String, String> {
         self.data.schema.metadata().clone()
+    }
+
+    /// UTF-8 byte length of each schema-metadata value, without copying values.
+    fn metadata_sizes(&self) -> HashMap<String, usize> {
+        metadata_sizes(self.data.schema.metadata())
+    }
+
+    /// One schema-metadata value, or its first `max_bytes` UTF-8 bytes cut back
+    /// to a character boundary; `None` when the key is absent.
+    #[pyo3(signature = (key, max_bytes=None))]
+    fn metadata_value(&self, key: &str, max_bytes: Option<usize>) -> Option<&str> {
+        metadata_value(self.data.schema.metadata(), key, max_bytes)
     }
 
     #[getter]
@@ -2100,25 +1952,10 @@ impl ArrowTable {
             .call_method1("_attach_xbbg_metadata_attrs", (frame, slf))
     }
 
-    fn to_polars<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        ensure_optional_module(
-            py,
-            "polars",
-            "pip install xbbg[polars]",
-            "ArrowTable.to_polars()",
-        )?;
-        let polars = py.import("polars")?;
-        let table = Py::new(py, self.clone())?;
-        match polars.call_method1("from_arrow", (table,)) {
-            Ok(frame) => Ok(frame),
-            Err(err) if err.to_string().contains("pyarrow") => {
-                let dataframe = polars.getattr("DataFrame")?;
-                let kwargs = PyDict::new(py);
-                kwargs.set_item("schema", self.column_names())?;
-                dataframe.call((self.to_pylist(py)?,), Some(&kwargs))
-            }
-            Err(err) => Err(err),
-        }
+    /// Convert to a Polars DataFrame through `xbbg.backend`, keeping native chunks.
+    fn to_polars<'py>(slf: PyRef<'py, Self>, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        py.import("xbbg.backend")?
+            .call_method1("_to_polars_frame", (slf,))
     }
 
     fn column(&self, column: &Bound<'_, PyAny>) -> PyResult<ArrowColumn> {
@@ -2261,13 +2098,17 @@ impl ArrowTable {
     }
 
     /// Quote rows from generic tick output, with the security in `key_column`.
+    ///
+    /// The BQR shaper's reshape, shared with `ashape_bqr`, `xbbg.ext.abqr`
+    /// and Node `bqr`; schema metadata is kept.
     fn reshape_bqr_generic(
         &self,
         py: Python<'_>,
         ticker: &str,
         key_column: &str,
     ) -> PyResult<Self> {
-        Self::detached(py, || bqr_generic_table(&self.data, ticker, key_column))
+        py.detach(|| reshape_bqr_generic_table(&self.data, ticker, key_column))
+            .map(Self::from_data)
     }
 
     fn __repr__(&self) -> String {
@@ -2298,6 +2139,7 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
 }
 
 #[cfg(test)]
+#[allow(clippy::disallowed_methods)]
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
@@ -2306,7 +2148,7 @@ mod tests {
     use arrow_array::builder::NullBufferBuilder;
     use arrow_array::types::Int32Type;
     use arrow_array::{DictionaryArray, NullArray};
-    use xbbg_arrow::cell_to_string;
+    use xbbg_arrow::{cell_has_value, cell_to_string};
 
     /// The row-wise rule `column_has_value` replaced.
     fn reference_has_value(array: &dyn Array) -> bool {
@@ -2352,7 +2194,11 @@ mod tests {
         (!field.is_empty()).then_some((idx, field))
     }
 
-    /// The cell-map BQR reshape `bqr_generic_table` replaced.
+    /// Tick columns of the cell-map BQR reshape, in output order after the key.
+    const REFERENCE_BQR_TICK_COLUMNS: [&str; 4] = ["time", "type", "value", "size"];
+
+    /// The cell-map BQR reshape `ArrowTable.reshape_bqr_generic` ran before
+    /// the shared recipe reshape.
     fn reference_reshape_bqr_generic(
         data: &TableData,
         ticker: &str,
@@ -2361,7 +2207,7 @@ mod tests {
         let empty = || {
             TableData::empty_from_columns(
                 std::iter::once(key_column)
-                    .chain(BQR_TICK_COLUMNS)
+                    .chain(REFERENCE_BQR_TICK_COLUMNS)
                     .map(ToString::to_string)
                     .collect(),
             )
@@ -2401,13 +2247,13 @@ mod tests {
             return empty();
         }
         let mut columns = vec![key_column.to_string()];
-        for name in BQR_TICK_COLUMNS {
+        for name in REFERENCE_BQR_TICK_COLUMNS {
             if fields.contains(name) {
                 columns.push(name.to_string());
             }
         }
         for name in fields {
-            if name != key_column && !BQR_TICK_COLUMNS.contains(&name.as_str()) {
+            if name != key_column && !REFERENCE_BQR_TICK_COLUMNS.contains(&name.as_str()) {
                 columns.push(name);
             }
         }
@@ -3397,9 +3243,11 @@ mod tests {
         );
         let no_rows = TableData::try_new(vec![RecordBatch::new_empty(generic.clone())]).unwrap();
 
-        let reshaped = bqr_generic_table(&quotes, "TEST Corp", "ticker").unwrap();
+        let reshape = |data: &TableData, key_column| {
+            reshape_bqr_generic_table(data, "TEST Corp", key_column).unwrap()
+        };
         assert_eq!(
-            reshaped.column_names(),
+            reshape(&quotes, "ticker").column_names(),
             [
                 "ticker",
                 "time",
@@ -3421,10 +3269,48 @@ mod tests {
             ("no rows", &no_rows),
         ] {
             for key_column in ["ticker", "security"] {
-                let actual = bqr_generic_table(data, "TEST Corp", key_column).unwrap();
+                let actual = reshape(data, key_column);
                 let expected = reference_reshape_bqr_generic(data, "TEST Corp", key_column);
-                assert_eq!(actual.schema, expected.schema, "{label} {key_column}");
-                assert_eq!(actual.batches, expected.batches, "{label} {key_column}");
+                // The cell-map reshape dropped schema metadata.
+                assert_eq!(
+                    actual.schema.metadata(),
+                    data.schema.metadata(),
+                    "{label} {key_column}"
+                );
+                let actual = actual.combined_batch().unwrap();
+                let expected = expected.combined_batch().unwrap();
+                assert_eq!(
+                    (actual.num_columns(), actual.num_rows()),
+                    (expected.num_columns(), expected.num_rows()),
+                    "{label} {key_column}"
+                );
+                for (index, field) in expected.schema().fields().iter().enumerate() {
+                    let context = format!("{label} {key_column} {}", field.name());
+                    let (column, reference) = (actual.column(index), expected.column(index));
+                    if column.data_type() == field.data_type() {
+                        assert_eq!(actual.schema().field(index), field.as_ref(), "{context}");
+                        assert_eq!(column, reference, "{context}");
+                        continue;
+                    }
+                    // The cell-map reshape widened integers to Int64; the
+                    // shared reshape keeps the `value_num` type and its cells.
+                    assert_eq!(actual.schema().field(index).name(), field.name());
+                    assert_eq!(
+                        column.data_type(),
+                        data.schema
+                            .field_with_name("value_num")
+                            .unwrap()
+                            .data_type(),
+                        "{context}"
+                    );
+                    for row in 0..column.len() {
+                        assert_eq!(
+                            cell_from_array(column.as_ref(), row),
+                            cell_from_array(reference.as_ref(), row),
+                            "{context} row {row}"
+                        );
+                    }
+                }
             }
         }
     }
