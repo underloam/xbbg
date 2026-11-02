@@ -39,8 +39,7 @@ use xbbg_ext::{fmt_date, parse_date};
 
 use crate::error::{RecipeError, Result};
 use crate::utils::{
-    array_value_as_date, array_value_as_f64, array_value_as_string, as_string_col,
-    clean_bloomberg_text, naive_to_date32, parse_f64_like,
+    ColumnValues, as_string_col, clean_bloomberg_text, naive_to_date32, parse_f64_like, str_entry,
 };
 
 const FIELD_ETF_NAV_TICKER: &str = "ETF_NAV_TICKER";
@@ -894,6 +893,7 @@ fn strict_refdata_value_map(batch: &RecordBatch, key: &str) -> Result<RefValues>
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+    let value_col = ColumnValues::new(value_col.as_ref());
     let mut values: RefValues = HashMap::new();
 
     for row in 0..batch.num_rows() {
@@ -901,7 +901,7 @@ fn strict_refdata_value_map(batch: &RecordBatch, key: &str) -> Result<RefValues>
         if ticker_col.is_null(row) || field_col.is_null(row) {
             continue;
         }
-        let Some(raw_value) = array_value_as_string(value_col, row) else {
+        let Some(raw_value) = value_col.string(row) else {
             continue;
         };
         let Some(value) = clean_bloomberg_text(&raw_value) else {
@@ -909,7 +909,7 @@ fn strict_refdata_value_map(batch: &RecordBatch, key: &str) -> Result<RefValues>
         };
         let ticker = ticker_col.value(row);
         let field = field_col.value(row).to_ascii_uppercase();
-        let fields = values.entry(ticker.to_string()).or_default();
+        let fields = str_entry(&mut values, ticker);
         match fields.entry(field) {
             HashEntry::Occupied(entry) => {
                 if entry.get() != &value {
@@ -939,6 +939,8 @@ fn strict_history_value_map(batch: &RecordBatch, key: &str) -> Result<HistorySer
     let date_col = batch
         .column_by_name("date")
         .ok_or_else(|| RecipeError::Other("missing 'date' column".to_string()))?;
+    let value_col = ColumnValues::new(value_col.as_ref());
+    let date_col = ColumnValues::new(date_col.as_ref());
     let mut values = HistorySeries::new();
 
     for row in 0..batch.num_rows() {
@@ -946,10 +948,10 @@ fn strict_history_value_map(batch: &RecordBatch, key: &str) -> Result<HistorySer
         if ticker_col.is_null(row) || field_col.is_null(row) {
             continue;
         }
-        let Some(date) = array_value_as_date(date_col, row) else {
+        let Some(date) = date_col.date(row) else {
             continue;
         };
-        let Some(value) = array_value_as_f64(value_col, row) else {
+        let Some(value) = value_col.f64(row) else {
             continue;
         };
         let ticker = ticker_col.value(row);
@@ -1188,6 +1190,7 @@ fn build_history_batch(rows: &[HistoryRow]) -> Result<RecordBatch> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::utils::{array_value_as_f64, array_value_as_string};
     use arrow_array::{Array, Date32Array, Float64Array, Int32Array, StringArray};
     use xbbg_async::engine::state::{
         METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_BLOOMBERG_REQUEST_IDS,

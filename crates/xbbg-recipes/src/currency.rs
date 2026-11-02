@@ -16,7 +16,7 @@ use std::sync::Arc;
 use arrow_arith::numeric::div;
 use arrow_array::{
     Array, ArrayRef, Date32Array, Float64Array, GenericStringArray, LargeStringArray,
-    OffsetSizeTrait, RecordBatch, StringArray, StringViewArray, builder::GenericStringBuilder,
+    OffsetSizeTrait, RecordBatch, StringArray, builder::GenericStringBuilder,
 };
 use arrow_schema::{DataType, Field, Schema};
 use xbbg_async::engine::state::BloombergRequestIds;
@@ -27,8 +27,7 @@ use xbbg_ext::{fmt_date, parse_date};
 
 use crate::error::{RecipeError, Result};
 use crate::utils::{
-    apply_request_options, array_value_as_f64, array_value_as_string, as_string_col,
-    date32_to_naive,
+    ColumnValues, TextValues, apply_request_options, as_string_col, date32_to_naive, str_entry,
 };
 
 const DATE_COL: &str = "date";
@@ -71,9 +70,10 @@ pub async fn recipe_adjust_ccy(
     }
     let (column_tickers, tickers) = if long {
         let ticker_col = data.column_by_name(key).expect("long key column");
+        let ticker_col = TextValues::new(ticker_col.as_ref());
         let mut seen = HashSet::new();
         let tickers = (0..data.num_rows())
-            .filter_map(|row| text_value(ticker_col, row))
+            .filter_map(|row| ticker_col.get(row))
             .filter(|ticker| !ticker.is_empty() && seen.insert(*ticker))
             .map(str::to_owned)
             .collect::<Vec<_>>();
@@ -297,7 +297,7 @@ fn parse_currency_batch(batch: &RecordBatch, key: &str) -> Result<HashMap<String
 
     let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
-    let value_col = find_value_column(batch)?;
+    let value_col = ColumnValues::new(find_value_column(batch)?.as_ref());
 
     let mut out = HashMap::new();
     for row in 0..batch.num_rows() {
@@ -309,7 +309,7 @@ fn parse_currency_batch(batch: &RecordBatch, key: &str) -> Result<HashMap<String
             continue;
         }
 
-        let Some(value) = array_value_as_string(value_col, row) else {
+        let Some(value) = value_col.string(row) else {
             continue;
         };
 
@@ -366,7 +366,7 @@ fn parse_fx_rate_batch(batch: &RecordBatch, key: &str) -> Result<FxRatesByPair> 
 
     let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
-    let value_col = find_value_column(batch)?;
+    let value_col = ColumnValues::new(find_value_column(batch)?.as_ref());
     let date_keys = extract_date_keys(batch)?.ok_or_else(|| {
         RecipeError::Other("FX rate response missing required 'date' column".to_string())
     })?;
@@ -391,7 +391,7 @@ fn parse_fx_rate_batch(batch: &RecordBatch, key: &str) -> Result<FxRatesByPair> 
             continue;
         };
 
-        let Some(rate) = array_value_as_f64(value_col, row) else {
+        let Some(rate) = value_col.f64(row) else {
             continue;
         };
 
@@ -399,9 +399,7 @@ fn parse_fx_rate_batch(batch: &RecordBatch, key: &str) -> Result<FxRatesByPair> 
             continue;
         }
 
-        out.entry(ticker_col.value(row).to_string())
-            .or_default()
-            .insert(date_key, rate);
+        str_entry(&mut out, ticker_col.value(row)).insert(date_key, rate);
     }
 
     Ok(out)
@@ -414,10 +412,11 @@ fn apply_long_fx_conversion(
     fx_by_ticker: &HashMap<String, FxConversionInfo>,
     fx_rates: &FxRatesByPair,
 ) -> Result<RecordBatch> {
-    let tickers = data.column_by_name(key).ok_or_else(|| {
+    let ticker_col = data.column_by_name(key).ok_or_else(|| {
         RecipeError::InvalidArgument(format!("currency data requires a {key} column"))
             .with_bloomberg_request_ids_from_batch(&data)
     })?;
+    let tickers = TextValues::new(ticker_col.as_ref());
     let schema = data.schema();
     let value_idx = ["value", "value_f64", "value_i64", "value_str"]
         .iter()
@@ -466,7 +465,7 @@ fn apply_long_fx_conversion(
                 return None;
             }
             let value = numeric.value(row);
-            let ticker = text_value(tickers, row);
+            let ticker = tickers.get(row);
             match ticker.and_then(|ticker| fx_by_ticker.get(ticker)) {
                 Some(info) => {
                     fx_denominator(info, date_keys[row], fx_rates).map(|rate| value / rate)
@@ -508,7 +507,7 @@ fn apply_long_fx_conversion(
 
 fn convert_long_strings<O: OffsetSizeTrait>(
     values: &GenericStringArray<O>,
-    tickers: &ArrayRef,
+    tickers: TextValues<'_>,
     dates: &[Option<i32>],
     fx_by_ticker: &HashMap<String, FxConversionInfo>,
     fx_rates: &FxRatesByPair,
@@ -516,7 +515,7 @@ fn convert_long_strings<O: OffsetSizeTrait>(
     let mut converted =
         GenericStringBuilder::<O>::with_capacity(values.len(), values.value_data().len());
     for (row, value) in values.iter().enumerate() {
-        let info = text_value(tickers, row).and_then(|ticker| fx_by_ticker.get(ticker));
+        let info = tickers.get(row).and_then(|ticker| fx_by_ticker.get(ticker));
         match (value, info) {
             (Some(value), Some(info)) => {
                 if let Ok(number) = value.trim().parse::<f64>() {
@@ -533,22 +532,6 @@ fn convert_long_strings<O: OffsetSizeTrait>(
         }
     }
     converted.finish()
-}
-
-fn text_value(array: &ArrayRef, row: usize) -> Option<&str> {
-    if array.is_null(row) {
-        return None;
-    }
-    if let Some(values) = array.as_any().downcast_ref::<StringArray>() {
-        Some(values.value(row))
-    } else if let Some(values) = array.as_any().downcast_ref::<LargeStringArray>() {
-        Some(values.value(row))
-    } else {
-        array
-            .as_any()
-            .downcast_ref::<StringViewArray>()
-            .map(|values| values.value(row))
-    }
 }
 
 fn fx_denominator(
@@ -715,9 +698,10 @@ fn extract_date_keys(batch: &RecordBatch) -> Result<Option<Vec<Option<i32>>>> {
         date_col.data_type(),
         DataType::Utf8 | DataType::LargeUtf8 | DataType::Utf8View
     ) {
+        let dates = TextValues::new(date_col.as_ref());
         return Ok(Some(
             (0..date_col.len())
-                .map(|row| text_value(date_col, row).and_then(parse_date_key))
+                .map(|row| dates.get(row).and_then(parse_date_key))
                 .collect(),
         ));
     }
@@ -767,6 +751,7 @@ fn find_value_column(batch: &RecordBatch) -> Result<&ArrayRef> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow_array::StringViewArray;
     use arrow_schema::{DataType, Field, Schema};
 
     #[test]
@@ -1143,7 +1128,7 @@ mod tests {
         .unwrap();
         let data = decode_currency_dictionaries(data).unwrap();
         assert_eq!(
-            text_value(data.column_by_name("ticker").unwrap(), 0),
+            TextValues::new(data.column_by_name("ticker").unwrap().as_ref()).get(0),
             Some("ABC LN Equity")
         );
         let info = HashMap::from([("ABC LN Equity".into(), build_fx_pair("GBP", "USD"))]);

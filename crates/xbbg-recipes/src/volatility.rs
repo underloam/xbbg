@@ -12,9 +12,7 @@ use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 
 use crate::error::{RecipeError, Result};
-use crate::utils::{
-    array_value_as_date, array_value_as_f64, as_string_col, naive_to_date32, parse_f64_like,
-};
+use crate::utils::{ColumnValues, as_string_col, naive_to_date32, parse_f64_like};
 
 const DEFAULT_PRESET: &str = "MONEYNESS_30D";
 const DEFAULT_DIVIDEND_YIELD_FIELD: &str = "EQY_DVD_YLD_12M";
@@ -320,6 +318,8 @@ pub(crate) fn build_vol_surface_rows(
     let date_col = batch
         .column_by_name("date")
         .ok_or_else(|| RecipeError::Other("missing 'date' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
+    let dates = ColumnValues::new(date_col.as_ref());
 
     let spec_by_field = specs
         .iter()
@@ -328,23 +328,23 @@ pub(crate) fn build_vol_surface_rows(
     let mut rows = Vec::new();
     let mut spot: HashMap<(String, NaiveDate), f64> = HashMap::new();
     let mut dividend_yield: HashMap<(String, NaiveDate), f64> = HashMap::new();
+    let mut field_key = String::new();
 
     for row in 0..batch.num_rows() {
         if ticker_col.is_null(row) || field_col.is_null(row) || value_col.is_null(row) {
             continue;
         }
-        let Some(date) = array_value_as_date(date_col, row) else {
+        let Some(date) = dates.date(row) else {
             continue;
         };
         let field = field_col.value(row);
-        let field_key = field.to_ascii_uppercase();
-        let Some(raw_value) = array_value_as_f64(value_col, row) else {
+        let Some(raw_value) = values.f64(row) else {
             continue;
         };
-        let ticker = ticker_col.value(row).to_string();
+        let ticker = ticker_col.value(row);
 
-        if include_derived && field_key == SPOT_FIELD {
-            spot.insert((ticker, date), raw_value);
+        if include_derived && field.eq_ignore_ascii_case(SPOT_FIELD) {
+            spot.insert((ticker.to_string(), date), raw_value);
             continue;
         }
         if include_derived && field.eq_ignore_ascii_case(dividend_yield_field) {
@@ -356,11 +356,14 @@ pub(crate) fn build_vol_surface_rows(
             } else {
                 raw_value
             };
-            dividend_yield.insert((ticker, date), value);
+            dividend_yield.insert((ticker.to_string(), date), value);
             continue;
         }
 
-        let Some(spec) = spec_by_field.get(&field_key) else {
+        field_key.clear();
+        field_key.push_str(field);
+        field_key.make_ascii_uppercase();
+        let Some(spec) = spec_by_field.get(field_key.as_str()) else {
             continue;
         };
         let value = if as_decimal && spec.scale_decimal {
@@ -369,7 +372,7 @@ pub(crate) fn build_vol_surface_rows(
             raw_value
         };
         rows.push(SurfaceRow {
-            ticker,
+            ticker: ticker.to_string(),
             date,
             metric: spec.metric.clone(),
             tenor: spec.tenor.clone(),

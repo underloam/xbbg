@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use crate::error::{RecipeError, Result};
 use crate::utils::{
-    apply_request_options, array_value_as_date, array_value_as_f64, array_value_as_string,
-    as_string_col, canonical_name, find_column, naive_to_date32,
+    ColumnValues, apply_request_options, as_string_col, canonical_name, find_column,
+    naive_to_date32,
 };
 use arrow_array::RecordBatch;
 use arrow_array::builder::{Date32Builder, Float64Builder, StringBuilder};
@@ -209,7 +209,35 @@ fn dividend_type_allowed(value: Option<&str>, filter: Option<&HashSet<String>>) 
     let Some(value) = value else {
         return false;
     };
-    filter.contains(&canonical_name(value))
+    filter
+        .iter()
+        .any(|canonical| canonical_name_matches(value, canonical))
+}
+
+/// `canonical_name(value) == canonical` without building the canonical string.
+///
+/// `canonical_name` lowercases the ASCII-alphanumeric runs of `value` and joins
+/// them with `_`, so comparing those runs part by part is equivalent.
+fn canonical_name_matches(value: &str, canonical: &str) -> bool {
+    let mut parts = value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty());
+    if canonical.is_empty() {
+        return parts.next().is_none();
+    }
+    let mut expected = canonical.split('_');
+    loop {
+        match (parts.next(), expected.next()) {
+            (Some(part), Some(want))
+                if part.len() == want.len()
+                    && part
+                        .bytes()
+                        .zip(want.bytes())
+                        .all(|(have, want)| have.to_ascii_lowercase() == want) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
 }
 
 /// Dividend events from `DVD_HIST_ALL` bulk output keyed by the engine's `key`
@@ -270,35 +298,43 @@ pub(crate) fn extract_dividend_events(
     )
     .and_then(|name| batch.column_by_name(&name));
 
+    let tickers = ColumnValues::new(ticker_col.as_ref());
+    let ex_dates = ColumnValues::new(ex_date_col.as_ref());
+    let amounts = amount_col.map(|col| ColumnValues::new(col.as_ref()));
+    let types = type_col.map(|col| ColumnValues::new(col.as_ref()));
+    let declared_dates = declared_col.map(|col| ColumnValues::new(col.as_ref()));
+    let record_dates = record_col.map(|col| ColumnValues::new(col.as_ref()));
+    let payable_dates = payable_col.map(|col| ColumnValues::new(col.as_ref()));
+
     let mut events = Vec::new();
     for row in 0..batch.num_rows() {
-        let Some(ticker) =
-            array_value_as_string(ticker_col, row).map(|value| value.trim().to_string())
-        else {
+        let Some(raw_ticker) = tickers.string(row) else {
             continue;
         };
+        let ticker = raw_ticker.trim();
         if ticker.is_empty() {
             continue;
         }
-        let Some(ex_date) = array_value_as_date(ex_date_col, row) else {
+        let Some(ex_date) = ex_dates.date(row) else {
             continue;
         };
-        let dividend_type = type_col
-            .and_then(|col| array_value_as_string(col, row))
-            .map(|value| value.trim().to_string())
+        let raw_type = types.and_then(|col| col.string(row));
+        let dividend_type = raw_type
+            .as_deref()
+            .map(str::trim)
             .filter(|value| !value.is_empty());
-        if !dividend_type_allowed(dividend_type.as_deref(), dividend_type_filter) {
+        if !dividend_type_allowed(dividend_type, dividend_type_filter) {
             continue;
         }
 
         events.push(DividendEvent {
-            ticker,
+            ticker: ticker.to_string(),
             ex_date,
-            declared_date: declared_col.and_then(|col| array_value_as_date(col, row)),
-            record_date: record_col.and_then(|col| array_value_as_date(col, row)),
-            payable_date: payable_col.and_then(|col| array_value_as_date(col, row)),
-            dividend_type,
-            amount: amount_col.and_then(|col| array_value_as_f64(col, row)),
+            declared_date: declared_dates.and_then(|col| col.date(row)),
+            record_date: record_dates.and_then(|col| col.date(row)),
+            payable_date: payable_dates.and_then(|col| col.date(row)),
+            dividend_type: dividend_type.map(str::to_string),
+            amount: amounts.and_then(|col| col.f64(row)),
         });
     }
 
@@ -363,6 +399,8 @@ fn extract_price_history(
     let date_col = batch
         .column_by_name("date")
         .ok_or_else(|| RecipeError::Other("missing 'date' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
+    let dates = ColumnValues::new(date_col.as_ref());
     let mut prices = HashMap::new();
 
     for row in 0..batch.num_rows() {
@@ -372,10 +410,10 @@ fn extract_price_history(
         if !field_col.value(row).eq_ignore_ascii_case("PX_LAST") {
             continue;
         }
-        let Some(date) = array_value_as_date(date_col, row) else {
+        let Some(date) = dates.date(row) else {
             continue;
         };
-        let Some(price) = array_value_as_f64(value_col, row) else {
+        let Some(price) = values.f64(row) else {
             continue;
         };
         prices.insert((ticker_col.value(row).to_string(), date), price);
@@ -803,8 +841,9 @@ fn build_earning_header_rename(
             continue;
         };
 
+        let values = ColumnValues::new(column.as_ref());
         let first_value = (0..header_batch.num_rows())
-            .find_map(|idx| array_value_as_string(column, idx))
+            .find_map(|idx| values.string(idx))
             .map(|raw| raw.trim().to_string())
             .filter(|raw| !raw.is_empty());
 
@@ -1390,7 +1429,7 @@ fn apply_turnover_presentation(
     let Ok(date_index) = batch.schema().index_of("date") else {
         return Ok(batch);
     };
-    let dates = batch.column(date_index);
+    let dates = ColumnValues::new(batch.column(date_index).as_ref());
     let mut periods =
         StringBuilder::with_capacity(batch.num_rows(), batch.num_rows().saturating_mul(10));
     let mut label = String::with_capacity(10);
@@ -1420,21 +1459,15 @@ fn apply_turnover_presentation(
 }
 
 fn format_turnover_period_label(
-    dates: &ArrayRef,
+    dates: ColumnValues<'_>,
     row: usize,
     periodicity: TurnoverPeriodicity,
     label: &mut String,
 ) {
     label.clear();
-    let Some(date) = array_value_as_date(dates, row) else {
-        if row < dates.len() && !dates.is_null(row) {
-            if let Some(strings) = dates.as_any().downcast_ref::<StringArray>() {
-                label.push_str(strings.value(row));
-            } else if let Some(strings) = dates.as_any().downcast_ref::<LargeStringArray>() {
-                label.push_str(strings.value(row));
-            } else if let Some(value) = array_value_as_string(dates, row) {
-                label.push_str(&value);
-            }
+    let Some(date) = dates.date(row) else {
+        if let Some(value) = dates.string(row) {
+            label.push_str(&value);
         }
         return;
     };
@@ -1530,6 +1563,8 @@ fn extract_turnover_rows(batch: &RecordBatch, key: &str) -> Result<Vec<TurnoverR
     let values = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("turnover response missing 'value'".to_string()))?;
+    let dates = ColumnValues::new(dates.as_ref());
+    let values = ColumnValues::new(values.as_ref());
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         if tickers.is_null(row)
@@ -1540,8 +1575,8 @@ fn extract_turnover_rows(batch: &RecordBatch, key: &str) -> Result<Vec<TurnoverR
         }
         rows.push(TurnoverRow {
             ticker: tickers.value(row).to_string(),
-            date: array_value_as_date(dates, row).map(naive_to_date32),
-            value: array_value_as_f64(values, row),
+            date: dates.date(row).map(naive_to_date32),
+            value: values.f64(row),
         });
     }
     Ok(rows)
@@ -1583,6 +1618,9 @@ fn append_turnover_fallback(
         .iter()
         .map(|ticker| (ticker.as_str(), BTreeMap::new()))
         .collect();
+    let dates = ColumnValues::new(dates.as_ref());
+    let value_view = ColumnValues::new(values.as_ref());
+    let text_values = value_view.is_text();
     for row in 0..batch.num_rows() {
         if tickers.is_null(row) || fields.is_null(row) {
             continue;
@@ -1598,15 +1636,15 @@ fn append_turnover_fallback(
         } else {
             continue;
         };
-        let Some(date) = array_value_as_date(dates, row) else {
+        let Some(date) = dates.date(row) else {
             continue;
         };
         let input = &mut by_date.entry(naive_to_date32(date)).or_default()[index];
-        input.value = array_value_as_f64(values, row);
-        input.present = if let Some(strings) = values.as_any().downcast_ref::<StringArray>() {
-            !strings.is_null(row) && !strings.value(row).trim().is_empty()
-        } else if let Some(strings) = values.as_any().downcast_ref::<LargeStringArray>() {
-            !strings.is_null(row) && !strings.value(row).trim().is_empty()
+        input.value = value_view.f64(row);
+        input.present = if text_values {
+            value_view
+                .text(row)
+                .is_some_and(|value| !value.trim().is_empty())
         } else {
             !values.is_null(row)
         };
@@ -1871,6 +1909,45 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
+    use crate::utils::array_value_as_f64;
+
+    #[test]
+    fn canonical_name_matches_agrees_with_canonical_name() {
+        let values = [
+            "Regular Cash",
+            " regular  cash ",
+            "REGULAR-CASH",
+            "Regular Cash (Final)",
+            "Spin-off",
+            "Spinoff",
+            "Régular Cash",
+            "--",
+            "",
+            "a_b",
+        ];
+        let candidates = [
+            "regular_cash",
+            "Regular_Cash",
+            "regular cash",
+            "regular_cash_final",
+            "spin_off",
+            "spinoff",
+            "r_gular_cash",
+            "regular__cash",
+            "_regular_cash",
+            "a_b",
+            "",
+        ];
+        for value in values {
+            for candidate in candidates {
+                assert_eq!(
+                    canonical_name_matches(value, candidate),
+                    canonical_name(value) == candidate,
+                    "{value:?} vs {candidate:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_build_earning_header_rename() {
@@ -2826,10 +2903,11 @@ mod tests {
             assert_eq!(empty.num_rows(), 0);
         }
         let dates: ArrayRef = Arc::new(StringArray::from(vec![None, Some("not-a-date")]));
+        let dates = ColumnValues::new(dates.as_ref());
         let mut label = "previous label".to_string();
-        format_turnover_period_label(&dates, 0, TurnoverPeriodicity::Daily, &mut label);
+        format_turnover_period_label(dates, 0, TurnoverPeriodicity::Daily, &mut label);
         assert_eq!(label, "");
-        format_turnover_period_label(&dates, 1, TurnoverPeriodicity::Daily, &mut label);
+        format_turnover_period_label(dates, 1, TurnoverPeriodicity::Daily, &mut label);
         assert_eq!(label, "not-a-date");
     }
 

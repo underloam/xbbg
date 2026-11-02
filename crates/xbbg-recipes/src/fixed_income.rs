@@ -18,7 +18,7 @@ use xbbg_ext::transforms::fixed_income::{YieldType, build_yas_overrides};
 use xbbg_ext::utils::date::parse_date;
 
 use crate::error::{RecipeError, Result};
-use crate::utils::{apply_request_options, array_value_as_f64, as_string_col};
+use crate::utils::{ColumnValues, apply_request_options, as_string_col};
 
 /// YAS (Yield & Spread Analysis) recipe.
 ///
@@ -426,14 +426,16 @@ fn reshape_bqr_generic(batch: &RecordBatch, ticker: &str, key: &str) -> Result<R
     let strings = batch
         .column_by_name("value_str")
         .and_then(|array| array.as_any().downcast_ref::<StringArray>());
-    let numbers = batch.column_by_name("value_num");
+    let numbers = batch
+        .column_by_name("value_num")
+        .map(|array| ColumnValues::new(array.as_ref()));
     let text = |row| {
         strings
             .filter(|array| array.is_valid(row))
             .map(|array| array.value(row))
             .filter(|value| !value.is_empty())
     };
-    let number = |row| numbers.and_then(|array| array_value_as_f64(array, row));
+    let number = |row| numbers.and_then(|values| values.f64(row));
     let mut fields = BTreeSet::new();
     let mut records: BTreeMap<usize, HashMap<&str, usize>> = BTreeMap::new();
     for (row, path) in paths.iter().enumerate() {
@@ -506,6 +508,7 @@ mod tests {
     use arrow_schema::{DataType, TimeUnit};
 
     use super::*;
+    use crate::utils::array_value_as_f64;
 
     #[test]
     fn yas_merges_caller_overrides_without_replacing_request_identity() {

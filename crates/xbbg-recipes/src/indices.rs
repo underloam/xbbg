@@ -9,7 +9,7 @@ use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
 
 use crate::error::{RecipeError, Result};
-use crate::utils::{array_value_as_string, canonical_name};
+use crate::utils::{ColumnValues, canonical_name};
 
 const SUPPORTED_INDEX_MEMBER_FIELDS: &[&str] = &["INDX_MWEIGHT", "INDX_MEMBERS", "INDX_MEMBERS3"];
 
@@ -69,10 +69,10 @@ pub(crate) fn normalize_index_members_batch(
         ))
     })?;
 
-    let member_source = batch.column(member_col_idx);
+    let member_source = ColumnValues::new(batch.column(member_col_idx).as_ref());
     let mut member_builder = StringBuilder::with_capacity(batch.num_rows(), batch.num_rows() * 16);
     for row in 0..batch.num_rows() {
-        match array_value_as_string(member_source, row) {
+        match member_source.string(row) {
             Some(value) if !value.trim().is_empty() => member_builder.append_value(value.trim()),
             _ => member_builder.append_null(),
         }
