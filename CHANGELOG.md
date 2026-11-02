@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Free-threaded CPython wheels (beta, #370).** Releases and CI build `cp314t`/`cp315t` wheels for Linux x86_64 (manylinux_2_28), Windows x64 and macOS arm64, and the package declares `Free Threading :: 2 - Beta`. pyarrow, pandas and narwhals are supported there; polars, duckdb and `xbbg-langgraph` are not, because they or their dependencies publish no free-threaded wheels. An advisory CI job runs the offline suite on 3.14t/3.15t and fails if an import re-enables the GIL. See `docs/free-threading.md`.
 - **Bounded native Arrow access (#370).** `ArrowColumn.logical_nbytes` sizes a slice without copying it, `ArrowTable`/`ArrowRecordBatch.metadata_sizes()` and `.metadata_value(key, max_bytes=None)` read schema metadata without copying every value, and `ArrowTable.from_pydict()` builds a table column-wise.
 - **Python delivery-latency benchmark.** `py-xbbg/benchmarks/bench_python_delivery_latency.py` measures publish-to-delivery latency for an asyncio consumer on release test-support builds and reports event-loop lag separately; its provenance omits local paths.
+- **Concurrency testing for free-threaded Python.**
+  - The free-threaded CI job also runs the offline suite under pytest-run-parallel, with each test body in 8 threads at once (`pixi run -e py314t test-parallel` locally). Async tests and tests that change process-wide state run in one thread.
+  - New stress tests check exact results from many threads at once: one subscription driver, one request driver, subscribe/unsubscribe churn, the first import of the native extension, and `configure()`/`shutdown()`/`reset()`. CI runs them, and the native teardown tests, against the test-support build.
+  - A nightly ThreadSanitizer workflow runs the `xbbg-async` and `xbbg-arrow` tests, and the native Python tests on a ThreadSanitizer-built free-threaded CPython.
+  - `docs/free-threading.md` lists the settings that apply process-wide and how middleware must behave when several threads run their own event loops.
 
 ### Deprecated
 

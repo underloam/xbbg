@@ -72,6 +72,7 @@ def _checkout_package(tmp_path: Path, layout: str) -> Path:
         (None, contextlib.nullcontext()),  # no package metadata: nothing to compare against
     ],
 )
+@pytest.mark.thread_unsafe(reason="each parametrized pytest.raises context is one object shared by all threads")
 def test_installed_extension_must_be_built_for_the_installed_distribution(tmp_path, distribution_version, outcome):
     package_dir = _installed_package(tmp_path)
 

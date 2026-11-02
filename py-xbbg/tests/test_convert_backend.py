@@ -151,6 +151,7 @@ class TestConvertBackendNative:
         else:
             assert native is arrow_table
 
+    @pytest.mark.thread_unsafe(reason="set_backend() is process-wide")
     def test_facade_conversion_honors_set_backend(self, arrow_table: Any):
         original = blp.get_backend()
         try:
