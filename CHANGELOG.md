@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Free-threaded CPython wheels (beta, #370).** Releases and CI build `cp314t`/`cp315t` wheels for Linux x86_64 (manylinux_2_28), Windows x64 and macOS arm64, and the package declares `Free Threading :: 2 - Beta`. pyarrow, pandas and narwhals are supported there; polars, duckdb and `xbbg-langgraph` are not, because they or their dependencies publish no free-threaded wheels. An advisory CI job runs the offline suite on 3.14t/3.15t and fails if an import re-enables the GIL. See `docs/free-threading.md`.
 - **Bounded native Arrow access (#370).** `ArrowColumn.logical_nbytes` sizes a slice without copying it, `ArrowTable`/`ArrowRecordBatch.metadata_sizes()` and `.metadata_value(key, max_bytes=None)` read schema metadata without copying every value, and `ArrowTable.from_pydict()` builds a table column-wise.
 - **Python delivery-latency benchmark.** `py-xbbg/benchmarks/bench_python_delivery_latency.py` measures publish-to-delivery latency for an asyncio consumer on release test-support builds and reports event-loop lag separately; its provenance omits local paths.
+- **Concurrency testing for free-threaded Python.**
+  - The free-threaded CI job also runs the offline suite under pytest-run-parallel, with each test body in 8 threads at once (`pixi run -e py314t test-parallel` locally). Async tests and tests that change process-wide state run in one thread.
+  - New stress tests check exact results from many threads at once: one subscription driver, one request driver, subscribe/unsubscribe churn, the first import of the native extension, and `configure()`/`shutdown()`/`reset()`. CI runs them, and the native teardown tests, against the test-support build.
+  - A nightly ThreadSanitizer workflow runs the `xbbg-async` and `xbbg-arrow` tests, and the native Python tests on a ThreadSanitizer-built free-threaded CPython.
+  - `docs/free-threading.md` lists the settings that apply process-wide and how middleware must behave when several threads run their own event loops.
 
 ### Deprecated
 
@@ -54,11 +59,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Request middleware changes no longer affect running requests (#370).** Each request snapshots the middleware chain, so removing a middleware while another request is awaiting no longer skips or replaces the rest of that request's chain.
 - **Field types, element routing and schema parsing follow the active engine (#370).** The process-wide Python field-type, valid-element and parsed-schema caches are gone. A default type returned during a transient lookup failure is no longer pinned and sent as an override after the engine learns the real type, and scoped engines, `invalidate_schema()` and `clear_schema_cache()` take effect immediately.
 - **Caller-owned results (#370).** `ta_study_params()`, `get_sdk_info()` and `ServiceSchema.from_json()` return objects that callers can mutate without changing later results.
-- **LangGraph native results are bounded before copying (#370).** Cell sizes are checked before a cell is materialized, and metadata sizes before any value is fetched, so oversized cells or metadata no longer cost a full copy before the result limits apply.
+- **LangGraph native results are bounded before copying (#370).** With an xbbg release that provides the bounded native getters, cell sizes are checked before a cell is materialized, and metadata sizes before any value is fetched, so oversized cells or metadata no longer cost a full copy before the result limits apply. With older xbbg releases, which the adapter's declared floor still allows, it copies them as before.
 - **Runtime backend floors match the declared extras.** The pandas and duckdb backend checks now require 2.2.2 and 1.5.1, as `pyproject.toml` declares.
 - **`Engine.with_config()` releases its config before connecting (#370).** Reading or setting that config from another thread during startup no longer raises "Already borrowed".
 - **`ext_generate_futures_candidates` bounds `count` (#370).** Counts above 10,000 raise `ValueError` (Node: `InvalidArg`) instead of preallocating whatever the caller passed, and a corrupt embedded exchange-rule table fails loudly instead of meaning "no rule".
 - **`ColumnSet::finish_with_order` appends unlisted columns in first-write order (Rust), as documented.** Removing a listed column no longer moves the last column into its place.
+- **Source builds stay clear of rustc's `recursion_depth_exceeding_limit` lint.** Proving `Send` for the Python request futures exceeded the default recursion depth. Nightly rustc warns about this (rust-lang/rust#159228) and will make it a hard error, so the Python extension raises its recursion limit to 256.
 
 ## [1.7.0] - 2026-10-29
 

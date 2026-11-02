@@ -11,6 +11,8 @@ from xbbg import _engine, _request_options, request_middleware, schema
 from xbbg.request_middleware import RequestContext, RequestEnvironment
 from xbbg.services import Operation, RequestParams, Service
 
+pytestmark = pytest.mark.thread_unsafe(reason="request middleware is process-wide")
+
 
 @pytest.fixture(autouse=True)
 def isolated_middleware():

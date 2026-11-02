@@ -12,6 +12,8 @@ from xbbg import _engine, blp
 from xbbg._core import ArrowRecordBatch, ArrowTable
 from xbbg.services import Operation, Service
 
+pytestmark = pytest.mark.thread_unsafe(reason="configure(), middleware and the engine are process-wide")
+
 
 class DummyConfig:
     def __init__(self, **kwargs):

@@ -58,6 +58,13 @@
 //! RUST_LOG=xbbg_core=trace,xbbg_async=debug python my_script.py
 //! ```
 
+// Proving `Send` for the futures handed to pyo3-async-runtimes walks every
+// nested async layer (bridge future, completion gate, `select!`, request); the
+// request futures exceed the default depth of 128, which rustc's
+// `recursion_depth_exceeding_limit` lint (rust-lang/rust#159228) will turn into
+// a hard error.
+#![recursion_limit = "256"]
+
 #[cfg(feature = "mimalloc")]
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;

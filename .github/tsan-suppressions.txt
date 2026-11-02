@@ -1,0 +1,18 @@
+# ThreadSanitizer suppressions for .github/workflows/thread-sanitizer.yml.
+#
+# Only uninstrumented third-party code belongs here, each entry with the report
+# that justified it. xbbg's own code is never suppressed: a report in it is a
+# bug to fix. The Python job appends CPython's own list for its exact
+# interpreter release (Tools/tsan/suppressions_free_threading.txt), so known
+# interpreter reports are not repeated here.
+#
+# Format: https://github.com/google/sanitizers/wiki/ThreadSanitizerSuppressions
+
+# The Bloomberg C++ SDK is a prebuilt, uninstrumented library that links its
+# C++ runtime statically, so TSan cannot see the synchronization inside it.
+# When xbbg's test-support driver publishes from several threads at once, one
+# thread's pthread_mutex_init and another's pthread_mutex_lock on the same SDK
+# global (both called from inside libblpapi3_64.so) are reported as a race.
+# This ignores only the libc calls the SDK makes itself: xbbg's accesses,
+# including callbacks the SDK runs, are still checked.
+called_from_lib:libblpapi3_64.so

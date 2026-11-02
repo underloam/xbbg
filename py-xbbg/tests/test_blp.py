@@ -22,6 +22,7 @@ from xbbg import _endpoints, _engine, _request_options, _sync, blp
 _CASE = TestCase()
 
 
+@pytest.mark.thread_unsafe(reason="the notebook sync bridge is one process-wide thread")
 class TestNotebookSyncBridge:
     """Tests for sync wrappers called from running event loops."""
 

@@ -1,0 +1,290 @@
+name: ThreadSanitizer
+
+# Data races in xbbg's native code, found by ThreadSanitizer (TSan): the Rust
+# engine crates on their own, and the Python extension inside a free-threaded
+# CPython built with TSan, where Python threads call into it without a GIL.
+# Instrumented builds are slow, so this runs nightly and on demand; pull
+# requests run it only when the workflow, its suppressions or its CPython build
+# script change.
+
+on:
+  schedule:
+    - cron: "37 3 * * *"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - .github/workflows/thread-sanitizer.yml
+      - .github/tsan-suppressions.txt
+      - scripts/build-tsan-cpython.sh
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  UV_VERSION: "0.13.0"
+  # TSan needs std instrumented as well (-Zbuild-std), which needs an explicit
+  # target; that also keeps build scripts and proc macros uninstrumented.
+  # rustdoc compiles doctests and reads its own flags, which must match.
+  RUSTFLAGS: -Zsanitizer=thread
+  RUSTDOCFLAGS: -Zsanitizer=thread
+  TSAN_TARGET: x86_64-unknown-linux-gnu
+  # Line tables give TSan reports file:line frames; setup-rust-toolchain turns
+  # dev-profile debug info off unless this is set.
+  CARGO_PROFILE_DEV_DEBUG: line-tables-only
+
+jobs:
+  # ════════════════════════════════════════════════════════════════════════════
+  # Detect latest Bloomberg SDK version (runs first, others depend on it)
+  # ════════════════════════════════════════════════════════════════════════════
+  sdk-version:
+    name: Detect SDK Version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Detect latest downloadable Bloomberg C++ SDK version
+        id: detect
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          detect-only: "true"
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Generate bindings once, consume the artifact in both sanitizer jobs
+  # ════════════════════════════════════════════════════════════════════════════
+  generate-bindings:
+    name: Generate blpapi bindings artifact
+    needs: sdk-version
+    # The reusable workflow builds inside the xbbg-ci image on GHCR.
+    permissions:
+      contents: read
+      packages: read
+    uses: ./.github/workflows/generate-bindings.yml
+    with:
+      sdk-version: ${{ needs.sdk-version.outputs.version }}
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Rust engine crates under TSan (no libpython)
+  # ════════════════════════════════════════════════════════════════════════════
+  rust:
+    name: Rust crates (TSan)
+    needs: [sdk-version, generate-bindings]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      TSAN_OPTIONS: halt_on_error=1 second_deadlock_stack=1 suppressions=${{ github.workspace }}/.github/tsan-suppressions.txt
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust nightly
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          components: rust-src
+          # Nightly-only warnings must not fail a sanitizer run.
+          build-warnings: warn
+          # Nightly changes daily, so a cache would rarely hit while it churns
+          # the repository's cache storage.
+          cache: false
+
+      - name: Reduce ASLR entropy for TSan
+        # Otherwise TSan re-execs every process with a fixed address space and
+        # warns that reducing the entropy is preferable.
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK (Linux)
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      # xbbg-async runs the engine's worker pools and subscription fan-out and
+      # links the Bloomberg SDK through xbbg_core; xbbg-arrow holds the Arrow
+      # carriers shared across threads and needs no SDK.
+      - name: Cargo test under TSan
+        run: cargo test --locked -Zbuild-std --target "$TSAN_TARGET" -p xbbg-async -p xbbg-arrow
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Python extension under TSan, on a free-threaded CPython built with TSan
+  # ════════════════════════════════════════════════════════════════════════════
+  # Binary wheels are not instrumented, so races inside them go unseen: only
+  # pure-Python packages are installed, plus pyarrow, through which the native
+  # delivery tests read rows. pandas, polars and duckdb stay out, so their
+  # backend variants skip. PYTHON_GIL stays unset so an import that re-enables
+  # the GIL fails the run.
+  python:
+    name: Free-threaded Python (TSan)
+    needs: [sdk-version, generate-bindings]
+    # Pinned: the cached interpreter is built against this image's libraries.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      # Bump both together: the SHA-256 is the one python.org publishes for
+      # Python-<version>.tar.xz.
+      CPYTHON_VERSION: "3.14.10"
+      CPYTHON_SHA256: de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust nightly
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          toolchain: nightly
+          components: rust-src
+          build-warnings: warn
+          cache: false
+
+      - name: Reduce ASLR entropy for TSan
+        run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+      - name: Select clang matching rustc's LLVM
+        id: llvm
+        run: |
+          # The extension carries rustc's TSan instrumentation but resolves the
+          # TSan runtime from the interpreter, so CPython is built with the clang
+          # whose LLVM major matches rustc's.
+          major=$(rustc -vV | sed -n 's/^LLVM version: \([0-9]*\)\..*/\1/p')
+          test -n "$major"
+          echo "major=$major" >> "$GITHUB_OUTPUT"
+          echo "CPYTHON_PREFIX=$RUNNER_TEMP/cpython-tsan" >> "$GITHUB_ENV"
+
+      # Needed on every run, not only to build CPython: the interpreter's TSan
+      # runtime symbolizes reports with this release's llvm-symbolizer.
+      - name: Install clang ${{ steps.llvm.outputs.major }}
+        env:
+          LLVM_MAJOR: ${{ steps.llvm.outputs.major }}
+        run: |
+          curl -fsSL --retry 3 https://apt.llvm.org/llvm.sh -o "$RUNNER_TEMP/llvm.sh"
+          sudo bash "$RUNNER_TEMP/llvm.sh" "$LLVM_MAJOR"
+
+      - name: Restore TSan CPython
+        id: cpython
+        uses: actions/cache/restore@v6
+        with:
+          path: ${{ env.CPYTHON_PREFIX }}
+          key: cpython-tsan-ubuntu-24.04-${{ env.CPYTHON_VERSION }}-clang${{ steps.llvm.outputs.major }}-${{ hashFiles('scripts/build-tsan-cpython.sh') }}
+
+      - name: Build TSan CPython
+        if: steps.cpython.outputs.cache-hit != 'true'
+        env:
+          CC: clang-${{ steps.llvm.outputs.major }}
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends libffi-dev libssl-dev zlib1g-dev
+          bash scripts/build-tsan-cpython.sh "$CPYTHON_VERSION" "$CPYTHON_SHA256" "$CPYTHON_PREFIX"
+
+      # Saved right away, so a run that finds a race still keeps the build.
+      - name: Save TSan CPython
+        if: steps.cpython.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v6
+        with:
+          path: ${{ env.CPYTHON_PREFIX }}
+          key: ${{ steps.cpython.outputs.cache-primary-key }}
+
+      - name: Configure ThreadSanitizer
+        run: |
+          # TSAN_OPTIONS takes one suppressions file: xbbg's entries for
+          # uninstrumented libraries plus CPython's own list for this release.
+          cat .github/tsan-suppressions.txt "$CPYTHON_PREFIX/share/tsan/suppressions_free_threading.txt" > "$RUNNER_TEMP/tsan-suppressions.txt"
+          echo "TSAN_OPTIONS=halt_on_error=1 second_deadlock_stack=1 suppressions=$RUNNER_TEMP/tsan-suppressions.txt" >> "$GITHUB_ENV"
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Create a virtual environment on the TSan interpreter
+        run: |
+          python="$CPYTHON_PREFIX/bin/python${CPYTHON_VERSION%.*}t"
+          "$python" -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED'); assert '--with-thread-sanitizer' in sysconfig.get_config_var('CONFIG_ARGS')"
+          uv venv "$RUNNER_TEMP/venv" --python "$python"
+          echo "VIRTUAL_ENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+          echo "PYO3_PYTHON=$RUNNER_TEMP/venv/bin/python" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK (Linux)
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Install test dependencies
+        # --no-build: wheels only, so nothing is compiled uninstrumented here.
+        run: uv pip install --no-build "pytest>=8.4" "pytest-asyncio>=0.24" "pyarrow>=22.0.0"
+
+      - name: Install xbbg
+        env:
+          # setuptools-rust compiles the production extension with the same
+          # instrumentation and profile, so the test-support build below reuses
+          # its instrumented std and most dependencies.
+          CARGO_BUILD_TARGET: ${{ env.TSAN_TARGET }}
+          CARGO_UNSTABLE_BUILD_STD: std
+          SETUPTOOLS_RUST_CARGO_PROFILE: dev
+        run: uv pip install .
+
+      # The overlay of ci-rust.yml's native test-support step: the installed
+      # package keeps its files and only the extension becomes the driver build.
+      - name: Swap in the test-support extension
+        env:
+          # Keeps libpython out of the link, as setuptools-rust does: this
+          # interpreter only has a static libpython, which cannot be linked
+          # into a shared object.
+          PYO3_BUILD_EXTENSION_MODULE: "1"
+        run: |
+          XBBG_DIST_VERSION="$(python -c 'from importlib.metadata import version; print(version("xbbg"))')"
+          export XBBG_DIST_VERSION
+          cargo build --locked -Zbuild-std --target "$TSAN_TARGET" -p pyo3-xbbg --features test-support
+          CORE_TARGET="$(python -c 'from importlib.metadata import distribution; print(next(distribution("xbbg").locate_file("xbbg").glob("_core*.so")))')"
+          cp "target/$TSAN_TARGET/debug/lib_core.so" "$CORE_TARGET"
+
+      - name: Copy tests to temp directory
+        # Run from temp dir to avoid importing local source instead of installed package
+        run: |
+          mkdir -p "${{ runner.temp }}/test-run"
+          cp -r py-xbbg/tests "${{ runner.temp }}/test-run/"
+
+      - name: Run free-threading tests under TSan
+        working-directory: ${{ runner.temp }}/test-run
+        env:
+          XBBG_REQUIRE_TEST_SUPPORT: "1"
+        # --capture=sys: halt_on_error ends the process at the first report, and
+        # pytest's default fd capture would discard the report with it.
+        run: >-
+          python -m pytest --capture=sys -v
+          tests/test_free_threading.py
+          tests/test_native_bridge.py
+          tests/test_native_teardown.py
+          tests/test_subscription_delivery_native.py
+          tests/test_free_threading_stress.py

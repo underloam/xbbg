@@ -83,6 +83,7 @@ def engine_seam(monkeypatch):
     return engine, get_engine
 
 
+@pytest.mark.thread_unsafe(reason="exchange overrides are process-wide")
 class TestNativeOverrides:
     def test_public_set_is_visible_directly_in_core(self):
         set_exchange_override(

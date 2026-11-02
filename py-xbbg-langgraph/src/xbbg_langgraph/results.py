@@ -294,15 +294,23 @@ class _ArrowSource:
         self.exhausted = False
         self.selected: Any = None
         # Native carriers report metadata sizes without copying any value, so
-        # every value is gated before it is copied or decoded. PyArrow exposes
-        # only a full bytes copy of its metadata, which is never decoded here.
-        native = self.kind == "native"
-        raw: Mapping[Any, Any] = {} if native else value.schema.metadata or {}
-        sizes: dict[str, int] = value.metadata_sizes() if native else {}
-        self.metadata: Mapping[Any, Any] = _NativeMetadata(value, sizes) if native else raw
+        # every value is gated before it is copied or decoded. PyArrow, and native
+        # carriers from xbbg releases without the bounded metadata getters (which
+        # the declared xbbg floor still allows), expose only a full copy of their
+        # metadata, which is never decoded here.
+        bounded = self.kind == "native" and hasattr(value, "metadata_sizes")
+        raw: Mapping[Any, Any]
+        if bounded:
+            raw = {}
+        elif self.kind == "native":
+            raw = (value.to_table() if type(value).__name__ == "ArrowRecordBatch" else value).metadata
+        else:
+            raw = value.schema.metadata or {}
+        sizes: dict[str, int] = value.metadata_sizes() if bounded else {}
+        self.metadata: Mapping[Any, Any] = _NativeMetadata(value, sizes) if bounded else raw
         for key, target in _METADATA_KEYS.items():
-            encoded: str | bytes | None = None if native else raw.get(key, raw.get(key.encode()))
-            size = sizes.get(key) if native else None if encoded is None else len(encoded)
+            encoded: str | bytes | None = None if bounded else raw.get(key, raw.get(key.encode()))
+            size = sizes.get(key) if bounded else None if encoded is None else len(encoded)
             if size is None:
                 continue
             if size > min(work.nodes_left, work.bytes_left):
@@ -382,8 +390,13 @@ class _ArrowSource:
                 cost = 1
                 # nbytes includes parent buffers; logical_nbytes measures only
                 # this cell's bytes without copying them, so an oversized cell
-                # is rejected before it is expanded into Python.
-                allocation = column.logical_nbytes if dtype.startswith(_NATIVE_VARIABLE) else 32
+                # is rejected before it is expanded into Python. xbbg releases
+                # without logical_nbytes need the one cell compacted first.
+                if dtype.startswith(_NATIVE_VARIABLE):
+                    logical = getattr(column, "logical_nbytes", None)
+                    allocation = column.compact().nbytes if logical is None else logical
+                else:
+                    allocation = 32
             else:
                 name = sliced.schema.field(column_index).name
                 cost = _pyarrow_cost(column, work.nodes_left)
