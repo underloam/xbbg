@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, StringArray};
+use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, StringArray};
 use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow_select::concat::{concat, concat_batches};
@@ -14,7 +14,7 @@ use arrow_select::take::take_record_batch;
 
 use crate::column::{ColumnData, compact_array};
 use crate::error::{ArrowCoreError, Result};
-use crate::scalar::{CellValue, InferredKind, build_array_for_kind, cell_matches, infer_kind};
+use crate::scalar::{CellMatchMask, CellValue, InferredKind, build_array_for_kind, infer_kind};
 
 const TYPE_MISSES_METADATA_KEY: &str = "xbbg.type_misses";
 const BLOOMBERG_REQUEST_ID_METADATA_KEY: &str = "xbbg.bloomberg_request_id";
@@ -343,17 +343,17 @@ impl TableData {
     }
 
     /// Filter rows where a column equals a scalar value.
+    ///
+    /// Matching follows [`crate::scalar::cell_matches`]; the needle is resolved
+    /// once for the column type into a typed Arrow scalar where that is exact.
     pub fn filter_eq(&self, column: &str, value: &CellValue) -> Result<Self> {
         let idx = self.column_index(column)?;
+        let matcher = CellMatchMask::new(self.schema.field(idx).data_type(), value);
         let filtered = self
             .batches
             .iter()
             .map(|batch| {
-                let mask = BooleanArray::from(
-                    (0..batch.num_rows())
-                        .map(|row| cell_matches(batch.column(idx).as_ref(), row, value))
-                        .collect::<Vec<_>>(),
-                );
+                let mask = matcher.mask(batch.column(idx).as_ref())?;
                 filter_record_batch(batch, &mask).map_err(Into::into)
             })
             .collect::<Result<Vec<_>>>()?;
@@ -882,6 +882,74 @@ mod tests {
         assert_eq!(
             table
                 .filter_eq("value", &CellValue::Int(9_007_199_254_740_993))
+                .unwrap()
+                .num_rows(),
+            0
+        );
+    }
+
+    #[test]
+    fn filter_eq_selects_matches_across_sliced_batches_and_skips_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, true),
+            Field::new("px", DataType::Float64, true),
+        ]));
+        let batch = |tickers: Vec<Option<&str>>, prices: Vec<Option<f64>>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(tickers)) as ArrayRef,
+                    Arc::new(Float64Array::from(prices)) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let first = batch(
+            vec![Some("SKIP"), Some("AAPL"), None, Some("IBM")],
+            vec![Some(0.0), Some(-0.0), Some(f64::NAN), None],
+        )
+        .slice(1, 3);
+        let second = batch(
+            vec![Some("AAPL"), Some("MSFT"), None],
+            vec![Some(0.0), Some(1.5), Some(0.0)],
+        );
+        let table = TableData::try_new(vec![first, second]).unwrap();
+
+        let tickers = |table: &TableData| {
+            table
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    let column = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    column
+                        .iter()
+                        .map(|value| value.map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let aapl = table
+            .filter_eq("ticker", &CellValue::Text("AAPL".to_string()))
+            .unwrap();
+        assert_eq!(aapl.chunk_lengths(), [1, 1]);
+        assert_eq!(
+            tickers(&aapl),
+            [Some("AAPL".to_string()), Some("AAPL".to_string())]
+        );
+        let zero = table.filter_eq("px", &CellValue::Float(0.0)).unwrap();
+        assert_eq!(
+            tickers(&zero),
+            [Some("AAPL".to_string()), Some("AAPL".to_string()), None]
+        );
+        let missing = table.filter_eq("ticker", &CellValue::Null).unwrap();
+        assert_eq!(missing.chunk_lengths(), [1, 1]);
+        assert_eq!(
+            table
+                .filter_eq("px", &CellValue::Float(f64::NAN))
                 .unwrap()
                 .num_rows(),
             0

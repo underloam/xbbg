@@ -2855,6 +2855,7 @@ version = "1.7.0"
 dependencies = [
  "arrow-array",
  "arrow-schema",
+ "arrow-select",
  "chrono",
  "chrono-tz",
  "phf 0.14.0",
