@@ -58,11 +58,12 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Request middleware changes no longer affect running requests (#370).** Each request snapshots the middleware chain, so removing a middleware while another request is awaiting no longer skips or replaces the rest of that request's chain.
 - **Field types, element routing and schema parsing follow the active engine (#370).** The process-wide Python field-type, valid-element and parsed-schema caches are gone. A default type returned during a transient lookup failure is no longer pinned and sent as an override after the engine learns the real type, and scoped engines, `invalidate_schema()` and `clear_schema_cache()` take effect immediately.
 - **Caller-owned results (#370).** `ta_study_params()`, `get_sdk_info()` and `ServiceSchema.from_json()` return objects that callers can mutate without changing later results.
-- **LangGraph native results are bounded before copying (#370).** Cell sizes are checked before a cell is materialized, and metadata sizes before any value is fetched, so oversized cells or metadata no longer cost a full copy before the result limits apply.
+- **LangGraph native results are bounded before copying (#370).** With an xbbg release that provides the bounded native getters, cell sizes are checked before a cell is materialized, and metadata sizes before any value is fetched, so oversized cells or metadata no longer cost a full copy before the result limits apply. With older xbbg releases, which the adapter's declared floor still allows, it copies them as before.
 - **Runtime backend floors match the declared extras.** The pandas and duckdb backend checks now require 2.2.2 and 1.5.1, as `pyproject.toml` declares.
 - **`Engine.with_config()` releases its config before connecting (#370).** Reading or setting that config from another thread during startup no longer raises "Already borrowed".
 - **`ext_generate_futures_candidates` bounds `count` (#370).** Counts above 10,000 raise `ValueError` (Node: `InvalidArg`) instead of preallocating whatever the caller passed, and a corrupt embedded exchange-rule table fails loudly instead of meaning "no rule".
 - **`ColumnSet::finish_with_order` appends unlisted columns in first-write order (Rust), as documented.** Removing a listed column no longer moves the last column into its place.
+- **Source builds stay clear of rustc's `recursion_depth_exceeding_limit` lint.** Proving `Send` for the Python request futures exceeded the default recursion depth. Nightly rustc warns about this (rust-lang/rust#159228) and will make it a hard error, so the Python extension raises its recursion limit to 256.
 
 ## [1.7.0] - 2026-10-29
 
