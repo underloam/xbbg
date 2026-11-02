@@ -15,7 +15,9 @@ use arrow_array::builder::{Float64Builder, StringBuilder};
 use arrow_schema::{DataType as ArrowDataType, Field, Schema};
 use tokio::sync::oneshot;
 
-use super::value_utils::{format_date32, format_timestamp_micros, top_level_response_error};
+use super::value_utils::{
+    format_date32, format_timestamp_micros, get_value_with_datatype, top_level_response_error,
+};
 use xbbg_core::{BlpError, DataType, Element, Message, Value};
 
 /// State for a generic request that flattens elements to tabular format.
@@ -77,7 +79,8 @@ impl GenericState {
 
     /// Recursively flatten an element into rows.
     fn flatten_element(&mut self, path: &str, elem: &Element<'_>) {
-        match elem.datatype() {
+        let datatype = elem.datatype();
+        match datatype {
             DataType::Sequence => {
                 // Check if this sequence is an array (iterate by index)
                 // vs a struct with named children (iterate by children)
@@ -116,14 +119,9 @@ impl GenericState {
                 }
             }
             _ => {
-                // Leaf value - extract and record
-                if elem.is_null() {
-                    self.append_row(path, "null", None, None);
-                    return;
-                }
-
-                // Try to get the value at index 0
-                if let Some(value) = elem.get_value(0) {
+                // Leaf value: one getter call with the datatype read above; a
+                // null element reads as `Value::Null`.
+                if let Some(value) = get_value_with_datatype(elem, datatype) {
                     match value {
                         Value::Null => {
                             self.append_row(path, "null", None, None);

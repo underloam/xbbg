@@ -12,15 +12,14 @@ use xbbg_log::trace;
 use super::refdata::{LongMode, OutputFormat};
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
-    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns, append_long_value_row,
-    common_value_type, get_value_cached_datatype, top_level_response_error,
+    LongRowWriter, LongStringColumns, ResponseMetadata, SecurityElements, TypedLongColumns,
+    WideColumns, common_value_type, field_dtype_hints, get_value_cached_datatype,
+    top_level_response_error,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Message, Name, Value};
 
 struct HistDataElementNames {
     security_data: Name,
-    security: Name,
-    field_data: Name,
     date: Name,
 }
 
@@ -28,8 +27,6 @@ impl HistDataElementNames {
     fn new() -> Self {
         Self {
             security_data: Name::get_or_intern("securityData"),
-            security: Name::get_or_intern("security"),
-            field_data: Name::get_or_intern("fieldData"),
             date: Name::get_or_intern("date"),
         }
     }
@@ -47,14 +44,16 @@ pub(super) struct HistDataResponse {
     date_datatype: Option<BlpDataType>,
     /// Pre-interned structural names for response traversal
     names: HistDataElementNames,
-    /// Field type hints (field name -> arrow type)
-    field_types: HashMap<String, ArrowType>,
+    /// Per requested field, the `dtype` its type hint fixes in metadata rows
+    field_dtype_hints: Vec<Option<&'static str>>,
     /// Output format
     format: OutputFormat,
     /// Long format mode (only used when format == Long)
     long_mode: LongMode,
     /// Column set for building the output
     columns: ColumnSet,
+    /// Slots for long rows appended through `columns`, resolved on first use
+    long_rows: Option<LongRowWriter>,
     /// Fixed long-format builders for the common string-value output path
     long_columns: Option<LongStringColumns>,
     /// Fixed typed-long builders for direct multi-value output
@@ -180,15 +179,16 @@ impl HistDataResponse {
         }
 
         Self {
+            field_dtype_hints: field_dtype_hints(&fields, &arrow_types),
             field_names: fields,
             field_lookup_names,
             field_value_datatypes,
             date_datatype: None,
             names: HistDataElementNames::new(),
-            field_types: arrow_types,
             format,
             long_mode,
             columns,
+            long_rows: None,
             long_columns: long_value_type.map(LongStringColumns::histdata),
             typed_long_columns: (format == OutputFormat::Long && long_mode == LongMode::Typed)
                 .then(TypedLongColumns::histdata),
@@ -226,11 +226,12 @@ impl HistDataResponse {
                     if let Some(long_columns) = self.long_columns.take() {
                         long_columns.finish_histdata()
                     } else {
-                        std::mem::take(&mut self.columns)
+                        self.take_columns()
                             .finish_with_order(&["ticker", "date", "field", "value"])
                     }
                 }
-                LongMode::WithMetadata => std::mem::take(&mut self.columns)
+                LongMode::WithMetadata => self
+                    .take_columns()
                     .finish_with_order(&["ticker", "date", "field", "value", "dtype"]),
                 LongMode::Typed => self
                     .typed_long_columns
@@ -245,6 +246,13 @@ impl HistDataResponse {
                 .finish_histdata(),
         };
         result.map(|batch| response_meta.attach(batch))
+    }
+
+    /// Take the column set; slots belong to the set that resolved them, so
+    /// its replacement resolves them again.
+    fn take_columns(&mut self) -> ColumnSet {
+        self.long_rows = None;
+        std::mem::take(&mut self.columns)
     }
 
     /// Process a HistoricalDataResponse message using Element API.
@@ -277,13 +285,10 @@ impl HistDataResponse {
             return None;
         };
 
-        // Get ticker
-        let ticker = security_data
-            .get(&self.names.security)
-            .and_then(|e| e.get_str(0))
-            .unwrap_or("");
+        let security = SecurityElements::scan(&security_data);
+        let ticker = security.ticker();
 
-        let diagnostics = self.response_meta.record_security(ticker, &security_data);
+        let diagnostics = self.response_meta.record_security(ticker, &security);
         if let Some(error) = diagnostics.security_error {
             xbbg_log::warn!(
                 ticker = ticker,
@@ -296,7 +301,7 @@ impl HistDataResponse {
         }
 
         // Get fieldData array
-        let Some(field_data) = security_data.get(&self.names.field_data) else {
+        let Some(field_data) = security.field_data() else {
             trace!(ticker = ticker, "No fieldData for security");
             return None;
         };
@@ -348,38 +353,41 @@ impl HistDataResponse {
             return;
         }
         if let Some(typed_columns) = self.typed_long_columns.as_mut() {
-            for (field_name, field_lookup_name) in
-                self.field_names.iter().zip(&self.field_lookup_names)
+            for ((field_name, field_lookup_name), field_datatype) in self
+                .field_names
+                .iter()
+                .zip(&self.field_lookup_names)
+                .zip(self.field_value_datatypes.iter_mut())
             {
                 let value = row
                     .get(field_lookup_name)
-                    .and_then(|element| element.get_value(0));
+                    .and_then(|element| get_value_cached_datatype(&element, field_datatype));
                 typed_columns.append_row(ticker, date_value.as_ref(), field_name, value);
             }
             return;
         }
 
-        let long_mode = self.long_mode;
-        let field_names = &self.field_names;
-        let field_lookup_names = &self.field_lookup_names;
-        let field_types = &self.field_types;
-        let columns = &mut self.columns;
-
-        for (field_name, field_lookup_name) in field_names.iter().zip(field_lookup_names) {
-            // Get the field value
-            let value = row.get(field_lookup_name).and_then(|e| e.get_value(0));
-            let dtype = value
-                .as_ref()
-                .map(|v| dtype_from_hints(field_types, field_name, v));
-
-            append_long_value_row(columns, long_mode, field_name, value, dtype, |columns| {
-                columns.append_str("ticker", ticker);
-                if let Some(date_value) = date_value {
-                    columns.append("date", date_value.clone());
-                } else {
-                    columns.append_null("date");
-                }
-            });
+        let writer = *self
+            .long_rows
+            .get_or_insert_with(|| LongRowWriter::histdata(&mut self.columns, self.long_mode));
+        for (((field_name, field_lookup_name), field_datatype), dtype_hint) in self
+            .field_names
+            .iter()
+            .zip(&self.field_lookup_names)
+            .zip(self.field_value_datatypes.iter_mut())
+            .zip(&self.field_dtype_hints)
+        {
+            let value = row
+                .get(field_lookup_name)
+                .and_then(|element| get_value_cached_datatype(&element, field_datatype));
+            writer.append_row(
+                &mut self.columns,
+                ticker,
+                date_value.as_ref(),
+                field_name,
+                value,
+                *dtype_hint,
+            );
         }
     }
 
@@ -403,17 +411,4 @@ impl HistDataResponse {
             );
         }
     }
-}
-
-fn dtype_from_hints(
-    field_types: &HashMap<String, ArrowType>,
-    field_name: &str,
-    value: &Value<'_>,
-) -> &'static str {
-    // Use type hint if available
-    if let Some(hint) = field_types.get(field_name) {
-        return hint.type_name();
-    }
-    // Otherwise infer from value
-    ArrowType::from_value(value).type_name()
 }

@@ -13,13 +13,15 @@ use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use tokio::sync::oneshot;
 use xbbg_log::trace;
 
-use super::value_utils::{ResponseMetadata, top_level_response_error};
-use xbbg_core::{BlpError, Element, Message, Name, Value};
+use super::value_utils::{
+    ResponseMetadata, find_children, get_value_cached_datatype, top_level_response_error,
+};
+use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
 struct IntradayBarNames {
     bar_data: Name,
-    bar_tick_data: Name,
-    eid_data: Name,
+    /// `barData` children in `find_children` order: `eidData`, `barTickData`.
+    bar_data_children: [Name; 2],
     time: Name,
     open: Name,
     high: Name,
@@ -34,8 +36,7 @@ impl IntradayBarNames {
     fn new() -> Self {
         Self {
             bar_data: Name::get_or_intern("barData"),
-            bar_tick_data: Name::get_or_intern("barTickData"),
-            eid_data: Name::get_or_intern("eidData"),
+            bar_data_children: ["eidData", "barTickData"].map(Name::get_or_intern),
             time: Name::get_or_intern("time"),
             open: Name::get_or_intern("open"),
             high: Name::get_or_intern("high"),
@@ -46,6 +47,19 @@ impl IntradayBarNames {
             value: Name::get_or_intern("value"),
         }
     }
+}
+
+/// Bloomberg datatypes learned per numeric bar field, so each value costs
+/// one getter call.
+#[derive(Default)]
+struct IntradayBarDatatypes {
+    open: Option<BlpDataType>,
+    high: Option<BlpDataType>,
+    low: Option<BlpDataType>,
+    close: Option<BlpDataType>,
+    volume: Option<BlpDataType>,
+    num_events: Option<BlpDataType>,
+    value: Option<BlpDataType>,
 }
 
 struct IntradayBarBuilders {
@@ -98,6 +112,8 @@ pub(super) struct IntradayBarResponse {
     names: IntradayBarNames,
     /// Fixed Arrow builders for the output schema.
     builders: Option<IntradayBarBuilders>,
+    /// Learned value datatypes of the numeric bar fields.
+    datatypes: IntradayBarDatatypes,
     /// Response-level entitlement IDs attached as schema metadata.
     response_meta: ResponseMetadata,
 }
@@ -163,6 +179,7 @@ impl IntradayBarResponse {
             ticker,
             names: IntradayBarNames::new(),
             builders: None,
+            datatypes: IntradayBarDatatypes::default(),
             response_meta: ResponseMetadata::default(),
         }
     }
@@ -195,12 +212,14 @@ impl IntradayBarResponse {
             return false;
         };
 
-        if let Some(eids) = bar_data.get(&self.names.eid_data) {
+        // `eidData` is usually absent: find both children in one pass.
+        let [eids, bar_tick_data] = find_children(&bar_data, &self.names.bar_data_children);
+        if let Some(eids) = eids {
             self.response_meta.record_eid_data(&self.ticker, &eids);
         }
 
         // Get barTickData array
-        let Some(bar_tick_data) = bar_data.get(&self.names.bar_tick_data) else {
+        let Some(bar_tick_data) = bar_tick_data else {
             trace!("No barTickData in message");
             return !self.response_meta.is_empty();
         };
@@ -213,35 +232,44 @@ impl IntradayBarResponse {
         let builders = self
             .builders
             .get_or_insert_with(|| IntradayBarBuilders::new(n, self.ticker.len()));
+        let names = &self.names;
+        let types = &mut self.datatypes;
+        let misses = &mut self.response_meta;
         for i in 0..n {
             let Some(bar) = bar_tick_data.get_element(i) else {
                 continue;
             };
 
             builders.ticker.append_value(&self.ticker);
-            if Self::append_time_field(&bar, &self.names.time, &mut builders.time) {
-                self.response_meta.record_type_miss("time");
+            if Self::append_time_field(&bar, &names.time, &mut builders.time) {
+                misses.record_type_miss("time");
             }
-            if Self::append_f64_field(&bar, &self.names.open, &mut builders.open) {
-                self.response_meta.record_type_miss("open");
+            if Self::append_f64_field(&bar, &names.open, &mut types.open, &mut builders.open) {
+                misses.record_type_miss("open");
             }
-            if Self::append_f64_field(&bar, &self.names.high, &mut builders.high) {
-                self.response_meta.record_type_miss("high");
+            if Self::append_f64_field(&bar, &names.high, &mut types.high, &mut builders.high) {
+                misses.record_type_miss("high");
             }
-            if Self::append_f64_field(&bar, &self.names.low, &mut builders.low) {
-                self.response_meta.record_type_miss("low");
+            if Self::append_f64_field(&bar, &names.low, &mut types.low, &mut builders.low) {
+                misses.record_type_miss("low");
             }
-            if Self::append_f64_field(&bar, &self.names.close, &mut builders.close) {
-                self.response_meta.record_type_miss("close");
+            if Self::append_f64_field(&bar, &names.close, &mut types.close, &mut builders.close) {
+                misses.record_type_miss("close");
             }
-            if Self::append_f64_field(&bar, &self.names.volume, &mut builders.volume) {
-                self.response_meta.record_type_miss("volume");
+            if Self::append_f64_field(&bar, &names.volume, &mut types.volume, &mut builders.volume)
+            {
+                misses.record_type_miss("volume");
             }
-            if Self::append_i32_field(&bar, &self.names.num_events, &mut builders.num_events) {
-                self.response_meta.record_type_miss("numEvents");
+            if Self::append_i32_field(
+                &bar,
+                &names.num_events,
+                &mut types.num_events,
+                &mut builders.num_events,
+            ) {
+                misses.record_type_miss("numEvents");
             }
-            if Self::append_f64_field(&bar, &self.names.value, &mut builders.value) {
-                self.response_meta.record_type_miss("value");
+            if Self::append_f64_field(&bar, &names.value, &mut types.value, &mut builders.value) {
+                misses.record_type_miss("value");
             }
         }
         true
@@ -282,18 +310,22 @@ impl IntradayBarResponse {
         field_name: &Name,
         builder: &mut TimestampMicrosecondBuilder,
     ) -> bool {
-        let field = element.get(field_name).filter(|field| !field.is_null());
+        let field = element.get(field_name);
+        // A null field fails the getter; only a non-null failure is a miss.
         let value = field.as_ref().and_then(|field| field.get_timestamp_us(0));
         builder.append_option(value);
-        value.is_none() && field.is_some()
+        value.is_none() && field.is_some_and(|field| !field.is_null())
     }
 
     fn append_f64_field(
         element: &Element<'_>,
         field_name: &Name,
+        datatype: &mut Option<BlpDataType>,
         builder: &mut Float64Builder,
     ) -> bool {
-        let value = element.get(field_name).and_then(|field| field.get_value(0));
+        let value = element
+            .get(field_name)
+            .and_then(|field| get_value_cached_datatype(&field, datatype));
         let converted = value.as_ref().and_then(Value::as_f64);
         builder.append_option(converted);
         converted.is_none() && value.is_some_and(|value| !value.is_null())
@@ -302,9 +334,12 @@ impl IntradayBarResponse {
     fn append_i32_field(
         element: &Element<'_>,
         field_name: &Name,
+        datatype: &mut Option<BlpDataType>,
         builder: &mut Int32Builder,
     ) -> bool {
-        let value = element.get(field_name).and_then(|field| field.get_value(0));
+        let value = element
+            .get(field_name)
+            .and_then(|field| get_value_cached_datatype(&field, datatype));
         let converted = match value.as_ref() {
             Some(Value::Int32(value)) => Some(*value),
             Some(Value::Int64(value)) => i32::try_from(*value).ok(),

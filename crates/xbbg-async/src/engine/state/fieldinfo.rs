@@ -10,7 +10,7 @@
 //! Extracts directly from Bloomberg Elements without JSON intermediate.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::RecordBatch;
 use arrow_array::builder::StringBuilder;
@@ -18,10 +18,42 @@ use arrow_schema::{DataType, Field, Schema};
 use tokio::sync::oneshot;
 use xbbg_log::trace;
 
-use super::value_utils::top_level_response_error;
+use super::value_utils::{find_children, top_level_response_error};
 use crate::diagnostics::{FieldErrorMeta, METADATA_KEY_FIELD_ERRORS};
 use crate::field_cache::BlpFieldType;
-use xbbg_core::{BlpError, Message};
+use xbbg_core::{BlpError, Message, Name};
+
+struct FieldInfoNames {
+    field_data: Name,
+    /// `fieldData[]` children in `find_children` order: `id`, `fieldInfo`,
+    /// `fieldError`.
+    item: [Name; 3],
+    mnemonic: Name,
+    datatype: Name,
+    ftype: Name,
+    description: Name,
+    category_name: Name,
+    category: Name,
+    code: Name,
+    subcategory: Name,
+    message: Name,
+    source: Name,
+}
+
+static FIELD_INFO_NAMES: LazyLock<FieldInfoNames> = LazyLock::new(|| FieldInfoNames {
+    field_data: Name::get_or_intern("fieldData"),
+    item: ["id", "fieldInfo", "fieldError"].map(Name::get_or_intern),
+    mnemonic: Name::get_or_intern("mnemonic"),
+    datatype: Name::get_or_intern("datatype"),
+    ftype: Name::get_or_intern("ftype"),
+    description: Name::get_or_intern("description"),
+    category_name: Name::get_or_intern("categoryName"),
+    category: Name::get_or_intern("category"),
+    code: Name::get_or_intern("code"),
+    subcategory: Name::get_or_intern("subcategory"),
+    message: Name::get_or_intern("message"),
+    source: Name::get_or_intern("source"),
+});
 
 /// State for a FieldInfoRequest that extracts field metadata.
 pub struct FieldInfoState {
@@ -95,10 +127,11 @@ impl FieldInfoState {
     /// }
     /// ```
     fn process_message(&mut self, msg: &Message) {
+        let names = &*FIELD_INFO_NAMES;
         let root = msg.elements();
 
         // Get fieldData array
-        let Some(field_data) = root.get_by_str("fieldData") else {
+        let Some(field_data) = root.get(&names.field_data) else {
             trace!("No fieldData in message");
             return;
         };
@@ -109,14 +142,13 @@ impl FieldInfoState {
                 continue;
             };
 
-            let id = item.get_by_str("id").and_then(|element| element.get_str(0));
-            if let Some(error) = item
-                .get_by_str("fieldError")
-                .filter(|element| !element.is_null())
-            {
+            // `fieldError` is usually absent: find the item's children in one pass.
+            let [id_element, field_info, field_error] = find_children(&item, &names.item);
+            let id = id_element.as_ref().and_then(|element| element.get_str(0));
+            if let Some(error) = field_error.filter(|element| !element.is_null()) {
                 let string = |name| {
                     error
-                        .get_by_str(name)
+                        .get(name)
                         .and_then(|element| element.get_str(0))
                         .unwrap_or("")
                         .to_string()
@@ -124,15 +156,15 @@ impl FieldInfoState {
                 self.field_errors.insert(
                     id.unwrap_or("").to_string(),
                     FieldErrorMeta {
-                        category: string("category"),
+                        category: string(&names.category),
                         code: error
-                            .get_by_str("code")
+                            .get(&names.code)
                             .and_then(|element| element.get_i32(0))
                             .unwrap_or_default(),
-                        subcategory: string("subcategory"),
-                        message: string("message"),
+                        subcategory: string(&names.subcategory),
+                        message: string(&names.message),
                         source: error
-                            .get_by_str("source")
+                            .get(&names.source)
                             .and_then(|element| element.get_str(0))
                             .map(str::to_string),
                     },
@@ -140,18 +172,16 @@ impl FieldInfoState {
                 continue;
             }
 
-            let Some(field_info) = item
-                .get_by_str("fieldInfo")
-                .filter(|element| !element.is_null())
-            else {
+            let Some(field_info) = field_info.filter(|element| !element.is_null()) else {
                 continue;
             };
 
             // Keep the canonical mnemonic separate from Bloomberg's field id.
+            let [id_name, ..] = &names.item;
             let field = field_info
-                .get_by_str("mnemonic")
+                .get(&names.mnemonic)
                 .and_then(|e| e.get_str(0))
-                .or_else(|| field_info.get_by_str("id").and_then(|e| e.get_str(0)))
+                .or_else(|| field_info.get(id_name).and_then(|e| e.get_str(0)))
                 .or(id)
                 .unwrap_or("");
 
@@ -161,8 +191,8 @@ impl FieldInfoState {
 
             // apiflds uses Datetime for temporal and textual fields; ftype
             // disambiguates those without overriding other concrete datatypes.
-            let datatype = field_info.get_by_str("datatype");
-            let ftype = field_info.get_by_str("ftype");
+            let datatype = field_info.get(&names.datatype);
+            let ftype = field_info.get(&names.ftype);
             let blp_type = BlpFieldType::from_metadata(
                 datatype.as_ref().and_then(|element| element.get_str(0)),
                 ftype.as_ref().and_then(|element| element.get_str(0)),
@@ -171,13 +201,13 @@ impl FieldInfoState {
 
             // Get description
             let description = field_info
-                .get_by_str("description")
+                .get(&names.description)
                 .and_then(|e| e.get_str(0))
                 .unwrap_or("");
 
             // Get category (first one if multiple)
             let category = field_info
-                .get_by_str("categoryName")
+                .get(&names.category_name)
                 .and_then(|cats| cats.get_str(0))
                 .unwrap_or("");
 

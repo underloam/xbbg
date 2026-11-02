@@ -20,16 +20,38 @@
 //! }
 //! ```
 
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 
 use arrow_array::RecordBatch;
 use arrow_schema::Schema;
 use tokio::sync::oneshot;
-use xbbg_core::{BlpError, Element, Message, Value};
+use xbbg_core::{BlpError, Element, Message, Name, Value};
 use xbbg_log::debug;
 
-use super::typed_builder::ColumnSet;
-use super::value_utils::top_level_response_error;
+use super::typed_builder::{ColumnSet, ColumnSlot};
+use super::value_utils::{get_value_with_datatype, top_level_response_error};
+
+struct GridNames {
+    num_of_records: Name,
+    num_of_fields: Name,
+    reach_max: Name,
+    sequence_number: Name,
+    error: Name,
+    column_titles: Name,
+    data_records: Name,
+    data_fields: Name,
+}
+
+static GRID_NAMES: LazyLock<GridNames> = LazyLock::new(|| GridNames {
+    num_of_records: Name::get_or_intern("NumOfRecords"),
+    num_of_fields: Name::get_or_intern("NumOfFields"),
+    reach_max: Name::get_or_intern("ReachMax"),
+    sequence_number: Name::get_or_intern("SequenceNumber"),
+    error: Name::get_or_intern("Error"),
+    column_titles: Name::get_or_intern("ColumnTitles"),
+    data_records: Name::get_or_intern("DataRecords"),
+    data_fields: Name::get_or_intern("DataFields"),
+});
 
 #[derive(Default)]
 struct ProcessedGridPage {
@@ -46,6 +68,8 @@ pub struct BsrchState {
     columns: ColumnSet,
     /// Column names from `ColumnTitles[]`, or fallback `colN` names.
     column_names: Vec<String>,
+    /// Column-set slots parallel to `column_names`.
+    column_slots: Vec<ColumnSlot>,
     /// Bloomberg `Error` payload, if one was returned.
     error: Option<String>,
     /// Bloomberg reported `NumOfRecords` total across processed pages.
@@ -62,6 +86,7 @@ impl BsrchState {
         Self {
             columns: ColumnSet::new(),
             column_names: Vec::new(),
+            column_slots: Vec::new(),
             error: None,
             expected_records: None,
             expected_fields: None,
@@ -146,21 +171,22 @@ impl BsrchState {
 
     /// Process a BSRCH `GridResponse` message using the Element API.
     fn process_message(&mut self, msg: &Message) -> ProcessedGridPage {
+        let names = &*GRID_NAMES;
         let root = msg.elements();
         let mut page = ProcessedGridPage {
-            num_records: element_i32_usize(&root, "NumOfRecords"),
-            num_fields: element_reported_num_fields(&root, "NumOfFields"),
+            num_records: element_i32_usize(&root, &names.num_of_records),
+            num_fields: element_reported_num_fields(&root, &names.num_of_fields),
             reach_max: root
-                .get_by_str("ReachMax")
+                .get(&names.reach_max)
                 .and_then(|value| value.get_bool(0))
                 .unwrap_or(false),
             sequence_number: root
-                .get_by_str("SequenceNumber")
+                .get(&names.sequence_number)
                 .and_then(|value| value.get_i32(0)),
             ..ProcessedGridPage::default()
         };
 
-        if let Some(error) = child_by_name(&root, "Error").and_then(element_string) {
+        if let Some(error) = child_by_name(&root, &names.error).and_then(element_string) {
             page.error = Some(error);
         }
 
@@ -178,7 +204,7 @@ impl BsrchState {
             }
         }
 
-        let Some(records) = root.get_by_str("DataRecords") else {
+        let Some(records) = root.get(&names.data_records) else {
             return page;
         };
 
@@ -189,7 +215,7 @@ impl BsrchState {
                 self.column_names.len(),
             );
 
-            let Some(fields) = record.get_by_str("DataFields") else {
+            let Some(fields) = record.get(&names.data_fields) else {
                 if let Some(width) = expected_width.filter(|width| *width > 0) {
                     self.append_null_record(width);
                 } else {
@@ -252,7 +278,7 @@ impl BsrchState {
             return;
         }
 
-        let Some(titles) = root.get_by_str("ColumnTitles") else {
+        let Some(titles) = root.get(&GRID_NAMES.column_titles) else {
             return;
         };
 
@@ -285,15 +311,14 @@ impl BsrchState {
             .max(self.column_names.len());
         self.ensure_column_width(width);
 
-        for idx in 0..width {
-            let name = &self.column_names[idx];
+        for (idx, &slot) in self.column_slots[..width].iter().enumerate() {
             if let Some(field) = fields.get_element(idx)
-                && append_grid_field_value(&mut self.columns, name, field)
+                && append_grid_field_value(&mut self.columns, slot, field)
             {
                 continue;
             }
 
-            self.columns.append_null(name);
+            self.columns.append_null_slot(slot);
         }
 
         self.columns.end_row();
@@ -301,9 +326,8 @@ impl BsrchState {
 
     fn append_null_record(&mut self, width: usize) {
         self.ensure_column_width(width);
-        for idx in 0..width {
-            let name = &self.column_names[idx];
-            self.columns.append_null(name);
+        for &slot in &self.column_slots[..width] {
+            self.columns.append_null_slot(slot);
         }
         self.columns.end_row();
     }
@@ -321,56 +345,60 @@ impl BsrchState {
             .filter(|value| !value.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| format!("col{idx}"));
+        let name = self.unique_column_name(base);
+        self.column_slots.push(self.columns.slot(&name));
+        self.column_names.push(name);
+    }
 
+    fn unique_column_name(&self, base: String) -> String {
         if !self.column_names.iter().any(|name| name == &base) {
-            self.column_names.push(base);
-            return;
+            return base;
         }
 
         let mut suffix = 2;
         loop {
             let candidate = format!("{base}_{suffix}");
             if !self.column_names.iter().any(|name| name == &candidate) {
-                self.column_names.push(candidate);
-                return;
+                return candidate;
             }
             suffix += 1;
         }
     }
 }
 
-fn append_grid_field_value(columns: &mut ColumnSet, name: &str, field: Element<'_>) -> bool {
+fn append_grid_field_value(columns: &mut ColumnSet, slot: ColumnSlot, field: Element<'_>) -> bool {
     for child in field.children() {
-        if let Some(value) = child.get_value(0) {
-            columns.append(name, value);
+        if let Some(value) = get_value_with_datatype(&child, child.datatype()) {
+            columns.append_slot(slot, value);
             return true;
         }
     }
 
-    if let Some(value) = field.get_value(0) {
-        columns.append(name, value);
+    if let Some(value) = get_value_with_datatype(&field, field.datatype()) {
+        columns.append_slot(slot, value);
         return true;
     }
 
     false
 }
 
-fn child_by_name<'a>(element: &'a Element<'a>, name: &str) -> Option<Element<'a>> {
-    if let Some(child) = element.get_by_str(name) {
+fn child_by_name<'a>(element: &'a Element<'a>, name: &Name) -> Option<Element<'a>> {
+    if let Some(child) = element.get(name) {
         return Some(child);
     }
 
+    let name = name.as_str();
     element
         .children()
         .find(|child| child.name_str().eq_ignore_ascii_case(name))
 }
 
-fn element_i32_usize(element: &Element<'_>, name: &str) -> Option<usize> {
+fn element_i32_usize(element: &Element<'_>, name: &Name) -> Option<usize> {
     let value = child_by_name(element, name)?.get_i32(0)?;
     usize::try_from(value).ok()
 }
 
-fn element_reported_num_fields(element: &Element<'_>, name: &str) -> Option<usize> {
+fn element_reported_num_fields(element: &Element<'_>, name: &Name) -> Option<usize> {
     reported_num_fields(element_i32_usize(element, name))
 }
 

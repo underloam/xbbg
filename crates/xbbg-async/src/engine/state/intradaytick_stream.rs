@@ -15,7 +15,8 @@ use arrow_array::builder::{
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use tokio::sync::mpsc;
 
-use super::value_utils::{ResponseMetadata, top_level_response_error};
+use super::intradaytick::TICK_RESPONSE_NAMES;
+use super::value_utils::{ResponseMetadata, find_children, top_level_response_error};
 use xbbg_core::{BlpError, Message};
 
 /// Streaming state for an intraday tick request (bdtick).
@@ -80,20 +81,22 @@ impl IntradayTickStreamState {
     /// Note: Optional fields like conditionCodes require includeConditionCodes=true
     /// in the request. For those, use the non-streaming API with elements param.
     fn process_message(&mut self, msg: &Message) -> Option<RecordBatch> {
+        let names = &*TICK_RESPONSE_NAMES;
         let root = msg.elements();
 
         // Get tickData (outer)
-        let tick_data_outer = root.get_by_str("tickData")?;
+        let tick_data_outer = root.get(&names.tick_data)?;
+        // `eidData` is usually absent: find it and the inner tickData array
+        // (same name as the parent) in one pass.
+        let [eids, tick_data] = find_children(&tick_data_outer, &names.tick_data_children);
         let mut response_meta = ResponseMetadata::default();
-        let has_eids = if let Some(eids) = tick_data_outer.get_by_str("eidData") {
+        let has_eids = if let Some(eids) = eids {
             response_meta.record_eid_data(&self.ticker, &eids);
             true
         } else {
             false
         };
 
-        // Get tickData array (inner - same name as parent)
-        let tick_data = tick_data_outer.get_by_str("tickData");
         let n = tick_data.as_ref().map_or(0, |data| data.len());
         if n == 0 && !has_eids {
             return None;
@@ -107,6 +110,7 @@ impl IntradayTickStreamState {
         let mut value_builder = Float64Builder::with_capacity(n);
         let mut size_builder = Int64Builder::with_capacity(n);
 
+        let [time_name, type_name, value_name, size_name] = &names.core_fields;
         for i in 0..n {
             let tick_data = tick_data
                 .as_ref()
@@ -118,7 +122,7 @@ impl IntradayTickStreamState {
             ticker_builder.append_value(&self.ticker);
 
             // Get time - native datetime extraction
-            if let Some(time_elem) = tick.get_by_str("time") {
+            if let Some(time_elem) = tick.get(time_name) {
                 if let Some(micros) = time_elem.get_timestamp_us(0) {
                     time_builder.append_value(micros);
                 } else {
@@ -129,7 +133,7 @@ impl IntradayTickStreamState {
             }
 
             // Type
-            if let Some(type_elem) = tick.get_by_str("type") {
+            if let Some(type_elem) = tick.get(type_name) {
                 if let Some(t) = type_elem.get_str(0) {
                     type_builder.append_value(t);
                 } else {
@@ -140,7 +144,7 @@ impl IntradayTickStreamState {
             }
 
             // Value
-            if let Some(val_elem) = tick.get_by_str("value") {
+            if let Some(val_elem) = tick.get(value_name) {
                 if let Some(v) = val_elem.get_f64(0) {
                     value_builder.append_value(v);
                 } else {
@@ -151,7 +155,7 @@ impl IntradayTickStreamState {
             }
 
             // Size
-            if let Some(size_elem) = tick.get_by_str("size") {
+            if let Some(size_elem) = tick.get(size_name) {
                 if let Some(s) = size_elem.get_i64(0) {
                     size_builder.append_value(s);
                 } else if let Some(s) = size_elem.get_i32(0) {
