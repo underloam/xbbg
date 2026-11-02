@@ -16,8 +16,8 @@ import {
   Backend,
   emitDelayedDataWarnings,
   Format,
+  ipcFileToPolars,
   ipcSchemaMetadata,
-  ipcToPolars,
   nativeArrowToBackend,
   nativeRecipeResult,
   normalizeBackend,
@@ -1145,12 +1145,12 @@ export class Engine {
     const nativeParams = { ...rest, ...mapOverridesToRequestParts(overrides) };
     try {
       if (backend === Backend.POLARS) {
-        const ipc = await this.inner.requestRaw(nativeParams);
+        const file = await this.inner.requestIpcFile(nativeParams);
         if (warnDelayed) {
-          emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
+          emitDelayedDataWarnings(file.metadata);
         }
-        warnTickerKeyColumn(this.inner.keyColumn, ipc);
-        return ipcToPolars(ipc);
+        warnTickerKeyColumn(this.inner.keyColumn, file.ipc);
+        return ipcFileToPolars(file);
       }
       const batch = await this.inner.request(nativeParams);
       if (warnDelayed) {

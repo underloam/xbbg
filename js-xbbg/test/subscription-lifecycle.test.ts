@@ -10,7 +10,12 @@ import type {
   NativeSubscriptionUpdateBatch,
 } from '../src/napi';
 import * as api from '../src/subscriptions';
-import { fakeNativeSubscription, int32ArrowBatch, scalarBatch } from './subscription-fixtures';
+import {
+  fakeNativeSubscription,
+  int32ArrowBatch,
+  scalarBatch,
+  scalarRowBatch,
+} from './subscription-fixtures';
 
 function deferred<T>(): {
   readonly promise: Promise<T>;
@@ -104,28 +109,12 @@ describe('subscription iterator lifecycle', () => {
 
   it('preserves absent fields separately from explicit clears in canonical and typed accessors', async () => {
     const native = fakeNativeSubscription({
-      nextUpdates: async () => ({
-        kind: 'batch',
-        layout: {
-          fields: ['present', 'cleared', 'absent'],
-          kinds: ['i32', 'i32', 'i32'],
-          version: 1,
-        },
-        updates: [
-          {
-            boolValues: [null, null],
-            f64Values: [null, null],
-            fieldIndices: [0, 1],
-            i32Values: [7, null],
-            i64Values: [null, null],
-            layoutVersion: 1,
-            stringValues: [null, null],
-            timestampUs: 123,
-            topic: 'topic-1',
-            topicId: 1,
-          },
-        ],
-      }),
+      nextUpdates: async () =>
+        scalarRowBatch(
+          { fields: ['present', 'cleared', 'absent'], kinds: ['i32', 'i32', 'i32'], version: 1 },
+          [0, 1],
+          [7, null],
+        ),
     });
     const subscription = new api.Subscription(native);
     const tick = (await subscription.next()).value;
@@ -157,30 +146,14 @@ describe('subscription iterator lifecycle', () => {
     await subscription.unsubscribe(false);
   });
 
-  it('decodes promoted boolean and numeric values from native string slots', async () => {
+  it('decodes promoted boolean and numeric values from native strings', async () => {
     const native = fakeNativeSubscription({
-      nextUpdates: async () => ({
-        kind: 'batch',
-        layout: {
-          fields: ['flag', 'count', 'price'],
-          kinds: ['str', 'str', 'str'],
-          version: 1,
-        },
-        updates: [
-          {
-            boolValues: [null, null, null],
-            f64Values: [null, null, null],
-            fieldIndices: [0, 1, 2],
-            i32Values: [null, null, null],
-            i64Values: [null, null, null],
-            layoutVersion: 1,
-            stringValues: ['true', '42', '1.25'],
-            timestampUs: 123,
-            topic: 'topic-1',
-            topicId: 1,
-          },
-        ],
-      }),
+      nextUpdates: async () =>
+        scalarRowBatch(
+          { fields: ['flag', 'count', 'price'], kinds: ['str', 'str', 'str'], version: 1 },
+          [0, 1, 2],
+          ['true', '42', '1.25'],
+        ),
     });
     const subscription = new api.Subscription(native);
     const tick = (await subscription.next()).value;
@@ -193,6 +166,47 @@ describe('subscription iterator lifecycle', () => {
     expect(tick.get('price')).toBe('1.25');
     expect(tick.f64('price')).toBe(1.25);
     expect(tick.i64('count')).toBe(42n);
+    await subscription.unsubscribe(false);
+  });
+
+  it('slices typed rows from one columnar batch and reuses decoded dates', async () => {
+    const native = fakeNativeSubscription({
+      nextUpdates: async () => ({
+        kind: 'batch',
+        layout: {
+          fields: ['volume', 'tradeDate', 'stamp', 'flag'],
+          kinds: ['i64', 'date32', 'timestamp_us', 'bool'],
+          version: 3,
+        },
+        layoutVersion: 3,
+        topics: ['first', 'second'],
+        timestampsUs: Float64Array.of(10, 20),
+        rowOffsets: Uint32Array.of(0, 2, 4),
+        fieldIndices: Uint16Array.of(0, 1, 2, 3),
+        values: [9_007_199_254_740_993n, 19_000, null, true],
+      }),
+    });
+    const subscription = new api.Subscription(native);
+    const first = (await subscription.next()).value;
+    const second = (await subscription.next()).value;
+    if (first === undefined || second === undefined) {
+      throw new Error('expected two ticks');
+    }
+
+    expect(first.topic).toBe('first');
+    expect(first.layoutVersion).toBe(3);
+    expect(first.i64('volume')).toBe(9_007_199_254_740_993n);
+    expect(first.get('tradeDate')).toStrictEqual(new Date(Date.UTC(1970, 0, 1 + 19_000)));
+    expect(first.get('tradeDate')).toBe(first.toObject().tradeDate);
+    expect(first.has('stamp')).toBeFalsy();
+    expect(second.timestampUs).toBe(20);
+    expect(second.has('volume')).toBeFalsy();
+    expect(second.toObject()).toStrictEqual({
+      flag: true,
+      stamp: null,
+      timestampUs: 20,
+      topic: 'second',
+    });
     await subscription.unsubscribe(false);
   });
 

@@ -1,13 +1,14 @@
 import type { Table } from 'apache-arrow';
 
 import {
+  ipcFileToPolars,
   nativeArrowToBackend,
-  nativeArrowToPolars,
   normalizeBackend,
   toArrowTableFromNative,
 } from './backends';
 import { BlpValidationError, wrapError } from './errors';
 import type {
+  NativeArrowIpcFile,
   NativeArrowZeroCopyBatch,
   NativeEngine,
   NativeSubscription,
@@ -15,7 +16,6 @@ import type {
   NativeSubscriptionDeliveryReceipt,
   NativeSubscriptionFieldKind,
   NativeSubscriptionLayout,
-  NativeSubscriptionRow,
   NativeSubscriptionUpdateBatch,
 } from './napi';
 import { isPlainObject } from './objects';
@@ -240,26 +240,30 @@ function createTickLayout(layout: NativeSubscriptionLayout): TickLayout {
   };
 }
 
+/** One row of a columnar native batch; values decode on first access. */
 export class Tick {
-  private readonly decodedSet: boolean[] = [];
-  private readonly decodedValues: (TickValue | undefined)[] = [];
+  private dates: (Date | undefined)[] | undefined;
   private rowPositions: number[] | undefined;
 
   public constructor(
-    private readonly update: NativeSubscriptionRow,
+    private readonly batch: NativeSubscriptionUpdateBatch,
     private readonly layout: TickLayout,
+    private readonly tickTopic: string,
+    private readonly tickTimestampUs: number,
+    private readonly start: number,
+    private readonly end: number,
   ) {}
 
   public get topic(): string {
-    return this.update.topic;
+    return this.tickTopic;
   }
 
   public get timestampUs(): number {
-    return this.update.timestampUs;
+    return this.tickTimestampUs;
   }
 
   public get layoutVersion(): number {
-    return this.update.layoutVersion;
+    return this.layout.version;
   }
 
   public has(field: string | FieldHandle): boolean {
@@ -275,52 +279,34 @@ export class Tick {
   }
 
   private getByFieldIndex(fieldIndex: number): TickValue | undefined {
-    if (this.decodedSet[fieldIndex] === true) {
-      return this.decodedValues[fieldIndex];
-    }
     const position = this.valuePosition(fieldIndex);
     if (position === undefined) {
-      this.decodedSet[fieldIndex] = true;
-      this.decodedValues[fieldIndex] = undefined;
       return undefined;
     }
+    // Native code already resolved the value for its kind. Only Date32 crosses as a day count.
+    const value = this.batch.values[position] ?? null;
+    return typeof value === 'number' && this.layout.kinds[fieldIndex] === 'date32'
+      ? this.dateValue(fieldIndex, value)
+      : value;
+  }
 
-    const kind = this.layout.kinds[fieldIndex] ?? 'unknown';
-    let value: TickValue;
-    if (kind === 'bool') {
-      value = this.update.boolValues[position] ?? null;
-    } else if (kind === 'i32') {
-      value = this.update.i32Values[position] ?? null;
-    } else if (kind === 'f64') {
-      value = this.update.f64Values[position] ?? null;
-    } else if (kind === 'str' || kind === 'unknown') {
-      value = this.update.stringValues[position] ?? null;
-    } else if (kind === 'date32') {
-      const days = this.update.i32Values[position];
-      value = days === null || days === undefined ? null : new Date(Date.UTC(1970, 0, 1 + days));
-    } else {
-      const raw = this.update.i64Values[position];
-      if (raw === null || raw === undefined) {
-        value = null;
-      } else {
-        try {
-          value = BigInt(raw);
-        } catch {
-          value = null;
-        }
-      }
+  private dateValue(fieldIndex: number, days: number): Date {
+    this.dates ??= [];
+    let date = this.dates[fieldIndex];
+    if (date === undefined) {
+      date = new Date(Date.UTC(1970, 0, 1 + days));
+      this.dates[fieldIndex] = date;
     }
-    this.decodedSet[fieldIndex] = true;
-    this.decodedValues[fieldIndex] = value;
-    return value;
+    return date;
   }
 
   private valuePosition(fieldIndex: number): number | undefined {
     let positions = this.rowPositions;
     if (positions === undefined) {
       const built: number[] = [];
-      for (const [position, index] of this.update.fieldIndices.entries()) {
-        built[index] = position;
+      const indices = this.batch.fieldIndices.subarray(this.start, this.end);
+      for (const [offset, index] of indices.entries()) {
+        built[index] = this.start + offset;
       }
       positions = built;
       this.rowPositions = positions;
@@ -359,7 +345,7 @@ export class Tick {
 
   public toObject(): Record<string, unknown> {
     const out: Record<string, unknown> = { timestampUs: this.timestampUs, topic: this.topic };
-    for (const fieldIndex of this.update.fieldIndices) {
+    for (const fieldIndex of this.batch.fieldIndices.subarray(this.start, this.end)) {
       const field = this.layout.fields[fieldIndex];
       if (field !== undefined) {
         out[field] = this.getByFieldIndex(fieldIndex);
@@ -1019,7 +1005,7 @@ class SubscriptionIterator<TBatch, TValue> {
   }
 }
 function subscriptionDelivery<TData>(
-  delivery: NativeSubscriptionDelivery,
+  delivery: NativeSubscriptionDelivery<unknown>,
   data: TData,
 ): SubscriptionDelivery<TData> {
   return {
@@ -1033,6 +1019,122 @@ type SubscriptionDeliveryBatch<TData> =
   | { readonly kind: 'drained'; readonly value: SubscriptionDelivery<TData> }
   | NativeSubscriptionDeliveryReceipt<SubscriptionDelivery<TData>>;
 
+type NativeDeliveryProjector<TNative, TData> = (
+  delivery: NativeSubscriptionDelivery<TNative>,
+) => SubscriptionDelivery<TData>;
+
+/** Native reads and drains that hand projectors one data representation. */
+interface NativeDeliveryReads<TNative, TData> {
+  readonly next: (
+    project: NativeDeliveryProjector<TNative, TData>,
+  ) => Promise<NativeSubscriptionDeliveryReceipt<SubscriptionDelivery<TData>> | null>;
+  readonly drain: (
+    drain: boolean,
+    project: NativeDeliveryProjector<TNative, TData>,
+  ) => Promise<SubscriptionDelivery<TData>[] | null>;
+}
+
+/** Projects deliveries whose native data is one Arrow IPC file (the Polars path). */
+export interface IpcFileDeliveryProjection<TData> {
+  readonly ipcFile: (
+    delivery: NativeSubscriptionDelivery<NativeArrowIpcFile>,
+  ) => SubscriptionDelivery<TData>;
+}
+
+function deliveryIterator<TNative, TData>(
+  inner: NativeSubscription,
+  project: NativeDeliveryProjector<TNative, TData>,
+  reads: NativeDeliveryReads<TNative, TData>,
+): SubscriptionIterator<SubscriptionDeliveryBatch<TData>, SubscriptionDelivery<TData>> {
+  let projectionFailed = false;
+  let projectionError: unknown;
+  const transactionalProject = (
+    delivery: NativeSubscriptionDelivery<TNative>,
+  ): SubscriptionDelivery<TData> => {
+    try {
+      return project(delivery);
+    } catch (error) {
+      projectionFailed = true;
+      projectionError = error;
+      throw error;
+    }
+  };
+  const readBatch = async (): Promise<NativeSubscriptionDeliveryReceipt<
+    SubscriptionDelivery<TData>
+  > | null> => {
+    try {
+      return await reads.next(transactionalProject);
+    } catch (error) {
+      if (projectionFailed) {
+        throw new SubscriptionProjectionError(projectionError);
+      }
+      const nativeFailure = nativeSubscriptionProjectionError(error);
+      if (nativeFailure !== undefined) {
+        throw nativeFailure;
+      }
+      throw error;
+    } finally {
+      projectionFailed = false;
+      projectionError = undefined;
+    }
+  };
+  const closeNative = async (
+    drain: boolean,
+  ): Promise<SubscriptionDeliveryBatch<TData>[] | null> => {
+    const failure: { failed: boolean; error: unknown } = { failed: false, error: undefined };
+    const projectDrain = (
+      delivery: NativeSubscriptionDelivery<TNative>,
+    ): SubscriptionDelivery<TData> => {
+      try {
+        return project(delivery);
+      } catch (error) {
+        failure.failed = true;
+        failure.error = error;
+        throw error;
+      }
+    };
+    try {
+      const drained = await reads.drain(drain, projectDrain);
+      return (
+        drained?.map((value): SubscriptionDeliveryBatch<TData> => ({ kind: 'drained', value })) ??
+        null
+      );
+    } catch (error) {
+      if (failure.failed) {
+        throw new SubscriptionProjectionError(failure.error);
+      }
+      throw nativeSubscriptionProjectionError(error) ?? error;
+    }
+  };
+  return new SubscriptionIterator<SubscriptionDeliveryBatch<TData>, SubscriptionDelivery<TData>>(
+    readBatch,
+    closeNative,
+    {
+      cardinality: 'publication',
+      hasError: (batch) => batch.kind === 'error',
+      publish: (batch) => {
+        if (batch.kind === 'drained') {
+          return { done: false, value: batch.value };
+        }
+        if (batch.kind === 'error') {
+          if (!batch.commit()) return { done: true, value: undefined };
+          throw new Error('native terminal receipt committed without publishing its error');
+        }
+        const result: IteratorResult<SubscriptionDelivery<TData>, undefined> = {
+          done: false,
+          value: batch.value,
+        };
+        return batch.commit() ? result : { done: true, value: undefined };
+      },
+      rollback: (batch) => {
+        if (batch.kind === 'delivery' || batch.kind === 'error') batch.rollback();
+      },
+    },
+    subscriptionCoordinatorFor(inner),
+    'delivery',
+  );
+}
+
 export class DeliveryStream<TData = Table>
   implements
     AsyncIterator<SubscriptionDelivery<TData>, undefined, SubscriptionReadOptions | undefined>,
@@ -1043,98 +1145,25 @@ export class DeliveryStream<TData = Table>
     SubscriptionDelivery<TData>
   >;
 
+  /** A function projects zero-copy descriptors; `{ ipcFile }` projects one Arrow IPC file. */
   public constructor(
     inner: NativeSubscription,
-    project: (delivery: NativeSubscriptionDelivery) => SubscriptionDelivery<TData>,
+    project:
+      | ((delivery: NativeSubscriptionDelivery) => SubscriptionDelivery<TData>)
+      | IpcFileDeliveryProjection<TData>,
   ) {
-    let projectionFailed = false;
-    let projectionError: unknown;
-    const transactionalProject = (
-      delivery: NativeSubscriptionDelivery,
-    ): SubscriptionDelivery<TData> => {
-      try {
-        return project(delivery);
-      } catch (error) {
-        projectionFailed = true;
-        projectionError = error;
-        throw error;
-      }
-    };
-    const readBatch = async (): Promise<NativeSubscriptionDeliveryReceipt<
-      SubscriptionDelivery<TData>
-    > | null> => {
-      try {
-        return await inner.nextDelivery(undefined, undefined, transactionalProject);
-      } catch (error) {
-        if (projectionFailed) {
-          throw new SubscriptionProjectionError(projectionError);
-        }
-        const nativeFailure = nativeSubscriptionProjectionError(error);
-        if (nativeFailure !== undefined) {
-          throw nativeFailure;
-        }
-        throw error;
-      } finally {
-        projectionFailed = false;
-        projectionError = undefined;
-      }
-    };
-    const closeNative = async (
-      drain: boolean,
-    ): Promise<SubscriptionDeliveryBatch<TData>[] | null> => {
-      const failure: { failed: boolean; error: unknown } = { failed: false, error: undefined };
-      const projectDrain = (delivery: NativeSubscriptionDelivery): SubscriptionDelivery<TData> => {
-        try {
-          return project(delivery);
-        } catch (error) {
-          failure.failed = true;
-          failure.error = error;
-          throw error;
-        }
-      };
-      try {
-        const drained = await inner.unsubscribeDeliveries(drain, projectDrain);
-        return (
-          drained?.map((value): SubscriptionDeliveryBatch<TData> => ({ kind: 'drained', value })) ??
-          null
-        );
-      } catch (error) {
-        if (failure.failed) {
-          throw new SubscriptionProjectionError(failure.error);
-        }
-        throw nativeSubscriptionProjectionError(error) ?? error;
-      }
-    };
-    this.iterator = new SubscriptionIterator<
-      SubscriptionDeliveryBatch<TData>,
-      SubscriptionDelivery<TData>
-    >(
-      readBatch,
-      closeNative,
-      {
-        cardinality: 'publication',
-        hasError: (batch) => batch.kind === 'error',
-        publish: (batch) => {
-          if (batch.kind === 'drained') {
-            return { done: false, value: batch.value };
-          }
-          if (batch.kind === 'error') {
-            if (!batch.commit()) return { done: true, value: undefined };
-            throw new Error('native terminal receipt committed without publishing its error');
-          }
-          const result: IteratorResult<SubscriptionDelivery<TData>, undefined> = {
-            done: false,
-            value: batch.value,
-          };
-          return batch.commit() ? result : { done: true, value: undefined };
-        },
-        rollback: (batch) => {
-          if (batch.kind === 'delivery' || batch.kind === 'error') batch.rollback();
-        },
-      },
-      subscriptionCoordinatorFor(inner),
-      'delivery',
-    );
+    this.iterator =
+      typeof project === 'function'
+        ? deliveryIterator(inner, project, {
+            next: async (projector) => await inner.nextDelivery(undefined, undefined, projector),
+            drain: async (drain, projector) => await inner.unsubscribeDeliveries(drain, projector),
+          })
+        : deliveryIterator(inner, project.ipcFile, {
+            next: async (projector) =>
+              await inner.nextIpcFileDelivery(undefined, undefined, projector),
+            drain: async (drain, projector) =>
+              await inner.unsubscribeIpcFileDeliveries(drain, projector),
+          });
   }
 
   public next(
@@ -1225,12 +1254,21 @@ export class Subscription
     if (batch.layout !== undefined) {
       this.layouts.set(batch.layout.version, createTickLayout(batch.layout));
     }
-    return batch.updates.map((update) => {
-      const layout = this.layouts.get(update.layoutVersion);
-      if (layout === undefined) {
-        throw new Error(`subscription layout ${update.layoutVersion} was not supplied by native`);
+    if (batch.topics.length === 0) {
+      return [];
+    }
+    const layout = this.layouts.get(batch.layoutVersion);
+    if (layout === undefined) {
+      throw new Error(`subscription layout ${batch.layoutVersion} was not supplied by native`);
+    }
+    return batch.topics.map((topic, row) => {
+      const timestampUs = batch.timestampsUs[row];
+      const start = batch.rowOffsets[row];
+      const end = batch.rowOffsets[row + 1];
+      if (timestampUs === undefined || start === undefined || end === undefined) {
+        throw new Error(`subscription batch row ${row} is incomplete`);
       }
-      return new Tick(update, layout);
+      return new Tick(batch, layout, topic, timestampUs, start, end);
     });
   }
 
@@ -1310,14 +1348,14 @@ export class Subscription
     if (existing !== undefined) {
       return existing;
     }
-    const created = new DeliveryStream<unknown>(this.inner, (delivery) =>
-      subscriptionDelivery(
-        delivery,
-        backend === 'polars'
-          ? nativeArrowToPolars(delivery.data)
-          : nativeArrowToBackend(delivery.data, backend),
-      ),
-    );
+    const created =
+      backend === 'polars'
+        ? new DeliveryStream<unknown>(this.inner, {
+            ipcFile: (delivery) => subscriptionDelivery(delivery, ipcFileToPolars(delivery.data)),
+          })
+        : new DeliveryStream<unknown>(this.inner, (delivery) =>
+            subscriptionDelivery(delivery, nativeArrowToBackend(delivery.data, backend)),
+          );
     (this.backendDeliveryViews ??= new Map()).set(backend, created);
     return created;
   }

@@ -8,6 +8,8 @@ use arrow::array::{
 };
 use arrow::buffer::{Buffer as ArrowBuffer, MutableBuffer};
 use arrow::datatypes::{DataType, TimeUnit};
+use arrow::error::ArrowError;
+use arrow::ipc::writer::FileWriter;
 use arrow::record_batch::RecordBatch;
 use napi::bindgen_prelude::{
     Buffer, BufferSlice, Env, JsObjectValue, JsValue, Object, ToNapiValue,
@@ -19,6 +21,13 @@ use crate::StringPair;
 pub struct NativeArrowBatch {
     num_rows: usize,
     columns: Vec<NativeArrowColumn>,
+    metadata: Vec<StringPair>,
+}
+
+/// One Arrow IPC file (Feather v2) with its schema metadata as a side channel,
+/// for readers such as nodejs-polars `readIPC` that accept only the file format.
+pub struct NativeArrowIpcFile {
+    ipc: Vec<u8>,
     metadata: Vec<StringPair>,
 }
 
@@ -50,6 +59,10 @@ enum PendingData {
 }
 
 enum PendingOffsets {
+    /// Offsets that already start at zero (unsliced or prefix-sliced arrays)
+    /// transfer their existing buffer instead of being rebuilt.
+    ZeroBased(ArrowBuffer),
+    /// Offsets of an array sliced past its start, rebased to zero.
     I32(Vec<i32>),
     I64(Vec<i64>),
 }
@@ -120,15 +133,7 @@ impl NativeArrowBatch {
             ));
         }
 
-        let metadata = batch
-            .schema_ref()
-            .metadata()
-            .iter()
-            .map(|(key, value)| StringPair {
-                key: key.clone(),
-                value: value.clone(),
-            })
-            .collect();
+        let metadata = schema_metadata(&batch);
         let (schema, arrays, num_rows) = batch.into_parts();
         let pending = arrays
             .iter()
@@ -157,6 +162,42 @@ impl NativeArrowBatch {
             metadata,
         })
     }
+}
+
+impl NativeArrowIpcFile {
+    /// Encode `batch` once; JavaScript hands the bytes to its reader as is.
+    pub fn from_record_batch(batch: &RecordBatch) -> Result<Self> {
+        let ipc_error = |stage: &str, error: ArrowError| {
+            Error::new(
+                Status::GenericFailure,
+                format!("Arrow IPC file {stage} failed: {error}"),
+            )
+        };
+        let mut writer = FileWriter::try_new(Vec::<u8>::new(), batch.schema_ref())
+            .map_err(|error| ipc_error("writer init", error))?;
+        writer
+            .write(batch)
+            .map_err(|error| ipc_error("write", error))?;
+        let ipc = writer
+            .into_inner()
+            .map_err(|error| ipc_error("finalize", error))?;
+        Ok(Self {
+            ipc,
+            metadata: schema_metadata(batch),
+        })
+    }
+}
+
+fn schema_metadata(batch: &RecordBatch) -> Vec<StringPair> {
+    batch
+        .schema_ref()
+        .metadata()
+        .iter()
+        .map(|(key, value)| StringPair {
+            key: key.clone(),
+            value: value.clone(),
+        })
+        .collect()
 }
 
 impl PendingArrowColumn {
@@ -204,10 +245,17 @@ impl PendingArrowColumn {
                     usize::try_from(first).expect("validated Arrow offset must be non-negative");
                 let data_end =
                     usize::try_from(last).expect("validated Arrow offset must be non-negative");
-                let offsets = source_offsets
-                    .iter()
-                    .map(|offset| *offset - first)
-                    .collect::<Vec<_>>();
+                let offsets = if first == 0 {
+                    // Unsliced and prefix-sliced arrays already start at zero.
+                    PendingOffsets::ZeroBased(values.offsets().inner().inner().clone())
+                } else {
+                    PendingOffsets::$offset_kind(
+                        source_offsets
+                            .iter()
+                            .map(|offset| *offset - first)
+                            .collect(),
+                    )
+                };
                 Self {
                     name,
                     arrow_type: $arrow_type,
@@ -219,7 +267,7 @@ impl PendingArrowColumn {
                             .values()
                             .slice_with_length(data_start, data_end - data_start),
                     )),
-                    offsets: Some(PendingOffsets::$offset_kind(offsets)),
+                    offsets: Some(offsets),
                     null_bitmap,
                 }
             }};
@@ -415,6 +463,7 @@ impl PendingData {
 impl PendingOffsets {
     fn into_mutable(self) -> MutableBuffer {
         match self {
+            Self::ZeroBased(buffer) => into_exclusive_mutable(buffer),
             Self::I32(offsets) => MutableBuffer::from(offsets),
             Self::I64(offsets) => MutableBuffer::from(offsets),
         }
@@ -569,16 +618,35 @@ impl ToNapiValue for NativeArrowBatch {
     ) -> Result<napi::sys::napi_value> {
         let env = Env::from_raw(env);
         let mut obj = Object::new(&env)?;
-        let mut metadata = Object::new(&env)?;
-        for pair in value.metadata {
-            metadata.set_named_property(&pair.key, pair.value)?;
-        }
+        let metadata = metadata_object(&env, value.metadata)?;
         obj.set_named_property("kind", "zeroCopy")?;
         obj.set_named_property("numRows", checked_js_u32_len("numRows", value.num_rows)?)?;
         obj.set_named_property("columns", value.columns)?;
         obj.set_named_property("metadata", metadata)?;
         Ok(obj.raw())
     }
+}
+
+impl ToNapiValue for NativeArrowIpcFile {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> Result<napi::sys::napi_value> {
+        let env = Env::from_raw(env);
+        let mut obj = Object::new(&env)?;
+        obj.set_named_property("kind", "ipcFile")?;
+        obj.set_named_property("ipc", Buffer::from(value.ipc))?;
+        obj.set_named_property("metadata", metadata_object(&env, value.metadata)?)?;
+        Ok(obj.raw())
+    }
+}
+
+fn metadata_object(env: &Env, metadata: Vec<StringPair>) -> Result<Object<'_>> {
+    let mut object = Object::new(env)?;
+    for pair in metadata {
+        object.set_named_property(&pair.key, pair.value)?;
+    }
+    Ok(object)
 }
 
 impl ToNapiValue for NativeArrowColumn {
@@ -635,10 +703,13 @@ impl ToNapiValue for NativeArrowColumn {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::io::Cursor;
     use std::sync::Arc;
 
     use arrow::array::ArrayRef;
     use arrow::datatypes::{Field, Schema};
+    use arrow::ipc::reader::FileReader;
 
     use super::*;
 
@@ -818,7 +889,7 @@ mod tests {
     }
 
     #[test]
-    fn utf8_prefix_slice_rebases_offsets_and_does_not_retain_suffix_bytes() {
+    fn utf8_prefix_slice_exports_logical_offsets_and_does_not_retain_suffix_bytes() {
         let secret = "secret".repeat(65_536);
         let source = StringArray::from(vec![Some("visible"), Some(secret.as_str())]);
         let sliced = source.slice(0, 1);
@@ -849,6 +920,39 @@ mod tests {
 
         assert_eq!(column.data.as_ref().unwrap().as_slice(), b"abc");
         assert_eq!(read_i32_offsets(column.offsets.as_ref().unwrap()), [0, 3]);
+    }
+
+    #[test]
+    fn unsliced_utf8_offsets_transfer_their_allocation_without_rebuilding() {
+        let values = StringArray::from(vec!["alpha", "beta"]);
+        let original = values.offsets().inner().inner().as_ptr();
+        let native =
+            NativeArrowBatch::from_record_batch(one_column_batch("text", Arc::new(values)))
+                .unwrap();
+        let offsets = native.columns[0].offsets.as_ref().unwrap();
+
+        assert_eq!(offsets.as_ptr(), original);
+        assert_eq!(read_i32_offsets(offsets), [0, 5, 9]);
+    }
+
+    #[test]
+    fn ipc_file_round_trips_rows_and_schema_metadata() {
+        let metadata = HashMap::from([("xbbg.eid_data".to_string(), "{}".to_string())]);
+        let schema =
+            Schema::new(vec![Field::new("answer", DataType::Int32, true)]).with_metadata(metadata);
+        let values: ArrayRef = Arc::new(Int32Array::from(vec![Some(42), None]));
+        let batch = RecordBatch::try_new(Arc::new(schema), vec![values]).unwrap();
+
+        let file = NativeArrowIpcFile::from_record_batch(&batch).unwrap();
+
+        assert!(file.ipc.starts_with(b"ARROW1") && file.ipc.ends_with(b"ARROW1"));
+        assert_eq!(file.metadata.len(), 1);
+        assert_eq!(file.metadata[0].key, "xbbg.eid_data");
+        assert_eq!(file.metadata[0].value, "{}");
+        let mut reader = FileReader::try_new(Cursor::new(file.ipc), None).unwrap();
+        assert_eq!(reader.schema().metadata(), batch.schema_ref().metadata());
+        assert_eq!(reader.next().unwrap().unwrap(), batch);
+        assert!(reader.next().is_none());
     }
 
     #[test]
