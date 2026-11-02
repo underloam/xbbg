@@ -141,14 +141,14 @@ impl SubscriptionArrowBatcher {
     }
 
     fn append_current_layout(&mut self, update: &SubscriptionUpdate) {
+        // Borrow the cached layout: field-disjoint borrows avoid a per-row Arc clone.
         let layout = self
             .layout
             .as_ref()
-            .expect("subscription arrow layout initialized")
-            .clone();
+            .expect("subscription arrow layout initialized");
 
         if self.builders.is_empty() {
-            self.builders = subscription_builders(&layout, self.capacity);
+            self.builders = subscription_builders(layout, self.capacity);
         }
 
         self.scratch.clear();
