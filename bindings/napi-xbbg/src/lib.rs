@@ -3508,10 +3508,7 @@ mod tests {
             let delivery = completion.lease.as_ref().expect("successful delivery");
             assert_eq!(delivery.kind, SubscriptionDeliveryMode::Deltas);
             assert_eq!(delivery.data.num_rows(), 1);
-            assert_eq!(
-                delivery.gap_before,
-                Some(SubscriptionGap { dropped_updates: 2 })
-            );
+            assert_eq!(delivery.gap_before.map(|gap| gap.dropped_updates), Some(2));
             drop(completion);
 
             let retried = subscription
@@ -3520,10 +3517,7 @@ mod tests {
                 .expect("native retry")
                 .expect("restored delivery");
             let delivery = retried.lease.commit().expect("publish retry");
-            assert_eq!(
-                delivery.gap_before,
-                Some(SubscriptionGap { dropped_updates: 2 })
-            );
+            assert_eq!(delivery.gap_before.map(|gap| gap.dropped_updates), Some(2));
             let timestamp = delivery
                 .data
                 .column(0)
@@ -3559,8 +3553,8 @@ mod tests {
             let drained = drained.lease.commit().expect("publish drain");
             assert_eq!(drained.len(), 1);
             assert_eq!(
-                drained[0].gap_before,
-                Some(SubscriptionGap { dropped_updates: 2 })
+                drained[0].gap_before.map(|gap| gap.dropped_updates),
+                Some(2)
             );
             assert_eq!(drained[0].data.num_rows(), 1);
             assert!(subscription.consumer.is_closed());
@@ -3649,10 +3643,7 @@ mod tests {
                 .lease
                 .commit()
                 .expect("publish");
-            assert_eq!(
-                delivery.gap_before,
-                Some(SubscriptionGap { dropped_updates: 1 })
-            );
+            assert_eq!(delivery.gap_before.map(|gap| gap.dropped_updates), Some(1));
             let error = subscription
                 .next_delivery(Some(0), None, None)
                 .await

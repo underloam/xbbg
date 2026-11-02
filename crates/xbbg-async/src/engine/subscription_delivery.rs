@@ -8,7 +8,10 @@ use arrow_array::RecordBatch;
 use crate::BlpAsyncError;
 
 /// Whether a subscription delivers sparse deltas or conflated current images.
+///
+/// Non-exhaustive so later delivery modes are not breaking changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SubscriptionDeliveryMode {
     #[default]
     Deltas,
@@ -46,6 +49,7 @@ impl FromStr for SubscriptionDeliveryMode {
 
 /// Updates intentionally evicted from one consumer's local delta queue.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SubscriptionGap {
     pub dropped_updates: u64,
 }
@@ -59,6 +63,7 @@ impl SubscriptionGap {
 /// One backend-independent batch plus continuity information that cannot be
 /// discarded by a dataframe conversion.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct SubscriptionDelivery {
     pub kind: SubscriptionDeliveryMode,
     pub data: RecordBatch,
