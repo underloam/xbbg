@@ -79,6 +79,7 @@ def test_mock_rows_follow_the_engine_the_context_routes_to(monkeypatch):
     ]
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("key_column", ["ticker", "security"])
 async def test_resolvers_unwrap_the_key_column_without_warning(monkeypatch, key_column):
     _configure(monkeypatch, key_column)
