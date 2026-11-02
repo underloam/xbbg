@@ -19,7 +19,7 @@ The subscription workload modules under `benches/support/` use the production ba
 
 ## Registered benchmark targets
 
-All eight targets are explicitly registered in `Cargo.toml`:
+All ten targets are explicitly registered in `Cargo.toml`:
 
 | Target | Work measured | Bloomberg session |
 |--------|---------------|-------------------|
@@ -31,8 +31,10 @@ All eight targets are explicitly registered in `Cargo.toml`:
 | `bql_json_parsers` | Serde JSON versus simd-json parsing of shared BQL fixtures; simd lanes separate copy-excluded and copy-inclusive timing | None |
 | `subscription_queue_default` | Strict queue roundtrips with unchanged source usable against frozen v1.7.0 | None |
 | `subscription_delivery` | Full overwrite adapter versus bare queue primitives, registered-future wakes, and actual shared-feed delta/state replay | None; synthetic SDK TestUtil preflight only |
+| `request_decode_replay` | SDK TestUtil BDH/BDP/BDS responses through production `HistDataState`, `RefDataState` and `BulkDataState` in every output mode | None |
+| `subscription_read_latency` | Per-update enqueue → `RecordBatch` latency through the production channel, `receive_subscription_updates` batch limit and `SubscriptionArrowBatcher` | None |
 
-`pixi run bench-rs` runs `cargo bench --package xbbg-bench`, selecting all eight targets. Use `--bench <target>` to select one. The workflow suite is the entrypoint for a combined JSON/Markdown report:
+`pixi run bench-rs` runs `cargo bench --package xbbg-bench`, selecting all ten targets. Use `--bench <target>` to select one. The workflow suite is the entrypoint for a combined JSON/Markdown report:
 
 ```bash
 cargo bench --package xbbg-bench --bench xbbg_benchmark_suite
@@ -158,6 +160,8 @@ CACHED_SUB_ENABLE_LIVE=1 CACHED_SUB_CAPTURE_MESSAGES=25 CACHED_SUB_REPLAY_LOOPS=
 cargo bench --package xbbg-bench --bench bql_json_parsers
 cargo bench --package xbbg-bench --bench subscription_queue_default
 cargo bench --package xbbg-bench --bench subscription_delivery
+DECODE_ITERATIONS=9 cargo bench --package xbbg-bench --bench request_decode_replay
+LATENCY_LIMITS=1,16,64,1024 cargo bench --package xbbg-bench --bench subscription_read_latency
 ```
 
 `async_subscription_replay` preserves the deterministic topic/value patterns, late-field introduction point, and rows/batches/columns reporting. `SUB_REPLAY_FLUSH` controls the maximum consumer-side Arrow batch size. A late layout change flushes the pending prefix through the real batcher, so batch counts can exceed `ceil(rows / flush_threshold)`; columns include the production `__xbbg_present` bitmap. Timing covers fixture setup, sparse update generation, append, and finalization, not SDK extraction or transport.
@@ -171,3 +175,7 @@ The suite's `synthetic_subscriptions` scenario materializes the generated values
 `cached_subscription_arrow` retains `CACHED_SUB_CONSUMER_BATCH` as the number of updates dequeued per consumer poll; each accepted update is adapted to one Arrow batch. The ignored `CACHED_SUB_COMPAT_FLUSH_THRESHOLD` option and report field have been removed, and this target's report schema is version 4. Public consumer-side batching options outside these benchmarks are unchanged.
 
 Both BQL targets consume `BQL_JSON_SCENARIOS` and `bql_json_fixture` from the shared library: `bql_json_parsers` measures parser choices only, while the suite's `bql_json` scenarios measure production extraction and Arrow materialization.
+
+`request_decode_replay` measures request extraction without Bloomberg access: response messages are built once with the SDK's TestUtil from fixed schemas (`DECODE_HIST_SECURITIES`×`DECODE_HIST_DATES` BDH rows of three fields, `DECODE_REF_SECURITIES` BDP securities of five mixed-type fields, `DECODE_BULK_SECURITIES`×`DECODE_BULK_ROWS` BDS rows) and replayed through the production extractors for `long`, `long_typed`, `long_metadata` and `semi_long`. Timing covers state creation, element traversal, value extraction, Arrow append and finalization; fixture construction is excluded. Messages formatted by TestUtil can differ in SDK-internal cost from wire-decoded messages, so compare runs against each other rather than against live latencies.
+
+`subscription_read_latency` replays three fixed schedules (quiet 10k updates/s, bursts of 2,000 updates 1 µs apart, sustained 250k updates/s) for each `LATENCY_LIMITS` value and reports per-update p50/p99/p99.9/max latency from enqueue to the consumer's `RecordBatch`, batches, rows per batch and the peak queue depth, flagging depths above the default 256-update stream capacity. The limit is the maximum number of already-queued updates combined into one batch; a read never waits for more. Python/JS binding costs are excluded.
