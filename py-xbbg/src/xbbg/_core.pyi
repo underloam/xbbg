@@ -1110,10 +1110,11 @@ class PySubscription:
         Raises StopAsyncIteration when the subscription is closed.
         Raises RuntimeError for rows=False; use latest() for image-only consumers.
         """
-    def next_delivery(self, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+    def next_delivery(self) -> typing.Any:
         r"""
-        Prepare a marked batch for publication on the consuming Python loop.
-        The converter runs before the returned receipt's publish() commits it.
+        Lease the next marked batch as an unpublished receipt. Python converts
+        `receipt.value` on its event loop, then `publish()` commits the batch or
+        `discard()` restores it; no backend conversion runs on the async bridge.
         """
     def __anext_tick_dict__(self) -> typing.Any:
         r"""
@@ -1155,9 +1156,10 @@ class PySubscription:
         
         If drain=True, returns all unread values in the selected iteration mode.
         """
-    def unsubscribe_deliveries(self, drain: builtins.bool = False, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+    def unsubscribe_deliveries(self, drain: builtins.bool = False) -> typing.Any:
         r"""
         Close and optionally drain marked batches without losing gap metadata.
+        A draining close returns an unpublished receipt like `next_delivery()`.
         """
     def __aenter__(self) -> PySubscription:
         r"""

@@ -1916,14 +1916,10 @@ impl PySubscription {
         })
     }
 
-    /// Prepare a marked batch for publication on the consuming Python loop.
-    /// The converter runs before the returned receipt's publish() commits it.
-    #[pyo3(signature = (converter=None))]
-    fn next_delivery<'py>(
-        &self,
-        py: Python<'py>,
-        converter: Option<Py<PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    /// Lease the next marked batch as an unpublished receipt. Python converts
+    /// `receipt.value` on its event loop, then `publish()` commits the batch or
+    /// `discard()` restores it; no backend conversion runs on the async bridge.
+    fn next_delivery<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.ensure_rows()?;
         let consumer = self.consumer.clone();
         let batch_items = self.batch_items;
@@ -1933,10 +1929,7 @@ impl PySubscription {
                 .next_delivery(batch_items)
                 .await
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription ended"))?;
-            prepare_subscription_delivery(lease, move |py, delivery| {
-                subscription_delivery_to_python(py, delivery, converter.as_ref())
-            })
-            .await
+            prepare_subscription_delivery(lease).await
         })
     }
 
@@ -2389,12 +2382,12 @@ impl PySubscription {
     }
 
     /// Close and optionally drain marked batches without losing gap metadata.
-    #[pyo3(signature = (drain=false, converter=None))]
+    /// A draining close returns an unpublished receipt like `next_delivery()`.
+    #[pyo3(signature = (drain=false))]
     fn unsubscribe_deliveries<'py>(
         &self,
         py: Python<'py>,
         drain: bool,
-        converter: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let consumer = self.consumer.clone();
         let legacy_arrow = self.legacy_arrow.clone();
@@ -2416,7 +2409,7 @@ impl PySubscription {
             let lease = consumer
                 .prepare_unsubscribe_deliveries(true, Some(&engine_shutdown))
                 .await;
-            prepare_subscription_drain(lease, converter).await
+            prepare_subscription_drain(lease).await
         })
     }
 
@@ -2477,35 +2470,39 @@ impl SubscriptionPublicationLease {
     }
 }
 
-/// Retains the native receipt until the consuming Python task actually resumes.
-/// Dropping an unpublished result restores updates/gaps, re-dirties state, or
+/// Unpublished marked delivery. `value` holds native `(kind, batch,
+/// dropped_updates)` tuples (a list for drains) for conversion on the consuming
+/// event loop; `publish()` commits once that conversion succeeds. Discarding or
+/// dropping an unpublished receipt restores updates/gaps, re-dirties state, or
 /// retains a frozen drain for a later publication attempt.
 #[pyclass(frozen)]
 struct PySubscriptionDeliveryReceipt {
     lease: StdMutex<Option<SubscriptionPublicationLease>>,
-    result: Option<Py<PyAny>>,
+    value: Option<Py<PyAny>>,
 }
 
 #[pymethods]
 impl PySubscriptionDeliveryReceipt {
-    fn publish(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// Commit the delivery, or raise the terminal stream error it carries.
+    fn publish(&self) -> PyResult<()> {
         let lease = self
             .lease
             .lock()
             .expect("subscription delivery receipt poisoned")
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("subscription delivery already published"))?;
-        lease.commit()?;
-        Ok(self
-            .result
-            .as_ref()
-            .expect("a successful receipt has a converted result")
-            .clone_ref(py))
+        lease.commit()
+    }
+
+    /// Native value awaiting conversion; None when the receipt carries an error.
+    #[getter]
+    fn value(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.value.as_ref().map(|value| value.clone_ref(py))
     }
 
     #[getter]
     fn has_error(&self) -> bool {
-        self.result.is_none()
+        self.value.is_none()
     }
 
     fn discard(&self) {
@@ -2518,26 +2515,20 @@ impl PySubscriptionDeliveryReceipt {
     }
 }
 
-async fn prepare_subscription_delivery<F>(
-    lease: SubscriptionDeliveryLease,
-    convert: F,
-) -> PyResult<Py<PyAny>>
-where
-    F: FnOnce(Python<'_>, SubscriptionDelivery) -> PyResult<Py<PyAny>> + Send,
-{
+async fn prepare_subscription_delivery(lease: SubscriptionDeliveryLease) -> PyResult<Py<PyAny>> {
     try_attach_or_suspend(move |py| {
-        let (publication, result) = match lease.prepare_success() {
-            Ok((delivery, ack)) => {
-                let result = convert(py, delivery)?;
-                (SubscriptionPublicationLease::ReadAck(ack), Some(result))
-            }
+        let (publication, value) = match lease.prepare_success() {
+            Ok((delivery, ack)) => (
+                SubscriptionPublicationLease::ReadAck(ack),
+                Some(subscription_delivery_to_python(py, delivery)?),
+            ),
             Err(lease) => (SubscriptionPublicationLease::ReadError(lease), None),
         };
         Py::new(
             py,
             PySubscriptionDeliveryReceipt {
                 lease: StdMutex::new(Some(publication)),
-                result,
+                value,
             },
         )
         .map(Py::into_any)
@@ -2545,20 +2536,13 @@ where
     .await
 }
 
-async fn prepare_subscription_drain(
-    lease: SubscriptionDeliveryDrainLease,
-    converter: Option<Py<PyAny>>,
-) -> PyResult<Py<PyAny>> {
+async fn prepare_subscription_drain(lease: SubscriptionDeliveryDrainLease) -> PyResult<Py<PyAny>> {
     try_attach_or_suspend(move |py| {
-        let (publication, result) = match lease.prepare_success() {
+        let (publication, value) = match lease.prepare_success() {
             Ok((deliveries, ack)) => {
                 let list = pyo3::types::PyList::empty(py);
                 for delivery in deliveries {
-                    list.append(subscription_delivery_to_python(
-                        py,
-                        delivery,
-                        converter.as_ref(),
-                    )?)?;
+                    list.append(subscription_delivery_to_python(py, delivery)?)?;
                 }
                 (
                     SubscriptionPublicationLease::DrainAck(ack),
@@ -2571,7 +2555,7 @@ async fn prepare_subscription_drain(
             py,
             PySubscriptionDeliveryReceipt {
                 lease: StdMutex::new(Some(publication)),
-                result,
+                value,
             },
         )
         .map(Py::into_any)
@@ -2579,23 +2563,23 @@ async fn prepare_subscription_drain(
     .await
 }
 
+/// Wrap native buffers only; backend conversion happens in Python on its loop.
 fn subscription_delivery_to_python(
     py: Python<'_>,
     delivery: SubscriptionDelivery,
-    converter: Option<&Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let SubscriptionDelivery {
         kind,
         data,
         gap_before,
+        ..
     } = delivery;
     let batch = native_arrow::record_batch_to_arrow_record_batch(py, data)?;
     let dropped_updates = gap_before.map(|gap| gap.dropped_updates);
-    let args = (kind.as_str(), batch, dropped_updates);
-    match converter {
-        Some(converter) => Ok(converter.bind(py).call1(args)?.unbind()),
-        None => Ok(args.into_pyobject(py)?.into_any().unbind()),
-    }
+    Ok((kind.as_str(), batch, dropped_updates)
+        .into_pyobject(py)?
+        .into_any()
+        .unbind())
 }
 
 fn exchange_info_to_pydict(py: Python<'_>, info: &ExchangeInfo) -> PyResult<Py<PyAny>> {
@@ -3003,7 +2987,7 @@ mod tests {
     }
 
     #[test]
-    fn delivery_conversion_failure_restores_real_native_batch_and_gap() {
+    fn discarded_delivery_restores_real_native_batch_and_gap() {
         Python::initialize();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3018,33 +3002,38 @@ mod tests {
             }
             let consumer = SubscriptionConsumer::from_receiver(rx);
             let lease = consumer.next_delivery(1).await.expect("first receipt");
-            let error = prepare_subscription_delivery(lease, |_py, _delivery| {
-                Err(PyValueError::new_err(
-                    "synthetic backend conversion failure",
-                ))
-            })
-            .await
-            .expect_err("conversion failure");
-            Python::attach(|py| assert!(error.is_instance_of::<PyValueError>(py)));
+            let receipt = prepare_subscription_delivery(lease)
+                .await
+                .expect("unpublished receipt");
+            // A failed Python backend conversion discards the unpublished receipt.
+            Python::attach(|py| {
+                receipt.bind(py).call_method0("discard").unwrap();
+            });
 
             let lease = consumer.next_delivery(1).await.expect("restored receipt");
             assert_eq!(
                 lease.as_ref().unwrap().gap_before.unwrap().dropped_updates,
                 1
             );
-            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
-                subscription_delivery_to_python(py, delivery, None)
-            })
-            .await
-            .expect("converted delivery");
+            let receipt = prepare_subscription_delivery(lease)
+                .await
+                .expect("unpublished receipt");
             Python::attach(|py| {
-                let output = prepared.bind(py).call_method0("publish").unwrap();
+                let receipt = receipt.bind(py);
+                assert!(
+                    !receipt
+                        .getattr("has_error")
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap()
+                );
+                let value = receipt.getattr("value").unwrap();
                 assert_eq!(
-                    output.get_item(0).unwrap().extract::<String>().unwrap(),
+                    value.get_item(0).unwrap().extract::<String>().unwrap(),
                     "deltas"
                 );
-                assert_eq!(output.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
-                let batch = output.get_item(1).unwrap();
+                assert_eq!(value.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
+                let batch = value.get_item(1).unwrap();
                 assert_eq!(
                     batch
                         .getattr("num_rows")
@@ -3063,6 +3052,11 @@ mod tests {
                         .unwrap(),
                     "SYNTHETIC Index",
                 );
+                receipt.call_method0("publish").unwrap();
+                let repeated = receipt
+                    .call_method0("publish")
+                    .expect_err("a receipt commits once");
+                assert!(repeated.is_instance_of::<PyRuntimeError>(py));
             });
             drop(tx);
             assert!(consumer.next_delivery(1).await.is_none());
@@ -3084,14 +3078,20 @@ mod tests {
             });
             let consumer = SubscriptionConsumer::from_receiver(rx);
             let lease = consumer.next_delivery(1).await.expect("terminal receipt");
-            let prepared = prepare_subscription_delivery(lease, |_py, _delivery| {
-                panic!("terminal receipts must not run the batch converter")
-            })
-            .await
-            .expect("prepared terminal receipt");
+            let receipt = prepare_subscription_delivery(lease)
+                .await
+                .expect("prepared terminal receipt");
             Python::attach(|py| {
-                let error = prepared
-                    .bind(py)
+                let receipt = receipt.bind(py);
+                assert!(
+                    receipt
+                        .getattr("has_error")
+                        .unwrap()
+                        .extract::<bool>()
+                        .unwrap()
+                );
+                assert!(receipt.getattr("value").unwrap().is_none());
+                let error = receipt
                     .call_method0("publish")
                     .expect_err("terminal source loss");
                 assert!(error.is_instance_of::<BlpSubscriptionDataLossError>(py));
@@ -3131,11 +3131,7 @@ mod tests {
             tx.try_send(Ok(subscription_update(20))).unwrap();
             let consumer = SubscriptionConsumer::from_receiver(rx);
             let lease = consumer.next_delivery(1).await.unwrap();
-            let prepared = prepare_subscription_delivery(lease, |py, delivery| {
-                subscription_delivery_to_python(py, delivery, None)
-            })
-            .await
-            .unwrap();
+            let prepared = prepare_subscription_delivery(lease).await.unwrap();
             Python::attach(|_| drop(prepared));
             let restored = consumer
                 .next_delivery(1)
