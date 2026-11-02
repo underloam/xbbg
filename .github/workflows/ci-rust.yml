@@ -865,7 +865,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
           )
 
       # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
@@ -960,7 +960,7 @@ jobs:
         # instead of compiling from source.
         run: |
           WHEEL=$(echo dist/*.whl)
-          uv pip install --system --no-build "${WHEEL}" "pytest>=8.4" "pytest-asyncio>=0.24" "pyarrow>=22.0.0" "pandas>=3"
+          uv pip install --system --no-build "${WHEEL}" "pytest>=8.4" "pytest-asyncio>=0.24" "pytest-run-parallel>=0.10" "pyarrow>=22.0.0" "pandas>=3"
 
       - name: Copy tests to temp directory
         # Run from temp dir to avoid importing local source instead of installed package
@@ -977,6 +977,14 @@ jobs:
           python -W error::RuntimeWarning -c "import sys, xbbg, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
           python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
           pytest tests -v -m "not live"
+
+      # pytest-run-parallel runs each test body in 8 threads at once. Tests marked
+      # thread_unsafe (async tests, and tests that change process-wide state such
+      # as configure() or middleware) still run, in one thread.
+      - name: Run tests in parallel threads
+        working-directory: ${{ runner.temp }}/test-run
+        shell: bash
+        run: pytest tests -q -m "not live" --parallel-threads=8
 
       - name: Setup Rust for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
@@ -1007,7 +1015,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
           )
 
   # ════════════════════════════════════════════════════════════════════════════

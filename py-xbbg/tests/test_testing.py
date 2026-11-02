@@ -16,6 +16,8 @@ from xbbg.testing import (
     mock_engine,
 )
 
+pytestmark = pytest.mark.thread_unsafe(reason="mock_engine installs process-wide middleware and engine state")
+
 
 @pytest.fixture(autouse=True)
 def reset_blp_state():

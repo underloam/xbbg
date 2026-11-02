@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import inspect
 import os
 import sys
 import sysconfig
+from unittest import mock
 
 import pytest
 
@@ -29,10 +31,25 @@ def pytest_configure(config):
         "markers",
         "live: mark test as requiring a live Bloomberg Terminal or B-PIPE connection",
     )
+    # pytest-run-parallel's marker, registered here too so the suite runs without it.
+    config.addinivalue_line(
+        "markers",
+        "thread_unsafe(reason=None): run this test in one thread under pytest-run-parallel",
+    )
 
 
+_ASYNC_THREAD_UNSAFE = pytest.mark.thread_unsafe(
+    reason="pytest-asyncio drives async tests on one event loop; pytest-run-parallel cannot run them in threads"
+)
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_collection_modifyitems(config, items):
-    """Auto-skip live tests when running in CI (no Bloomberg Terminal)."""
+    """Run async tests single-threaded under pytest-run-parallel; skip live tests in CI."""
+    for item in items:
+        if inspect.iscoroutinefunction(getattr(item, "obj", None)):
+            item.add_marker(_ASYNC_THREAD_UNSAFE)
+
     if not os.environ.get("CI"):
         return
 
@@ -77,14 +94,18 @@ class _ForbiddenPyEngine:
 
 
 @pytest.fixture(autouse=True)
-def _no_real_engine(request, monkeypatch):
+def _no_real_engine(request):
     """Fail fast when a non-live test starts a real Bloomberg session.
 
     ``pytest.fail`` raises a ``BaseException`` subclass, so it is not swallowed by the
-    ``except Exception`` fallbacks around schema lookups.
+    ``except Exception`` fallbacks around schema lookups. The patch is installed during
+    setup, before pytest-run-parallel starts a test's threads; ``monkeypatch`` would
+    mark every test thread-unsafe instead.
     """
     if "live" in request.keywords or "integration" in request.keywords:
+        yield
         return
     from xbbg import _core
 
-    monkeypatch.setattr(_core, "PyEngine", _ForbiddenPyEngine)
+    with mock.patch.object(_core, "PyEngine", _ForbiddenPyEngine):
+        yield

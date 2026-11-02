@@ -161,6 +161,11 @@ pandas = ">=2.3.3,<4"
 [feature.freethreading.pypi-dependencies]
 pytest = ">=8.4"
 pytest-asyncio = ">=0.24"
+pytest-run-parallel = ">=0.10"
+
+[feature.freethreading.tasks]
+# Every test body runs in 8 threads at once; tests marked thread_unsafe run in one.
+test-parallel = 'pytest py-xbbg/tests -m "not live and not integration" --parallel-threads=8'
 
 # ── Environments ──────────────────────────────────────────────────────────────
 

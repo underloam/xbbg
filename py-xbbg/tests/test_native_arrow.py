@@ -645,7 +645,9 @@ def large_carriers() -> dict[str, Any]:
             "date": [start + timedelta(days=row % 1_500) for row in range(_GIL_ROWS)],
             "field": ["PX_LAST" if row % 2 else "VOLUME" for row in range(_GIL_ROWS)],
             "value": [float((row * 7_919) % 10_007) for row in range(_GIL_ROWS)],
-            "blank": [""] * _GIL_ROWS,
+            # Nulls make the presence scan visit every row; without them an
+            # all-empty text column is answered from its offsets alone.
+            "blank": [None if row % 2 else "" for row in range(_GIL_ROWS)],
             "payload": [f"{row:08d}" * 8 for row in range(_GIL_ROWS)],
         }
     )
@@ -671,7 +673,7 @@ _GIL_RELEASING_CALLS: dict[str, Callable[[dict[str, Any]], object]] = {
     "batch_compact": lambda carriers: carriers["batch"].compact(),
     "column_compact": lambda carriers: carriers["column"].compact(),
     "to_record_batch": lambda carriers: carriers["table"].to_record_batch(),
-    "has_any_value": lambda carriers: carriers["table"].has_any_value(["blank"] * 25),
+    "has_any_value": lambda carriers: carriers["table"].has_any_value(["blank"] * 400),
     "apply_historical_presentation": lambda carriers: carriers["history"].apply_historical_presentation(
         True, "BOTH", "DESCENDING", "WEEKLY", "ticker"
     ),
