@@ -22,7 +22,7 @@
 ---
 
 <!-- xbbg:latest-release-start -->
-Latest release: xbbg==0.12.3 (release: [notes](https://github.com/alpha-xone/xbbg/releases/tag/v0.12.3))
+Latest release: xbbg==0.12.4 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v0.12.4))
 <!-- xbbg:latest-release-end -->
 
 > **xbbg 1.0 Release Candidate Available**

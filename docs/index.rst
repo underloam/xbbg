@@ -29,7 +29,7 @@ xbbg
 ..
    xbbg:latest-release-start
 
-Latest release: xbbg==0.12.3 (release: `notes <https://github.com/alpha-xone/xbbg/releases/tag/v0.12.3>`_)
+Latest release: xbbg==0.12.4 (release: `notes <https://github.com/underloam/xbbg/releases/tag/v0.12.4>`_)
 
    xbbg:latest-release-end
 

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-02
+
 ### Fixed
 
 - **Python 3.15 installs of `xbbg<1` resolve to the 0.x line, not 0.7.7**: `requires-python` drops its `<3.15` upper bound. pip skips every release whose Requires-Python excludes the running interpreter, so on 3.15 it passed over 0.7.10-0.12.3 and installed 0.7.7 (2022), the newest release without a cap. Tested versions are unchanged (3.10-3.14).
@@ -828,7 +830,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/alpha-xone/xbbg/compare/v0.12.3...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v0.12.4...HEAD
+[0.12.4]: https://github.com/underloam/xbbg/compare/v0.12.3...v0.12.4
 [0.12.3]: https://github.com/alpha-xone/xbbg/compare/v0.12.2...v0.12.3
 [0.12.2]: https://github.com/alpha-xone/xbbg/compare/v0.12.1...v0.12.2
 [0.12.1]: https://github.com/alpha-xone/xbbg/compare/v0.12.0...v0.12.1
