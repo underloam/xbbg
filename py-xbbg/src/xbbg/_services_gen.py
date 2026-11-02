@@ -104,7 +104,7 @@ class ExtractorHint(str, Enum):
     """Bulk data extractor: [ticker, field, row_idx, col1, col2, ...]"""
 
     FIELD_INFO = "fieldinfo"
-    """Field info extractor: [field, type, description, category]"""
+    """Field info extractor: [field, type, description, category, id]"""
 
     GENERIC = "generic"
     """Generic flattener: [path, type, value_str, value_num, value_date]"""
@@ -203,6 +203,15 @@ VALIDATION_MODE_DEFAULT = "disabled"
 
 VALIDATION_MODE_VALUES = "disabled, lenient, strict"
 """Canonical VALIDATION_MODES as a list for error messages and docstrings."""
+
+KEY_COLUMNS: tuple[str, ...] = ("security", "ticker")
+"""Name of the result column holding each row's security."""
+
+KEY_COLUMN_DEFAULT = "ticker"
+"""Value used when the caller omits it."""
+
+KEY_COLUMN_VALUES = "security, ticker"
+"""Canonical KEY_COLUMNS as a list for error messages and docstrings."""
 
 SDK_LOG_LEVELS: tuple[str, ...] = ("debug", "error", "fatal", "info", "off", "trace", "warn")
 """Verbosity of the Bloomberg C SDK's own logging."""

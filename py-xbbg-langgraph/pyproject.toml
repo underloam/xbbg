@@ -51,7 +51,13 @@ xbbg_langgraph = ["py.typed"]
 addopts = "-ra"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
-filterwarnings = ["error::DeprecationWarning", "error::PendingDeprecationWarning", "error::FutureWarning"]
+filterwarnings = [
+  "error::DeprecationWarning",
+  "error::PendingDeprecationWarning",
+  "error::FutureWarning",
+  # Tool results use the deprecated default key column; xbbg tests cover its warning.
+  "ignore:xbbg results name the security column 'ticker':FutureWarning",
+]
 
 [tool.ruff]
 extend = "../pyproject.toml"

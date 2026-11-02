@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::str::FromStr;
 use std::sync::Arc;
 
-use arrow_array::{Array, ArrayRef, BooleanArray, RecordBatch, RecordBatchOptions, StringArray};
+use arrow_array::{Array, ArrayRef, RecordBatch, RecordBatchOptions, StringArray};
 use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, FieldRef, Schema, SchemaRef};
 use arrow_select::concat::{concat, concat_batches};
@@ -14,9 +14,7 @@ use arrow_select::take::take_record_batch;
 
 use crate::column::{ColumnData, compact_array};
 use crate::error::{ArrowCoreError, Result};
-use crate::scalar::{
-    CellValue, InferredKind, array_has_value, build_array_for_kind, cell_matches, infer_kind,
-};
+use crate::scalar::{CellMatchMask, CellValue, InferredKind, build_array_for_kind, infer_kind};
 
 const TYPE_MISSES_METADATA_KEY: &str = "xbbg.type_misses";
 const BLOOMBERG_REQUEST_ID_METADATA_KEY: &str = "xbbg.bloomberg_request_id";
@@ -345,35 +343,21 @@ impl TableData {
     }
 
     /// Filter rows where a column equals a scalar value.
+    ///
+    /// Matching follows [`crate::scalar::cell_matches`]; the needle is resolved
+    /// once for the column type into a typed Arrow scalar where that is exact.
     pub fn filter_eq(&self, column: &str, value: &CellValue) -> Result<Self> {
         let idx = self.column_index(column)?;
+        let matcher = CellMatchMask::new(self.schema.field(idx).data_type(), value);
         let filtered = self
             .batches
             .iter()
             .map(|batch| {
-                let mask = BooleanArray::from(
-                    (0..batch.num_rows())
-                        .map(|row| cell_matches(batch.column(idx).as_ref(), row, value))
-                        .collect::<Vec<_>>(),
-                );
+                let mask = matcher.mask(batch.column(idx).as_ref())?;
                 filter_record_batch(batch, &mask).map_err(Into::into)
             })
             .collect::<Result<Vec<_>>>()?;
         Self::try_new(filtered)
-    }
-
-    /// Whether any named column holds a present value (non-null, non-empty text).
-    ///
-    /// Unknown names are ignored.
-    pub fn has_any_value(&self, names: &[String]) -> bool {
-        names
-            .iter()
-            .filter_map(|name| self.schema.index_of(name).ok())
-            .any(|idx| {
-                self.batches
-                    .iter()
-                    .any(|batch| array_has_value(batch.column(idx).as_ref()))
-            })
     }
 
     /// Insert a scalar-built column at `index`.
@@ -905,6 +889,74 @@ mod tests {
     }
 
     #[test]
+    fn filter_eq_selects_matches_across_sliced_batches_and_skips_nulls() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, true),
+            Field::new("px", DataType::Float64, true),
+        ]));
+        let batch = |tickers: Vec<Option<&str>>, prices: Vec<Option<f64>>| {
+            RecordBatch::try_new(
+                schema.clone(),
+                vec![
+                    Arc::new(StringArray::from(tickers)) as ArrayRef,
+                    Arc::new(Float64Array::from(prices)) as ArrayRef,
+                ],
+            )
+            .unwrap()
+        };
+        let first = batch(
+            vec![Some("SKIP"), Some("AAPL"), None, Some("IBM")],
+            vec![Some(0.0), Some(-0.0), Some(f64::NAN), None],
+        )
+        .slice(1, 3);
+        let second = batch(
+            vec![Some("AAPL"), Some("MSFT"), None],
+            vec![Some(0.0), Some(1.5), Some(0.0)],
+        );
+        let table = TableData::try_new(vec![first, second]).unwrap();
+
+        let tickers = |table: &TableData| {
+            table
+                .batches
+                .iter()
+                .flat_map(|batch| {
+                    let column = batch
+                        .column(0)
+                        .as_any()
+                        .downcast_ref::<StringArray>()
+                        .unwrap();
+                    column
+                        .iter()
+                        .map(|value| value.map(str::to_string))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>()
+        };
+        let aapl = table
+            .filter_eq("ticker", &CellValue::Text("AAPL".to_string()))
+            .unwrap();
+        assert_eq!(aapl.chunk_lengths(), [1, 1]);
+        assert_eq!(
+            tickers(&aapl),
+            [Some("AAPL".to_string()), Some("AAPL".to_string())]
+        );
+        let zero = table.filter_eq("px", &CellValue::Float(0.0)).unwrap();
+        assert_eq!(
+            tickers(&zero),
+            [Some("AAPL".to_string()), Some("AAPL".to_string()), None]
+        );
+        let missing = table.filter_eq("ticker", &CellValue::Null).unwrap();
+        assert_eq!(missing.chunk_lengths(), [1, 1]);
+        assert_eq!(
+            table
+                .filter_eq("px", &CellValue::Float(f64::NAN))
+                .unwrap()
+                .num_rows(),
+            0
+        );
+    }
+
+    #[test]
     fn adds_and_sets_cell_columns() {
         let table = sample_table();
         let added = table
@@ -1257,80 +1309,5 @@ mod tests {
                 None,
             ]
         );
-    }
-
-    #[test]
-    fn has_any_value_matches_per_cell_presence_without_decoding_cells() {
-        use arrow_array::{
-            BinaryArray, Date32Array, LargeStringArray, StringViewArray, TimestampSecondArray,
-            UInt64Array,
-        };
-
-        use crate::scalar::{array_has_value, cell_from_array, cell_has_value};
-
-        let cases: Vec<(ArrayRef, bool)> = vec![
-            (Arc::new(StringArray::from(vec![Some(""), None])), false),
-            (Arc::new(StringArray::from(vec![Some(""), Some("x")])), true),
-            (
-                Arc::new(LargeStringArray::from(vec![Some(""), None])),
-                false,
-            ),
-            (
-                Arc::new(LargeStringArray::from(vec![None, Some("x")])),
-                true,
-            ),
-            (Arc::new(StringViewArray::from(vec![Some(""), None])), false),
-            (
-                Arc::new(StringViewArray::from(vec![
-                    None,
-                    Some("long enough to spill"),
-                ])),
-                true,
-            ),
-            (Arc::new(Int64Array::from(vec![None, Some(0)])), true),
-            (Arc::new(Int64Array::from(vec![None::<i64>, None])), false),
-            (Arc::new(Float64Array::from(vec![f64::NAN])), true),
-            (Arc::new(UInt64Array::from(vec![u64::MAX])), true),
-            // Unsupported scalar types decode to absent.
-            (Arc::new(BinaryArray::from(vec![b"x".as_slice()])), false),
-            (Arc::new(Date32Array::from(vec![Some(0)])), true),
-            (Arc::new(Date32Array::from(vec![Some(i32::MAX)])), false),
-            (Arc::new(TimestampSecondArray::from(vec![i64::MAX])), false),
-            (Arc::new(TimestampSecondArray::from(vec![1])), true),
-        ];
-        for (array, expected) in cases {
-            let reference =
-                (0..array.len()).any(|row| cell_has_value(&cell_from_array(array.as_ref(), row)));
-            assert_eq!(reference, expected, "{}", array.data_type());
-            assert_eq!(
-                array_has_value(array.as_ref()),
-                expected,
-                "{}",
-                array.data_type()
-            );
-        }
-
-        let schema = Arc::new(Schema::new(vec![
-            Field::new("value_str", DataType::Utf8, true),
-            Field::new("value_num", DataType::Float64, true),
-        ]));
-        let batch = |text: Vec<Option<&str>>, num: Vec<Option<f64>>| {
-            RecordBatch::try_new(
-                schema.clone(),
-                vec![
-                    Arc::new(StringArray::from(text)),
-                    Arc::new(Float64Array::from(num)),
-                ],
-            )
-            .unwrap()
-        };
-        let table = TableData::try_new(vec![
-            batch(vec![Some(""), None], vec![None, None]),
-            batch(vec![None, Some("")], vec![None, Some(0.0)]),
-        ])
-        .unwrap();
-        assert!(!table.has_any_value(&["value_str".into(), "missing".into()]));
-        assert!(table.has_any_value(&["missing".into(), "value_num".into()]));
-        assert!(!table.has_any_value(&[]));
     }
 }

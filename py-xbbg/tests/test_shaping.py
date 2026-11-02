@@ -83,7 +83,7 @@ _GENERIC_ROWS: list[tuple[str | None, str | None, float | None]] = [
 
 @pytest.mark.asyncio
 async def test_ashape_bqr_sorts_and_renames_typed_quotes() -> None:
-    shaped = await _core.ashape_bqr(_typed_quotes(["DLRA", "", None]), "SYN1 Corp", True)
+    shaped = await _core.ashape_bqr(_typed_quotes(["DLRA", "", None]), "SYN1 Corp", "ticker", True)
 
     # Typed output is renamed in place and keeps its column types.
     assert _schema(shaped) == [
@@ -134,21 +134,21 @@ async def test_ashape_bqr_sorts_and_renames_typed_quotes() -> None:
 @pytest.mark.asyncio
 async def test_ashape_bqr_accepts_batches_and_multi_batch_tables() -> None:
     table = _typed_quotes(["DLRA", "", None])
-    expected = (await _core.ashape_bqr(table, "SYN1 Corp", True)).to_pylist()
+    expected = (await _core.ashape_bqr(table, "SYN1 Corp", "ticker", True)).to_pylist()
     split = ArrowTable.concat_tables([table.slice(0, 1), table.slice(1)])
     assert split.chunk_lengths == [1, 2]
 
     for carrier in (table.to_batches()[0], split):
-        shaped = await _core.ashape_bqr(carrier, "SYN1 Corp", True)
+        shaped = await _core.ashape_bqr(carrier, "SYN1 Corp", "ticker", True)
         assert shaped.chunk_lengths == [3]
         assert shaped.to_pylist() == expected
 
 
 @pytest.mark.asyncio
 async def test_ashape_bqr_pivots_generic_ticks_into_quote_rows() -> None:
-    shaped = await _core.ashape_bqr(_generic_ticks(_GENERIC_ROWS), "SYN1 Corp", True)
+    shaped = await _core.ashape_bqr(_generic_ticks(_GENERIC_ROWS), "SYN1 Corp", "ticker", True)
 
-    # Numeric-only fields are Float64; fields with any text stay strings.
+    # Fields without text keep value_num's Float64; fields with any text are strings.
     assert _schema(shaped) == [
         ("ticker", "Utf8"),
         ("time", "Utf8"),
@@ -189,7 +189,7 @@ async def test_ashape_bqr_pivots_generic_ticks_into_quote_rows() -> None:
 async def test_ashape_bqr_without_tick_rows_returns_the_empty_quote_table() -> None:
     no_ticks = _generic_ticks([("summary.count", None, 2.0), (None, "ignored", None)])
 
-    shaped = await _core.ashape_bqr(no_ticks, "SYN1 Corp", True)
+    shaped = await _core.ashape_bqr(no_ticks, "SYN1 Corp", "ticker", True)
 
     assert _schema(shaped) == [(name, "Utf8") for name in ("ticker", "time", "event_type", "price", "size")]
     assert shaped.num_rows == 0
@@ -202,13 +202,13 @@ async def test_ashape_bqr_requires_broker_attribution_only_when_enforced() -> No
 
     for raw, quote_rows in ((unattributed, 3), (generic, 1)):
         with pytest.raises(RuntimeError) as raised:
-            await _core.ashape_bqr(raw, "SYN1 Corp", True)
+            await _core.ashape_bqr(raw, "SYN1 Corp", "ticker", True)
         assert str(raised.value) == _MISSING_BROKER_ATTRIBUTION
-        assert (await _core.ashape_bqr(raw, "SYN1 Corp", False)).num_rows == quote_rows
+        assert (await _core.ashape_bqr(raw, "SYN1 Corp", "ticker", False)).num_rows == quote_rows
 
     # Empty results never need attribution, including column-less mock responses.
     for empty in (unattributed.slice(0, 0), ArrowTable.empty([])):
-        shaped = await _core.ashape_bqr(empty, "SYN1 Corp", True)
+        shaped = await _core.ashape_bqr(empty, "SYN1 Corp", "ticker", True)
         assert shaped.num_rows == 0
         assert shaped.num_columns == empty.num_columns
 
@@ -216,17 +216,17 @@ async def test_ashape_bqr_requires_broker_attribution_only_when_enforced() -> No
 def test_shaping_kernels_take_only_native_carriers() -> None:
     message = "Expected xbbg ArrowTable or ArrowRecordBatch, got dict"
     with pytest.raises(TypeError, match=message):
-        _core.ashape_bqr({"path": []}, "SYN1 Corp", True)
+        _core.ashape_bqr({"path": []}, "SYN1 Corp", "ticker", True)
     with pytest.raises(TypeError, match=message):
-        _core.apresent_historical({"date": []}, None, None, "ASCENDING", None)
+        _core.apresent_historical({"date": []}, None, None, "ASCENDING", None, "ticker")
 
 
 @pytest.mark.asyncio
 async def test_reshape_bqr_generic_is_the_shaper_reshape() -> None:
     ticks = _generic_ticks(_GENERIC_ROWS)
 
-    reshaped = ticks.reshape_bqr_generic("SYN1 Corp")
-    shaped = await _core.ashape_bqr(ticks, "SYN1 Corp", True)
+    reshaped = ticks.reshape_bqr_generic("SYN1 Corp", "security")
+    shaped = await _core.ashape_bqr(ticks, "SYN1 Corp", "security", True)
 
     # The ticks are already in time order, so shaping only renames.
     renames = {name: _BQR_RENAMES[name] for name in reshaped.column_names if name in _BQR_RENAMES}
@@ -271,14 +271,15 @@ async def test_apresent_historical_matches_the_synchronous_presentation(
     show_date: bool | None, date_format: str | None, sort: str | None, periodicity: str | None
 ) -> None:
     table = _history()
-    expected = table.apply_historical_presentation(show_date, date_format, sort, periodicity)
+    expected = table.apply_historical_presentation(show_date, date_format, sort, periodicity, "ticker")
 
-    presented = await _core.apresent_historical(table, show_date, date_format, sort, periodicity)
+    presented = await _core.apresent_historical(table, show_date, date_format, sort, periodicity, "ticker")
     assert _schema(presented) == _schema(expected)
     assert presented.chunk_lengths == expected.chunk_lengths
     assert presented.to_pylist() == expected.to_pylist()
 
-    from_batch = await _core.apresent_historical(table.to_record_batch(), show_date, date_format, sort, periodicity)
+    batch = table.to_record_batch()
+    from_batch = await _core.apresent_historical(batch, show_date, date_format, sort, periodicity, "ticker")
     assert _schema(from_batch) == _schema(expected)
     assert from_batch.to_pylist() == expected.to_pylist()
 
@@ -315,9 +316,9 @@ def large_carriers() -> dict[str, Any]:
 
 
 _LARGE_KERNELS: dict[str, Callable[[dict[str, Any]], Any]] = {
-    "ashape_bqr": lambda carriers: _core.ashape_bqr(carriers["ticks"], "SYN1 Corp", True),
+    "ashape_bqr": lambda carriers: _core.ashape_bqr(carriers["ticks"], "SYN1 Corp", "ticker", True),
     "apresent_historical": lambda carriers: _core.apresent_historical(
-        carriers["history"], True, "BOTH", "DESCENDING", "WEEKLY"
+        carriers["history"], True, "BOTH", "DESCENDING", "WEEKLY", "ticker"
     ),
 }
 

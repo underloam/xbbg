@@ -386,7 +386,7 @@ async fn request_reference(
         })
         .await?;
     request_ids.collect(&batch);
-    refdata_value_map(&batch)
+    refdata_value_map(&batch, engine.key_column().as_str())
 }
 
 async fn lookup_venues(
@@ -1938,7 +1938,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let values = refdata_value_map(&batch).unwrap();
+        let values = refdata_value_map(&batch, "ticker").unwrap();
         let mut rows = uncached_rows(&["SYNTHETIC".to_string()], &values, &HashMap::new());
         validate_rows(
             &mut rows,

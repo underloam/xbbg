@@ -84,7 +84,8 @@ async def abdp(
         flds: Single field or list of fields to query.
         backend: DataFrame backend to return. If None, uses global default.
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
-        format: Output format. Options:
+        format: Output format. The leading ``ticker`` column is named
+            ``security`` when the engine sets ``key_column="security"``. Options:
             - Format.LONG (default): ticker, field, value (strings)
             - Format.LONG_TYPED: ticker, field, value_f64, value_i64,
               value_str, value_bool, value_date, value_ts, value_time.
@@ -155,7 +156,8 @@ async def abdh(
         end_date: End date. Defaults to 'today'.
         backend: DataFrame backend to return. If None, uses global default.
             Supports lazy backends: 'polars_lazy', 'narwhals_lazy', 'duckdb'.
-        format: Output format. Options:
+        format: Output format. The leading ``ticker`` column is named
+            ``security`` when the engine sets ``key_column="security"``. Options:
             - Format.LONG (default): ticker, date, field, value (strings)
             - Format.LONG_TYPED: ticker, date, field, value_f64, value_i64,
               value_str, value_bool, value_date, value_ts, value_time.
@@ -223,7 +225,8 @@ async def abds(
 
     Returns:
         DataFrame with one row per Bloomberg bulk row. The only xbbg-added
-        columns are ``ticker`` and ``field``; bulk subfield columns preserve
+        columns are ``ticker`` (``security`` with ``key_column="security"``)
+        and ``field``; bulk subfield columns preserve
         Bloomberg's labels exactly as emitted, including spaces, punctuation,
         and case. Higher-level helpers must rename their own semantic outputs.
 
@@ -510,13 +513,17 @@ async def _postprocess_bqr_result(
     """Shape raw BQR ticks natively, off the event loop, then convert the backend.
 
     The shaper is shared with ``xbbg.ext.abqr``: generic ``path`` output is
-    pivoted into one row per tick, attributed requests require a broker code
-    (``RuntimeError`` otherwise), rows are sorted by ``time`` and Bloomberg
-    names are normalized.
+    pivoted into one row per tick with the security in the active engine's key
+    column, attributed requests require a broker code (``RuntimeError``
+    otherwise), rows are sorted by ``time`` and Bloomberg names are normalized.
     """
     from . import _core
 
-    table = await _core.ashape_bqr(result, ticker, enforce_broker_codes)
+    table = ensure_arrow_table(result)
+    reshaped = "path" in table.column_names
+    table = await _core.ashape_bqr(table, ticker, _engine._active_key_column(), enforce_broker_codes)
+    if reshaped:
+        _engine._warn_ticker_key_column(table)
     return _backend._convert_result_backend(table, backend)
 
 
@@ -557,11 +564,12 @@ async def abqr(
         **kwargs: Additional options.
 
     Returns:
-        DataFrame with columns: ticker, time, event_type, price, size,
+        DataFrame with columns: ticker (``security`` with
+        ``key_column="security"``), time, event_type, price, size,
         plus optional broker_buy, broker_sell, spread_price, etc., sorted by
-        time. Shaping matches ``xbbg.ext.abqr``: schema metadata is kept, and
-        fields of generic (``path``) output are float64 when every value is
-        numeric and strings otherwise.
+        time. Shaping matches ``xbbg.ext.abqr``: schema metadata is kept, and a
+        field of generic (``path``) output is a string column when it holds any
+        text and otherwise keeps the extractor's float64 values.
 
     Raises:
         RuntimeError: ``include_broker_codes`` is set and the quote rows carry

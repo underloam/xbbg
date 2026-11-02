@@ -9,6 +9,7 @@ import type {
   FieldInfo,
   FuturesCandidate,
   FxPairInfo,
+  KeyColumn,
   MarketRule,
   RequestInput,
   SeatType,
@@ -75,11 +76,22 @@ export interface NativeArrowZeroCopyBatch {
   readonly metadata: Record<string, string>;
 }
 
-// Scalar subscription rows use columnar, per-row typed option arrays instead of
-// Serde_json values. Each fieldIndices entry marks a field as present. Exactly
-// One typed array carries a concrete payload at that position; all-null slots
-// Mean an explicit clear, while absent fields have no position. Int64/time64/
-// Timestamp values are decimal strings so JS can materialize BigInt lazily.
+/** One Arrow IPC file (Feather v2) encoded natively for readers such as nodejs-polars. */
+export interface NativeArrowIpcFile {
+  readonly kind: 'ipcFile';
+  readonly ipc: Buffer;
+  /** The schema metadata, so JS never parses the IPC to read it. */
+  readonly metadata: Record<string, string>;
+}
+
+/**
+ * Scalar subscription batches are columnar. Row r owns positions
+ * rowOffsets[r]..rowOffsets[r + 1] of fieldIndices/values, in update order. A position
+ * marks a present field and null an explicit clear; absent fields have no position.
+ * Native code resolves each value once under its layout kind: boolean, number (i32,
+ * f64, and date32 as days since the epoch), string, or bigint (i64/time64_us/
+ * timestamp_us). A payload that does not match its kind is null.
+ */
 export type NativeSubscriptionFieldKind =
   | 'unknown'
   | 'bool'
@@ -97,28 +109,23 @@ export interface NativeSubscriptionLayout {
   readonly kinds: readonly NativeSubscriptionFieldKind[];
 }
 
-export interface NativeSubscriptionRow {
-  readonly topic: string;
-  readonly topicId: number;
-  readonly timestampUs: number;
-  readonly layoutVersion: number;
-  readonly fieldIndices: readonly number[];
-  readonly boolValues: readonly (boolean | null)[];
-  readonly i32Values: readonly (number | null)[];
-  readonly f64Values: readonly (number | null)[];
-  readonly stringValues: readonly (string | null)[];
-  readonly i64Values: readonly (string | null)[];
-}
+export type NativeSubscriptionValue = null | boolean | number | string | bigint;
 
 export interface NativeSubscriptionUpdateBatch {
   readonly kind: 'batch';
   readonly layout?: NativeSubscriptionLayout;
-  readonly updates: readonly NativeSubscriptionRow[];
+  /** Every row in a batch shares this layout. */
+  readonly layoutVersion: number;
+  readonly topics: readonly string[];
+  readonly timestampsUs: Float64Array;
+  readonly rowOffsets: Uint32Array;
+  readonly fieldIndices: Uint16Array;
+  readonly values: readonly NativeSubscriptionValue[];
 }
 
-export interface NativeSubscriptionDelivery {
+export interface NativeSubscriptionDelivery<TData = NativeArrowZeroCopyBatch> {
   readonly kind: SubscriptionDeliveryMode;
-  readonly data: NativeArrowZeroCopyBatch;
+  readonly data: TData;
   readonly gapBefore?: SubscriptionGap;
 }
 
@@ -139,6 +146,12 @@ export interface NativeSubscription {
     maxWaitMs?: number,
     project?: (delivery: NativeSubscriptionDelivery) => T,
   ): Promise<NativeSubscriptionDeliveryReceipt<T> | null>;
+  /** Like nextDelivery, but `data` is one Arrow IPC file for nodejs-polars. */
+  nextIpcFileDelivery<T>(
+    maxRows: number | undefined,
+    maxWaitMs: number | undefined,
+    project: (delivery: NativeSubscriptionDelivery<NativeArrowIpcFile>) => T,
+  ): Promise<NativeSubscriptionDeliveryReceipt<T> | null>;
   add(tickers: readonly string[], aliases?: Readonly<Record<string, string>>): Promise<void>;
   addFields(fields: readonly string[]): Promise<void>;
   latest(): NativeArrowZeroCopyBatch;
@@ -150,6 +163,10 @@ export interface NativeSubscription {
   unsubscribeDeliveries<T = NativeSubscriptionDelivery>(
     drain: boolean,
     project?: (delivery: NativeSubscriptionDelivery) => T,
+  ): Promise<T[] | null>;
+  unsubscribeIpcFileDeliveries<T>(
+    drain: boolean,
+    project: (delivery: NativeSubscriptionDelivery<NativeArrowIpcFile>) => T,
   ): Promise<T[] | null>;
   readonly tickers: string[];
   readonly fields: string[];
@@ -170,8 +187,12 @@ export interface NativeSubscription {
 }
 
 export interface NativeEngine {
+  /** Name of the result column holding each row's security. */
+  readonly keyColumn: KeyColumn;
   request(params: RequestInput): Promise<NativeArrowZeroCopyBatch>;
   requestRaw(params: RequestInput): Promise<Buffer>;
+  /** File-format IPC for nodejs-polars `readIPC`; `requestRaw` keeps the stream format. */
+  requestIpcFile(params: RequestInput): Promise<NativeArrowIpcFile>;
   seatType(): Promise<SeatType>;
   checkEntitlements(service: string, eids: readonly number[]): Promise<EntitlementReport>;
   identityIsAuthorized(service: string): Promise<boolean>;

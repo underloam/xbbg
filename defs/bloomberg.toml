@@ -238,7 +238,7 @@ doc = "BSRCH: Bloomberg Search responses."
 [extractors.FIELD_INFO]
 rust_name = "FieldInfo"
 value = "fieldinfo"
-doc = "Field info extractor: [field, type, description, category]"
+doc = "Field info extractor: [field, type, description, category, id]"
 
 
 # ============================================================================
@@ -359,6 +359,24 @@ rust_name = "Lenient"
 value = "lenient"
 doc = "Drop unknown fields and send the remaining ones."
 
+
+# ============================================================================
+# Key Columns
+# ============================================================================
+# Name of the result column holding each row's security, as requested.
+#
+# Authority: `KeyColumn` in crates/xbbg-async/src/engine/key_column.rs.
+
+[key_columns.TICKER]
+rust_name = "Ticker"
+value = "ticker"
+default = true
+doc = "Deprecated default. Collides with Bloomberg's TICKER field once identifiers are case-folded; removed in the next major release."
+
+[key_columns.SECURITY]
+rust_name = "Security"
+value = "security"
+doc = "Bloomberg's name for the requested security (securityData.security); the default from the next major release."
 
 # ============================================================================
 # SDK Log Levels

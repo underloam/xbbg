@@ -24,9 +24,11 @@ from datetime import datetime
 
 import narwhals.stable.v1 as nw
 
+from xbbg import _engine
 from xbbg._core import ext_parse_date
 from xbbg._dates import DateLike, _fmt_date, _normalize_to_datetime
-from xbbg.ext._utils import _call_native_recipe, _syncify
+from xbbg.backend import _convert_result_backend
+from xbbg.ext._utils import _call_native_recipe, _native_recipe, _syncify
 
 
 def _parse_date(dt: DateLike) -> datetime:
@@ -82,15 +84,10 @@ async def afut_ticker(
         asyncio.run(main())
     """
     recipe = "recipe_fut_ticker"
-    table = await _call_native_recipe(
-        recipe,
-        gen_ticker,
-        _fmt_date(_parse_date(dt)),
-        kwargs.pop("freq", None),
-        backend=kwargs.pop("backend", None),
-        request_options=kwargs,
-    )
-    return _ticker_result(recipe, table)
+    freq = kwargs.pop("freq", None)
+    backend = kwargs.pop("backend", None)
+    table = await _native_recipe(recipe, gen_ticker, _fmt_date(_parse_date(dt)), freq, request_options=kwargs)
+    return _ticker_result(recipe, _convert_result_backend(table, backend))
 
 
 async def aactive_futures(
@@ -136,19 +133,14 @@ async def aactive_futures(
         asyncio.run(main())
     """
     recipe = "recipe_active_futures"
-    table = await _call_native_recipe(
-        recipe,
-        ticker,
-        _fmt_date(_parse_date(dt)),
-        kwargs.pop("freq", None),
-        backend=kwargs.pop("backend", None),
-        request_options=kwargs,
-    )
-    return _ticker_result(recipe, table)
+    freq = kwargs.pop("freq", None)
+    backend = kwargs.pop("backend", None)
+    table = await _native_recipe(recipe, ticker, _fmt_date(_parse_date(dt)), freq, request_options=kwargs)
+    return _ticker_result(recipe, _convert_result_backend(table, backend))
 
 
 def _ticker_result(recipe: str, table) -> str:
-    """Unwrap a native recipe's single ticker across supported result backends."""
+    """Unwrap a native recipe's single resolved security across supported result backends."""
     if hasattr(table, "to_pylist"):
         rows = table.to_pylist()
     else:
@@ -156,7 +148,7 @@ def _ticker_result(recipe: str, table) -> str:
         rows = list(frame.iter_rows(named=True))
     if len(rows) != 1:
         raise ValueError(f"{recipe} returned {len(rows)} rows, expected exactly 1")
-    ticker = rows[0].get("ticker")
+    ticker = rows[0].get(_engine._active_key_column())
     if not ticker:
         raise ValueError(f"{recipe} returned a row without a ticker")
     return str(ticker)
@@ -164,7 +156,7 @@ def _ticker_result(recipe: str, table) -> str:
 
 async def _resolve_cdx_recipe(recipe: str, *args) -> str:
     """Run a native CDX recipe and unwrap its single-ticker result."""
-    table = await _call_native_recipe(recipe, *args, backend="native")
+    table = await _native_recipe(recipe, *args)
     return _ticker_result(recipe, table)
 
 

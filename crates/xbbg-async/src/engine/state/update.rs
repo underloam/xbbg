@@ -1,5 +1,3 @@
-use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use smallvec::SmallVec;
@@ -65,6 +63,9 @@ pub enum UpdateValue {
     Time64Micros(i64),
     TimestampMicros(i64),
 }
+
+/// Last decoded string of one field. The tag is the cached text's byte length;
+/// reuse always compares the text itself, so any caller-supplied tag is safe.
 pub(crate) type StringValueCache = Option<(u64, Arc<str>)>;
 
 impl FieldLayout {
@@ -186,17 +187,15 @@ impl UpdateValue {
         let Some(str_cache) = str_cache else {
             return Arc::from(value);
         };
-        let mut hasher = DefaultHasher::new();
-        value.hash(&mut hasher);
-        let hash = hasher.finish();
-        if let Some((cached_hash, cached)) = str_cache.as_ref()
-            && *cached_hash == hash
+        // Streaming strings mostly repeat; a length check plus memcmp replaces
+        // hashing every incoming value.
+        if let Some((_, cached)) = str_cache.as_ref()
             && cached.as_ref() == value
         {
             return Arc::clone(cached);
         }
         let interned = Arc::<str>::from(value);
-        *str_cache = Some((hash, Arc::clone(&interned)));
+        *str_cache = Some((value.len() as u64, Arc::clone(&interned)));
         interned
     }
 
@@ -212,5 +211,30 @@ impl UpdateValue {
             Self::Time64Micros(v) => Some(v.to_string()),
             Self::TimestampMicros(v) => Some(v.to_string()),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cached(value: &str, cache: &mut StringValueCache) -> Arc<str> {
+        match UpdateValue::from_blp_with_str_cache(Value::String(value), Some(cache)) {
+            UpdateValue::Str(value) => value,
+            other => panic!("expected a string value, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn string_cache_reuses_only_identical_text() {
+        let mut cache = None;
+        let first = cached("BID", &mut cache);
+        assert!(Arc::ptr_eq(&first, &cached("BID", &mut cache)));
+
+        // Same-length text must be compared, not assumed equal.
+        let replaced = cached("ASK", &mut cache);
+        assert_eq!(replaced.as_ref(), "ASK");
+        assert!(!Arc::ptr_eq(&first, &replaced));
+        assert!(Arc::ptr_eq(&replaced, &cached("ASK", &mut cache)));
     }
 }

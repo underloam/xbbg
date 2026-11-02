@@ -12,9 +12,9 @@
 //!   Their futures run on a two-worker bridge runtime and yield owned Rust
 //!   payloads; bridge workers never attach to the interpreter.
 //!   pyo3-async-runtimes attaches once per completion on its blocking pool,
-//!   where payloads become Python objects, including marked-delivery converter
-//!   calls and publication receipts. Cancelled awaitables drop their payload
-//!   there without converting it.
+//!   where payloads become Python objects, including unpublished delivery
+//!   receipts (backend conversion then runs on the consuming event loop).
+//!   Cancelled awaitables drop their payload there without converting it.
 //! - Exceptions are lazy plans (class, message, attributes): the instance is
 //!   created only when Python observes the error, wherever it was raised.
 //! - Once interpreter finalization begins, completed results are dropped
@@ -86,7 +86,7 @@ use xbbg_async::engine::{
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, OverflowPolicy, SubscribeRequest,
+    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, KeyColumn, OverflowPolicy, SubscribeRequest,
     SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
@@ -105,7 +105,7 @@ mod teardown;
 
 use completion::{
     DeliveryPayload, DrainPayload, ExchangeInfoDict, Guarded, MarketInfoDict, TickDict,
-    Unsubscribed, record_batch_future, shutdown_safe_future,
+    TickDictKeys, Unsubscribed, record_batch_future, shutdown_safe_future,
 };
 use request::dict_to_request_params;
 use teardown::{EngineOwner, SubscriptionOwner};
@@ -482,7 +482,14 @@ pub struct PyEngineConfig {
     /// Also accepts "off" and "none" as aliases for "disabled".
     #[pyo3(get, set)]
     pub validation_mode: String,
-    /// Number of ticks to buffer before flushing to Python (default: 1)
+    /// Name of the result column holding each row's security: "ticker"
+    /// (default, deprecated) or "security", which becomes the default in the
+    /// next major release.
+    #[pyo3(get, set)]
+    pub key_column: String,
+    /// Maximum number of already-queued subscription updates combined into one
+    /// batch (default: 16). Reads never wait for more updates: a read returns as
+    /// soon as one update is available, so quiet streams still yield one-row batches.
     #[pyo3(get, set)]
     pub subscription_flush_threshold: usize,
     /// Bloomberg SDK event queue size (default: 10000)
@@ -614,6 +621,7 @@ impl PyEngineConfig {
             shard_chunk_size: defaults.shard_chunk_size,
             shard_max_concurrent: defaults.shard_max_concurrent,
             validation_mode: defaults.validation_mode.to_string(),
+            key_column: defaults.key_column.to_string(),
             subscription_flush_threshold: defaults.subscription_flush_threshold,
             max_event_queue_size: defaults.max_event_queue_size,
             command_queue_size: defaults.command_queue_size,
@@ -690,6 +698,9 @@ impl PyEngineConfig {
             }
             if let Some(v) = kw.get_item("validation_mode")? {
                 config.validation_mode = v.extract()?;
+            }
+            if let Some(v) = kw.get_item("key_column")? {
+                config.key_column = v.extract()?;
             }
             if let Some(v) = kw.get_item("subscription_flush_threshold")? {
                 config.subscription_flush_threshold = v.extract()?;
@@ -808,7 +819,8 @@ impl PyEngineConfig {
             "EngineConfig(host='{}', port={}, request_pool_size={}, subscription_pool_size={}, \
              runtime_worker_threads={}, max_subscription_sessions={}, shard_requests={}, \
              shard_threshold={}, shard_chunk_size={}, shard_max_concurrent={}, validation_mode='{}', \
-             overflow_policy='{}', auth_method='{}', field_cache_path='{}', warmup_services={:?})",
+             key_column='{}', overflow_policy='{}', auth_method='{}', field_cache_path='{}', \
+             warmup_services={:?})",
             self.host,
             self.port,
             self.request_pool_size,
@@ -820,6 +832,7 @@ impl PyEngineConfig {
             self.shard_chunk_size,
             self.shard_max_concurrent,
             self.validation_mode,
+            self.key_column,
             self.overflow_policy,
             auth_method,
             fcp_display,
@@ -855,6 +868,11 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
             .parse()
             .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
 
+        let key_column: KeyColumn = py_config
+            .key_column
+            .parse()
+            .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
+
         let config = EngineConfig {
             transport: Transport::Direct(Vec::new()),
             tls: None,
@@ -867,6 +885,7 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
             shard_chunk_size: py_config.shard_chunk_size,
             shard_max_concurrent: py_config.shard_max_concurrent,
             validation_mode,
+            key_column,
             subscription_flush_threshold: py_config.subscription_flush_threshold,
             max_event_queue_size: py_config.max_event_queue_size,
             command_queue_size: py_config.command_queue_size,
@@ -1392,6 +1411,10 @@ impl PyEngine {
     /// Returns a PySubscription that supports async iteration and dynamic add/remove.
     /// GIL is released during async operations; iteration and add/remove use separate
     /// locks to avoid contention.
+    /// flush_threshold caps how many already-queued updates one read combines
+    /// into a batch (default: the engine's subscription_flush_threshold, 16).
+    /// Reads never wait for more updates, so quiet streams still yield one-row
+    /// batches.
     /// Aliases map Bloomberg topics to consumer labels. Delayed streams warn by
     /// default; on_delayed also accepts raise and ignore. Isolated subscriptions
     /// do not share upstream feeds with other consumers.
@@ -1494,6 +1517,7 @@ impl PyEngine {
                     &engine,
                 )),
                 engine_shutdown: engine.shutdown_receiver(),
+                tick_dict_keys: Arc::default(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
@@ -1511,6 +1535,9 @@ impl PyEngine {
     ///     tickers: List of securities to subscribe to
     ///     fields: List of fields to subscribe to
     ///     options: List of subscription options (e.g., ["VWAP_START_TIME=09:30"])
+    ///     flush_threshold: Maximum number of already-queued updates combined into
+    ///         one batch (default: the engine's subscription_flush_threshold, 16).
+    ///         Reads never wait for more updates.
     ///     aliases: Optional Bloomberg topic to consumer label mapping
     ///     on_delayed: Delayed stream policy: warn, raise, or ignore
     ///     isolated: Disable sharing of upstream market-data feeds
@@ -1621,6 +1648,7 @@ impl PyEngine {
                     &engine,
                 )),
                 engine_shutdown: engine.shutdown_receiver(),
+                tick_dict_keys: Arc::default(),
                 #[cfg(feature = "test-support")]
                 _test_fixture: None,
                 #[cfg(feature = "test-support")]
@@ -1747,6 +1775,8 @@ pub struct PySubscription {
     /// Engine shutdown is not iteration EOF; this only prevents close commands
     /// from being sent after global engine teardown has already cleaned up.
     engine_shutdown: watch::Receiver<bool>,
+    /// Tick-dict field keys, reused while the update layout is unchanged.
+    tick_dict_keys: Arc<StdMutex<TickDictKeys>>,
     /// Retain the synthetic engine while a real test subscription is alive.
     #[cfg(feature = "test-support")]
     _test_fixture: Option<Arc<xbbg_async::testing::SubscriptionFixture>>,
@@ -1966,16 +1996,12 @@ impl PySubscription {
         })
     }
 
-    /// Prepare a marked batch for publication on the consuming Python loop.
-    /// The converter runs on a native completion thread (attached, off the event
-    /// loop) before the returned receipt's publish() commits the batch; a read
-    /// cancelled before completion never runs it.
-    #[pyo3(signature = (converter=None))]
-    fn next_delivery<'py>(
-        &self,
-        py: Python<'py>,
-        converter: Option<Py<PyAny>>,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    /// Lease the next marked batch as an unpublished receipt. Python converts
+    /// `receipt.value` on its event loop, then `publish()` commits the batch or
+    /// `discard()` restores it. The receipt is built on a native completion
+    /// thread; no backend conversion runs on the async bridge, and a read
+    /// cancelled before completion leaves the batch unread.
+    fn next_delivery<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.ensure_rows()?;
         let consumer = self.consumer.clone();
         let batch_items = self.batch_items;
@@ -1985,7 +2011,7 @@ impl PySubscription {
                 .next_delivery(batch_items)
                 .await
                 .ok_or_else(|| PyStopAsyncIteration::new_err("subscription ended"))?;
-            Ok(DeliveryPayload::new(lease, converter, consumer))
+            Ok(DeliveryPayload::new(lease, consumer))
         })
     }
 
@@ -1994,6 +2020,7 @@ impl PySubscription {
     fn __anext_tick_dict__<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         self.ensure_plain_rows()?;
         let consumer = self.consumer.clone();
+        let tick_keys = Arc::clone(&self.tick_dict_keys);
         #[cfg(feature = "test-support")]
         let read_started = self._test_legacy_read_started.clone();
 
@@ -2022,7 +2049,7 @@ impl PySubscription {
                     // Retain rx through conversion unless the publication gate owns ordering.
                     let receiver = publication.is_none().then_some(guard);
                     Ok(Guarded::new(
-                        TickDict(update),
+                        TickDict::new(update, tick_keys),
                         (receiver, publication, consumer),
                     ))
                 }
@@ -2355,6 +2382,7 @@ impl PySubscription {
         let legacy_arrow = self.legacy_arrow.clone();
         let batch_items = self.batch_items;
         let engine_shutdown = self.engine_shutdown.clone();
+        let tick_keys = Arc::clone(&self.tick_dict_keys);
 
         debug!(drain, tick_mode, "PySubscription: unsubscribing");
 
@@ -2393,7 +2421,7 @@ impl PySubscription {
                         .clear();
                 }
                 return Ok(Guarded::new(
-                    Unsubscribed::Ticks(remaining),
+                    Unsubscribed::Ticks(remaining, tick_keys),
                     (operation, consumer),
                 ));
             }
@@ -2433,12 +2461,12 @@ impl PySubscription {
     }
 
     /// Close and optionally drain marked batches without losing gap metadata.
-    #[pyo3(signature = (drain=false, converter=None))]
+    /// A draining close returns an unpublished receipt like `next_delivery()`.
+    #[pyo3(signature = (drain=false))]
     fn unsubscribe_deliveries<'py>(
         &self,
         py: Python<'py>,
         drain: bool,
-        converter: Option<Py<PyAny>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let consumer = self.consumer.clone();
         let legacy_arrow = self.legacy_arrow.clone();
@@ -2462,7 +2490,7 @@ impl PySubscription {
                 .await;
             let owner = consumer.clone();
             Ok(Guarded::new(
-                Some(DrainPayload::new(lease, converter, owner)),
+                Some(DrainPayload::new(lease, owner)),
                 (None, consumer),
             ))
         })
@@ -2737,6 +2765,7 @@ mod tests {
             deliver_rows,
             overflow_policy: OverflowPolicy::DropNewest,
             engine_shutdown: watch::channel(false).1,
+            tick_dict_keys: Arc::default(),
             #[cfg(feature = "test-support")]
             _test_fixture: None,
             #[cfg(feature = "test-support")]
@@ -2924,6 +2953,7 @@ mod tests {
     }
 
     #[test]
+
     fn advanced_python_iteration_guards_retain_real_native_receipts() {
         Python::initialize();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3909,7 +3939,7 @@ mod tests {
     }
 
     #[test]
-    fn python_subscription_batch_limits_preserve_default_one_update() {
+    fn python_subscription_reads_stop_at_the_explicit_batch_limit() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()

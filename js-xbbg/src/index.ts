@@ -16,12 +16,13 @@ import {
   Backend,
   emitDelayedDataWarnings,
   Format,
+  ipcFileToPolars,
   ipcSchemaMetadata,
-  ipcToPolars,
   nativeArrowToBackend,
   nativeRecipeResult,
   normalizeBackend,
   toArrowTableFromNative,
+  warnTickerKeyColumn,
 } from './backends';
 // Date / datetime helpers (#317): isolated module so they can be tested
 // Without loading the native NAPI addon. Re-exported as public API below.
@@ -37,7 +38,7 @@ import {
   BlpValidationError,
   wrapError,
 } from './errors';
-import type { NativeAddon, NativeEngine } from './napi';
+import type { NativeAddon, NativeArrowZeroCopyBatch, NativeEngine } from './napi';
 import { resolveNativeAddon } from './native/resolve-native';
 import { isPlainObject } from './objects';
 import { configureRuntimeSearchPath } from './runtime-search-path';
@@ -1045,6 +1046,18 @@ export class Engine {
     return maybeEngine;
   }
 
+  /** Convert a recipe result, warning once while results use the `ticker` key column. */
+  private async recipeResult(
+    backend: BackendKind | undefined,
+    request: () => Promise<NativeArrowZeroCopyBatch>,
+  ): Promise<unknown> {
+    return await nativeRecipeResult(backend, async () => {
+      const batch = await request();
+      warnTickerKeyColumn(this.inner.keyColumn, batch);
+      return batch;
+    });
+  }
+
   public static withConfig(config: EngineConfig = {}): Engine {
     try {
       return Engine.fromInner(native.JsEngine.withConfig(config));
@@ -1132,16 +1145,18 @@ export class Engine {
     const nativeParams = { ...rest, ...mapOverridesToRequestParts(overrides) };
     try {
       if (backend === Backend.POLARS) {
-        const ipc = await this.inner.requestRaw(nativeParams);
+        const file = await this.inner.requestIpcFile(nativeParams);
         if (warnDelayed) {
-          emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
+          emitDelayedDataWarnings(file.metadata);
         }
-        return ipcToPolars(ipc);
+        warnTickerKeyColumn(this.inner.keyColumn, file.ipc);
+        return ipcFileToPolars(file);
       }
       const batch = await this.inner.request(nativeParams);
       if (warnDelayed) {
         emitDelayedDataWarnings(batch.metadata);
       }
+      warnTickerKeyColumn(this.inner.keyColumn, batch);
       return nativeArrowToBackend(batch, backend);
     } catch (error) {
       throw wrapError(error);
@@ -1165,6 +1180,7 @@ export class Engine {
       if (warnDelayed) {
         emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
       }
+      warnTickerKeyColumn(this.inner.keyColumn, ipc);
       return ipc;
     } catch (error) {
       throw wrapError(error);
@@ -1661,7 +1677,7 @@ export class Engine {
   // ── Recipes ─────────────────────────────────────────────────────────
 
   public async bqr(ticker: string, options: BqrOptions = {}): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeBqr(
@@ -1679,7 +1695,7 @@ export class Engine {
     fields: string | readonly string[],
     options: YasOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeYas(
@@ -1696,7 +1712,7 @@ export class Engine {
   }
 
   public async preferreds(equityTicker: string, options: PreferredsOptions = {}): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipePreferreds(
@@ -1710,7 +1726,7 @@ export class Engine {
     ticker: string,
     options: CorporateBondsOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeCorporateBonds(
@@ -1726,7 +1742,7 @@ export class Engine {
     dt: DateLike,
     options: FuturesResolveOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeFutTicker(
@@ -1742,7 +1758,7 @@ export class Engine {
     dt: DateLike,
     options: FuturesResolveOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeActiveFutures(
@@ -1757,7 +1773,7 @@ export class Engine {
     genTicker: string,
     options: FuturesCurveOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeFuturesCurve(
@@ -1788,7 +1804,7 @@ export class Engine {
     dt: DateLike,
     options: CdxResolveOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeCdxTicker(
@@ -1815,7 +1831,7 @@ export class Engine {
     dt: DateLike,
     options: ActiveCdxOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeActiveCdx(
@@ -1833,7 +1849,7 @@ export class Engine {
     endDate: DateLike,
     options: DividendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeDividend(
@@ -1851,7 +1867,7 @@ export class Engine {
     endDate: DateLike,
     options: DividendYieldOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeDividendYield(
@@ -1870,7 +1886,7 @@ export class Engine {
     endDate: DateLike,
     options: TurnoverOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeTurnover(
@@ -1884,7 +1900,7 @@ export class Engine {
   }
 
   public async etfHoldings(etfTicker: string, options: EtfHoldingsOptions = {}): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeEtfHoldings(
@@ -1900,7 +1916,7 @@ export class Engine {
     endDate: DateLike,
     options: VolSurfaceOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeVolSurface(
@@ -1918,7 +1934,7 @@ export class Engine {
   }
 
   public async indexMembers(index: string, options: IndexMembersOptions = {}): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeIndexMembers(
@@ -1933,7 +1949,7 @@ export class Engine {
     isins: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () => await this.inner.recipeResolveIsins(toStringArray(isins)),
     );
@@ -1943,7 +1959,7 @@ export class Engine {
     securities: string | readonly string[],
     options: ResolveVenuesOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeResolveVenues(toStringArray(securities), options.pcsOverrides),
@@ -1954,7 +1970,7 @@ export class Engine {
     securities: string | readonly string[],
     options: AuctionSnapshotOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeAuctionSnapshot(
@@ -1976,7 +1992,7 @@ export class Engine {
     tickers: string | readonly string[],
     options: DelayStatusOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeDelayStatus(toStringArray(tickers), options.checkIdentity ?? false),
@@ -2036,7 +2052,7 @@ export class Engine {
     bondIsins: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () => await this.inner.recipeIssuerIsins(toStringArray(bondIsins)),
     );
@@ -2046,7 +2062,7 @@ export class Engine {
     tickers: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeEtfNavRelationships(
@@ -2059,7 +2075,7 @@ export class Engine {
     tickers: string | readonly string[],
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeEtfNavSnapshot(
@@ -2074,7 +2090,7 @@ export class Engine {
     endDate: DateLike,
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeEtfNavHistory(
@@ -2128,7 +2144,7 @@ export class Engine {
     endDate: DateLike,
     options: RecipeBackendOptions = {},
   ): Promise<unknown> {
-    return await nativeRecipeResult(
+    return await this.recipeResult(
       options.backend,
       async () =>
         await this.inner.recipeCurrencyConversion(
@@ -2527,4 +2543,10 @@ export type {
 
 // Closed string sets generated from defs/bloomberg.toml. These appear in
 // EngineConfig and StreamOptions; FormatKind is re-exported above.
-export type { OverflowPolicy, RequestFormat, SdkLogLevel, ValidationMode } from './types';
+export type {
+  KeyColumn,
+  OverflowPolicy,
+  RequestFormat,
+  SdkLogLevel,
+  ValidationMode,
+} from './types';

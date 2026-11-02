@@ -4,26 +4,29 @@
 //! Rust payload. The bridge runtime's workers only poll that future; they
 //! never attach to the interpreter. pyo3-async-runtimes later attaches once per
 //! completion on the bridge's blocking pool, skips awaitables that were already
-//! cancelled, and converts the payload through `IntoPyObject`. Python objects,
-//! marked-delivery converter calls and publication receipts are therefore all
-//! created there. Dropping an unconverted payload (cancellation, interpreter
-//! finalization) releases its guards and rolls back its native receipt without
-//! the interpreter.
+//! cancelled, and converts the payload through `IntoPyObject`. Python objects
+//! and unpublished delivery receipts are therefore all created there; backend
+//! conversion of a receipt's native batches happens later in Python, on the
+//! consuming event loop. Dropping an unconverted payload (cancellation,
+//! interpreter finalization) releases its guards and rolls back its native
+//! receipt without the interpreter.
 
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::{Arc, LazyLock, Mutex as StdMutex};
+use std::sync::{Arc, LazyLock, Mutex as StdMutex, PoisonError};
 
 use arrow_array::RecordBatch;
 use chrono::{DateTime, Datelike, NaiveDate, Timelike};
 use pyo3::IntoPyObjectExt;
 use pyo3::exceptions::PyRuntimeError;
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDate, PyDateTime, PyDict, PyList, PyTime, PyTzInfo};
+use pyo3::sync::MutexExt;
+use pyo3::types::{PyDate, PyDateTime, PyDict, PyList, PyString, PyTime, PyTzInfo};
 use pyo3_async_runtimes::err::RustPanic;
 use pyo3_async_runtimes::tokio::future_into_py;
 use tokio::sync::watch;
 use xbbg_async::engine::SubscriptionDelivery;
-use xbbg_async::engine::state::{SubscriptionUpdate, UpdateValue};
+use xbbg_async::engine::state::{FieldLayout, SubscriptionUpdate, UpdateValue};
 use xbbg_async::subscription_consumer::{
     SubscriptionDeliveryAck, SubscriptionDeliveryDrainAck, SubscriptionDeliveryDrainLease,
     SubscriptionDeliveryLease, wait_for_subscription_close,
@@ -255,46 +258,100 @@ impl<'py> IntoPyObject<'py> for MarketInfoDict {
     }
 }
 
+/// Python field-name keys for tick dicts, rebuilt only when the update layout
+/// changes.
+#[derive(Default)]
+pub(crate) struct TickDictKeys {
+    /// Layout the keys were built for; holding it keeps its address from
+    /// being reused by another layout while cached.
+    layout: Option<Arc<FieldLayout>>,
+    /// One key per layout field, indexed like `FieldLayout::fields`.
+    fields: Vec<Py<PyString>>,
+}
+
+impl TickDictKeys {
+    /// Keys for `layout`'s fields, built once per layout.
+    fn for_layout(&mut self, py: Python<'_>, layout: &Arc<FieldLayout>) -> &[Py<PyString>] {
+        let current = self
+            .layout
+            .as_ref()
+            .is_some_and(|cached| Arc::ptr_eq(cached, layout) && cached.version == layout.version);
+        if !current {
+            self.fields = layout
+                .fields
+                .iter()
+                .map(|meta| PyString::new(py, &meta.name).unbind())
+                .collect();
+            self.layout = Some(Arc::clone(layout));
+        }
+        &self.fields
+    }
+}
+
+/// Tick-dict keys shared by one subscription's reads.
+pub(crate) type SharedTickDictKeys = Arc<StdMutex<TickDictKeys>>;
+
 /// One update shaped as the tick-mode dict: UTC-aware `timestamp`, `topic`,
-/// present fields only, and explicit nulls as `None`.
-pub(crate) struct TickDict(pub(crate) SubscriptionUpdate);
+/// present fields only, and explicit nulls as `None`. Field-name keys are
+/// reused while the subscription's update layout is unchanged.
+pub(crate) struct TickDict {
+    update: SubscriptionUpdate,
+    keys: SharedTickDictKeys,
+}
+
+impl TickDict {
+    pub(crate) fn new(update: SubscriptionUpdate, keys: SharedTickDictKeys) -> Self {
+        Self { update, keys }
+    }
+}
 
 impl<'py> IntoPyObject<'py> for TickDict {
-    type Target = PyDict;
-    type Output = Bound<'py, PyDict>;
+    type Target = PyAny;
+    type Output = Bound<'py, PyAny>;
     type Error = PyErr;
 
-    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyDict>> {
-        let Self(update) = self;
-        let dict = PyDict::new(py);
-        dict.set_item(
-            "timestamp",
-            timestamp_micros_to_py(py, update.timestamp_us)?,
-        )?;
-        dict.set_item("topic", update.topic.as_ref())?;
-        for field in update.values.iter() {
-            let Some(meta) = update.layout.fields.get(field.index as usize) else {
-                continue;
-            };
-            let name = meta.name.as_ref();
-            match &field.value {
-                UpdateValue::Null => dict.set_item(name, py.None())?,
-                UpdateValue::Bool(v) => dict.set_item(name, *v)?,
-                UpdateValue::I32(v) => dict.set_item(name, *v)?,
-                UpdateValue::I64(v) => dict.set_item(name, *v)?,
-                UpdateValue::F64(v) => dict.set_item(name, *v)?,
-                UpdateValue::Str(v) => dict.set_item(name, v.as_ref())?,
-                UpdateValue::Date32(v) => dict.set_item(name, date32_to_py(py, *v)?)?,
-                UpdateValue::Time64Micros(v) => {
-                    dict.set_item(name, time64_micros_to_py(py, *v)?)?
-                }
-                UpdateValue::TimestampMicros(v) => {
-                    dict.set_item(name, timestamp_micros_to_py(py, *v)?)?
-                }
+    fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+        let Self { update, keys } = self;
+        let mut keys = keys
+            .lock_py_attached(py)
+            .unwrap_or_else(PoisonError::into_inner);
+        subscription_update_to_pydict(py, &mut keys, update).map(|dict| dict.into_bound(py))
+    }
+}
+
+fn subscription_update_to_pydict(
+    py: Python<'_>,
+    keys: &mut TickDictKeys,
+    update: SubscriptionUpdate,
+) -> PyResult<Py<PyAny>> {
+    let utc = PyTzInfo::utc(py)?;
+    let dict = PyDict::new(py);
+    dict.set_item(
+        intern!(py, "timestamp"),
+        timestamp_micros_to_py(py, &utc, update.timestamp_us)?,
+    )?;
+    dict.set_item(intern!(py, "topic"), update.topic.as_ref())?;
+    let names = keys.for_layout(py, &update.layout);
+    for field in update.values.iter() {
+        let Some(name) = names.get(usize::from(field.index)) else {
+            continue;
+        };
+        let name = name.bind(py);
+        match &field.value {
+            UpdateValue::Null => dict.set_item(name, py.None())?,
+            UpdateValue::Bool(v) => dict.set_item(name, *v)?,
+            UpdateValue::I32(v) => dict.set_item(name, *v)?,
+            UpdateValue::I64(v) => dict.set_item(name, *v)?,
+            UpdateValue::F64(v) => dict.set_item(name, *v)?,
+            UpdateValue::Str(v) => dict.set_item(name, v.as_ref())?,
+            UpdateValue::Date32(v) => dict.set_item(name, date32_to_py(py, *v)?)?,
+            UpdateValue::Time64Micros(v) => dict.set_item(name, time64_micros_to_py(py, *v)?)?,
+            UpdateValue::TimestampMicros(v) => {
+                dict.set_item(name, timestamp_micros_to_py(py, &utc, *v)?)?
             }
         }
-        Ok(dict)
     }
+    Ok(dict.into_any().unbind())
 }
 
 fn date32_to_py(py: Python<'_>, days: i32) -> PyResult<Py<PyAny>> {
@@ -325,11 +382,14 @@ fn time64_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
         .unbind())
 }
 
-fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
+fn timestamp_micros_to_py<'py>(
+    py: Python<'py>,
+    utc: &Bound<'py, PyTzInfo>,
+    micros: i64,
+) -> PyResult<Py<PyAny>> {
     let Some(dt) = DateTime::from_timestamp_micros(micros) else {
         return Ok(py.None());
     };
-    let utc = PyTzInfo::utc(py)?;
     Ok(PyDateTime::new(
         py,
         dt.year(),
@@ -339,7 +399,7 @@ fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
         dt.minute() as u8,
         dt.second() as u8,
         dt.timestamp_subsec_micros(),
-        Some(&utc),
+        Some(utc),
     )?
     .into_any()
     .unbind())
@@ -349,8 +409,9 @@ fn timestamp_micros_to_py(py: Python<'_>, micros: i64) -> PyResult<Py<PyAny>> {
 pub(crate) enum Unsubscribed {
     /// Close without draining: `None`.
     Closed,
-    /// Tick-mode drain: one dict per unread update.
-    Ticks(Vec<SubscriptionUpdate>),
+    /// Tick-mode drain: one dict per unread update, sharing the
+    /// subscription's field-name keys.
+    Ticks(Vec<SubscriptionUpdate>, SharedTickDictKeys),
     /// Arrow drain: one `ArrowRecordBatch` per batch.
     Batches(Vec<RecordBatch>),
 }
@@ -363,8 +424,14 @@ impl<'py> IntoPyObject<'py> for Unsubscribed {
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         match self {
             Self::Closed => Ok(py.None().into_bound(py)),
-            Self::Ticks(updates) => {
-                let ticks = PyList::new(py, updates.into_iter().map(TickDict))?;
+            Self::Ticks(updates, keys) => {
+                let mut keys = keys
+                    .lock_py_attached(py)
+                    .unwrap_or_else(PoisonError::into_inner);
+                let ticks = PyList::empty(py);
+                for update in updates {
+                    ticks.append(subscription_update_to_pydict(py, &mut keys, update)?)?;
+                }
                 Ok(ticks.into_any())
             }
             Self::Batches(batches) => {
@@ -406,13 +473,15 @@ impl SubscriptionPublicationLease {
     }
 }
 
-/// Retains the native receipt until the consuming Python task actually resumes.
-/// Dropping an unpublished result restores updates/gaps, re-dirties state, or
+/// Unpublished marked delivery. `value` holds native `(kind, batch,
+/// dropped_updates)` tuples (a list for drains) for conversion on the consuming
+/// event loop; `publish()` commits once that conversion succeeds. Discarding or
+/// dropping an unpublished receipt restores updates/gaps, re-dirties state, or
 /// retains a frozen drain for a later publication attempt.
 #[pyclass(frozen)]
 pub(crate) struct PySubscriptionDeliveryReceipt {
     lease: StdMutex<Option<SubscriptionPublicationLease>>,
-    result: Option<Py<PyAny>>,
+    value: Option<Py<PyAny>>,
     /// Released after the lease (fields drop in order), so the subscription's
     /// own drop decides whether native teardown runs inline or deferred.
     _owner: Arc<SubscriptionOwner>,
@@ -421,12 +490,12 @@ pub(crate) struct PySubscriptionDeliveryReceipt {
 impl PySubscriptionDeliveryReceipt {
     fn new(
         publication: SubscriptionPublicationLease,
-        result: Option<Py<PyAny>>,
+        value: Option<Py<PyAny>>,
         owner: Arc<SubscriptionOwner>,
     ) -> Self {
         Self {
             lease: StdMutex::new(Some(publication)),
-            result,
+            value,
             _owner: owner,
         }
     }
@@ -434,24 +503,26 @@ impl PySubscriptionDeliveryReceipt {
 
 #[pymethods]
 impl PySubscriptionDeliveryReceipt {
-    fn publish(&self, py: Python<'_>) -> PyResult<Py<PyAny>> {
+    /// Commit the delivery, or raise the terminal stream error it carries.
+    fn publish(&self) -> PyResult<()> {
         let lease = self
             .lease
             .lock()
             .expect("subscription delivery receipt poisoned")
             .take()
             .ok_or_else(|| PyRuntimeError::new_err("subscription delivery already published"))?;
-        lease.commit()?;
-        Ok(self
-            .result
-            .as_ref()
-            .expect("a successful receipt has a converted result")
-            .clone_ref(py))
+        lease.commit()
+    }
+
+    /// Native value awaiting conversion; None when the receipt carries an error.
+    #[getter]
+    fn value(&self, py: Python<'_>) -> Option<Py<PyAny>> {
+        self.value.as_ref().map(|value| value.clone_ref(py))
     }
 
     #[getter]
     fn has_error(&self) -> bool {
-        self.result.is_none()
+        self.value.is_none()
     }
 
     fn discard(&self) {
@@ -464,30 +535,20 @@ impl PySubscriptionDeliveryReceipt {
     }
 }
 
-/// One marked delivery and its optional converter.
+/// One marked delivery, wrapped into an unpublished receipt on the completion
+/// thread without any backend conversion.
 ///
-/// Conversion prepares the lease, runs the converter and wraps both in a
-/// publication receipt; the commit still happens in `publish()`. A failed
-/// conversion or a dropped unconverted payload rolls the lease back. The
-/// subscription owner outlives the lease, so a receipt or payload released
-/// after its engine never runs SDK teardown inline.
+/// The commit still happens in `publish()`; a dropped unconverted payload
+/// rolls the lease back. The subscription owner outlives the lease, so a
+/// receipt or payload released after its engine never runs SDK teardown inline.
 pub(crate) struct DeliveryPayload {
     lease: SubscriptionDeliveryLease,
-    converter: Option<Py<PyAny>>,
     owner: Arc<SubscriptionOwner>,
 }
 
 impl DeliveryPayload {
-    pub(crate) fn new(
-        lease: SubscriptionDeliveryLease,
-        converter: Option<Py<PyAny>>,
-        owner: Arc<SubscriptionOwner>,
-    ) -> Self {
-        Self {
-            lease,
-            converter,
-            owner,
-        }
+    pub(crate) fn new(lease: SubscriptionDeliveryLease, owner: Arc<SubscriptionOwner>) -> Self {
+        Self { lease, owner }
     }
 }
 
@@ -497,44 +558,34 @@ impl<'py> IntoPyObject<'py> for DeliveryPayload {
     type Error = PyErr;
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
-        let Self {
-            lease,
-            converter,
-            owner,
-        } = self;
-        let (publication, result) = match lease.prepare_success() {
-            Ok((delivery, ack)) => {
-                let result = subscription_delivery_to_python(py, delivery, converter.as_ref())?;
-                (SubscriptionPublicationLease::ReadAck(ack), Some(result))
-            }
+        let Self { lease, owner } = self;
+        let (publication, value) = match lease.prepare_success() {
+            Ok((delivery, ack)) => (
+                SubscriptionPublicationLease::ReadAck(ack),
+                Some(subscription_delivery_to_python(py, delivery)?),
+            ),
             Err(lease) => (SubscriptionPublicationLease::ReadError(lease), None),
         };
         Bound::new(
             py,
-            PySubscriptionDeliveryReceipt::new(publication, result, owner),
+            PySubscriptionDeliveryReceipt::new(publication, value, owner),
         )
     }
 }
 
-/// A frozen marked drain and its optional converter, converted like
-/// [`DeliveryPayload`]. Dropping it unconverted retains the drain for retry.
+/// A frozen marked drain, wrapped like [`DeliveryPayload`]. Dropping it
+/// unconverted retains the drain for retry.
 pub(crate) struct DrainPayload {
     lease: SubscriptionDeliveryDrainLease,
-    converter: Option<Py<PyAny>>,
     owner: Arc<SubscriptionOwner>,
 }
 
 impl DrainPayload {
     pub(crate) fn new(
         lease: SubscriptionDeliveryDrainLease,
-        converter: Option<Py<PyAny>>,
         owner: Arc<SubscriptionOwner>,
     ) -> Self {
-        Self {
-            lease,
-            converter,
-            owner,
-        }
+        Self { lease, owner }
     }
 }
 
@@ -544,20 +595,12 @@ impl<'py> IntoPyObject<'py> for DrainPayload {
     type Error = PyErr;
 
     fn into_pyobject(self, py: Python<'py>) -> PyResult<Self::Output> {
-        let Self {
-            lease,
-            converter,
-            owner,
-        } = self;
-        let (publication, result) = match lease.prepare_success() {
+        let Self { lease, owner } = self;
+        let (publication, value) = match lease.prepare_success() {
             Ok((deliveries, ack)) => {
                 let list = PyList::empty(py);
                 for delivery in deliveries {
-                    list.append(subscription_delivery_to_python(
-                        py,
-                        delivery,
-                        converter.as_ref(),
-                    )?)?;
+                    list.append(subscription_delivery_to_python(py, delivery)?)?;
                 }
                 (
                     SubscriptionPublicationLease::DrainAck(ack),
@@ -568,28 +611,28 @@ impl<'py> IntoPyObject<'py> for DrainPayload {
         };
         Bound::new(
             py,
-            PySubscriptionDeliveryReceipt::new(publication, result, owner),
+            PySubscriptionDeliveryReceipt::new(publication, value, owner),
         )
     }
 }
 
+/// Wrap native buffers only; backend conversion happens in Python on its loop.
 fn subscription_delivery_to_python(
     py: Python<'_>,
     delivery: SubscriptionDelivery,
-    converter: Option<&Py<PyAny>>,
 ) -> PyResult<Py<PyAny>> {
     let SubscriptionDelivery {
         kind,
         data,
         gap_before,
+        ..
     } = delivery;
     let batch = record_batch_to_arrow_record_batch(py, data)?;
     let dropped_updates = gap_before.map(|gap| gap.dropped_updates);
-    let args = (kind.as_str(), batch, dropped_updates);
-    match converter {
-        Some(converter) => Ok(converter.bind(py).call1(args)?.unbind()),
-        None => Ok(args.into_pyobject(py)?.into_any().unbind()),
-    }
+    Ok((kind.as_str(), batch, dropped_updates)
+        .into_pyobject(py)?
+        .into_any()
+        .unbind())
 }
 
 #[cfg(test)]
@@ -599,8 +642,6 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::time::Duration;
 
-    use pyo3::exceptions::PyValueError;
-    use pyo3::types::{PyCFunction, PyTuple};
     use xbbg_async::OverflowPolicy;
     use xbbg_async::engine::state::{
         FieldKind, FieldLayout, FieldMeta, UpdateField, subscription_channel,
@@ -798,13 +839,10 @@ mod tests {
     fn timestamp_micros_to_py_returns_utc_aware_datetime() {
         Python::initialize();
         Python::attach(|py| {
-            let value = timestamp_micros_to_py(py, 1_704_067_200_123_456).expect("timestamp");
+            let utc = PyTzInfo::utc(py).expect("utc");
+            let value = timestamp_micros_to_py(py, &utc, 1_704_067_200_123_456).expect("timestamp");
             let tzinfo = value.bind(py).getattr("tzinfo").expect("tzinfo");
-            assert!(
-                tzinfo
-                    .eq(PyTzInfo::utc(py).expect("utc"))
-                    .expect("tz equality")
-            );
+            assert!(tzinfo.eq(utc).expect("tz equality"));
         });
     }
 
@@ -825,46 +863,88 @@ mod tests {
                 value: UpdateValue::Null,
             });
 
-            let dict = TickDict(update).into_pyobject(py).expect("tick dict");
+            let keys = Arc::new(StdMutex::new(TickDictKeys::default()));
+            let dict = TickDict::new(update, keys)
+                .into_pyobject(py)
+                .expect("tick dict");
             assert!(dict.contains("PX_LAST").expect("present field"));
-            assert!(
-                dict.get_item("PX_LAST")
-                    .expect("lookup")
-                    .expect("present value")
-                    .is_none()
-            );
+            assert!(dict.get_item("PX_LAST").expect("lookup").is_none());
             assert!(!dict.contains("BID").expect("absent field"));
         });
     }
 
     #[test]
-    fn delivery_conversion_failure_restores_real_native_batch_and_gap() {
+    fn tick_dict_reuses_field_keys_until_the_layout_changes() {
+        Python::initialize();
+        Python::attach(|py| {
+            let first = Arc::new(FieldLayout::new(
+                1,
+                vec![
+                    FieldMeta::new("PX_LAST", 0, FieldKind::F64),
+                    FieldMeta::new("BID", 1, FieldKind::F64),
+                ],
+            ));
+            // Same version, other fields: the layout object decides reuse.
+            let second = Arc::new(FieldLayout::new(
+                1,
+                vec![FieldMeta::new("BID", 0, FieldKind::F64)],
+            ));
+            let update = |layout: &Arc<FieldLayout>, value: f64| {
+                let mut update = subscription_update_with_layout(Arc::clone(layout), 10);
+                update.values.push(UpdateField {
+                    index: 0,
+                    value: UpdateValue::F64(value),
+                });
+                update
+            };
+            let mut keys = TickDictKeys::default();
+            let mut tick = |next| {
+                subscription_update_to_pydict(py, &mut keys, next)
+                    .expect("tick dict")
+                    .into_bound(py)
+                    .cast_into::<PyDict>()
+                    .expect("dict")
+            };
+            fn key<'py>(dict: &Bound<'py, PyDict>, name: &str) -> Bound<'py, PyAny> {
+                dict.keys()
+                    .iter()
+                    .find(|key| key.eq(name).expect("key comparison"))
+                    .expect("key present")
+            }
+
+            let first_tick = tick(update(&first, 1.0));
+            let second_tick = tick(update(&first, 2.0));
+            assert!(key(&first_tick, "PX_LAST").is(key(&second_tick, "PX_LAST")));
+
+            let third_tick = tick(update(&second, 3.0));
+            assert_eq!(
+                third_tick
+                    .get_item("BID")
+                    .expect("lookup")
+                    .expect("present value")
+                    .extract::<f64>()
+                    .expect("float"),
+                3.0
+            );
+            assert_eq!(
+                third_tick.keys().extract::<Vec<String>>().expect("keys"),
+                ["timestamp", "topic", "BID"]
+            );
+        });
+    }
+
+    #[test]
+    fn discarded_delivery_restores_real_native_batch_and_gap() {
         Python::initialize();
         current_thread_runtime().block_on(async {
             let (producer, consumer) = consumer_with_gap();
             let lease = consumer.next_delivery(1).await.expect("first receipt");
+            // A failed Python backend conversion discards the unpublished receipt.
             Python::attach(|py| {
-                let failing = PyCFunction::new_closure(
-                    py,
-                    None,
-                    None,
-                    |_args: &Bound<'_, PyTuple>,
-                     _kwargs: Option<&Bound<'_, PyDict>>|
-                     -> PyResult<()> {
-                        Err(PyValueError::new_err(
-                            "synthetic backend conversion failure",
-                        ))
-                    },
-                )
-                .expect("converter");
-                let error = DeliveryPayload::new(
-                    lease,
-                    Some(failing.into_any().unbind()),
-                    consumer.clone(),
-                )
-                .into_pyobject(py)
-                .expect_err("conversion failure");
-                assert!(error.is_instance_of::<PyValueError>(py));
+                let receipt = DeliveryPayload::new(lease, consumer.clone())
+                    .into_pyobject(py)
+                    .expect("unpublished receipt");
+                receipt.call_method0("discard").unwrap();
             });
 
             let lease = consumer.next_delivery(1).await.expect("restored receipt");
@@ -873,16 +953,17 @@ mod tests {
                 1
             );
             Python::attach(|py| {
-                let receipt = DeliveryPayload::new(lease, None, consumer.clone())
+                let receipt = DeliveryPayload::new(lease, consumer.clone())
                     .into_pyobject(py)
-                    .expect("converted delivery");
-                let output = receipt.call_method0("publish").unwrap();
+                    .expect("unpublished receipt");
+                assert!(!receipt.get().has_error());
+                let value = receipt.getattr("value").unwrap();
                 assert_eq!(
-                    output.get_item(0).unwrap().extract::<String>().unwrap(),
+                    value.get_item(0).unwrap().extract::<String>().unwrap(),
                     "deltas"
                 );
-                assert_eq!(output.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
-                let rows = output
+                assert_eq!(value.get_item(2).unwrap().extract::<u64>().unwrap(), 1);
+                let rows = value
                     .get_item(1)
                     .unwrap()
                     .call_method0("to_pylist")
@@ -897,6 +978,11 @@ mod tests {
                         .unwrap(),
                     "SYNTHETIC Index",
                 );
+                receipt.call_method0("publish").unwrap();
+                let repeated = receipt
+                    .call_method0("publish")
+                    .expect_err("a receipt commits once");
+                assert!(repeated.is_instance_of::<PyRuntimeError>(py));
             });
             drop(producer);
             assert!(consumer.next_delivery(1).await.is_none());
@@ -914,29 +1000,12 @@ mod tests {
             });
             let consumer = owned(SubscriptionConsumer::from_receiver(rx));
             let lease = consumer.next_delivery(1).await.expect("terminal receipt");
-            let called = Arc::new(AtomicBool::new(false));
-            let flag = called.clone();
             Python::attach(|py| {
-                let converter = PyCFunction::new_closure(
-                    py,
-                    None,
-                    None,
-                    move |_args: &Bound<'_, PyTuple>,
-                          _kwargs: Option<&Bound<'_, PyDict>>|
-                          -> PyResult<()> {
-                        flag.store(true, Ordering::SeqCst);
-                        Ok(())
-                    },
-                )
-                .expect("converter");
-                let receipt = DeliveryPayload::new(
-                    lease,
-                    Some(converter.into_any().unbind()),
-                    consumer.clone(),
-                )
-                .into_pyobject(py)
-                .expect("prepared terminal receipt");
+                let receipt = DeliveryPayload::new(lease, consumer.clone())
+                    .into_pyobject(py)
+                    .expect("prepared terminal receipt");
                 assert!(receipt.get().has_error());
+                assert!(receipt.getattr("value").unwrap().is_none());
                 let error = receipt
                     .call_method0("publish")
                     .expect_err("terminal source loss");
@@ -957,10 +1026,6 @@ mod tests {
                 }
                 assert!(receipt.call_method0("publish").is_err());
             });
-            assert!(
-                !called.load(Ordering::SeqCst),
-                "terminal receipts must not run the batch converter"
-            );
             assert!(consumer.next_delivery(1).await.is_none());
         });
     }
@@ -972,7 +1037,7 @@ mod tests {
             let (_producer, consumer) = consumer_with_gap();
             let lease = consumer.next_delivery(1).await.unwrap();
             Python::attach(|py| {
-                let receipt = DeliveryPayload::new(lease, None, consumer.clone())
+                let receipt = DeliveryPayload::new(lease, consumer.clone())
                     .into_pyobject(py)
                     .unwrap();
                 drop(receipt);
@@ -1000,8 +1065,7 @@ mod tests {
         current_thread_runtime().block_on(async {
             let (_producer, consumer) = consumer_with_gap();
             let lease = consumer.next_delivery(1).await.expect("first receipt");
-            let converter = Python::attach(|py| py.None());
-            let payload = DeliveryPayload::new(lease, Some(converter), consumer.clone());
+            let payload = DeliveryPayload::new(lease, consumer.clone());
             run_while_interpreter_held(move || drop(payload));
             let restored = consumer
                 .next_delivery(1)
@@ -1027,7 +1091,7 @@ mod tests {
             let (_producer, consumer) = consumer_with_gap();
             let lease = consumer.prepare_unsubscribe_deliveries(true, None).await;
             assert_eq!(lease.as_ref().expect("drained deliveries").len(), 1);
-            let payload = DrainPayload::new(lease, None, consumer.clone());
+            let payload = DrainPayload::new(lease, consumer.clone());
             run_while_interpreter_held(move || drop(payload));
             let retried = consumer
                 .prepare_unsubscribe_deliveries(true, None)

@@ -422,7 +422,7 @@ def test_historical_presentation_sorts_by_ticker_date_and_field(sort: str, value
     table = _history_table()
     assert table.chunk_lengths == [3, 2]
 
-    shaped = table.apply_historical_presentation(None, None, sort, None)
+    shaped = table.apply_historical_presentation(None, None, sort, None, "ticker")
 
     assert shaped.column_names == _HISTORY_COLUMNS
     assert shaped.column("value") == values
@@ -460,13 +460,13 @@ def test_historical_presentation_labels_periods_for_each_periodicity(
 ) -> None:
     table = _history_table()
 
-    periodic = table.apply_historical_presentation(None, "periodic", None, periodicity)
+    periodic = table.apply_historical_presentation(None, "periodic", None, periodicity, "ticker")
     assert periodic.column_names == ["ticker", "period", "field", "value"]
     assert periodic.column("period") == labels
     assert periodic.column("period").data_type == "Utf8"
     assert periodic.chunk_lengths == [3, 2]
 
-    both = table.apply_historical_presentation(None, "BOTH", None, periodicity)
+    both = table.apply_historical_presentation(None, "BOTH", None, periodicity, "ticker")
     assert both.column_names == ["ticker", "date", "period", "field", "value"]
     assert both.column("date") == [row[1] for row in _HISTORY_ROWS]
     assert both.column("period") == labels
@@ -475,14 +475,16 @@ def test_historical_presentation_labels_periods_for_each_periodicity(
 def test_historical_presentation_hides_dates_and_periods() -> None:
     table = _history_table()
 
-    assert table.apply_historical_presentation(False, None, None, None).column_names == ["ticker", "field", "value"]
-    hidden = table.apply_historical_presentation(False, "BOTH", "DESCENDING", "MONTHLY")
+    hide = table.apply_historical_presentation(False, None, None, None, "ticker")
+    assert hide.column_names == ["ticker", "field", "value"]
+    hidden = table.apply_historical_presentation(False, "BOTH", "DESCENDING", "MONTHLY", "ticker")
     assert hidden.column_names == ["ticker", "field", "value"]
     assert hidden.column("value") == [3.0, 2.0, 4.0, 1.0, 5.0]
-    assert table.apply_historical_presentation(True, None, None, None).to_pylist() == table.to_pylist()
+    shown = table.apply_historical_presentation(True, None, None, None, "ticker")
+    assert shown.to_pylist() == table.to_pylist()
 
     undated = table.drop_columns(["date"])
-    unchanged = undated.apply_historical_presentation(None, "PERIODIC", "DESCENDING", "MONTHLY")
+    unchanged = undated.apply_historical_presentation(None, "PERIODIC", "DESCENDING", "MONTHLY", "ticker")
     assert unchanged.to_pylist() == undated.to_pylist()
 
 
@@ -502,7 +504,7 @@ def test_reshape_bqr_generic_pivots_ticks_across_batches_with_gaps() -> None:
         [99.0, None, 5.0, 6.0],
     )
 
-    reshaped = ArrowTable.concat_tables([first, second]).reshape_bqr_generic("SYN1 Corp")
+    reshaped = ArrowTable.concat_tables([first, second]).reshape_bqr_generic("SYN1 Corp", "ticker")
 
     assert reshaped.column_names == ["ticker", "time", "type", "value", "brokerBuy"]
     assert reshaped.to_pylist() == [
@@ -518,26 +520,26 @@ def test_reshape_bqr_generic_without_tick_records_is_the_empty_quote_table() -> 
     no_paths = ArrowTable.from_pydict({"value_str": ["x"]})
 
     for table in (no_ticks, no_paths, no_ticks.slice(0, 0)):
-        reshaped = table.reshape_bqr_generic("SYN1 Corp")
+        reshaped = table.reshape_bqr_generic("SYN1 Corp", "ticker")
         assert reshaped.column_names == empty_columns
         assert reshaped.num_rows == 0
 
 
-def test_reshape_bqr_generic_types_numeric_fields_as_float64_and_others_as_text() -> None:
+def test_reshape_bqr_generic_keeps_value_num_types_and_renders_them_beside_text() -> None:
     ticks = _generic_bqr_table(
         ["tickData[0].size", "tickData[1].size", "tickData[0].type", "tickData[1].type"],
         [None, None, "BID", None],
         [5, 7, None, 1],
     )
 
-    reshaped = ticks.reshape_bqr_generic("SYN1 Corp")
+    reshaped = ticks.reshape_bqr_generic("SYN1 Corp", "security")
 
     assert [(name, reshaped.column(name).data_type) for name in reshaped.column_names] == [
-        ("ticker", "Utf8"),
+        ("security", "Utf8"),
         ("type", "Utf8"),
-        ("size", "Float64"),
+        ("size", "Int64"),
     ]
-    assert reshaped.column("size") == [5.0, 7.0]
+    assert reshaped.column("size") == [5, 7]
     assert reshaped.column("type") == ["BID", "1"]
 
 
@@ -613,7 +615,7 @@ def test_decode_field_exceptions_expands_versioned_and_legacy_payloads() -> None
     ids=["not-json", "dangling-index", "negative-index", "truncated-above-threshold"],
 )
 def test_decode_field_exceptions_rejects_malformed_payloads(raw: str) -> None:
-    with pytest.raises(ValueError, match=r"invalid JSON in xbbg\.field_exceptions"):
+    with pytest.raises(ValueError, match=r"invalid xbbg\.field_exceptions metadata: "):
         _decode_field_exceptions(raw)
 
 
@@ -671,9 +673,9 @@ _GIL_RELEASING_CALLS: dict[str, Callable[[dict[str, Any]], object]] = {
     "to_record_batch": lambda carriers: carriers["table"].to_record_batch(),
     "has_any_value": lambda carriers: carriers["table"].has_any_value(["blank"] * 25),
     "apply_historical_presentation": lambda carriers: carriers["history"].apply_historical_presentation(
-        True, "BOTH", "DESCENDING", "WEEKLY"
+        True, "BOTH", "DESCENDING", "WEEKLY", "ticker"
     ),
-    "reshape_bqr_generic": lambda carriers: carriers["ticks"].reshape_bqr_generic("SYN1 Corp"),
+    "reshape_bqr_generic": lambda carriers: carriers["ticks"].reshape_bqr_generic("SYN1 Corp", "ticker"),
 }
 
 

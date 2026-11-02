@@ -73,6 +73,13 @@ CLOSED_SETS: tuple[tuple[str, str, str, str, str], ...] = (
         "Field validation applied before a request is sent.",
     ),
     (
+        "key_columns",
+        "KEY_COLUMNS",
+        "KEY_COLUMN",
+        "KeyColumn",
+        "Name of the result column holding each row's security.",
+    ),
+    (
         "sdk_log_levels",
         "SDK_LOG_LEVELS",
         "SDK_LOG_LEVEL",
@@ -94,6 +101,7 @@ RUST_CONTRACTS: tuple[tuple[str, str, str, bool, bool], ...] = (
         True,
     ),
     ("validation_modes", "crate::engine::ValidationMode", "validation_mode", True, True),
+    ("key_columns", "crate::engine::KeyColumn", "key_column", True, True),
     ("sdk_log_levels", "crate::sdk_logging::SdkLogLevel", "sdk_log_level", False, False),
 )
 

@@ -13,6 +13,7 @@
 //! - [`recipe_cdx_ticker_with_options`]: Resolve CDX series
 //! - [`recipe_active_cdx_with_options`]: Find most active CDX series
 
+use std::borrow::Cow;
 use std::sync::Arc;
 
 use arrow_array::builder::{Float64Builder, Int32Builder, StringBuilder};
@@ -33,8 +34,8 @@ use xbbg_ext::{fmt_date, parse_date, parse_ticker_parts};
 
 use crate::error::{RecipeError, Result};
 use crate::utils::{
-    array_value_as_date, array_value_as_f64, array_value_as_string, as_string_col, canonical_name,
-    date32_to_naive, find_column, naive_to_date32, parse_any_date,
+    ColumnValues, as_string_col, canonical_name, date32_to_naive, find_column, naive_to_date32,
+    parse_any_date, str_entry,
 };
 
 /// Resolve a generic futures ticker to a specific contract ticker for a date.
@@ -85,7 +86,7 @@ pub async fn recipe_fut_ticker(
             .await?;
         }
         let (selected, _) = select_futures_contract(&valid_contracts, &gen_ticker, &dt, idx)?;
-        build_single_ticker_batch(selected)
+        build_single_ticker_batch(selected, engine.key_column().as_str())
     }
     .await;
     let batch =
@@ -124,6 +125,7 @@ pub async fn recipe_active_futures(
     validate_generic_ticker(&gen_ticker)?;
     let dt_parsed = parse_date(&dt)?;
     options.format = None;
+    let key = engine.key_column().as_str();
 
     let mut request_ids = BloombergRequestIds::default();
     if let Ok(Some(mapped_ticker)) =
@@ -133,7 +135,7 @@ pub async fn recipe_active_futures(
                 request_ids.extend(error.bloomberg_request_ids().iter().cloned());
             })
     {
-        let batch = build_single_ticker_batch(mapped_ticker)
+        let batch = build_single_ticker_batch(mapped_ticker, key)
             .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
         return Ok(request_ids.attach(batch));
     }
@@ -199,13 +201,13 @@ pub async fn recipe_active_futures(
     let ((front_ticker, front_maturity), second_contract) =
         pair.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
     let Some((second_ticker, _)) = second_contract else {
-        let batch = build_single_ticker_batch(front_ticker)
+        let batch = build_single_ticker_batch(front_ticker, key)
             .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
         return Ok(request_ids.attach(batch));
     };
 
     if before_futures_roll_month(dt_parsed, front_maturity) {
-        let batch = build_single_ticker_batch(front_ticker)
+        let batch = build_single_ticker_batch(front_ticker, key)
             .map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
         return Ok(request_ids.attach(batch));
     }
@@ -219,7 +221,7 @@ pub async fn recipe_active_futures(
     let volume_batch = engine.request(volume_params).await.map_err(|error| {
         RecipeError::from(error).with_bloomberg_request_ids(request_ids.iter().cloned())
     })?;
-    active_futures_volume_batch(&volume_batch, front_ticker, second_ticker, request_ids)
+    active_futures_volume_batch(&volume_batch, key, front_ticker, second_ticker, request_ids)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -268,7 +270,8 @@ pub async fn recipe_futures_curve(
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&chain_batch);
     let result: Result<_> = async {
-        let mut contracts = extract_chain_contracts(&chain_batch, max_contracts)?;
+        let mut contracts =
+            extract_chain_contracts(&chain_batch, engine.key_column().as_str(), max_contracts)?;
         drop(chain_batch);
         if contracts.is_empty() {
             return Err(RecipeError::Other(format!(
@@ -301,7 +304,7 @@ pub async fn recipe_futures_curve(
         };
         let metadata_batch = engine.request(metadata_params).await?;
         request_ids.collect(&metadata_batch);
-        let metadata = extract_refdata_values(&metadata_batch)?;
+        let metadata = extract_refdata_values(&metadata_batch, engine.key_column().as_str())?;
         drop(metadata_batch);
 
         for contract in &mut contracts {
@@ -361,7 +364,7 @@ pub async fn recipe_cdx_ticker_with_options(
         let resolved =
             resolve_cdx_series_at(engine, &gen_ticker, parse_date(&dt)?, &mut request_ids).await?;
         let ticker = build_resolved_cdx_ticker_with_options(&resolved.info, versionless);
-        build_single_ticker_batch(ticker)
+        build_single_ticker_batch(ticker, engine.key_column().as_str())
     }
     .await;
     let batch =
@@ -386,13 +389,14 @@ pub async fn recipe_active_cdx_with_options(
     versionless: bool,
 ) -> Result<RecordBatch> {
     let dt_parsed = parse_date(&dt)?;
+    let key = engine.key_column().as_str();
     let mut request_ids = BloombergRequestIds::default();
     let result: Result<_> = async {
         let current = resolve_cdx_series_at(engine, &gen_ticker, dt_parsed, &mut request_ids).await?;
 
         let Some(previous_alias) = current.info.previous_alias() else {
             let ticker = build_resolved_cdx_ticker_with_options(&current.info, versionless);
-            return build_single_ticker_batch(ticker);
+            return build_single_ticker_batch(ticker, key);
         };
         let previous = resolve_specific_cdx(engine, &previous_alias, &mut request_ids).await?;
         let current_ticker = build_resolved_cdx_ticker_with_options(&current.info, false);
@@ -411,9 +415,9 @@ pub async fn recipe_active_cdx_with_options(
 
         let price_batch = engine.request(price_params).await?;
         request_ids.collect(&price_batch);
-        let selected = if has_history_value(&price_batch, &current_ticker, "PX_LAST")? {
+        let selected = if has_history_value(&price_batch, key, &current_ticker, "PX_LAST")? {
             &current.info
-        } else if has_history_value(&price_batch, &previous_ticker, "PX_LAST")? {
+        } else if has_history_value(&price_batch, key, &previous_ticker, "PX_LAST")? {
             &previous
         } else {
             return Err(RecipeError::Other(format!(
@@ -424,7 +428,7 @@ pub async fn recipe_active_cdx_with_options(
         };
 
         let ticker = build_resolved_cdx_ticker_with_options(selected, versionless);
-        build_single_ticker_batch(ticker)
+        build_single_ticker_batch(ticker, key)
     }
     .await;
     let batch =
@@ -488,16 +492,18 @@ async fn resolve_cdx_series_at(
 
     let batch = request_cdx_metadata(engine, &[gen_ticker.to_string()]).await?;
     request_ids.collect(&batch);
-    let series = required_cdx_number(&batch, gen_ticker, "ROLLING_SERIES")?;
-    let accrual_start = required_cdx_date(&batch, gen_ticker, CDX_ACCRUAL_FIELD)?;
+    let metadata = RefdataIndex::new(&batch, engine.key_column().as_str())?;
+    let series = required_cdx_number(&metadata, gen_ticker, "ROLLING_SERIES")?;
+    let accrual_start = required_cdx_date(&metadata, gen_ticker, CDX_ACCRUAL_FIELD)?;
 
     if dt >= accrual_start {
-        let version = required_cdx_number(&batch, gen_ticker, "VERSION")?;
+        let version = required_cdx_number(&metadata, gen_ticker, "VERSION")?;
         return Ok(CdxSeriesAt {
             info: ResolvedCdxInfo::resolve(parsed, series, version)?,
             accrual_start,
         });
     }
+    drop(metadata);
     drop(batch);
 
     let mut window = cdx_prior_series_window(series, accrual_start, dt).ok_or_else(|| {
@@ -538,7 +544,14 @@ async fn resolve_cdx_ladder(
         .collect::<Result<Vec<String>>>()?;
     let batch = request_cdx_metadata(engine, &aliases).await?;
     request_ids.collect(&batch);
-    pick_cdx_ladder_series(&batch, gen_ticker, &aliases, lo, dt)
+    pick_cdx_ladder_series(
+        &batch,
+        engine.key_column().as_str(),
+        gen_ticker,
+        &aliases,
+        lo,
+        dt,
+    )
 }
 
 /// Decide which rung of a fetched ladder applies on `dt`.
@@ -548,16 +561,21 @@ async fn resolve_cdx_ladder(
 /// starting at `lo`.
 fn pick_cdx_ladder_series(
     batch: &RecordBatch,
+    key: &str,
     gen_ticker: &str,
     aliases: &[String],
     lo: u32,
     dt: NaiveDate,
 ) -> Result<Option<CdxSeriesAt>> {
+    if aliases.is_empty() {
+        return Ok(None);
+    }
+    let metadata = RefdataIndex::new(batch, key)?;
     let mut above: Option<(u32, NaiveDate)> = None;
 
     for (offset, alias) in aliases.iter().enumerate().rev() {
         let series = lo + offset as u32;
-        let accrual_start = required_cdx_date(batch, alias, CDX_ACCRUAL_FIELD)?;
+        let accrual_start = required_cdx_date(&metadata, alias, CDX_ACCRUAL_FIELD)?;
 
         if let Some((above_series, above_accrual)) = above
             && accrual_start >= above_accrual
@@ -569,7 +587,7 @@ fn pick_cdx_ladder_series(
         above = Some((series, accrual_start));
 
         if accrual_start <= dt {
-            let version = required_cdx_number(batch, alias, "VERSION")?;
+            let version = required_cdx_number(&metadata, alias, "VERSION")?;
             return Ok(Some(CdxSeriesAt {
                 info: ResolvedCdxInfo::resolve(parse_cdx_ticker(alias)?, series, version)?,
                 accrual_start,
@@ -611,12 +629,16 @@ async fn resolve_specific_cdx(
         .ok_or_else(|| RecipeError::Other(format!("missing parsed CDX series for '{ticker}'")))?;
     let batch = request_cdx_metadata(engine, &[ticker.to_string()]).await?;
     request_ids.collect(&batch);
-    let version = required_cdx_number(&batch, ticker, "VERSION")?;
+    let version = required_cdx_number(
+        &RefdataIndex::new(&batch, engine.key_column().as_str())?,
+        ticker,
+        "VERSION",
+    )?;
     ResolvedCdxInfo::resolve(parsed, series, version).map_err(Into::into)
 }
 
-fn required_cdx_number(batch: &RecordBatch, ticker: &str, field: &str) -> Result<u32> {
-    let raw = extract_refdata_string_for_ticker(batch, ticker, field)?.ok_or_else(|| {
+fn required_cdx_number(metadata: &RefdataIndex<'_>, ticker: &str, field: &str) -> Result<u32> {
+    let raw = metadata.string(ticker, field).ok_or_else(|| {
         RecipeError::Other(format!(
             "missing {field} for '{ticker}' in Bloomberg response"
         ))
@@ -626,16 +648,16 @@ fn required_cdx_number(batch: &RecordBatch, ticker: &str, field: &str) -> Result
     })
 }
 
-fn required_cdx_date(batch: &RecordBatch, ticker: &str, field: &str) -> Result<NaiveDate> {
-    extract_refdata_date_for_ticker(batch, ticker, field)?.ok_or_else(|| {
+fn required_cdx_date(metadata: &RefdataIndex<'_>, ticker: &str, field: &str) -> Result<NaiveDate> {
+    metadata.date(ticker, field).ok_or_else(|| {
         RecipeError::Other(format!(
             "missing {field} for '{ticker}' in Bloomberg response"
         ))
     })
 }
 
-fn has_history_value(batch: &RecordBatch, ticker: &str, field: &str) -> Result<bool> {
-    Ok(latest_history_numeric_point(batch, ticker, field)?.is_some())
+fn has_history_value(batch: &RecordBatch, key: &str, ticker: &str, field: &str) -> Result<bool> {
+    Ok(latest_history_numeric_point(batch, key, ticker, field)?.is_some())
 }
 
 fn parse_roll_frequency(freq: Option<&str>) -> RollFrequency {
@@ -689,7 +711,11 @@ async fn request_futures_maturities(
         .request(futures_maturity_request(candidate_tickers, options))
         .await?;
     request_ids.collect(&maturity_batch);
-    extract_refdata_date_values(&maturity_batch, "LAST_TRADEABLE_DT")
+    extract_refdata_date_values(
+        &maturity_batch,
+        engine.key_column().as_str(),
+        "LAST_TRADEABLE_DT",
+    )
 }
 
 fn futures_chain_request(
@@ -724,11 +750,14 @@ async fn request_futures_chain_maturities(
         .request(futures_chain_request(gen_ticker, dt, options))
         .await?;
     request_ids.collect(&batch);
-    extract_futures_chain_maturities(&batch, dt, freq)
+    extract_futures_chain_maturities(&batch, engine.key_column().as_str(), dt, freq)
 }
 
+/// Contract maturities from a chain keyed by the engine's `key` column; the key
+/// column itself is the last-resort contract column.
 fn extract_futures_chain_maturities(
     batch: &RecordBatch,
+    key: &str,
     dt: NaiveDate,
     freq: RollFrequency,
 ) -> Result<Vec<(String, NaiveDate)>> {
@@ -745,16 +774,18 @@ fn extract_futures_chain_maturities(
             "contract ticker",
         ],
     )
-    .or_else(|| find_column(batch, &["ticker"]))
+    .or_else(|| find_column(batch, &[key]))
     .ok_or_else(|| RecipeError::Other("futures chain is missing contract tickers".to_string()))?;
     let expiry_name = find_chain_expiry_column(batch)
         .or_else(|| find_column(batch, &["date"]))
         .ok_or_else(|| RecipeError::Other("futures chain is missing expiry dates".to_string()))?;
     let ticker_col = batch.column_by_name(&ticker_name).expect("matched column");
     let expiry_col = batch.column_by_name(&expiry_name).expect("matched column");
+    let tickers = ColumnValues::new(ticker_col.as_ref());
+    let expiries = ColumnValues::new(expiry_col.as_ref());
     let contracts = (0..batch.num_rows())
         .filter_map(|row| {
-            let ticker = array_value_as_string(ticker_col, row)?;
+            let ticker = tickers.string(row)?;
             let trimmed = ticker.trim();
             if trimmed.is_empty() {
                 return None;
@@ -771,13 +802,8 @@ fn extract_futures_chain_maturities(
                     return None;
                 }
             }
-            let expiry = array_value_as_date(expiry_col, row)?;
-            let ticker = if trimmed.len() == ticker.len() {
-                ticker
-            } else {
-                trimmed.to_string()
-            };
-            Some((ticker, expiry))
+            let expiry = expiries.date(row)?;
+            Some((trimmed.to_string(), expiry))
         })
         .collect();
     Ok(valid_futures_contracts(contracts, dt))
@@ -809,6 +835,7 @@ fn before_futures_roll_month(dt: NaiveDate, maturity: NaiveDate) -> bool {
 
 fn active_futures_volume_batch(
     batch: &RecordBatch,
+    key: &str,
     front_ticker: String,
     second_ticker: String,
     mut request_ids: BloombergRequestIds,
@@ -816,10 +843,10 @@ fn active_futures_volume_batch(
     request_ids.collect(batch);
     let result = (|| {
         if batch.num_rows() == 0 {
-            return build_single_ticker_batch(front_ticker);
+            return build_single_ticker_batch(front_ticker, key);
         }
-        let front_volume = latest_history_numeric_point(batch, &front_ticker, "VOLUME")?;
-        let second_volume = latest_history_numeric_point(batch, &second_ticker, "VOLUME")?;
+        let front_volume = latest_history_numeric_point(batch, key, &front_ticker, "VOLUME")?;
+        let second_volume = latest_history_numeric_point(batch, key, &second_ticker, "VOLUME")?;
         let selected = match (front_volume, second_volume) {
             (Some((_, f)), Some((_, s))) if s > f => second_ticker,
             (Some(_), Some(_)) => front_ticker,
@@ -827,7 +854,7 @@ fn active_futures_volume_batch(
             (None, Some(_)) => second_ticker,
             (None, None) => front_ticker,
         };
-        build_single_ticker_batch(selected)
+        build_single_ticker_batch(selected, key)
     })();
     let output =
         result.map_err(|error| error.with_bloomberg_request_ids(request_ids.iter().cloned()))?;
@@ -908,8 +935,12 @@ async fn bloomberg_current_generic_ticker(
 
     let batch = engine.request(params).await?;
     request_ids.collect(&batch);
-    let Some((_, mapped_root)) =
-        latest_history_string_point(&batch, gen_ticker, "FUT_CUR_GEN_TICKER")?
+    let Some((_, mapped_root)) = latest_history_string_point(
+        &batch,
+        engine.key_column().as_str(),
+        gen_ticker,
+        "FUT_CUR_GEN_TICKER",
+    )?
     else {
         return Ok(None);
     };
@@ -976,9 +1007,10 @@ fn ensure_field(fields: &mut Vec<String>, required: &str) {
 
 fn extract_chain_contracts(
     batch: &RecordBatch,
+    key: &str,
     max_contracts: Option<i32>,
 ) -> Result<Vec<ChainContract>> {
-    let contract_col_name = find_contract_column(batch).ok_or_else(|| {
+    let contract_col_name = find_contract_column(batch, key).ok_or_else(|| {
         RecipeError::Other(
             "futures chain response did not include a contract ticker column".to_string(),
         )
@@ -987,24 +1019,27 @@ fn extract_chain_contracts(
         .column_by_name(&contract_col_name)
         .ok_or_else(|| RecipeError::Other(format!("missing '{contract_col_name}' column")))?;
     let expiry_col = find_chain_expiry_column(batch).and_then(|name| batch.column_by_name(&name));
+    let tickers = ColumnValues::new(contract_col.as_ref());
+    let expiries = expiry_col.map(|col| ColumnValues::new(col.as_ref()));
     let limit = max_contracts
         .and_then(|value| (value > 0).then_some(value as usize))
         .unwrap_or(usize::MAX);
 
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::<String>::new();
     let mut contracts = Vec::new();
     for row in 0..batch.num_rows() {
         if contracts.len() >= limit {
             break;
         }
-        let Some(raw_ticker) = crate::utils::array_value_as_string(contract_col, row) else {
+        let Some(raw_ticker) = tickers.string(row) else {
             continue;
         };
         let ticker = raw_ticker.trim();
-        if ticker.is_empty() || !seen.insert(ticker.to_string()) {
+        if ticker.is_empty() || seen.contains(ticker) {
             continue;
         }
-        let expiry = expiry_col.and_then(|col| crate::utils::array_value_as_date(col, row));
+        seen.insert(ticker.to_string());
+        let expiry = expiries.and_then(|col| col.date(row));
         contracts.push(ChainContract {
             order: contracts.len(),
             ticker: ticker.to_string(),
@@ -1015,7 +1050,8 @@ fn extract_chain_contracts(
     Ok(contracts)
 }
 
-fn find_contract_column(batch: &RecordBatch) -> Option<String> {
+/// The chain's contract column, never the engine's `key` column.
+fn find_contract_column(batch: &RecordBatch, key: &str) -> Option<String> {
     let candidates = [
         "future's ticker",
         "futures ticker",
@@ -1034,7 +1070,7 @@ fn find_contract_column(batch: &RecordBatch) -> Option<String> {
         .iter()
         .find_map(|field| {
             let name = field.name();
-            if name == "ticker" || name == "field" {
+            if name == key || name == "field" {
                 return None;
             }
             let key = canonical_name(name);
@@ -1046,7 +1082,7 @@ fn find_contract_column(batch: &RecordBatch) -> Option<String> {
         .or_else(|| {
             batch.schema().fields().iter().find_map(|field| {
                 let name = field.name();
-                (name != "ticker" && name != "field").then(|| name.to_string())
+                (name != key && name != "field").then(|| name.to_string())
             })
         })
 }
@@ -1066,27 +1102,29 @@ fn find_chain_expiry_column(batch: &RecordBatch) -> Option<String> {
 
 fn extract_refdata_values(
     batch: &RecordBatch,
+    key: &str,
 ) -> Result<std::collections::HashMap<String, std::collections::HashMap<String, String>>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
-    let mut out = std::collections::HashMap::new();
+    let values = ColumnValues::new(value_col.as_ref());
+    let mut out: std::collections::HashMap<String, std::collections::HashMap<String, String>> =
+        std::collections::HashMap::new();
 
     for row in 0..batch.num_rows() {
         if ticker_col.is_null(row) || field_col.is_null(row) || value_col.is_null(row) {
             continue;
         }
-        let Some(value) = array_value_as_string(value_col, row) else {
+        let Some(value) = values.string(row) else {
             continue;
         };
         let value = value.trim();
         if value.is_empty() {
             continue;
         }
-        out.entry(ticker_col.value(row).to_string())
-            .or_insert_with(std::collections::HashMap::new)
+        str_entry(&mut out, ticker_col.value(row))
             .insert(field_col.value(row).to_ascii_uppercase(), value.to_string());
     }
 
@@ -1100,6 +1138,10 @@ fn build_futures_curve_rows(
     extra_fields: &[String],
 ) -> Vec<FuturesCurveRow> {
     let mut rows = Vec::with_capacity(contracts.len());
+    let extra_keys = extra_fields
+        .iter()
+        .map(|field| field.to_ascii_uppercase())
+        .collect::<Vec<_>>();
     let mut previous_mid: Option<f64> = None;
     let mut previous_expiry: Option<NaiveDate> = None;
 
@@ -1129,13 +1171,9 @@ fn build_futures_curve_rows(
             }
             _ => None,
         };
-        let extra_values = extra_fields
+        let extra_values = extra_keys
             .iter()
-            .map(|field| {
-                fields
-                    .and_then(|map| map.get(&field.to_ascii_uppercase()))
-                    .cloned()
-            })
+            .map(|key| fields.and_then(|map| map.get(key)).cloned())
             .collect::<Vec<_>>();
 
         rows.push(FuturesCurveRow {
@@ -1224,59 +1262,85 @@ fn build_futures_curve_batch(
     RecordBatch::try_new(schema, columns).map_err(Into::into)
 }
 
-fn build_single_ticker_batch(ticker: String) -> Result<RecordBatch> {
-    let schema = Arc::new(Schema::new(vec![Field::new(
-        "ticker",
-        DataType::Utf8,
-        false,
-    )]));
+/// A one-row result holding a resolved security in the engine's `key` column.
+fn build_single_ticker_batch(ticker: String, key: &str) -> Result<RecordBatch> {
+    let schema = Arc::new(Schema::new(vec![Field::new(key, DataType::Utf8, false)]));
     let ticker_array = StringArray::from(vec![ticker]);
     RecordBatch::try_new(schema, vec![Arc::new(ticker_array)]).map_err(Into::into)
 }
 
-fn extract_refdata_string_for_ticker(
-    batch: &RecordBatch,
-    ticker: &str,
-    field: &str,
-) -> Result<Option<String>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
-    let field_col = as_string_col(batch, "field")?;
-    let value_col = batch
-        .column_by_name("value")
-        .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+/// Long reference-data batch indexed by ticker once, so per-ticker lookups
+/// (one per CDX ladder alias) scan only that ticker's rows, in batch order.
+struct RefdataIndex<'a> {
+    fields: &'a StringArray,
+    values: ColumnValues<'a>,
+    rows_by_ticker: std::collections::HashMap<&'a str, Vec<usize>>,
+}
 
-    for row in 0..batch.num_rows() {
-        if ticker_col.is_null(row) || field_col.is_null(row) || value_col.is_null(row) {
-            continue;
+impl<'a> RefdataIndex<'a> {
+    fn new(batch: &'a RecordBatch, key: &str) -> Result<Self> {
+        let ticker_col = as_string_col(batch, key)?;
+        let field_col = as_string_col(batch, "field")?;
+        let value_col = batch
+            .column_by_name("value")
+            .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+        let mut rows_by_ticker = std::collections::HashMap::<&str, Vec<usize>>::new();
+        for row in 0..batch.num_rows() {
+            if ticker_col.is_null(row) || field_col.is_null(row) {
+                continue;
+            }
+            rows_by_ticker
+                .entry(ticker_col.value(row))
+                .or_default()
+                .push(row);
         }
-
-        if ticker_col.value(row) != ticker || !field_col.value(row).eq_ignore_ascii_case(field) {
-            continue;
-        }
-
-        let Some(raw) = array_value_as_string(value_col, row) else {
-            continue;
-        };
-        let raw = raw.trim();
-        if raw.is_empty() {
-            continue;
-        }
-
-        return Ok(Some(raw.to_string()));
+        Ok(Self {
+            fields: field_col,
+            values: ColumnValues::new(value_col.as_ref()),
+            rows_by_ticker,
+        })
     }
 
-    Ok(None)
+    /// First row for `ticker`/`field` (field case-insensitive) holding a
+    /// nonblank value, with that value.
+    ///
+    /// The first nonblank value is authoritative: later rows never override
+    /// it, even when it does not parse.
+    fn first_value(&self, ticker: &str, field: &str) -> Option<(usize, Cow<'a, str>)> {
+        self.rows_by_ticker.get(ticker)?.iter().find_map(|&row| {
+            if !self.fields.value(row).eq_ignore_ascii_case(field) {
+                return None;
+            }
+            let raw = self.values.string(row)?;
+            (!raw.trim().is_empty()).then_some((row, raw))
+        })
+    }
+
+    /// Trimmed first nonblank value for `ticker`/`field`.
+    fn string(&self, ticker: &str, field: &str) -> Option<String> {
+        self.first_value(ticker, field)
+            .map(|(_, raw)| raw.trim().to_string())
+    }
+
+    /// First nonblank value for `ticker`/`field` as a date; `None` when that
+    /// value is not a date.
+    fn date(&self, ticker: &str, field: &str) -> Option<NaiveDate> {
+        self.first_value(ticker, field)
+            .and_then(|(row, _)| self.values.date(row))
+    }
 }
 
 fn extract_refdata_date_values(
     batch: &RecordBatch,
+    key: &str,
     field: &str,
 ) -> Result<Vec<(String, NaiveDate)>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
 
     let mut output = Vec::new();
 
@@ -1289,7 +1353,7 @@ fn extract_refdata_date_values(
             continue;
         }
 
-        let Some(parsed) = array_value_as_date(value_col, row) else {
+        let Some(parsed) = values.date(row) else {
             continue;
         };
 
@@ -1299,45 +1363,18 @@ fn extract_refdata_date_values(
     Ok(output)
 }
 
-fn extract_refdata_date_for_ticker(
-    batch: &RecordBatch,
-    ticker: &str,
-    field: &str,
-) -> Result<Option<NaiveDate>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
-    let field_col = as_string_col(batch, "field")?;
-    let value_col = batch
-        .column_by_name("value")
-        .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
-
-    for row in 0..batch.num_rows() {
-        if ticker_col.is_null(row) || field_col.is_null(row) {
-            continue;
-        }
-        if ticker_col.value(row) == ticker && field_col.value(row).eq_ignore_ascii_case(field) {
-            if let Some(date) = array_value_as_date(value_col, row) {
-                return Ok(Some(date));
-            }
-            // Preserve the metadata rule: the first nonblank value is
-            // authoritative even when it is not a parseable date.
-            if array_value_as_string(value_col, row).is_some_and(|raw| !raw.trim().is_empty()) {
-                return Ok(None);
-            }
-        }
-    }
-    Ok(None)
-}
-
 fn latest_history_numeric_point(
     batch: &RecordBatch,
+    key: &str,
     ticker: &str,
     field: &str,
 ) -> Result<Option<(NaiveDate, f64)>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
 
     let date_col = batch
         .column_by_name("date")
@@ -1356,7 +1393,7 @@ fn latest_history_numeric_point(
             continue;
         }
 
-        let Some(value) = array_value_as_f64(value_col, row) else {
+        let Some(value) = values.f64(row) else {
             continue;
         };
 
@@ -1391,14 +1428,16 @@ fn latest_history_numeric_point(
 
 fn latest_history_string_point(
     batch: &RecordBatch,
+    key: &str,
     ticker: &str,
     field: &str,
 ) -> Result<Option<(NaiveDate, String)>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
 
     let date_col = batch
         .column_by_name("date")
@@ -1417,7 +1456,7 @@ fn latest_history_string_point(
             continue;
         }
 
-        let Some(raw_value) = array_value_as_string(value_col, row) else {
+        let Some(raw_value) = values.string(row) else {
             continue;
         };
         let raw_value = raw_value.trim();
@@ -1649,7 +1688,8 @@ mod tests {
             )
             .unwrap();
             let contracts =
-                extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap();
+                extract_futures_chain_maturities(&batch, "ticker", dt, RollFrequency::Monthly)
+                    .unwrap();
             assert_eq!(
                 contracts,
                 vec![
@@ -1665,7 +1705,10 @@ mod tests {
             );
             let (selected, _) =
                 select_futures_contract(&contracts, "ES2 Index", "20240115", 1).unwrap();
-            assert_single_ticker(&build_single_ticker_batch(selected).unwrap(), "ESM24 Index");
+            assert_single_ticker(
+                &build_single_ticker_batch(selected, "ticker").unwrap(),
+                "ESM24 Index",
+            );
             assert!(select_futures_contract(&contracts, "ES3 Index", "20240115", 2).is_err());
         }
     }
@@ -1675,7 +1718,7 @@ mod tests {
         let expiry = NaiveDate::from_ymd_opt(2024, 3, 15).unwrap();
         let dt = NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let schema = Arc::new(Schema::new(vec![
-            Field::new("ticker", DataType::Utf8, true),
+            Field::new("security", DataType::Utf8, true),
             Field::new("Last Trade Date", DataType::Date32, true),
         ]));
         let batch = RecordBatch::try_new(
@@ -1687,18 +1730,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap(),
+            extract_futures_chain_maturities(&batch, "security", dt, RollFrequency::Monthly)
+                .unwrap(),
             vec![("ESH24 Index".to_string(), expiry)]
         );
         let empty = RecordBatch::new_empty(Arc::new(Schema::empty()));
         assert!(
-            extract_futures_chain_maturities(&empty, dt, RollFrequency::Monthly)
+            extract_futures_chain_maturities(&empty, "security", dt, RollFrequency::Monthly)
                 .unwrap()
                 .is_empty()
         );
         let missing_expiry = batch.project(&[0]).unwrap();
         assert!(
-            extract_futures_chain_maturities(&missing_expiry, dt, RollFrequency::Monthly).is_err()
+            extract_futures_chain_maturities(
+                &missing_expiry,
+                "security",
+                dt,
+                RollFrequency::Monthly
+            )
+            .is_err()
         );
     }
 
@@ -1726,10 +1776,12 @@ mod tests {
             ],
         )
         .unwrap();
-        let monthly = extract_futures_chain_maturities(&batch, dt, RollFrequency::Monthly).unwrap();
+        let monthly =
+            extract_futures_chain_maturities(&batch, "ticker", dt, RollFrequency::Monthly).unwrap();
         assert_eq!(monthly.len(), 4);
         let quarterly =
-            extract_futures_chain_maturities(&batch, dt, RollFrequency::Quarterly).unwrap();
+            extract_futures_chain_maturities(&batch, "ticker", dt, RollFrequency::Quarterly)
+                .unwrap();
         assert_eq!(
             quarterly
                 .iter()
@@ -1825,6 +1877,7 @@ mod tests {
         .unwrap();
         let result = active_futures_volume_batch(
             &batch,
+            "ticker",
             "ESH24 Index".to_string(),
             "ESM24 Index".to_string(),
             BloombergRequestIds::default(),
@@ -1858,7 +1911,7 @@ mod tests {
         let mut request_ids = BloombergRequestIds::default();
         request_ids.collect(&maturities);
         let contracts = valid_futures_contracts(
-            extract_refdata_date_values(&maturities, "LAST_TRADEABLE_DT").unwrap(),
+            extract_refdata_date_values(&maturities, "ticker", "LAST_TRADEABLE_DT").unwrap(),
             NaiveDate::from_ymd_opt(2024, 3, 12).unwrap(),
         );
         drop(maturities);
@@ -1893,6 +1946,7 @@ mod tests {
         for volume_rows in [2, 0] {
             let output = active_futures_volume_batch(
                 &volumes.slice(0, volume_rows),
+                "ticker",
                 front.clone(),
                 second.clone(),
                 request_ids.clone(),
@@ -1912,6 +1966,7 @@ mod tests {
         }
         let single_request = active_futures_volume_batch(
             &volumes,
+            "ticker",
             front.clone(),
             second,
             BloombergRequestIds::default(),
@@ -1927,7 +1982,7 @@ mod tests {
                 .metadata()
                 .contains_key("xbbg.bloomberg_request_ids")
         );
-        let local = build_single_ticker_batch(front).unwrap();
+        let local = build_single_ticker_batch(front, "ticker").unwrap();
         assert!(local.schema().metadata().is_empty());
     }
 
@@ -1958,6 +2013,7 @@ mod tests {
             .unwrap();
             let result = active_futures_volume_batch(
                 &batch,
+                "ticker",
                 "ESH24 Index".to_string(),
                 "ESM24 Index".to_string(),
                 BloombergRequestIds::default(),
@@ -1969,6 +2025,7 @@ mod tests {
         assert_single_ticker(
             &active_futures_volume_batch(
                 &empty,
+                "ticker",
                 "ESH24 Index".to_string(),
                 "ESM24 Index".to_string(),
                 BloombergRequestIds::default(),
@@ -1996,8 +2053,9 @@ mod tests {
             ],
         )
         .unwrap();
+        let metadata = RefdataIndex::new(&batch, "ticker").unwrap();
         assert_eq!(
-            required_cdx_date(&batch, ticker, CDX_ACCRUAL_FIELD).unwrap(),
+            required_cdx_date(&metadata, ticker, CDX_ACCRUAL_FIELD).unwrap(),
             dt
         );
     }
@@ -2020,11 +2078,61 @@ mod tests {
                 ],
             )
             .unwrap();
-            assert_eq!(
-                extract_refdata_date_for_ticker(&batch, ticker, CDX_ACCRUAL_FIELD).unwrap(),
-                expected,
-            );
+            let metadata = RefdataIndex::new(&batch, "ticker").unwrap();
+            assert_eq!(metadata.date(ticker, CDX_ACCRUAL_FIELD), expected);
         }
+    }
+
+    #[test]
+    fn test_refdata_index_keeps_batch_order_across_interleaved_tickers() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("ticker", DataType::Utf8, true),
+            Field::new("field", DataType::Utf8, true),
+            Field::new("value", DataType::Utf8, true),
+        ]));
+        let (s44, s45) = (ig_alias(44), ig_alias(45));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![
+                Arc::new(StringArray::from(vec![
+                    Some(s45.as_str()),
+                    Some(s44.as_str()),
+                    None,
+                    Some(s45.as_str()),
+                    Some(s44.as_str()),
+                    Some(s45.as_str()),
+                    Some(s44.as_str()),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("version"),
+                    Some("VERSION"),
+                    Some("VERSION"),
+                    Some("VERSION"),
+                    Some("VERSION"),
+                    Some(CDX_ACCRUAL_FIELD),
+                    Some(CDX_ACCRUAL_FIELD),
+                ])),
+                Arc::new(StringArray::from(vec![
+                    Some("  "),
+                    Some(" 3 "),
+                    Some("9"),
+                    Some("2"),
+                    Some("4"),
+                    Some("2025-09-22"),
+                    None,
+                ])),
+            ],
+        )
+        .unwrap();
+        let metadata = RefdataIndex::new(&batch, "ticker").unwrap();
+        assert_eq!(metadata.string(&s45, "VERSION").as_deref(), Some("2"));
+        assert_eq!(metadata.string(&s44, "VERSION").as_deref(), Some("3"));
+        assert_eq!(
+            metadata.date(&s45, CDX_ACCRUAL_FIELD),
+            NaiveDate::from_ymd_opt(2025, 9, 22)
+        );
+        assert_eq!(metadata.date(&s44, CDX_ACCRUAL_FIELD), None);
+        assert_eq!(metadata.string("OTHER Corp", "VERSION"), None);
     }
 
     #[test]
@@ -2170,7 +2278,7 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = extract_refdata_date_values(&batch, "LAST_TRADEABLE_DT").unwrap();
+        let parsed = extract_refdata_date_values(&batch, "ticker", "LAST_TRADEABLE_DT").unwrap();
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].0, "ESH24 Index");
         assert_eq!(parsed[0].1, NaiveDate::from_ymd_opt(2024, 3, 15).unwrap());
@@ -2203,7 +2311,7 @@ mod tests {
         )
         .unwrap();
 
-        let parsed = extract_refdata_date_values(&batch, "LAST_TRADEABLE_DT").unwrap();
+        let parsed = extract_refdata_date_values(&batch, "ticker", "LAST_TRADEABLE_DT").unwrap();
 
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].0, "ESH24 Index");
@@ -2241,7 +2349,7 @@ mod tests {
         )
         .unwrap();
 
-        let latest = latest_history_numeric_point(&batch, "ESH24 Index", "VOLUME")
+        let latest = latest_history_numeric_point(&batch, "ticker", "ESH24 Index", "VOLUME")
             .unwrap()
             .unwrap();
 
@@ -2284,7 +2392,7 @@ mod tests {
         )
         .unwrap();
 
-        let latest = latest_history_numeric_point(&batch, "UXK24 Index", "VOLUME")
+        let latest = latest_history_numeric_point(&batch, "ticker", "UXK24 Index", "VOLUME")
             .unwrap()
             .unwrap();
 
@@ -2327,9 +2435,10 @@ mod tests {
         )
         .unwrap();
 
-        let latest = latest_history_string_point(&batch, "UX1 Index", "FUT_CUR_GEN_TICKER")
-            .unwrap()
-            .unwrap();
+        let latest =
+            latest_history_string_point(&batch, "ticker", "UX1 Index", "FUT_CUR_GEN_TICKER")
+                .unwrap()
+                .unwrap();
 
         assert_eq!(latest.0, NaiveDate::from_ymd_opt(2026, 4, 16).unwrap());
         assert_eq!(latest.1, "UXK6");
@@ -2386,6 +2495,7 @@ mod tests {
         let dt = NaiveDate::parse_from_str(dt, "%Y-%m-%d").unwrap();
         Ok(pick_cdx_ladder_series(
             &batch,
+            "ticker",
             "CDX IG CDSI GEN 5Y Corp",
             &aliases,
             IG_LADDER[0].0,
@@ -2426,7 +2536,15 @@ mod tests {
         let batch = ladder_batch(scrambled, None);
         let dt = NaiveDate::from_ymd_opt(2026, 7, 1).unwrap();
         assert!(
-            pick_cdx_ladder_series(&batch, "CDX IG CDSI GEN 5Y Corp", &aliases, 44, dt).is_err()
+            pick_cdx_ladder_series(
+                &batch,
+                "ticker",
+                "CDX IG CDSI GEN 5Y Corp",
+                &aliases,
+                44,
+                dt
+            )
+            .is_err()
         );
     }
 
@@ -2462,11 +2580,12 @@ mod tests {
     #[test]
     fn test_required_cdx_date_requires_present_metadata() {
         let batch = ladder_batch(&[(45, "2025-09-22")], None);
+        let metadata = RefdataIndex::new(&batch, "ticker").unwrap();
         assert_eq!(
-            required_cdx_date(&batch, &ig_alias(45), CDX_ACCRUAL_FIELD).unwrap(),
+            required_cdx_date(&metadata, &ig_alias(45), CDX_ACCRUAL_FIELD).unwrap(),
             NaiveDate::from_ymd_opt(2025, 9, 22).unwrap()
         );
-        assert!(required_cdx_date(&batch, &ig_alias(44), CDX_ACCRUAL_FIELD).is_err());
+        assert!(required_cdx_date(&metadata, &ig_alias(44), CDX_ACCRUAL_FIELD).is_err());
     }
 
     #[test]
@@ -2487,8 +2606,12 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(required_cdx_number(&batch, ticker, "VERSION").unwrap(), 2);
-        assert!(required_cdx_number(&batch, ticker, "ROLLING_SERIES").is_err());
+        let metadata = RefdataIndex::new(&batch, "ticker").unwrap();
+        assert_eq!(
+            required_cdx_number(&metadata, ticker, "VERSION").unwrap(),
+            2
+        );
+        assert!(required_cdx_number(&metadata, ticker, "ROLLING_SERIES").is_err());
         assert_eq!(parse_series_number("0"), None);
     }
 

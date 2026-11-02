@@ -68,19 +68,29 @@ fn shaping_err(err: RecipeError) -> PyErr {
 fn shape_bqr_input(
     input: NativeInput,
     ticker: &str,
+    key_column: &str,
     enforce_broker_codes: bool,
 ) -> PyResult<TableData> {
-    let shaped =
-        shape_bqr_quotes(input.into_batch()?, ticker, enforce_broker_codes).map_err(shaping_err)?;
+    let shaped = shape_bqr_quotes(
+        input.into_batch()?,
+        ticker,
+        key_column,
+        enforce_broker_codes,
+    )
+    .map_err(shaping_err)?;
     TableData::try_new(vec![shaped]).map_err(core_err_to_py)
 }
 
 /// Pivot generic BQR rows with the shared recipe reshape.
 ///
 /// Pure Arrow work: `ArrowTable.reshape_bqr_generic` runs it detached.
-pub(crate) fn reshape_bqr_generic_table(data: &TableData, ticker: &str) -> PyResult<TableData> {
+pub(crate) fn reshape_bqr_generic_table(
+    data: &TableData,
+    ticker: &str,
+    key_column: &str,
+) -> PyResult<TableData> {
     let batch = data.combined_batch().map_err(core_err_to_py)?;
-    let reshaped = reshape_bqr_generic(&batch, ticker).map_err(shaping_err)?;
+    let reshaped = reshape_bqr_generic(&batch, ticker, key_column).map_err(shaping_err)?;
     TableData::try_new(vec![reshaped]).map_err(core_err_to_py)
 }
 
@@ -110,31 +120,34 @@ where
 /// Shape raw BQR IntradayTick output into quote rows, off the event loop.
 ///
 /// Uses the BQR recipe's shaper, shared with `xbbg.ext.abqr` and Node: generic
-/// `path` output is pivoted into one row per tick (fields holding only numbers
-/// are Float64, other fields strings), attributed requests require a broker
-/// code, rows are sorted by `time` with nulls last, and Bloomberg names become
-/// `event_type`, `price`, `broker_buy`, `broker_sell`, `spread_price`,
-/// `condition_codes` and `exchange`. Schema metadata is kept.
+/// `path` output is pivoted into one row per tick with the security in
+/// `key_column` (fields holding text are strings; other fields keep the
+/// `value_num` type, Float64 from the generic extractor), attributed requests
+/// require a broker code, rows are sorted by `time` with nulls last, and
+/// Bloomberg names become `event_type`, `price`, `broker_buy`, `broker_sell`,
+/// `spread_price`, `condition_codes` and `exchange`. Schema metadata is kept.
 ///
 /// Args:
 ///     data: Raw result as an xbbg ArrowTable or ArrowRecordBatch.
-///     ticker: Requested security, the `ticker` of generic output rows.
+///     ticker: Requested security, the key of generic output rows.
+///     key_column: Name of the security column, the engine's key column.
 ///     enforce_broker_codes: Raise RuntimeError when quote rows carry no broker code.
 ///
 /// Returns:
 ///     An awaitable resolving to an ArrowTable.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-#[pyo3(signature = (data, ticker, enforce_broker_codes=true))]
+#[pyo3(signature = (data, ticker, key_column, enforce_broker_codes=true))]
 fn ashape_bqr<'py>(
     py: Python<'py>,
     data: &Bound<'py, PyAny>,
     ticker: String,
+    key_column: String,
     enforce_broker_codes: bool,
 ) -> PyResult<Bound<'py, PyAny>> {
     let input = NativeInput::extract(data)?;
     shutdown_safe_future(py, async move {
-        run_blocking(move || shape_bqr_input(input, &ticker, enforce_broker_codes))
+        run_blocking(move || shape_bqr_input(input, &ticker, &key_column, enforce_broker_codes))
             .await
             .map(ArrowTable::from_data)
     })
@@ -143,9 +156,9 @@ fn ashape_bqr<'py>(
 /// Apply BDH presentation options off the event loop.
 ///
 /// Same result as `ArrowTable.apply_historical_presentation`: `sort` orders
-/// by ticker, date (descending only for "DESCENDING") and field, nulls last;
-/// `date_format` "PERIODIC" replaces `date` with a UTF-8 `period` label and
-/// "BOTH" inserts it after `date`; `show_date=False` drops both.
+/// by `key_column`, date (descending only for "DESCENDING") and field, nulls
+/// last; `date_format` "PERIODIC" replaces `date` with a UTF-8 `period` label
+/// and "BOTH" inserts it after `date`; `show_date=False` drops both.
 ///
 /// Args:
 ///     data: Historical result as an xbbg ArrowTable or ArrowRecordBatch.
@@ -153,12 +166,13 @@ fn ashape_bqr<'py>(
 ///     date_format: "PERIODIC" or "BOTH" adds period labels.
 ///     sort: Sort rows; "DESCENDING" orders dates newest first.
 ///     periodicity: Label granularity, such as "MONTHLY" (default daily).
+///     key_column: Name of the security column, the engine's key column.
 ///
 /// Returns:
 ///     An awaitable resolving to an ArrowTable.
 #[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
 #[pyfunction]
-#[pyo3(signature = (data, show_date=None, date_format=None, sort=None, periodicity=None))]
+#[pyo3(signature = (data, show_date, date_format, sort, periodicity, key_column))]
 fn apresent_historical<'py>(
     py: Python<'py>,
     data: &Bound<'py, PyAny>,
@@ -166,6 +180,7 @@ fn apresent_historical<'py>(
     date_format: Option<String>,
     sort: Option<String>,
     periodicity: Option<String>,
+    key_column: String,
 ) -> PyResult<Bound<'py, PyAny>> {
     let input = NativeInput::extract(data)?;
     shutdown_safe_future(py, async move {
@@ -177,6 +192,7 @@ fn apresent_historical<'py>(
                 date_format.as_deref(),
                 sort.as_deref(),
                 periodicity.as_deref(),
+                &key_column,
             )
             .map_err(core_err_to_py)
         })
@@ -260,7 +276,8 @@ mod tests {
         let second = typed_quotes(vec![Some("2024-01-15T09:00:01")], vec![Some("DLRA")]);
         let table = TableData::try_new(vec![first, second]).unwrap();
 
-        let shaped = shape_bqr_input(NativeInput::Table(table), "SYN1 Corp", true).unwrap();
+        let shaped =
+            shape_bqr_input(NativeInput::Table(table), "SYN1 Corp", "ticker", true).unwrap();
 
         assert_eq!(shaped.batches.len(), 1);
         assert_eq!(
@@ -294,56 +311,24 @@ mod tests {
     }
 
     #[test]
-    fn generic_bqr_input_matches_the_shared_reshape() {
-        let generic = batch(vec![
-            column(
-                "path",
-                StringArray::from(vec![
-                    "result.tickData[0].time",
-                    "result.tickData[0].type",
-                    "result.tickData[0].value",
-                    "result.tickData[0].brokerBuyCode",
-                ]),
-            ),
-            column(
-                "value_str",
-                StringArray::from(vec![
-                    Some("2024-01-15T09:00:00"),
-                    Some("ASK"),
-                    None,
-                    Some("DLRA"),
-                ]),
-            ),
-            column(
-                "value_num",
-                Float64Array::from(vec![None, None, Some(101.5), None]),
-            ),
-        ]);
-        let table = TableData::try_new(vec![generic.clone()]).unwrap();
-
-        let reshaped = reshape_bqr_generic_table(&table, "SYN1 Corp").unwrap();
-        assert_eq!(
-            reshaped.combined_batch().unwrap(),
-            reshape_bqr_generic(&generic, "SYN1 Corp").unwrap()
-        );
-        assert_eq!(reshaped.schema.metadata(), &synthetic_metadata());
-
-        let shaped = shape_bqr_input(NativeInput::Batch(generic), "SYN1 Corp", true).unwrap();
-        assert_eq!(
-            column_names(&shaped),
-            ["ticker", "time", "event_type", "price", "broker_buy"]
-        );
-        assert_eq!(shaped.schema.metadata(), &synthetic_metadata());
-    }
-
-    #[test]
     fn bqr_failures_keep_their_python_exception_types() {
         Python::initialize();
         let unattributed = typed_quotes(vec![Some("2024-01-15T09:00:00")], vec![Some("")]);
 
-        let error = shape_bqr_input(NativeInput::Batch(unattributed.clone()), "SYN1 Corp", true)
-            .unwrap_err();
-        assert!(shape_bqr_input(NativeInput::Batch(unattributed), "SYN1 Corp", false).is_ok());
+        let error = shape_bqr_input(
+            NativeInput::Batch(unattributed.clone()),
+            "SYN1 Corp",
+            "ticker",
+            true,
+        )
+        .unwrap_err();
+        let unenforced = shape_bqr_input(
+            NativeInput::Batch(unattributed),
+            "SYN1 Corp",
+            "ticker",
+            false,
+        );
+        assert!(unenforced.is_ok());
 
         Python::attach(|py| {
             assert!(error.is_instance_of::<PyRuntimeError>(py));

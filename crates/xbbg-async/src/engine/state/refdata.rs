@@ -11,8 +11,9 @@ use xbbg_log::trace;
 
 use super::typed_builder::{ArrowType, ColumnSet};
 use super::value_utils::{
-    LongStringColumns, ResponseMetadata, TypedLongColumns, WideColumns, append_long_value_row,
-    common_value_type, get_value_cached_datatype, top_level_response_error,
+    LongRowWriter, LongStringColumns, ResponseMetadata, SecurityElements, TypedLongColumns,
+    WideColumns, common_value_type, field_dtype_hints, get_value_cached_datatype,
+    top_level_response_error,
 };
 use xbbg_core::{BlpError, DataType as BlpDataType, Element, Message, Name, Value};
 
@@ -41,16 +42,12 @@ pub enum LongMode {
 
 struct RefDataElementNames {
     security_data: Name,
-    security: Name,
-    field_data: Name,
 }
 
 impl RefDataElementNames {
     fn new() -> Self {
         Self {
             security_data: Name::get_or_intern("securityData"),
-            security: Name::get_or_intern("security"),
-            field_data: Name::get_or_intern("fieldData"),
         }
     }
 }
@@ -65,8 +62,8 @@ pub struct RefDataState {
     field_value_datatypes: Vec<Option<BlpDataType>>,
     /// Pre-interned structural names for response traversal
     names: RefDataElementNames,
-    /// Field type hints (field name -> arrow type)
-    field_types: HashMap<String, ArrowType>,
+    /// Per requested field, the `dtype` its type hint fixes in metadata rows
+    field_dtype_hints: Vec<Option<&'static str>>,
     /// Output format
     format: OutputFormat,
     /// Long format mode (only used when format == Long)
@@ -81,6 +78,8 @@ pub struct RefDataState {
     field_exception_count: usize,
     /// Column set for building the output
     columns: ColumnSet,
+    /// Slots for long rows appended through `columns`, resolved on first use
+    long_rows: Option<LongRowWriter>,
     /// Fixed long-format builders for the common string-value output path
     long_columns: Option<LongStringColumns>,
     /// Fixed typed-long builders for direct multi-value output
@@ -137,11 +136,11 @@ impl RefDataState {
         }
 
         Self {
+            field_dtype_hints: field_dtype_hints(&fields, &arrow_types),
             field_names: fields,
             field_lookup_names,
             field_value_datatypes,
             names: RefDataElementNames::new(),
-            field_types: arrow_types,
             format,
             long_mode,
             include_security_errors,
@@ -149,6 +148,7 @@ impl RefDataState {
             field_exception_securities: BTreeSet::new(),
             field_exception_count: 0,
             columns,
+            long_rows: None,
             long_columns: long_value_type.map(LongStringColumns::refdata),
             typed_long_columns: (format == OutputFormat::Long && long_mode == LongMode::Typed)
                 .then(TypedLongColumns::refdata),
@@ -305,13 +305,10 @@ impl RefDataState {
 
         // Iterate through each security
         for sec in security_data.values() {
-            // Get ticker
-            let ticker = sec
-                .get(&self.names.security)
-                .and_then(|e| e.get_str(0))
-                .unwrap_or("");
+            let security = SecurityElements::scan(&sec);
+            let ticker = security.ticker();
 
-            let diagnostics = self.response_meta.record_security(ticker, &sec);
+            let diagnostics = self.response_meta.record_security(ticker, &security);
             if let Some(error) = diagnostics.security_error {
                 xbbg_log::warn!(
                     ticker = ticker,
@@ -338,17 +335,17 @@ impl RefDataState {
             }
 
             // Get fieldData
-            let Some(field_data) = sec.get(&self.names.field_data) else {
+            let Some(field_data) = security.field_data() else {
                 trace!(ticker = ticker, "No fieldData for security");
                 continue;
             };
 
             match self.format {
                 OutputFormat::Long => {
-                    self.process_long_format(ticker, &field_data);
+                    self.process_long_format(ticker, field_data);
                 }
                 OutputFormat::Wide => {
-                    self.process_wide_format(ticker, &field_data);
+                    self.process_wide_format(ticker, field_data);
                 }
             }
         }
@@ -387,15 +384,22 @@ impl RefDataState {
         }
         let detail =
             format!("code={code} category={category} subcategory={subcategory} message={message}");
-        let value = Some(Value::String(detail.as_str()));
-        append_long_value_row(
+        let writer = self.long_row_writer();
+        writer.append_row(
             &mut self.columns,
-            self.long_mode,
+            ticker,
+            None,
             "__SECURITY_ERROR__",
-            value,
+            Some(Value::String(detail.as_str())),
             Some("string"),
-            |columns| columns.append_str("ticker", ticker),
         );
+    }
+
+    /// Slots for long rows appended through `columns`, resolved on first use.
+    fn long_row_writer(&mut self) -> LongRowWriter {
+        *self
+            .long_rows
+            .get_or_insert_with(|| LongRowWriter::refdata(&mut self.columns, self.long_mode))
     }
 
     /// Process security in long format (one row per field).
@@ -415,35 +419,39 @@ impl RefDataState {
             return;
         }
         if let Some(typed_columns) = self.typed_long_columns.as_mut() {
-            for (field_name, field_lookup_name) in
-                self.field_names.iter().zip(&self.field_lookup_names)
+            for ((field_name, field_lookup_name), field_datatype) in self
+                .field_names
+                .iter()
+                .zip(&self.field_lookup_names)
+                .zip(self.field_value_datatypes.iter_mut())
             {
                 let value = field_data
                     .get(field_lookup_name)
-                    .and_then(|element| element.get_value(0));
+                    .and_then(|element| get_value_cached_datatype(&element, field_datatype));
                 typed_columns.append_row(ticker, None, field_name, value);
             }
             return;
         }
 
-        let long_mode = self.long_mode;
-        let field_names = &self.field_names;
-        let field_lookup_names = &self.field_lookup_names;
-        let field_types = &self.field_types;
-        let columns = &mut self.columns;
-
-        for (field_name, field_lookup_name) in field_names.iter().zip(field_lookup_names) {
-            // Get the field element
+        let writer = self.long_row_writer();
+        for (((field_name, field_lookup_name), field_datatype), dtype_hint) in self
+            .field_names
+            .iter()
+            .zip(&self.field_lookup_names)
+            .zip(self.field_value_datatypes.iter_mut())
+            .zip(&self.field_dtype_hints)
+        {
             let value = field_data
                 .get(field_lookup_name)
-                .and_then(|e| e.get_value(0));
-            let dtype = value
-                .as_ref()
-                .map(|v| dtype_from_hints(field_types, field_name, v));
-
-            append_long_value_row(columns, long_mode, field_name, value, dtype, |columns| {
-                columns.append_str("ticker", ticker)
-            });
+                .and_then(|element| get_value_cached_datatype(&element, field_datatype));
+            writer.append_row(
+                &mut self.columns,
+                ticker,
+                None,
+                field_name,
+                value,
+                *dtype_hint,
+            );
         }
     }
 
@@ -462,19 +470,6 @@ impl RefDataState {
             );
         }
     }
-}
-
-fn dtype_from_hints(
-    field_types: &HashMap<String, ArrowType>,
-    field_name: &str,
-    value: &Value<'_>,
-) -> &'static str {
-    // Use type hint if available
-    if let Some(hint) = field_types.get(field_name) {
-        return hint.type_name();
-    }
-    // Otherwise infer from value
-    ArrowType::from_value(value).type_name()
 }
 
 #[cfg(test)]

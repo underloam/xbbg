@@ -17,6 +17,7 @@ include = ["src/**/*.rs", "data/*.toml", "Cargo.toml", "README.md"]
 # Arrow for zero-copy DataFrame operations (narrow crates keep Python wheels small).
 arrow-array = { workspace = true, features = ["chrono-tz"] }
 arrow-schema = { workspace = true }
+arrow-select = { workspace = true }
 
 # Date/time handling
 chrono = { workspace = true, features = ["std", "serde"] }

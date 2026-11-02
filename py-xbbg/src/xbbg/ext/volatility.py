@@ -69,7 +69,8 @@ async def avol_surface(
 ) -> IntoDataFrame:
     """Async tidy historical implied-volatility surface.
 
-    Returns columns: ticker, date, metric, tenor, point_type, point, field, value.
+    Returns columns: ticker (``security`` with ``key_column="security"``), date,
+    metric, tenor, point_type, point, field, value.
     """
     start = _fmt_date(start_date)
     end = _fmt_date(end_date)

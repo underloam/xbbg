@@ -611,6 +611,8 @@ impl SubscriptionConsumer {
         let requires_deliveries = rx
             .as_ref()
             .is_some_and(SubscriptionReceiver::requires_deliveries);
+        // A bare receiver has no engine configuration (and no flush-threshold
+        // default), so its drains keep one update per delivery.
         let batch_limit = handle
             .as_ref()
             .map_or(1, SubscriptionHandle::delivery_batch_limit);

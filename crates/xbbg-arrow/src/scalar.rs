@@ -7,16 +7,24 @@ use arrow_array::builder::{
     BooleanBuilder, Date32Builder, Float64Builder, Int64Builder, StringBuilder,
     TimestampMicrosecondBuilder,
 };
+use arrow_array::types::{
+    ArrowPrimitiveType, Date32Type, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+    Int64Type, Time32MillisecondType, Time32SecondType, Time64MicrosecondType,
+    Time64NanosecondType, TimestampMicrosecondType, TimestampMillisecondType, TimestampSecondType,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
 use arrow_array::{
     Array, ArrayRef, BooleanArray, Date32Array, Date64Array, Float16Array, Float32Array,
-    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, StringArray,
-    StringViewArray, Time32MillisecondArray, Time32SecondArray, Time64MicrosecondArray,
-    Time64NanosecondArray, TimestampMicrosecondArray, TimestampMillisecondArray,
-    TimestampNanosecondArray, TimestampSecondArray, UInt8Array, UInt16Array, UInt32Array,
-    UInt64Array,
+    Float64Array, Int8Array, Int16Array, Int32Array, Int64Array, LargeStringArray, PrimitiveArray,
+    Scalar, StringArray, StringViewArray, Time32MillisecondArray, Time32SecondArray,
+    Time64MicrosecondArray, Time64NanosecondArray, TimestampMicrosecondArray,
+    TimestampMillisecondArray, TimestampNanosecondArray, TimestampSecondArray, UInt8Array,
+    UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow_schema::{DataType, Field, TimeUnit};
-use chrono::NaiveDate;
+use arrow_buffer::BooleanBuffer;
+use arrow_ord::cmp::eq;
+use arrow_schema::{ArrowError, DataType, Field, TimeUnit};
+use chrono::{Datelike, NaiveDate};
 
 /// Scalar values used by xbbg's native carrier operations.
 #[derive(Clone, Debug, PartialEq)]
@@ -488,62 +496,6 @@ pub fn cell_has_value(cell: &CellValue) -> bool {
     }
 }
 
-/// Whether any row of `array` is present under [`cell_has_value`] semantics.
-///
-/// Equivalent to `(0..array.len()).any(|row| cell_has_value(&cell_from_array(array, row)))`,
-/// but text arrays are tested in place and types whose every non-null value
-/// decodes to a present cell reduce to a null count, so no per-cell value is
-/// allocated.
-pub fn array_has_value(array: &dyn Array) -> bool {
-    match array.data_type() {
-        DataType::Utf8 => text_has_value(
-            array
-                .as_any()
-                .downcast_ref::<StringArray>()
-                .expect("StringArray")
-                .iter(),
-        ),
-        DataType::LargeUtf8 => text_has_value(
-            array
-                .as_any()
-                .downcast_ref::<LargeStringArray>()
-                .expect("LargeStringArray")
-                .iter(),
-        ),
-        DataType::Utf8View => text_has_value(
-            array
-                .as_any()
-                .downcast_ref::<StringViewArray>()
-                .expect("StringViewArray")
-                .iter(),
-        ),
-        DataType::Boolean
-        | DataType::Int8
-        | DataType::Int16
-        | DataType::Int32
-        | DataType::Int64
-        | DataType::UInt8
-        | DataType::UInt16
-        | DataType::UInt32
-        | DataType::UInt64
-        | DataType::Float16
-        | DataType::Float32
-        | DataType::Float64
-        | DataType::Time32(TimeUnit::Second | TimeUnit::Millisecond)
-        | DataType::Time64(TimeUnit::Microsecond | TimeUnit::Nanosecond)
-        | DataType::Timestamp(TimeUnit::Microsecond | TimeUnit::Nanosecond, _) => {
-            array.null_count() < array.len()
-        }
-        // Dates and coarse timestamps can decode to absent on overflow, and
-        // unsupported types always decode to absent: keep the per-cell rule.
-        _ => (0..array.len()).any(|row| cell_has_value(&cell_from_array(array, row))),
-    }
-}
-
-fn text_has_value<'a>(mut values: impl Iterator<Item = Option<&'a str>>) -> bool {
-    values.any(|value| value.is_some_and(|text| !text.is_empty()))
-}
-
 /// Parse a carrier scalar as a date when possible.
 pub fn date_from_cell(cell: &CellValue) -> Option<NaiveDate> {
     match cell {
@@ -801,5 +753,599 @@ pub fn cell_matches(array: &dyn Array, row: usize, needle: &CellValue) -> bool {
             timestamp_micros(array, row) == Some(*expected)
         }
         _ => false,
+    }
+}
+
+/// Days from 0001-01-01 (CE) to the Unix epoch, as used by Arrow `Date32`.
+const UNIX_EPOCH_DAYS_FROM_CE: i32 = 719_163;
+
+/// Filter-mask builder selecting the rows where [`cell_matches`] holds.
+///
+/// The needle is resolved once per column data type: combinations whose
+/// [`cell_matches`] semantics provably coincide with Arrow equality become a
+/// typed scalar compared with one vectorized kernel, and every other
+/// combination falls back to the row-wise comparison. Non-matching rows are
+/// `false` or null in the mask, which `arrow_select::filter` treats
+/// identically.
+pub(crate) struct CellMatchMask<'a> {
+    needle: &'a CellValue,
+    target: Option<EqTarget>,
+}
+
+impl<'a> CellMatchMask<'a> {
+    /// Resolve `needle` for arrays of `data_type`.
+    pub(crate) fn new(data_type: &DataType, needle: &'a CellValue) -> Self {
+        Self {
+            needle,
+            target: EqTarget::resolve(data_type, needle),
+        }
+    }
+
+    /// Mask `array`, which must have the data type this mask was resolved for.
+    pub(crate) fn mask(&self, array: &dyn Array) -> Result<BooleanArray, ArrowError> {
+        match &self.target {
+            Some(target) => target.mask(array),
+            None => Ok(self.row_wise_mask(array)),
+        }
+    }
+
+    fn row_wise_mask(&self, array: &dyn Array) -> BooleanArray {
+        BooleanArray::new(
+            BooleanBuffer::collect_bool(array.len(), |row| cell_matches(array, row, self.needle)),
+            None,
+        )
+    }
+}
+
+/// A needle resolved against one column type for vectorized comparison.
+enum EqTarget {
+    /// No non-null row can match.
+    NoMatch,
+    /// Exactly the rows [`Array::is_null`] reports as null.
+    NullRows,
+    /// Rows equal to a one-element array of the column's exact data type.
+    Equal(Scalar<ArrayRef>),
+    /// Float rows equal to either signed zero (IEEE `0.0 == -0.0`, unlike
+    /// Arrow's total-order float equality).
+    SignedZero(Scalar<ArrayRef>, Scalar<ArrayRef>),
+}
+
+impl EqTarget {
+    /// Resolve `needle` for a column of `data_type`, or `None` when only the
+    /// row-wise comparison reproduces [`cell_matches`].
+    fn resolve(data_type: &DataType, needle: &CellValue) -> Option<Self> {
+        match needle {
+            CellValue::Null => Some(Self::NullRows),
+            CellValue::Bool(expected) => match data_type {
+                DataType::Boolean => Some(Self::equal(BooleanArray::from(vec![*expected]))),
+                _ => None,
+            },
+            CellValue::Text(expected) => {
+                let expected = expected.as_str();
+                Some(match data_type {
+                    DataType::Utf8 => Self::equal(StringArray::from(vec![expected])),
+                    DataType::LargeUtf8 => Self::equal(LargeStringArray::from(vec![expected])),
+                    DataType::Utf8View => Self::equal(StringViewArray::from(vec![expected])),
+                    _ => return None,
+                })
+            }
+            CellValue::Int(expected) => Self::int_needle(data_type, *expected),
+            CellValue::Float(expected) => Self::float_needle(data_type, *expected),
+            CellValue::Date(expected) => match data_type {
+                DataType::Date32 => {
+                    let days = expected.num_days_from_ce() - UNIX_EPOCH_DAYS_FROM_CE;
+                    Some(Self::primitive::<Date32Type>(data_type, days))
+                }
+                _ => None,
+            },
+            CellValue::Timestamp(expected) => Self::timestamp(data_type, *expected),
+        }
+    }
+
+    fn int_needle(data_type: &DataType, expected: i64) -> Option<Self> {
+        match data_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                Self::signed(data_type, expected)
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                match u64::try_from(expected) {
+                    Ok(expected) => Self::unsigned(data_type, expected),
+                    Err(_) => Some(Self::NoMatch),
+                }
+            }
+            // A float row matches an integer needle only when it is exactly
+            // that integer, which requires the integer to be exact in f64.
+            DataType::Float32 | DataType::Float64 => {
+                if integer_exactly_representable_as_f64(expected) {
+                    Self::float(data_type, expected as f64)
+                } else {
+                    Some(Self::NoMatch)
+                }
+            }
+            DataType::Time32(TimeUnit::Second) => Some(match i32::try_from(expected) {
+                Ok(expected) => Self::primitive::<Time32SecondType>(data_type, expected),
+                Err(_) => Self::NoMatch,
+            }),
+            DataType::Time32(TimeUnit::Millisecond) => Some(match i32::try_from(expected) {
+                Ok(expected) => Self::primitive::<Time32MillisecondType>(data_type, expected),
+                Err(_) => Self::NoMatch,
+            }),
+            DataType::Time64(TimeUnit::Microsecond) => Some(
+                Self::primitive::<Time64MicrosecondType>(data_type, expected),
+            ),
+            DataType::Time64(TimeUnit::Nanosecond) => {
+                Some(Self::primitive::<Time64NanosecondType>(data_type, expected))
+            }
+            DataType::Timestamp(_, _) => Self::timestamp(data_type, expected),
+            _ => None,
+        }
+    }
+
+    fn float_needle(data_type: &DataType, expected: f64) -> Option<Self> {
+        match data_type {
+            DataType::Int8 | DataType::Int16 | DataType::Int32 | DataType::Int64 => {
+                match exact_signed_from_float(expected) {
+                    Some(expected) => Self::signed(data_type, expected),
+                    None => Some(Self::NoMatch),
+                }
+            }
+            DataType::UInt8 | DataType::UInt16 | DataType::UInt32 | DataType::UInt64 => {
+                match exact_unsigned_from_float(expected) {
+                    Some(expected) => Self::unsigned(data_type, expected),
+                    None => Some(Self::NoMatch),
+                }
+            }
+            DataType::Float32 | DataType::Float64 => Self::float(data_type, expected),
+            _ => None,
+        }
+    }
+
+    fn signed(data_type: &DataType, expected: i64) -> Option<Self> {
+        let target = match data_type {
+            DataType::Int8 => i8::try_from(expected)
+                .map(|expected| Self::primitive::<Int8Type>(data_type, expected)),
+            DataType::Int16 => i16::try_from(expected)
+                .map(|expected| Self::primitive::<Int16Type>(data_type, expected)),
+            DataType::Int32 => i32::try_from(expected)
+                .map(|expected| Self::primitive::<Int32Type>(data_type, expected)),
+            DataType::Int64 => Ok(Self::primitive::<Int64Type>(data_type, expected)),
+            _ => return None,
+        };
+        Some(target.unwrap_or(Self::NoMatch))
+    }
+
+    fn unsigned(data_type: &DataType, expected: u64) -> Option<Self> {
+        let target = match data_type {
+            DataType::UInt8 => u8::try_from(expected)
+                .map(|expected| Self::primitive::<UInt8Type>(data_type, expected)),
+            DataType::UInt16 => u16::try_from(expected)
+                .map(|expected| Self::primitive::<UInt16Type>(data_type, expected)),
+            DataType::UInt32 => u32::try_from(expected)
+                .map(|expected| Self::primitive::<UInt32Type>(data_type, expected)),
+            DataType::UInt64 => Ok(Self::primitive::<UInt64Type>(data_type, expected)),
+            _ => return None,
+        };
+        Some(target.unwrap_or(Self::NoMatch))
+    }
+
+    /// IEEE equality against `expected` for Float32/Float64 columns.
+    ///
+    /// NaN never matches and both zeros match zero, so neither may reach
+    /// Arrow's total-order equality as a plain scalar.
+    fn float(data_type: &DataType, expected: f64) -> Option<Self> {
+        if !matches!(data_type, DataType::Float32 | DataType::Float64) {
+            return None;
+        }
+        if expected.is_nan() {
+            return Some(Self::NoMatch);
+        }
+        Some(match data_type {
+            DataType::Float32 => {
+                // Float32 rows are widened losslessly before comparison, so
+                // only a needle exact in f32 can match.
+                let narrowed = expected as f32;
+                if f64::from(narrowed) != expected {
+                    Self::NoMatch
+                } else if narrowed == 0.0 {
+                    Self::SignedZero(
+                        Self::scalar::<Float32Type>(data_type, 0.0),
+                        Self::scalar::<Float32Type>(data_type, -0.0),
+                    )
+                } else {
+                    Self::primitive::<Float32Type>(data_type, narrowed)
+                }
+            }
+            _ if expected == 0.0 => Self::SignedZero(
+                Self::scalar::<Float64Type>(data_type, 0.0),
+                Self::scalar::<Float64Type>(data_type, -0.0),
+            ),
+            _ => Self::primitive::<Float64Type>(data_type, expected),
+        })
+    }
+
+    /// Timestamp rows match microseconds after exact unit scaling; nanosecond
+    /// rows floor to microseconds, so they stay on the row-wise path.
+    fn timestamp(data_type: &DataType, micros: i64) -> Option<Self> {
+        let DataType::Timestamp(unit, _) = data_type else {
+            return None;
+        };
+        let (target, scale) = match unit {
+            TimeUnit::Second => (micros / 1_000_000, 1_000_000),
+            TimeUnit::Millisecond => (micros / 1_000, 1_000),
+            TimeUnit::Microsecond => (micros, 1),
+            TimeUnit::Nanosecond => return None,
+        };
+        if micros % scale != 0 {
+            return Some(Self::NoMatch);
+        }
+        Some(match unit {
+            TimeUnit::Second => Self::primitive::<TimestampSecondType>(data_type, target),
+            TimeUnit::Millisecond => Self::primitive::<TimestampMillisecondType>(data_type, target),
+            _ => Self::primitive::<TimestampMicrosecondType>(data_type, target),
+        })
+    }
+
+    fn equal(array: impl Array + 'static) -> Self {
+        Self::Equal(Scalar::new(Arc::new(array) as ArrayRef))
+    }
+
+    fn primitive<T: ArrowPrimitiveType>(data_type: &DataType, value: T::Native) -> Self {
+        Self::Equal(Self::scalar::<T>(data_type, value))
+    }
+
+    /// One-element scalar carrying the column's exact data type (including
+    /// timestamp timezone), as Arrow comparison kernels require.
+    fn scalar<T: ArrowPrimitiveType>(data_type: &DataType, value: T::Native) -> Scalar<ArrayRef> {
+        let array = PrimitiveArray::<T>::from_value(value, 1).with_data_type(data_type.clone());
+        Scalar::new(Arc::new(array) as ArrayRef)
+    }
+
+    fn mask(&self, array: &dyn Array) -> Result<BooleanArray, ArrowError> {
+        match self {
+            Self::NoMatch => Ok(BooleanArray::new(
+                BooleanBuffer::new_unset(array.len()),
+                None,
+            )),
+            // Mirrors `Array::is_null`, which reads the physical null buffer.
+            Self::NullRows => Ok(BooleanArray::new(
+                match array.nulls() {
+                    Some(nulls) => !nulls.inner(),
+                    None => BooleanBuffer::new_unset(array.len()),
+                },
+                None,
+            )),
+            Self::Equal(value) => eq(&array, value),
+            Self::SignedZero(positive, negative) => {
+                let (positive, nulls) = eq(&array, positive)?.into_parts();
+                let negative = eq(&array, negative)?;
+                Ok(BooleanArray::new(&positive | negative.values(), nulls))
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use arrow_array::{DictionaryArray, NullArray};
+
+    use super::CellValue::{Bool, Date, Float, Int, Null, Text, Timestamp};
+    use super::*;
+
+    fn selected(mask: &BooleanArray) -> Vec<bool> {
+        (0..mask.len())
+            .map(|row| mask.is_valid(row) && mask.value(row))
+            .collect()
+    }
+
+    /// Assert each needle takes the expected path and that its mask selects
+    /// exactly the row-wise rows, for the array and an offset slice of it.
+    fn assert_parity(array: ArrayRef, vectorized: &[CellValue], row_wise: &[CellValue]) {
+        let sliced = array.slice(1, array.len() - 1);
+        for (needles, expect_vectorized) in [(vectorized, true), (row_wise, false)] {
+            for needle in needles {
+                let matcher = CellMatchMask::new(array.data_type(), needle);
+                assert_eq!(
+                    matcher.target.is_some(),
+                    expect_vectorized,
+                    "{:?} {needle:?}",
+                    array.data_type(),
+                );
+                for input in [array.as_ref(), sliced.as_ref()] {
+                    assert_eq!(
+                        selected(&matcher.mask(input).unwrap()),
+                        selected(&matcher.row_wise_mask(input)),
+                        "{:?} {needle:?}",
+                        array.data_type(),
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn text_masks_match_row_wise() {
+        let values = vec![
+            Some("AAPL US Equity"),
+            None,
+            Some(""),
+            Some("IBM"),
+            Some("AAPL US Equity"),
+            Some("IBM"),
+        ];
+        let needles = [
+            Text("AAPL US Equity".to_string()),
+            Text("IBM".to_string()),
+            Text(String::new()),
+            Text("MSFT".to_string()),
+            Null,
+        ];
+        let row_wise = [Int(1), Bool(true)];
+        assert_parity(
+            Arc::new(StringArray::from(values.clone())),
+            &needles,
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(LargeStringArray::from(values.clone())),
+            &needles,
+            &row_wise,
+        );
+        assert_parity(Arc::new(StringViewArray::from(values)), &needles, &row_wise);
+    }
+
+    #[test]
+    fn integer_masks_match_row_wise_across_widths() {
+        let row_wise = [Text("7".to_string()), Bool(true)];
+        assert_parity(
+            Arc::new(Int64Array::from(vec![
+                Some(0),
+                None,
+                Some(-1),
+                Some(i64::MAX),
+                Some(i64::MIN),
+                Some(7),
+            ])),
+            &[
+                Int(0),
+                Int(7),
+                Int(i64::MIN),
+                Int(i64::MAX),
+                Float(7.0),
+                Float(7.5),
+                Float(-0.0),
+                Float(f64::NAN),
+                Float(9.3e18),
+                Float(-9_223_372_036_854_775_808.0),
+                Null,
+            ],
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(Int8Array::from(vec![Some(-128), Some(127), None, Some(0)])),
+            &[
+                Int(127),
+                Int(128),
+                Int(-129),
+                Float(-128.0),
+                Float(128.0),
+                Null,
+            ],
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(Int32Array::from(vec![
+                Some(i32::MIN),
+                None,
+                Some(5),
+                Some(5),
+            ])),
+            &[
+                Int(i64::from(i32::MIN)),
+                Int(i64::from(i32::MIN) - 1),
+                Int(5),
+                Float(5.0),
+            ],
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(UInt8Array::from(vec![Some(0), Some(255), None, Some(0)])),
+            &[
+                Int(-1),
+                Int(0),
+                Int(255),
+                Int(256),
+                Float(255.0),
+                Float(-0.0),
+                Float(0.0),
+                Null,
+            ],
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(UInt64Array::from(vec![
+                Some(u64::MAX),
+                Some(0),
+                None,
+                Some(1 << 63),
+            ])),
+            &[
+                Int(-1),
+                Int(0),
+                Int(i64::MAX),
+                Float(18_446_744_073_709_551_616.0),
+                Float(9_223_372_036_854_775_808.0),
+                Null,
+            ],
+            &row_wise,
+        );
+    }
+
+    #[test]
+    fn float_masks_keep_ieee_equality() {
+        let row_wise = [Text("0".to_string())];
+        assert_parity(
+            Arc::new(Float64Array::from(vec![
+                Some(0.0),
+                Some(-0.0),
+                Some(f64::NAN),
+                None,
+                Some(1.5),
+                Some(f64::INFINITY),
+                Some(f64::NEG_INFINITY),
+                Some(9_007_199_254_740_992.0),
+                Some(-f64::NAN),
+            ])),
+            &[
+                Float(0.0),
+                Float(-0.0),
+                Float(f64::NAN),
+                Float(1.5),
+                Float(f64::INFINITY),
+                Int(0),
+                Int(1),
+                Int(9_007_199_254_740_992),
+                Int(9_007_199_254_740_993),
+                Int(i64::MAX),
+                Null,
+            ],
+            &row_wise,
+        );
+        assert_parity(
+            Arc::new(Float32Array::from(vec![
+                Some(0.0),
+                Some(-0.0),
+                Some(f32::NAN),
+                None,
+                Some(0.1),
+                Some(1.5),
+                Some(16_777_216.0),
+                Some(f32::INFINITY),
+            ])),
+            &[
+                Float(0.1),
+                Float(f64::from(0.1_f32)),
+                Float(1.5),
+                Float(-0.0),
+                Float(f64::MAX),
+                Float(f64::INFINITY),
+                Float(f64::NAN),
+                Int(0),
+                Int(16_777_216),
+                Int(16_777_217),
+                Null,
+            ],
+            &row_wise,
+        );
+    }
+
+    #[test]
+    fn boolean_date_and_time_masks_match_row_wise() {
+        assert_parity(
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+            ])),
+            &[Bool(true), Bool(false), Null],
+            &[Int(1), Text("true".to_string())],
+        );
+        let date = |year, month, day| Date(NaiveDate::from_ymd_opt(year, month, day).unwrap());
+        assert_parity(
+            Arc::new(Date32Array::from(vec![
+                Some(0),
+                Some(19_723),
+                None,
+                Some(-1),
+                Some(i32::MAX),
+                Some(19_723),
+            ])),
+            &[
+                date(1970, 1, 1),
+                date(2024, 1, 1),
+                date(1969, 12, 31),
+                date(2024, 1, 2),
+                Null,
+            ],
+            &[Timestamp(0), Int(19_723)],
+        );
+        assert_parity(
+            Arc::new(Time32SecondArray::from(vec![Some(0), Some(86_399), None])),
+            &[Int(86_399), Int(i64::MAX), Null],
+            &[Float(0.0)],
+        );
+        assert_parity(
+            Arc::new(Time64NanosecondArray::from(vec![Some(5), None, Some(5)])),
+            &[Int(5), Int(-5), Null],
+            &[Timestamp(5)],
+        );
+    }
+
+    #[test]
+    fn timestamp_masks_scale_units_exactly() {
+        let seconds = TimestampSecondArray::from(vec![
+            Some(0),
+            Some(1),
+            None,
+            Some(-1),
+            Some(i64::MAX),
+            Some(1),
+        ])
+        .with_timezone("UTC");
+        assert_parity(
+            Arc::new(seconds),
+            &[
+                Timestamp(1_000_000),
+                Timestamp(1_000_001),
+                Timestamp(-1_000_000),
+                Timestamp(i64::MAX),
+                Int(0),
+                Int(1_000_000),
+                Null,
+            ],
+            &[Float(1.0)],
+        );
+        let millis =
+            TimestampMillisecondArray::from(vec![Some(0), Some(1), None, Some(-1), Some(i64::MIN)]);
+        assert_parity(
+            Arc::new(millis),
+            &[
+                Timestamp(1_000),
+                Timestamp(1_500),
+                Timestamp(-1_000),
+                Timestamp(i64::MIN),
+                Int(1_000),
+                Null,
+            ],
+            &[],
+        );
+        let micros = TimestampMicrosecondArray::from(vec![Some(0), Some(1), None, Some(-1)])
+            .with_timezone("America/New_York");
+        assert_parity(
+            Arc::new(micros),
+            &[Timestamp(1), Timestamp(-1), Int(0), Null],
+            &[],
+        );
+        let nanos = TimestampNanosecondArray::from(vec![Some(1_999), None, Some(-1), Some(2_000)]);
+        assert_parity(
+            Arc::new(nanos),
+            &[Null],
+            &[Timestamp(1), Timestamp(-1), Int(2)],
+        );
+    }
+
+    #[test]
+    fn dictionary_and_null_type_masks_vectorize_only_null_needles() {
+        let dictionary: DictionaryArray<Int32Type> = vec![Some("a"), None, Some("b"), Some("a")]
+            .into_iter()
+            .collect();
+        assert_parity(
+            Arc::new(dictionary),
+            &[Null],
+            &[Text("a".to_string()), Int(0)],
+        );
+        // `NullArray` has no physical null buffer, so `cell_matches` never
+        // matches even a null needle there.
+        assert_parity(Arc::new(NullArray::new(3)), &[Null], &[Int(0)]);
     }
 }

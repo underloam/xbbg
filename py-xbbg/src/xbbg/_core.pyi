@@ -347,21 +347,17 @@ class ArrowTable:
     def add_column(self, index: builtins.int, name: builtins.str, values: typing.Any) -> ArrowTable: ...
     def set_column(self, index: builtins.int, name: builtins.str, values: typing.Any) -> ArrowTable: ...
     def head(self, n: builtins.int) -> ArrowTable: ...
-    def has_any_value(self, names: typing.Sequence[builtins.str]) -> builtins.bool:
+    def has_any_value(self, names: typing.Sequence[builtins.str]) -> builtins.bool: ...
+    def apply_historical_presentation(self, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> ArrowTable:
         r"""
-        Whether any named column holds a value other than null or empty text.
-        
-        Unknown column names are ignored.
+        Excel-style BDH presentation; sorting keys rows by `key_column`.
         """
-    def apply_historical_presentation(self, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str]) -> ArrowTable: ...
-    def reshape_bqr_generic(self, ticker: builtins.str) -> ArrowTable:
+    def reshape_bqr_generic(self, ticker: builtins.str, key_column: builtins.str) -> ArrowTable:
         r"""
-        Pivot generic BQR `path`/`value_str`/`value_num` rows into one row per tick.
+        Quote rows from generic tick output, with the security in `key_column`.
         
-        Uses the BQR quote shaper's reshape, as `ashape_bqr` does: fields holding
-        only numbers are Float64, other fields UTF-8, and schema metadata is
-        kept. Without tick rows the result is the empty
-        `ticker`/`time`/`type`/`value`/`size` table.
+        The BQR shaper's reshape, shared with `ashape_bqr`, `xbbg.ext.abqr`
+        and Node `bqr`; schema metadata is kept.
         """
     def __repr__(self) -> builtins.str: ...
 
@@ -535,6 +531,10 @@ class PyEngine:
         Returns a PySubscription that supports async iteration and dynamic add/remove.
         GIL is released during async operations; iteration and add/remove use separate
         locks to avoid contention.
+        flush_threshold caps how many already-queued updates one read combines
+        into a batch (default: the engine's subscription_flush_threshold, 16).
+        Reads never wait for more updates, so quiet streams still yield one-row
+        batches.
         Aliases map Bloomberg topics to consumer labels. Delayed streams warn by
         default; on_delayed also accepts raise and ignore. Isolated subscriptions
         do not share upstream feeds with other consumers.
@@ -563,6 +563,9 @@ class PyEngine:
             tickers: List of securities to subscribe to
             fields: List of fields to subscribe to
             options: List of subscription options (e.g., ["VWAP_START_TIME=09:30"])
+            flush_threshold: Maximum number of already-queued updates combined into
+                one batch (default: the engine's subscription_flush_threshold, 16).
+                Reads never wait for more updates.
             aliases: Optional Bloomberg topic to consumer label mapping
             on_delayed: Delayed stream policy: warn, raise, or ignore
             isolated: Disable sharing of upstream market-data feeds
@@ -750,14 +753,32 @@ class PyEngineConfig:
         Also accepts "off" and "none" as aliases for "disabled".
         """
     @property
+    def key_column(self) -> builtins.str:
+        r"""
+        Name of the result column holding each row's security: "ticker"
+        (default, deprecated) or "security", which becomes the default in the
+        next major release.
+        """
+    @key_column.setter
+    def key_column(self, value: builtins.str) -> None:
+        r"""
+        Name of the result column holding each row's security: "ticker"
+        (default, deprecated) or "security", which becomes the default in the
+        next major release.
+        """
+    @property
     def subscription_flush_threshold(self) -> builtins.int:
         r"""
-        Number of ticks to buffer before flushing to Python (default: 1)
+        Maximum number of already-queued subscription updates combined into one
+        batch (default: 16). Reads never wait for more updates: a read returns as
+        soon as one update is available, so quiet streams still yield one-row batches.
         """
     @subscription_flush_threshold.setter
     def subscription_flush_threshold(self, value: builtins.int) -> None:
         r"""
-        Number of ticks to buffer before flushing to Python (default: 1)
+        Maximum number of already-queued subscription updates combined into one
+        batch (default: 16). Reads never wait for more updates: a read returns as
+        soon as one update is available, so quiet streams still yield one-row batches.
         """
     @property
     def max_event_queue_size(self) -> builtins.int:
@@ -1171,12 +1192,13 @@ class PySubscription:
         Raises StopAsyncIteration when the subscription is closed.
         Raises RuntimeError for rows=False; use latest() for image-only consumers.
         """
-    def next_delivery(self, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+    def next_delivery(self) -> typing.Any:
         r"""
-        Prepare a marked batch for publication on the consuming Python loop.
-        The converter runs on a native completion thread (attached, off the event
-        loop) before the returned receipt's publish() commits the batch; a read
-        cancelled before completion never runs it.
+        Lease the next marked batch as an unpublished receipt. Python converts
+        `receipt.value` on its event loop, then `publish()` commits the batch or
+        `discard()` restores it. The receipt is built on a native completion
+        thread; no backend conversion runs on the async bridge, and a read
+        cancelled before completion leaves the batch unread.
         """
     def __anext_tick_dict__(self) -> typing.Any:
         r"""
@@ -1218,9 +1240,10 @@ class PySubscription:
         
         If drain=True, returns all unread values in the selected iteration mode.
         """
-    def unsubscribe_deliveries(self, drain: builtins.bool = False, converter: typing.Optional[typing.Any] = None) -> typing.Any:
+    def unsubscribe_deliveries(self, drain: builtins.bool = False) -> typing.Any:
         r"""
         Close and optionally drain marked batches without losing gap metadata.
+        A draining close returns an unpublished receipt like `next_delivery()`.
         """
     def __aenter__(self) -> PySubscription:
         r"""
@@ -1245,14 +1268,14 @@ def _wait_native_teardown() -> None:
     waiting. Interpreter exit already waits; other callers rarely need this.
     """
 
-def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bool] = None, date_format: typing.Optional[builtins.str] = None, sort: typing.Optional[builtins.str] = None, periodicity: typing.Optional[builtins.str] = None) -> typing.Any:
+def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> typing.Any:
     r"""
     Apply BDH presentation options off the event loop.
     
     Same result as `ArrowTable.apply_historical_presentation`: `sort` orders
-    by ticker, date (descending only for "DESCENDING") and field, nulls last;
-    `date_format` "PERIODIC" replaces `date` with a UTF-8 `period` label and
-    "BOTH" inserts it after `date`; `show_date=False` drops both.
+    by `key_column`, date (descending only for "DESCENDING") and field, nulls
+    last; `date_format` "PERIODIC" replaces `date` with a UTF-8 `period` label
+    and "BOTH" inserts it after `date`; `show_date=False` drops both.
     
     Args:
         data: Historical result as an xbbg ArrowTable or ArrowRecordBatch.
@@ -1260,25 +1283,28 @@ def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bo
         date_format: "PERIODIC" or "BOTH" adds period labels.
         sort: Sort rows; "DESCENDING" orders dates newest first.
         periodicity: Label granularity, such as "MONTHLY" (default daily).
+        key_column: Name of the security column, the engine's key column.
     
     Returns:
         An awaitable resolving to an ArrowTable.
     """
 
-def ashape_bqr(data: typing.Any, ticker: builtins.str, enforce_broker_codes: builtins.bool = True) -> typing.Any:
+def ashape_bqr(data: typing.Any, ticker: builtins.str, key_column: builtins.str, enforce_broker_codes: builtins.bool = True) -> typing.Any:
     r"""
     Shape raw BQR IntradayTick output into quote rows, off the event loop.
     
     Uses the BQR recipe's shaper, shared with `xbbg.ext.abqr` and Node: generic
-    `path` output is pivoted into one row per tick (fields holding only numbers
-    are Float64, other fields strings), attributed requests require a broker
-    code, rows are sorted by `time` with nulls last, and Bloomberg names become
-    `event_type`, `price`, `broker_buy`, `broker_sell`, `spread_price`,
-    `condition_codes` and `exchange`. Schema metadata is kept.
+    `path` output is pivoted into one row per tick with the security in
+    `key_column` (fields holding text are strings; other fields keep the
+    `value_num` type, Float64 from the generic extractor), attributed requests
+    require a broker code, rows are sorted by `time` with nulls last, and
+    Bloomberg names become `event_type`, `price`, `broker_buy`, `broker_sell`,
+    `spread_price`, `condition_codes` and `exchange`. Schema metadata is kept.
     
     Args:
         data: Raw result as an xbbg ArrowTable or ArrowRecordBatch.
-        ticker: Requested security, the `ticker` of generic output rows.
+        ticker: Requested security, the key of generic output rows.
+        key_column: Name of the security column, the engine's key column.
         enforce_broker_codes: Raise RuntimeError when quote rows carry no broker code.
     
     Returns:
@@ -1564,8 +1590,8 @@ def ext_pivot_to_wide(batch: ArrowRecordBatch) -> typing.Any:
     r"""
     Pivot an xbbg ArrowRecordBatch from long to wide format.
     
-    Input: ArrowRecordBatch with columns (ticker, field, value)
-    Output: ArrowRecordBatch with columns (ticker, field1, field2, ...)
+    Input: ArrowRecordBatch with columns (security or ticker, field, value)
+    Output: ArrowRecordBatch with the input's key column, then one column per field
     """
 
 def ext_previous_cdx_series(ticker: builtins.str) -> typing.Optional[builtins.str]:

@@ -246,6 +246,7 @@ _VALID_CONFIG_KEYS: frozenset[str] = frozenset(
         "shard_chunk_size",
         "shard_max_concurrent",
         "validation_mode",
+        "key_column",
         "subscription_flush_threshold",
         "max_event_queue_size",
         "command_queue_size",
@@ -329,9 +330,12 @@ def configure(
             request element is omitted. The closed string fields are
             ``validation_mode`` (``"disabled"`` (default), ``"lenient"``, or
             ``"strict"``), ``overflow_policy`` (``"drop_newest"`` (default) or
-            ``"block"``), and ``sdk_log_level`` (``"off"`` (default),
+            ``"block"``), ``sdk_log_level`` (``"off"`` (default),
             ``"fatal"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"``, or
-            ``"trace"``).
+            ``"trace"``), and ``key_column``, the name of the result column
+            holding each row's security: ``"ticker"`` (default, deprecated;
+            results that use it emit a ``FutureWarning``) or ``"security"``,
+            which becomes the default in the next major release.
             ``tls_client_credentials`` and ``tls_trust_material`` accept file
             paths as ``str`` or in-memory DER material as ``bytes`` (PKCS#12
             credentials and PKCS#7 trust). Supply both, using the same
@@ -442,6 +446,35 @@ def _get_engine(*, engine: Engine | None = None):
                 _engine = _core.PyEngine()
             logger.info("PyEngine connected to Bloomberg")
         return _engine
+
+
+_TICKER_KEY_COLUMN_WARNING = (
+    "xbbg results name the security column 'ticker', which collides with Bloomberg's TICKER field. "
+    "The next major release renames it 'security'; pass key_column='security' to xbbg.configure() "
+    "or xbbg.Engine() to switch now."
+)
+
+
+def _active_key_column() -> str:
+    """Key column of the engine this context routes requests to, without starting one."""
+    scoped = _active_engine.get()
+    if scoped is not None:
+        return scoped._config_snapshot.key_column.lower()
+    with _engine_lock:
+        config = _config
+    if config is not None:
+        return config.key_column.lower()
+    from ._services_gen import KEY_COLUMN_DEFAULT
+
+    return KEY_COLUMN_DEFAULT
+
+
+def _warn_ticker_key_column(table: Any) -> None:
+    """Emit a ``FutureWarning`` for a result keyed by the deprecated ``ticker`` column."""
+    if "ticker" in table.column_names and _active_key_column() == "ticker":
+        from .exceptions import _warn_at_user_frame
+
+        _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
 
 
 def _normalize_engine_exception(exc: Exception) -> Exception:

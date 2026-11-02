@@ -64,14 +64,14 @@ def observe_delivery_reads(owner, monkeypatch, observer=None, *, drain_observer=
         def __getattr__(self, name):
             return getattr(self.native, name)
 
-        def next_delivery(self, converter=None):
-            future = self.native.next_delivery(converter)
+        def next_delivery(self):
+            future = self.native.next_delivery()
             if observer is not None:
                 observer(future)
             return future
 
-        def unsubscribe_deliveries(self, drain=False, converter=None):
-            future = self.native.unsubscribe_deliveries(drain, converter)
+        def unsubscribe_deliveries(self, drain=False):
+            future = self.native.unsubscribe_deliveries(drain)
             if drain and drain_observer is not None:
                 drain_observer(future)
             return future
@@ -425,7 +425,7 @@ async def test_delivery_view_emits_native_delayed_warnings(native_factory):
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("mode", ["deltas", "state"])
-async def test_cancelling_during_backend_conversion_rolls_back_native_receipt(native_factory, monkeypatch, mode):
+async def test_interrupted_loop_conversion_rolls_back_native_receipt(native_factory, monkeypatch, mode):
     owner = await native_factory()
     kwargs = {"overflow_policy": "drop_oldest", "stream_capacity": 1} if mode == "deltas" else {}
     sub = await xbbg.asubscribe(TOPIC, "BID", delivery=mode, **kwargs)
@@ -433,32 +433,27 @@ async def test_cancelling_during_backend_conversion_rolls_back_native_receipt(na
         await read(sub.deliveries())
     publish(owner, BID=10.0)
     publish(owner, BID=11.0)
-    started, release = threading.Event(), threading.Event()
-    convert = backend_module.convert_backend_frame
+    converter_threads = []
 
-    def blocked_converter(table, backend):
-        started.set()
-        if not release.wait(timeout=3):
-            raise TimeoutError("test did not release the backend converter")
-        return convert(table, backend)
+    class Interrupted(BaseException):
+        pass
 
-    monkeypatch.setattr(backend_module, "convert_backend_frame", blocked_converter)
-    pending = asyncio.create_task(sub.deliveries(backend="native").read())
-    try:
-        assert await asyncio.to_thread(started.wait, 3)
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pending
-        publish(owner, BID=12.0)
-    finally:
-        release.set()
+    def interrupted_converter(_table, _backend):
+        converter_threads.append(threading.get_ident())
+        raise Interrupted
+
+    monkeypatch.setattr(backend_module, "convert_backend_frame", interrupted_converter)
+    with pytest.raises(Interrupted):
+        await asyncio.wait_for(sub.deliveries(backend="native").read(), timeout=3)
+    # Backend conversion runs on the consuming event loop, never a native bridge worker.
+    assert converter_threads == [threading.get_ident()]
+    publish(owner, BID=12.0)
     restored = await read(sub.deliveries())
     if mode == "deltas":
-        assert rows(restored)[0]["BID"] == 11.0
+        # The restored receipt keeps its gap and, under the default
+        # flush_threshold, also carries the update queued behind it.
+        assert [row["BID"] for row in rows(restored)] == [11.0, 12.0]
         assert restored.gap_before.dropped_updates == 1
-        newest = await read(sub.deliveries())
-        assert rows(newest)[0]["BID"] == 12.0
-        assert newest.gap_before is None
     else:
         assert rows(restored)[0]["BID"] == 12.0
         assert rows(restored)[0]["valid"] is True
@@ -713,43 +708,6 @@ async def test_failed_marked_drain_conversion_retains_closed_source_for_retry(na
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["deltas", "state"])
-async def test_cancelling_blocked_marked_drain_converter_retains_final_data(native_factory, monkeypatch, mode):
-    owner = await native_factory()
-    options = {"overflow_policy": "drop_oldest", "stream_capacity": 1} if mode == "deltas" else {}
-    sub = await xbbg.asubscribe(TOPIC, "BID", delivery=mode, **options)
-    if mode == "state":
-        await read(sub.deliveries())
-    publish(owner, BID=10.0)
-    publish(owner, BID=11.0)
-    started, release = threading.Event(), threading.Event()
-    convert = backend_module.convert_backend_frame
-
-    def blocked_converter(table, backend):
-        started.set()
-        if not release.wait(timeout=3):
-            raise TimeoutError("test did not release the drain converter")
-        return convert(table, backend)
-
-    monkeypatch.setattr(backend_module, "convert_backend_frame", blocked_converter)
-    pending = asyncio.create_task(sub.deliveries(backend="native").unsubscribe(drain=True))
-    try:
-        assert await asyncio.to_thread(started.wait, 3)
-        pending.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await pending
-    finally:
-        release.set()
-    restored = await asyncio.wait_for(sub.deliveries(raw=True).unsubscribe(drain=True), timeout=3)
-    assert len(restored) == 1
-    assert rows(restored[0])[0]["BID"] == 11.0
-    if mode == "deltas":
-        assert restored[0].gap_before.dropped_updates == 1
-    else:
-        assert rows(restored[0])[0]["valid"] is True
-
-
-@pytest.mark.asyncio
 @pytest.mark.parametrize(("mode", "terminal"), [("deltas", False), ("state", False), ("deltas", True)])
 async def test_cancelled_after_native_drain_completion_restores_data_or_terminal(
     native_factory, monkeypatch, mode, terminal
@@ -865,32 +823,17 @@ async def test_legacy_strict_source_error_is_not_hidden_by_pending_warning(nativ
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tick_mode", [False, True])
-async def test_plain_reader_waits_for_cancelled_strict_delivery_publication(native_factory, monkeypatch, tick_mode):
+async def test_plain_reader_waits_for_unpublished_strict_delivery_receipt(native_factory, tick_mode):
     owner = await native_factory()
     sub = await xbbg.asubscribe(TOPIC, "BID", tick_mode=tick_mode)
     publish(owner, BID=10.0)
-    started, release = threading.Event(), threading.Event()
-    convert = backend_module.convert_backend_frame
-
-    def blocked_converter(table, backend):
-        started.set()
-        if not release.wait(timeout=3):
-            raise TimeoutError("test did not release the strict delivery converter")
-        return convert(table, backend)
-
-    monkeypatch.setattr(backend_module, "convert_backend_frame", blocked_converter)
-    marked = asyncio.create_task(sub.deliveries(backend="native").read())
-    plain = None
+    # Hold a real native receipt between its read and publication.
+    receipt = await asyncio.wait_for(sub._sub.next_delivery(), timeout=3)
+    plain = asyncio.create_task(anext(sub))
     try:
-        assert await asyncio.to_thread(started.wait, 3)
-        marked.cancel()
-        with pytest.raises(asyncio.CancelledError):
-            await marked
-        plain = asyncio.create_task(anext(sub))
         await asyncio.wait_for(owner.wait_legacy_read_started(), timeout=3)
     finally:
-        release.set()
-    assert plain is not None
+        receipt.discard()
     restored = await asyncio.wait_for(plain, timeout=3)
     if tick_mode:
         assert isinstance(restored, dict)
@@ -899,43 +842,6 @@ async def test_plain_reader_waits_for_cancelled_strict_delivery_publication(nati
         assert restored.to_pylist()[0]["BID"] == 10.0
         assert restored.num_rows == 1
     await sub.unsubscribe()
-
-
-@pytest.mark.asyncio
-async def test_blocked_converters_do_not_pin_the_async_bridge(native_factory):
-    owner = await native_factory()
-    topics = [f"SYNTHETIC BLOCKED {index} Equity" for index in range(3)]
-    blocked = [await owner.subscribe([topic], ["BID"]) for topic in topics]
-    free = await owner.subscribe([SECOND], ["BID"])
-    for topic in topics:
-        publish(owner, topic, BID=10.0)
-    started, release = threading.Semaphore(0), threading.Event()
-
-    def blocking_converter(kind, batch, dropped_updates):
-        started.release()
-        if not release.wait(timeout=10):
-            raise TimeoutError("test did not release the blocked converter")
-        return kind, batch, dropped_updates
-
-    pending = [native.next_delivery(blocking_converter) for native in blocked]
-    try:
-        for _ in pending:
-            assert await asyncio.to_thread(started.acquire, timeout=3), "every blocked converter must start"
-        ticks = owner.bridge_ticks()
-        await asyncio.sleep(0.2)
-        assert owner.bridge_ticks() > ticks, "bridge workers must stay free while converters block"
-        publish(owner, SECOND, BID=12.0)
-        receipt = await asyncio.wait_for(free.next_delivery(None), timeout=3)
-        _kind, batch, _dropped = receipt.publish()
-        assert batch.to_pylist()[0]["BID"] == 12.0
-    finally:
-        release.set()
-    for receipt in await asyncio.wait_for(asyncio.gather(*pending), timeout=5):
-        kind, batch, dropped = receipt.publish()
-        assert (kind, dropped) == ("deltas", None)
-        assert batch.to_pylist()[0]["BID"] == 10.0
-    for native in [*blocked, free]:
-        await native.unsubscribe()
 
 
 @requires_gil
@@ -954,14 +860,16 @@ async def test_completions_waiting_for_the_interpreter_leave_bridge_workers_free
     sys.setswitchinterval(1000)
     try:
         # Every read completes natively at once, then waits for the interpreter held here.
-        pending = [native.next_delivery(None) for native in subscriptions]
+        pending = [native.next_delivery() for native in subscriptions]
         start = owner.bridge_ticks()
         owner.hold_attached(HOLD_MS)
         held = owner.bridge_ticks() - start
     finally:
         sys.setswitchinterval(interval)
     receipts = await asyncio.wait_for(asyncio.gather(*pending), timeout=5)
-    assert [receipt.publish()[1].to_pylist()[0]["BID"] for receipt in receipts] == [0.0, 1.0, 2.0, 3.0]
+    assert [receipt.value[1].to_pylist()[0]["BID"] for receipt in receipts] == [0.0, 1.0, 2.0, 3.0]
+    for receipt in receipts:
+        receipt.publish()
     assert held >= idle / 2, f"bridge advanced {held} ticks while the interpreter was held, {idle} while idle"
     for native in subscriptions:
         await native.unsubscribe()
@@ -969,28 +877,23 @@ async def test_completions_waiting_for_the_interpreter_leave_bridge_workers_free
 
 @requires_gil
 @pytest.mark.asyncio
-async def test_read_cancelled_before_completion_never_converts_and_keeps_rows_and_gap(native_factory):
+async def test_read_cancelled_before_completion_keeps_rows_and_gap(native_factory):
     owner = await native_factory()
     native = await owner.subscribe([TOPIC], ["BID"], stream_capacity=1, overflow_policy="drop_oldest")
     publish(owner, BID=10.0)
     publish(owner, BID=11.0)
-    calls = []
-
-    def converter(kind, batch, dropped_updates):
-        calls.append(kind)
-        return kind, batch, dropped_updates
 
     interval = sys.getswitchinterval()
     sys.setswitchinterval(1000)
     try:
-        # The read may complete natively, but cannot convert before cancel().
-        cancelled = native.next_delivery(converter)
+        # The read may complete natively, but its receipt is dropped unpublished.
+        cancelled = native.next_delivery()
         cancelled.cancel()
     finally:
         sys.setswitchinterval(interval)
-    receipt = await asyncio.wait_for(native.next_delivery(None), timeout=3)
-    kind, batch, dropped_updates = receipt.publish()
-    assert calls == []
+    receipt = await asyncio.wait_for(native.next_delivery(), timeout=3)
+    kind, batch, dropped_updates = receipt.value
+    receipt.publish()
     assert (kind, dropped_updates) == ("deltas", 1)
     assert batch.to_pylist()[0]["BID"] == 11.0
     await native.unsubscribe()

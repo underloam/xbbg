@@ -242,6 +242,8 @@ filterwarnings = [
   "error::DeprecationWarning",
   "error::PendingDeprecationWarning",
   "error::FutureWarning",
+  # The suite exercises the deprecated default key column; its warning has dedicated tests.
+  "ignore:xbbg results name the security column 'ticker':FutureWarning",
 ]
 
 [dependency-groups]

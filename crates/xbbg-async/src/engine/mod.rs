@@ -12,6 +12,7 @@ mod dispatch;
 mod exchange;
 mod exchange_cache;
 mod intraday_timezone;
+mod key_column;
 mod request_plan;
 mod request_pool;
 mod request_sharding;
@@ -48,6 +49,7 @@ use exchange_cache::ExchangeCache;
 pub use crate::services::ExtractorType;
 
 pub use delayed::DelayedPolicy;
+pub use key_column::KeyColumn;
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
 use request_sharding::sharded_requests;
@@ -641,7 +643,12 @@ pub struct EngineConfig {
     pub max_event_queue_size: usize,
     /// Command channel capacity (backpressure)
     pub command_queue_size: usize,
-    /// Consumer-side Arrow batch size hint; the engine emits subscription updates immediately.
+    /// Maximum number of already-queued subscription updates (or dirty state
+    /// topics) combined into one Arrow batch per read (default: 16). A read
+    /// returns as soon as the first update arrives and adds only updates that
+    /// are already waiting, so quiet streams still get one-row batches; nothing
+    /// waits for a batch to fill, and the engine emits every update immediately.
+    /// `SubscribeRequest::flush_threshold` overrides it per subscription.
     pub subscription_flush_threshold: usize,
     /// Subscription stream capacity (backpressure)
     pub subscription_stream_capacity: usize,
@@ -672,6 +679,9 @@ pub struct EngineConfig {
     pub warmup_services: Vec<String>,
     /// Validation mode for requests (default: Strict)
     pub validation_mode: ValidationMode,
+    /// Name of the result column holding each row's security (default: the
+    /// deprecated `ticker`). See [`KeyColumn`].
+    pub key_column: KeyColumn,
     /// Custom path for the field cache JSON file (default: ~/.xbbg/field_cache.json)
     pub field_cache_path: Option<std::path::PathBuf>,
     /// Structured Bloomberg session auth configuration.
@@ -796,7 +806,7 @@ impl Default for EngineConfig {
             tls: None,
             max_event_queue_size: 10_000,
             command_queue_size: 256,
-            subscription_flush_threshold: 1,
+            subscription_flush_threshold: 16,
             subscription_stream_capacity: 256,
             overflow_policy: OverflowPolicy::default(),
             request_pool_size: 2,
@@ -812,6 +822,7 @@ impl Default for EngineConfig {
                 crate::services::Service::ApiFlds.to_string(),
             ],
             validation_mode: ValidationMode::default(),
+            key_column: KeyColumn::default(),
             field_cache_path: None,
             auth: None,
             bql_app_name: None,
@@ -969,6 +980,7 @@ impl Engine {
         self.apply_intraday_request_timezone(&mut builder).await?;
         let prepared = builder.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
+        let key = self.output_key_column(&prepared);
         let output_params = prepared.params().clone();
         let operation = prepared.effective_operation().to_string();
         let delay_lookup = delayed::lookup_securities(&prepared, chrono::Utc::now());
@@ -989,7 +1001,24 @@ impl Engine {
         let batch =
             intraday_timezone::apply_intraday_output_timezone(self, batch, &output_params).await?;
         state::ResponseMetadata::warn_batch_type_misses(&batch);
-        delayed::enforce(&output_params, &operation, batch)
+        let batch = delayed::enforce(&output_params, &operation, batch)?;
+        Ok(match key {
+            Some(key) => key_column::name_key_column(batch, key),
+            None => batch,
+        })
+    }
+
+    /// Name of the result column holding each row's security.
+    pub fn key_column(&self) -> KeyColumn {
+        self.config.key_column
+    }
+
+    /// The key column for a request whose results lead with a security column.
+    fn output_key_column(&self, request: &PreparedRequest) -> Option<KeyColumn> {
+        request
+            .shape()
+            .has_key_column()
+            .then_some(self.config.key_column)
     }
 
     /// Streaming generic request - dispatches to worker pool.
@@ -1011,8 +1040,9 @@ impl Engine {
         let out_iana = intraday_timezone::resolve_output_tz_iana(self, builder.params()).await?;
         let prepared = builder.finalize()?;
         self.maybe_validate_request_fields(&prepared).await?;
+        let key = self.output_key_column(&prepared);
         let stream = self.request_pool.request_stream(prepared).await?;
-        Ok(stream.with_output_timezone(out_iana))
+        Ok(stream.with_output_timezone(out_iana).with_key_column(key))
     }
 
     /// Resolve defaults, validate, schema-route kwargs, and apply field-cache hints.
@@ -1187,7 +1217,7 @@ impl Engine {
     ///
     /// Queries `//blp/apiflds` for the given fields and returns a list of
     /// invalid or refused field names, warning with Bloomberg's refusal details.
-    /// Echoed ids and canonical mnemonics both identify successful responses.
+    /// Bloomberg field ids and canonical mnemonics both identify successful responses.
     ///
     /// # Example
     /// ```ignore
@@ -1195,7 +1225,17 @@ impl Engine {
     /// // invalid = ["INVALID_FIELD"]
     /// ```
     pub async fn validate_fields(&self, fields: &[String]) -> Result<Vec<String>, BlpAsyncError> {
-        Ok(self.validate_field_metadata(fields).await?.invalid_fields)
+        let validation = self.validate_field_metadata(fields).await?;
+        // The returned names cannot carry Bloomberg's reasons, so report them here.
+        // Request validation warns (lenient) or raises (strict) with them instead.
+        if !validation.field_errors.is_empty() {
+            xbbg_log::warn!(
+                refused_count = validation.field_errors.len(),
+                field_errors = ?validation.field_errors,
+                "Bloomberg refused field validation ids"
+            );
+        }
+        Ok(validation.invalid_fields)
     }
 
     async fn validate_field_metadata(
@@ -1218,15 +1258,7 @@ impl Engine {
         let params = self.prepare_request_builder(params)?.finalize()?;
         let batch = self.request_pool.request(params).await?;
 
-        let validation = FieldValidation::from_response(fields, &batch)?;
-        if !validation.field_errors.is_empty() {
-            xbbg_log::warn!(
-                refused_count = validation.field_errors.len(),
-                field_errors = ?validation.field_errors,
-                "Bloomberg refused field validation ids"
-            );
-        }
-        Ok(validation)
+        FieldValidation::from_response(fields, &batch)
     }
 
     /// Check if field validation is enabled based on validation mode.
@@ -1851,6 +1883,7 @@ mod tests {
         assert_eq!(config.runtime_worker_threads, 2);
         assert_eq!(config.max_subscription_sessions, 32);
         assert!(config.max_subscription_sessions >= config.subscription_pool_size);
+        assert_eq!(config.subscription_flush_threshold, 16);
     }
 
     #[test]

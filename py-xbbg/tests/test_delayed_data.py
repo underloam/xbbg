@@ -30,6 +30,7 @@ def _delayed_result() -> Any:
         def __init__(self) -> None:
             self._table = _core.ArrowTable.from_pylist([{"ticker": ticker} for ticker in DELAYED])
             self.num_rows = self._table.num_rows
+            self.column_names = self._table.column_names
             self.metadata = {"xbbg.delayed": json.dumps(DELAYED)}
             self.delayed = DELAYED
 

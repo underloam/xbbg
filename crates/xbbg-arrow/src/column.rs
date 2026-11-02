@@ -13,7 +13,8 @@ use arrow_array::{
     make_array,
 };
 use arrow_buffer::ArrowNativeType;
-use arrow_data::ArrayDataBuilder;
+use arrow_data::transform::{Capacities, MutableArrayData};
+use arrow_data::{ArrayData, ArrayDataBuilder};
 use arrow_schema::{DataType, FieldRef};
 use arrow_select::interleave::interleave;
 
@@ -237,12 +238,60 @@ pub(crate) fn compact_array(array: &dyn Array) -> Result<ArrayRef> {
             ),
             _ => unreachable!("Arrow dictionary key types are integer primitives"),
         },
+        data_type if copies_as_one_range(data_type) => {
+            let data = array.to_data();
+            let len = data.len();
+            let capacities = match data_type {
+                DataType::Utf8 | DataType::Binary => {
+                    Capacities::Binary(len, Some(value_bytes::<i32>(&data)))
+                }
+                DataType::LargeUtf8 | DataType::LargeBinary => {
+                    Capacities::Binary(len, Some(value_bytes::<i64>(&data)))
+                }
+                _ => Capacities::Array(len),
+            };
+            let mut copied = MutableArrayData::with_capacities(vec![&data], false, capacities);
+            if len > 0 {
+                copied.try_extend(0, 0, len)?;
+            }
+            compact_owned_array(make_array(copied.freeze()))
+        }
         _ => {
             let indices = (0..array.len()).map(|row| (0, row)).collect::<Vec<_>>();
             let copied = interleave(&[array], &indices)?;
             compact_owned_array(copied)
         }
     }
+}
+
+/// Whether one `MutableArrayData` range copy yields the same compacted values
+/// as an identity `interleave`: flat layouts whose buffers it rebases to
+/// offset 0 (view data buffers are garbage-collected afterwards). Nested and
+/// encoded layouts keep the identity `interleave`, whose per-type kernels
+/// also compact their children.
+fn copies_as_one_range(data_type: &DataType) -> bool {
+    data_type.is_primitive()
+        || matches!(
+            data_type,
+            DataType::Null
+                | DataType::Boolean
+                | DataType::Utf8
+                | DataType::LargeUtf8
+                | DataType::Utf8View
+                | DataType::Binary
+                | DataType::LargeBinary
+                | DataType::BinaryView
+                | DataType::FixedSizeBinary(_)
+        )
+}
+
+/// Bytes spanned by the logical values of an offset-based byte array.
+fn value_bytes<O: ArrowNativeType>(data: &ArrayData) -> usize {
+    if data.is_empty() {
+        return 0;
+    }
+    let offsets = data.buffer::<O>(0);
+    offsets[data.len()].as_usize() - offsets[0].as_usize()
 }
 
 fn compact_dictionary<K: ArrowDictionaryKeyType>(array: &DictionaryArray<K>) -> Result<ArrayRef> {
@@ -320,7 +369,10 @@ fn compact_owned_array(array: ArrayRef) -> Result<ArrayRef> {
 
 #[cfg(test)]
 mod tests {
-    use arrow_array::{BinaryArray, Int64Array, LargeBinaryArray, LargeStringArray, StringArray};
+    use arrow_array::{
+        BinaryArray, BooleanArray, FixedSizeBinaryArray, Float64Array, Int64Array,
+        LargeBinaryArray, LargeStringArray, NullArray, StringArray, TimestampMicrosecondArray,
+    };
     use arrow_schema::Field;
 
     use super::*;
@@ -425,5 +477,79 @@ mod tests {
             column.slice(ROWS + 1, None).logical_nbytes().unwrap(),
             2 * 8 + 1
         );
+    }
+
+    fn identity_interleave_compact(array: &dyn Array) -> ArrayRef {
+        let indices = (0..array.len()).map(|row| (0, row)).collect::<Vec<_>>();
+        compact_owned_array(interleave(&[array], &indices).unwrap()).unwrap()
+    }
+
+    #[test]
+    fn one_range_copy_matches_identity_interleave_for_sliced_flat_arrays() {
+        let long = "x".repeat(64);
+        let text = vec![
+            Some("a"),
+            None,
+            Some(long.as_str()),
+            Some(""),
+            Some("tail value"),
+        ];
+        let arrays: Vec<ArrayRef> = vec![
+            Arc::new(Int64Array::from(vec![
+                Some(1),
+                None,
+                Some(3),
+                Some(4),
+                None,
+            ])),
+            Arc::new(Float64Array::from(vec![1.0, -0.0, f64::NAN, 4.0, 5.0])),
+            Arc::new(BooleanArray::from(vec![
+                Some(true),
+                None,
+                Some(false),
+                Some(true),
+                Some(false),
+                None,
+                Some(true),
+                Some(true),
+                Some(false),
+                Some(true),
+            ])),
+            Arc::new(
+                TimestampMicrosecondArray::from(vec![Some(1), None, Some(3), Some(4)])
+                    .with_timezone("UTC"),
+            ),
+            Arc::new(StringArray::from(text.clone())),
+            Arc::new(LargeStringArray::from(text.clone())),
+            Arc::new(StringViewArray::from(text)),
+            Arc::new(BinaryArray::from(vec![
+                Some(b"ab".as_ref()),
+                None,
+                Some(b"cde".as_ref()),
+                Some(b"".as_ref()),
+            ])),
+            Arc::new(
+                FixedSizeBinaryArray::try_from_sparse_iter_with_size(
+                    vec![Some([1_u8, 2]), None, Some([3, 4]), Some([5, 6])].into_iter(),
+                    2,
+                )
+                .unwrap(),
+            ),
+            Arc::new(NullArray::new(4)),
+        ];
+        for array in arrays {
+            assert!(copies_as_one_range(array.data_type()));
+            for input in [
+                array.clone(),
+                array.slice(1, array.len() - 2),
+                array.slice(2, 0),
+            ] {
+                let compacted = compact_array(input.as_ref()).unwrap();
+                let identity = identity_interleave_compact(input.as_ref());
+                assert_eq!(compacted.as_ref(), identity.as_ref());
+                assert_eq!(compacted.as_ref(), input.as_ref());
+                assert_eq!(compacted.offset(), 0);
+            }
+        }
     }
 }

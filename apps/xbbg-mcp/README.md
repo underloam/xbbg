@@ -255,6 +255,7 @@ Common settings:
 - `XBBG_MCP_VALIDATION_MODE` / `XBBG_VALIDATION_MODE` – `disabled` (default), `lenient`, `strict`
 - `XBBG_MCP_SDK_LOG_LEVEL` / `XBBG_SDK_LOG_LEVEL` – `off` (default), `fatal`, `error`, `warn`, `info`, `debug`, `trace`
 - `XBBG_MCP_OVERFLOW_POLICY` / `XBBG_OVERFLOW_POLICY` – `drop_newest` (default), `block`
+- `XBBG_MCP_KEY_COLUMN` / `XBBG_KEY_COLUMN` – `ticker` (default, deprecated), `security`; names the result column holding each row's security. `ticker` collides with Bloomberg's `TICKER` field once identifiers are case-folded, and `security` becomes the default in the next major release.
 
 Supported auth methods:
 

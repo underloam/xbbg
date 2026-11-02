@@ -603,11 +603,10 @@ class Subscription:
 class DeliveryStream:
     """Async batch-delivery view sharing its subscription's native lifecycle.
 
-    Backend conversion of each delivery runs on a native completion thread,
-    attached to the interpreter but off the event loop, before the consuming
-    task resumes and ``publish()`` commits the batch. A read cancelled before
-    its native completion never converts; failed or unpublished conversions
-    leave the batch and its gap unread.
+    Native reads return unpublished receipts, built on a native completion
+    thread without converting the batch. Backend conversion runs here, on the
+    consuming event loop, before a receipt is committed; failed or unpublished
+    conversions leave the batch and its gap unread.
     """
 
     __slots__ = ("_convert_delivery", "_owner")
@@ -617,7 +616,8 @@ class DeliveryStream:
         effective_backend = None if backend is None else _backend.resolve_backend(backend, None)
         convert_batch = _subscription_batch_converter(raw, effective_backend)
 
-        def convert_delivery(kind: str, batch: Any, dropped_updates: int | None) -> SubscriptionDelivery:
+        def convert_delivery(value: tuple[str, Any, int | None]) -> SubscriptionDelivery:
+            kind, batch, dropped_updates = value
             return SubscriptionDelivery(
                 kind=kind,
                 data=convert_batch(batch),
@@ -629,7 +629,7 @@ class DeliveryStream:
     def __aiter__(self) -> DeliveryStream:
         return self
 
-    async def _await_publication(self, future) -> Any:
+    async def _await_publication(self, future, convert: Callable[[Any], Any]) -> Any:
         try:
             receipt = await future
         except BaseException:
@@ -644,20 +644,23 @@ class DeliveryStream:
             return None
         if receipt.has_error:
             try:
-                return receipt.publish()
+                receipt.publish()
             finally:
                 self._owner._emit_warnings_preserving_error()
+            raise RuntimeError("native terminal receipt was published without its error")
         try:
             self._owner._emit_warnings()
+            converted = convert(receipt.value)
         except BaseException:
             receipt.discard()
             raise
-        return receipt.publish()
+        receipt.publish()
+        return converted
 
     async def __anext__(self) -> SubscriptionDelivery:
         try:
-            future = self._owner._sub.next_delivery(self._convert_delivery)
-            return await self._await_publication(future)
+            future = self._owner._sub.next_delivery()
+            return await self._await_publication(future, self._convert_delivery)
         except Exception as exc:
             mapped = _engine._normalize_engine_exception(exc)
             if mapped is exc:
@@ -675,9 +678,10 @@ class DeliveryStream:
         available to another ``unsubscribe(drain=True)`` call, even after close.
         A non-draining close intentionally discards any retained drain.
         """
+        convert = self._convert_delivery
         try:
-            future = self._owner._sub.unsubscribe_deliveries(drain, self._convert_delivery)
-            return await self._await_publication(future)
+            future = self._owner._sub.unsubscribe_deliveries(drain)
+            return await self._await_publication(future, lambda values: [convert(value) for value in values])
         except Exception as exc:
             mapped = _engine._normalize_engine_exception(exc)
             if mapped is exc:
@@ -766,7 +770,9 @@ async def asubscribe(
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
             Quote updates are conflated by Bloomberg; trades are still delivered as received.
         tick_mode: If True, return native dict ticks without building Arrow (implies raw=True)
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates, so a
+            quiet stream still yields one-row batches.
         stream_capacity: Backpressure capacity of the native subscription stream.
         overflow_policy: ``"drop_newest"`` (default) fails on a full consumer
             buffer; ``"block"`` waits briefly on a bounded forwarder and fails
@@ -984,7 +990,8 @@ async def astream(
         callback: Optional callback function to invoke on each batch
         tick_mode: If True, convert batches to dicts
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates.
         stream_capacity: Capacity of the native subscription stream.
         overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve
             strict delta output. ``"drop_oldest"`` yields marked batch envelopes.
@@ -1099,7 +1106,8 @@ def stream(
         callback: Optional callback function to invoke on each batch
         tick_mode: If True, convert batches to dicts
         conflate: If True, request Bloomberg conflated market data for //blp/mktdata.
-        flush_threshold: Number of ticks to buffer before emitting a batch.
+        flush_threshold: Maximum number of already-queued updates combined into one
+            batch (engine default 16). A read never waits for more updates.
         stream_capacity: Capacity of both the native subscription stream and the
             sync bridge. Defaults to 256.
         overflow_policy: ``"drop_newest"`` (default) and ``"block"`` preserve

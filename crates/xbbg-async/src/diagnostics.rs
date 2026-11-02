@@ -81,10 +81,10 @@ impl FieldExceptions {
     /// Decode and validate a compact envelope or historical per-security map.
     pub fn from_json(raw: &str) -> Result<Self, serde_json::Error> {
         let mut result = Self::default();
-        match serde_json::from_str::<Encoded>(raw)? {
+        match serde_json::from_str::<Encoded>(raw).map_err(|error| explain_rejection(raw, error))? {
             Encoded::Compact(envelope) => {
                 if envelope.version != 1 {
-                    return Err(invalid("unsupported field-exception metadata version"));
+                    return Err(unsupported_version(envelope.version));
                 }
                 if envelope
                     .securities
@@ -114,7 +114,9 @@ impl FieldExceptions {
                 // These two reserved keys together identify an envelope even
                 // when its version/member types are malformed.
                 if securities.contains_key("entries") && securities.contains_key("securities") {
-                    return Err(invalid("malformed field-exception dictionary envelope"));
+                    return Err(invalid(
+                        "malformed field-exception dictionary envelope: missing field `version`",
+                    ));
                 }
                 for (security, exceptions) in securities {
                     let indices = exceptions
@@ -234,6 +236,46 @@ impl FieldExceptions {
 
 fn invalid(message: &str) -> serde_json::Error {
     <serde_json::Error as serde::de::Error>::custom(message)
+}
+
+fn unsupported_version(version: impl std::fmt::Display) -> serde_json::Error {
+    invalid(&format!(
+        "unsupported field-exception metadata version {version}"
+    ))
+}
+
+/// Untagged decoding only reports that no shape matched. Re-read the members
+/// that identify an envelope (error path only) to say which part was rejected.
+fn explain_rejection(raw: &str, error: serde_json::Error) -> serde_json::Error {
+    #[derive(Deserialize)]
+    struct EnvelopeMembers {
+        version: Option<serde_json::Value>,
+        entries: Option<serde::de::IgnoredAny>,
+        securities: Option<serde::de::IgnoredAny>,
+    }
+
+    let Ok(members) = serde_json::from_str::<EnvelopeMembers>(raw) else {
+        // Not a JSON object, or not JSON at all: serde's own error is precise.
+        return error;
+    };
+    // A historical map could name a security `version`; only treat input as an
+    // envelope when its reserved members appear together.
+    let envelope_like = match members.version {
+        Some(_) => members.entries.is_some() || members.securities.is_some(),
+        None => members.entries.is_some() && members.securities.is_some(),
+    };
+    if !envelope_like {
+        return error;
+    }
+    match members.version {
+        Some(version) if version != 1 => unsupported_version(version),
+        _ => match serde_json::from_str::<Envelope>(raw) {
+            Err(envelope_error) => invalid(&format!(
+                "malformed field-exception dictionary envelope: {envelope_error}"
+            )),
+            Ok(_) => error,
+        },
+    }
 }
 
 struct CanonicalEnvelope<'a> {
@@ -424,6 +466,36 @@ mod tests {
                 FieldExceptions::from_json(&raw.to_string()).is_err(),
                 "accepted {raw}"
             );
+        }
+    }
+
+    #[test]
+    fn rejected_envelopes_name_the_version_or_member_at_fault() {
+        let message = |raw: serde_json::Value| {
+            FieldExceptions::from_json(&raw.to_string())
+                .unwrap_err()
+                .to_string()
+        };
+        for raw in [
+            json!({"version": 2, "entries": [], "securities": {}}),
+            json!({"version": 2, "entries": [], "securities": {}, "future": true}),
+        ] {
+            let message = message(raw);
+            assert!(
+                message.contains("unsupported field-exception metadata version 2"),
+                "{message}"
+            );
+        }
+        for raw in [
+            json!({"version": 1, "entries": [exception("FIELD_A", 9)], "securities": {"SYN_A": [-1]}}),
+            json!({"entries": [], "securities": {}}),
+        ] {
+            let message = message(raw);
+            assert!(
+                message.contains("malformed field-exception dictionary envelope"),
+                "{message}"
+            );
+            assert!(!message.contains("did not match any variant"), "{message}");
         }
     }
 }

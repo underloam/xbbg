@@ -26,7 +26,8 @@ class DummyConfig:
         self.shard_chunk_size = 16
         self.shard_max_concurrent = 4
         self.validation_mode = "disabled"
-        self.subscription_flush_threshold = 1
+        self.key_column = "ticker"
+        self.subscription_flush_threshold = 16
         self.max_event_queue_size = 10_000
         self.command_queue_size = 256
         self.subscription_stream_capacity = 256

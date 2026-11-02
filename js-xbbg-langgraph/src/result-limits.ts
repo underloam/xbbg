@@ -6,7 +6,11 @@ import {
   TRUNCATION_REASON_ORDER,
   type ResultTruncationReason,
 } from "./_defs_gen";
-import { buildRawFieldExceptions, rawFieldExceptionsMetadata } from "./result-diagnostics";
+import {
+  buildRawFieldExceptions,
+  InvalidFieldExceptionsMetadataError,
+  rawFieldExceptionsMetadata,
+} from "./result-diagnostics";
 import { buildEntitlementProperty } from "./result-entitlements";
 import {
   addReason,
@@ -261,6 +265,20 @@ function appendBuiltProperty(
   return true;
 }
 
+/**
+ * Unreadable stored field exceptions degrade like other unsupported values, as
+ * in the Python adapter: the result stays usable but never reports itself clean.
+ */
+function omitInvalidFieldExceptions(state: LimitState, error: unknown): boolean {
+  if (!(error instanceof InvalidFieldExceptionsMetadataError)) {
+    throw error;
+  }
+  addReason(state, "unsupported_value");
+  state.hasErrors = true;
+  state.omittedPropertiesAtLeast += 1;
+  return true;
+}
+
 function buildProperty(
   source: object,
   key: string,
@@ -271,11 +289,17 @@ function buildProperty(
   rowLimit: number,
 ): boolean {
   const descriptor = ownEnumerableDescriptor(source, key);
-  const rawExceptions =
+  let rawExceptions: string | undefined;
+  if (
     key === "fieldExceptions" &&
     (descriptor === undefined || !("value" in descriptor) || descriptor.value === undefined)
-      ? rawFieldExceptionsMetadata(source)
-      : undefined;
+  ) {
+    try {
+      rawExceptions = rawFieldExceptionsMetadata(source);
+    } catch (error) {
+      return omitInvalidFieldExceptions(state, error);
+    }
+  }
   if (
     rawExceptions === undefined &&
     (descriptor === undefined ||
@@ -319,6 +343,8 @@ function buildProperty(
         depth + 1,
         DIAGNOSTIC_TRAVERSAL,
       );
+    } catch (error) {
+      return omitInvalidFieldExceptions(state, error);
     } finally {
       state.inDiagnostics = wasInDiagnostics;
     }

@@ -17,6 +17,7 @@ import {
   emptyFieldInfoArrowBatch,
   fakeNativeSubscription,
   int32ArrowBatch,
+  ipcFileFromBatch,
   scalarBatch,
   typedBuffer,
 } from './subscription-fixtures';
@@ -607,6 +608,14 @@ function utf8(name: string, values: readonly (string | null)[]): NativeArrowColu
     nullBitmap: Buffer.from(validity),
   };
 }
+function keyedBatch(key: string): NativeArrowZeroCopyBatch {
+  return {
+    kind: 'zeroCopy',
+    numRows: 1,
+    metadata: {},
+    columns: [utf8(key, ['EURUSD BGN Curncy']), utf8('TICKER', ['EURUSD'])],
+  };
+}
 function venueBatch(rows: readonly VenueFixture[]): NativeArrowZeroCopyBatch {
   return {
     kind: 'zeroCopy',
@@ -898,6 +907,36 @@ describe('temporal native table results', () => {
   });
 });
 
+describe('ticker key column deprecation', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('warns once per process, only for results keyed by the ticker column', async () => {
+    const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
+    const request = { service: '//blp/refdata', operation: 'ReferenceDataRequest' } as const;
+
+    await engineWithNative({
+      keyColumn: 'security',
+      request: async () => keyedBatch('security'),
+    }).request(request);
+    expect(emitted).not.toHaveBeenCalled();
+
+    const legacy = engineWithNative({
+      keyColumn: 'ticker',
+      request: async () => keyedBatch('ticker'),
+      recipeDelayStatus: async () => keyedBatch('ticker'),
+    });
+    await legacy.request(request);
+    await legacy.delayStatus('EURUSD BGN Curncy');
+    expect(emitted).toHaveBeenCalledTimes(1);
+    expect(emitted).toHaveBeenCalledWith(expect.stringContaining("keyColumn: 'security'"), {
+      type: 'DeprecationWarning',
+      code: 'XBBG_TICKER_KEY_COLUMN',
+    });
+  });
+});
+
 const DELAYED_TICKERS = {
   'SYN_A Equity': { delayed: true, delay_minutes: 15 },
   'SYN_B Equity': { delayed: false, delay_minutes: null },
@@ -962,12 +1001,14 @@ describe('request delayed-data policy', () => {
     },
   );
 
-  it('warns from IPC schema metadata for Polars and raw IPC callers', async () => {
+  it('warns from native Polars metadata and from raw IPC schema metadata', async () => {
     const emitted = vi.spyOn(process, 'emitWarning').mockReturnValue(undefined);
-    const ipc = Buffer.from(
-      tableToIPC(tableFromNativeArrowBatch(int32ArrowBatch(1, DELAYED_METADATA)), 'stream'),
-    );
-    const engine = engineWithNative({ requestRaw: async () => ipc });
+    const batch = int32ArrowBatch(1, DELAYED_METADATA);
+    const ipc = Buffer.from(tableToIPC(tableFromNativeArrowBatch(batch), 'stream'));
+    const engine = engineWithNative({
+      requestIpcFile: async () => ipcFileFromBatch(batch),
+      requestRaw: async () => ipc,
+    });
 
     const frame = (await engine.bdp(['SYN_A Equity'], ['PX_LAST'], {
       backend: 'polars',
@@ -1116,7 +1157,7 @@ const recipes: readonly RecipeCase[] = [
 ];
 
 describe('public diagnostic metadata conversion', () => {
-  it('preserves stream IPC payload and raw and decoded diagnostics through Engine.request', async () => {
+  it('preserves file IPC payload and raw and decoded diagnostics through Engine.request', async () => {
     const exception = {
       field: 'OPEN_INT',
       category: 'BAD_FLD',
@@ -1142,11 +1183,11 @@ describe('public diagnostic metadata conversion', () => {
       'xbbg.field_errors': JSON.stringify(fieldErrors),
       'synthetic.metadata': 'retained',
     };
-    const ipc = Buffer.from(
-      tableToIPC(tableFromNativeArrowBatch(int32ArrowBatch(42, metadata)), 'stream'),
-    );
-    const requestRaw = vi.fn<NativeEngine['requestRaw']>().mockResolvedValue(ipc);
-    const engine = engineWithNative({ requestRaw });
+    const requestIpcFile = vi
+      .fn<NativeEngine['requestIpcFile']>()
+      .mockResolvedValue(ipcFileFromBatch(int32ArrowBatch(42, metadata)));
+    const requestRaw = vi.fn<NativeEngine['requestRaw']>();
+    const engine = engineWithNative({ requestIpcFile, requestRaw });
 
     const frame = (await engine.request({
       backend: 'polars',
@@ -1154,7 +1195,8 @@ describe('public diagnostic metadata conversion', () => {
       service: '//blp/refdata',
     })) as api.ResultMetadata & { ipcTable: Table; ipcMetadata: Record<string, string> };
 
-    expect(requestRaw).toHaveBeenCalledTimes(1);
+    expect(requestIpcFile).toHaveBeenCalledTimes(1);
+    expect(requestRaw).not.toHaveBeenCalled();
     expect(frame.ipcTable.getChild('answer')?.get(0)).toBe(42);
     expect(frame.ipcMetadata).toStrictEqual(metadata);
     expect(frame.metadata).toStrictEqual(metadata);
@@ -1174,9 +1216,9 @@ describe('public diagnostic metadata conversion', () => {
       });
       const engine = engineWithNative({
         request: vi.fn<NativeEngine['request']>().mockResolvedValue(batch),
-        requestRaw: vi
-          .fn<NativeEngine['requestRaw']>()
-          .mockResolvedValue(Buffer.from(tableToIPC(tableFromNativeArrowBatch(batch), 'file'))),
+        requestIpcFile: vi
+          .fn<NativeEngine['requestIpcFile']>()
+          .mockResolvedValue(ipcFileFromBatch(batch)),
       });
 
       await expect(

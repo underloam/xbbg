@@ -20,6 +20,7 @@ use tokio::sync::{mpsc, oneshot};
 
 use xbbg_core::BlpError;
 
+use super::key_column::{self, KeyColumn};
 use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
@@ -164,6 +165,9 @@ pub struct RequestStream {
     request_context: Option<(String, String, Option<String>)>,
     /// Identical chunk schemas share the final timezone-adjusted ID-bearing schema.
     metadata_schema: Option<(arrow_schema::SchemaRef, arrow_schema::SchemaRef)>,
+    key_column: Option<KeyColumn>,
+    /// Identical chunk schemas share one renamed schema.
+    key_schema: Option<(arrow_schema::SchemaRef, arrow_schema::SchemaRef)>,
 }
 
 impl RequestStream {
@@ -178,6 +182,8 @@ impl RequestStream {
             bloomberg_request_id: None,
             request_context: None,
             metadata_schema: None,
+            key_column: None,
+            key_schema: None,
         }
     }
 
@@ -185,6 +191,32 @@ impl RequestStream {
         self.output_timezone = timezone;
         self.metadata_schema = None;
         self
+    }
+
+    /// Rename each chunk's leading security column per the engine's key column.
+    pub(crate) fn with_key_column(mut self, key: Option<KeyColumn>) -> Self {
+        self.key_column = key;
+        self.key_schema = None;
+        self
+    }
+
+    fn name_key_column(&mut self, batch: RecordBatch, key: KeyColumn) -> RecordBatch {
+        let renamed = match &self.key_schema {
+            Some((source, renamed))
+                if Arc::ptr_eq(source, batch.schema_ref())
+                    || source.as_ref() == batch.schema_ref().as_ref() =>
+            {
+                Arc::clone(renamed)
+            }
+            _ => {
+                let Some(renamed) = key_column::renamed_schema(batch.schema_ref(), key) else {
+                    return batch;
+                };
+                self.key_schema = Some((Arc::clone(batch.schema_ref()), Arc::clone(&renamed)));
+                renamed
+            }
+        };
+        key_column::with_renamed_schema(batch, renamed)
     }
 
     fn finish(&mut self) {
@@ -225,6 +257,9 @@ impl RequestStream {
                 {
                     batch = ResponseMetadata::attach_bloomberg_request_id(batch, id);
                     self.metadata_schema = Some((source_schema, batch.schema()));
+                }
+                if let Some(key) = self.key_column {
+                    batch = self.name_key_column(batch, key);
                 }
                 Ok(batch)
             }
@@ -726,6 +761,46 @@ mod tests {
             }
             other => panic!("expected request timeout, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn security_key_column_renames_every_chunk_with_one_shared_schema() {
+        use super::super::state::METADATA_KEY_BLOOMBERG_REQUEST_ID;
+        use arrow_array::{ArrayRef, StringArray};
+
+        let chunk = |security: &str| {
+            RecordBatch::try_from_iter(vec![
+                (
+                    "ticker",
+                    Arc::new(StringArray::from(vec![security])) as ArrayRef,
+                ),
+                (
+                    "TICKER",
+                    Arc::new(StringArray::from(vec!["EURUSD"])) as ArrayRef,
+                ),
+            ])
+            .unwrap()
+        };
+        let (tx, rx) = mpsc::channel(2);
+        tx.try_send(Ok(chunk("EURUSD BGN Curncy"))).unwrap();
+        tx.try_send(Ok(chunk("EURUSD CMPN Curncy"))).unwrap();
+        let mut stream = RequestStream::new(rx, None).with_key_column(Some(KeyColumn::Security));
+        stream.bloomberg_request_id = Some(Arc::from("sdk-synthetic-stream"));
+
+        let first = stream.try_recv().unwrap().unwrap();
+        let second = stream.try_recv().unwrap().unwrap();
+        let names: Vec<_> = first
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(names, ["security", "TICKER"]);
+        assert_eq!(
+            first.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID],
+            "sdk-synthetic-stream"
+        );
+        assert!(Arc::ptr_eq(first.schema_ref(), second.schema_ref()));
     }
 
     #[test]

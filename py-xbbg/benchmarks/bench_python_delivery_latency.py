@@ -187,10 +187,11 @@ async def measure(factory: Any, *, samples: int, warmup: int, lag_interval_s: fl
             for index in range(total):
                 if index == warmup:
                     lag.start()
-                pending = subscription.next_delivery(None)
+                pending = subscription.next_delivery()
                 ready.set()
                 receipt = await pending
-                _kind, batch, _dropped = receipt.publish()
+                _kind, batch, _dropped = receipt.value
+                receipt.publish()
                 received = time.perf_counter_ns()
                 if index >= warmup:
                     delivery_ms.append((received - published_at[index]) / 1e6)

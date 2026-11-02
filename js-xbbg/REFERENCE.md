@@ -73,6 +73,8 @@ Pass `{ allFields: true }` to `stream()` / `subscribe()` / service stream helper
 
 Ticks are sparse deltas: `tick.has(field)` distinguishes a present value/clear from an absent field. `get()` and typed accessors preserve `undefined` for absence versus `null` for an explicit clear; `toObject()` omits absent keys. Values in a promoted string layout are strings, not fabricated nulls.
 
+`flushThreshold` (default **16**, engine-wide `subscriptionFlushThreshold`) is the maximum number of already-queued updates combined into one read batch. Reads never wait for a batch to fill: a quiet stream still yields one-row Arrow tables and deliveries, while a burst drains in fewer, larger batches. Scalar iteration still yields one `Tick` per update.
+
 Arrow tables append non-null binary `__xbbg_present`. Bit `i`, least-significant bit first, marks schema field `i + 2` after `timestamp` and `topic`: set bit plus null means clear; unset bit means unchanged. Interpret each row against its current table schema, not cached ordinals from a previous layout. Metadata key `xbbg.subscription_presence` records the encoding and mapping.
 
 ### Subscription lifecycle
@@ -204,6 +206,8 @@ import { bdp, ovr } from '@xbbg/core';
 xbbg.configure({
   host: 'localhost',
   port: 8194,
+  // Name results' security column 'security' instead of the deprecated 'ticker'
+  keyColumn: 'security',
 });
 
 // Direct B-PIPE / leased-line hosts with ordered failover
@@ -303,7 +307,7 @@ if (eids.length > 0) {
 
 ## Response diagnostics
 
-`fieldInfo()` and `bflds()` append an `id` column containing Bloomberg's echoed field id, separate from the canonical `field` mnemonic. Refused ids are available in the outer result's `fieldErrors` map, including for zero-row results; each error retains category, code, subcategory, message, and optional source.
+`fieldInfo()` and `bflds()` append an `id` column holding Bloomberg's field id for each answered field (for example `PR005`), separate from the canonical `field` mnemonic. Refused request ids are keys of the outer result's `fieldErrors` map, including for zero-row results; each error retains category, code, subcategory, message, and optional source.
 
 `fieldExceptions` retains its expanded per-security array shape. Raw `metadata["xbbg.field_exceptions"]` uses the version-1 dictionary described in the [shared response diagnostic contract](../README.md#response-diagnostics); persisted legacy maps remain readable. Invalid compact versions or indices fail explicitly instead of disappearing from the accessor.
 
@@ -502,6 +506,7 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 - `runtimeWorkerThreads`: shared Tokio runtime threads, default **2**, minimum **1**; this is not the total process thread count
 - `subscriptionPoolSize`: pre-warmed subscription sessions, default **1**, minimum **0**
 - `maxSubscriptionSessions`: concurrent subscription-session cap, default **32**, minimum **1**, and at least `subscriptionPoolSize`; native admission waits for capacity instead of allocating unbounded sessions
+- `subscriptionFlushThreshold`: default per-subscription `flushThreshold`, **16**, minimum **1**; the maximum number of already-queued updates combined into one read batch, never a wait for more
 
 The JS binding forwards these fields directly to the Rust engine, so Node can configure the same auth and transport features already available in the core runtime. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`.
 

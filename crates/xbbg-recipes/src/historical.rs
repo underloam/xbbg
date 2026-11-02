@@ -18,8 +18,8 @@ use std::sync::Arc;
 
 use crate::error::{RecipeError, Result};
 use crate::utils::{
-    apply_request_options, array_value_as_date, array_value_as_f64, array_value_as_string,
-    as_string_col, canonical_name, find_column, naive_to_date32,
+    ColumnValues, apply_request_options, as_string_col, canonical_name, find_column,
+    naive_to_date32,
 };
 use arrow_array::RecordBatch;
 use arrow_array::builder::{Date32Builder, Float64Builder, StringBuilder};
@@ -31,6 +31,7 @@ use arrow_ord::sort::{SortColumn, SortOptions, lexsort_to_indices};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
 use arrow_select::take::take_record_batch;
 use chrono::{Datelike, Duration, NaiveDate};
+use xbbg_async::diagnostics::{FieldExceptions, METADATA_KEY_FIELD_EXCEPTIONS};
 use xbbg_async::engine::state::BloombergRequestIds;
 use xbbg_async::engine::{Engine, ExtractorType, RequestParams};
 use xbbg_async::services::{Operation, Service};
@@ -155,11 +156,13 @@ pub async fn recipe_dividend_yield(
         ..Default::default()
     };
     let dividend_batch = engine.request(dividend_params).await?;
+    let key = engine.key_column().as_str();
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&dividend_batch);
     let result: Result<_> = async {
         let events = aggregate_dividend_events(extract_dividend_events(
             &dividend_batch,
+            key,
             dividend_type_filter.as_ref(),
         )?);
         drop(dividend_batch);
@@ -175,10 +178,10 @@ pub async fn recipe_dividend_yield(
         };
         let price_batch = engine.request(price_params).await?;
         request_ids.collect(&price_batch);
-        let prices = extract_price_history(&price_batch)?;
+        let prices = extract_price_history(&price_batch, key)?;
         drop(price_batch);
         let rows = build_dividend_yield_rows(&tickers, start, end, window_days, &events, &prices);
-        build_dividend_yield_batch(&rows)
+        build_dividend_yield_batch(&rows, key)
     }
     .await;
     let batch =
@@ -206,16 +209,47 @@ fn dividend_type_allowed(value: Option<&str>, filter: Option<&HashSet<String>>) 
     let Some(value) = value else {
         return false;
     };
-    filter.contains(&canonical_name(value))
+    filter
+        .iter()
+        .any(|canonical| canonical_name_matches(value, canonical))
 }
 
+/// `canonical_name(value) == canonical` without building the canonical string.
+///
+/// `canonical_name` lowercases the ASCII-alphanumeric runs of `value` and joins
+/// them with `_`, so comparing those runs part by part is equivalent.
+fn canonical_name_matches(value: &str, canonical: &str) -> bool {
+    let mut parts = value
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|part| !part.is_empty());
+    if canonical.is_empty() {
+        return parts.next().is_none();
+    }
+    let mut expected = canonical.split('_');
+    loop {
+        match (parts.next(), expected.next()) {
+            (Some(part), Some(want))
+                if part.len() == want.len()
+                    && part
+                        .bytes()
+                        .zip(want.bytes())
+                        .all(|(have, want)| have.to_ascii_lowercase() == want) => {}
+            (None, None) => return true,
+            _ => return false,
+        }
+    }
+}
+
+/// Dividend events from `DVD_HIST_ALL` bulk output keyed by the engine's `key`
+/// column.
 pub(crate) fn extract_dividend_events(
     batch: &RecordBatch,
+    key: &str,
     dividend_type_filter: Option<&HashSet<String>>,
 ) -> Result<Vec<DividendEvent>> {
     let ticker_col = batch
-        .column_by_name("ticker")
-        .ok_or_else(|| RecipeError::Other("missing 'ticker' column".to_string()))?;
+        .column_by_name(key)
+        .ok_or_else(|| RecipeError::Other(format!("missing '{key}' column")))?;
     let ex_date_col = find_column(
         batch,
         &[
@@ -264,35 +298,43 @@ pub(crate) fn extract_dividend_events(
     )
     .and_then(|name| batch.column_by_name(&name));
 
+    let tickers = ColumnValues::new(ticker_col.as_ref());
+    let ex_dates = ColumnValues::new(ex_date_col.as_ref());
+    let amounts = amount_col.map(|col| ColumnValues::new(col.as_ref()));
+    let types = type_col.map(|col| ColumnValues::new(col.as_ref()));
+    let declared_dates = declared_col.map(|col| ColumnValues::new(col.as_ref()));
+    let record_dates = record_col.map(|col| ColumnValues::new(col.as_ref()));
+    let payable_dates = payable_col.map(|col| ColumnValues::new(col.as_ref()));
+
     let mut events = Vec::new();
     for row in 0..batch.num_rows() {
-        let Some(ticker) =
-            array_value_as_string(ticker_col, row).map(|value| value.trim().to_string())
-        else {
+        let Some(raw_ticker) = tickers.string(row) else {
             continue;
         };
+        let ticker = raw_ticker.trim();
         if ticker.is_empty() {
             continue;
         }
-        let Some(ex_date) = array_value_as_date(ex_date_col, row) else {
+        let Some(ex_date) = ex_dates.date(row) else {
             continue;
         };
-        let dividend_type = type_col
-            .and_then(|col| array_value_as_string(col, row))
-            .map(|value| value.trim().to_string())
+        let raw_type = types.and_then(|col| col.string(row));
+        let dividend_type = raw_type
+            .as_deref()
+            .map(str::trim)
             .filter(|value| !value.is_empty());
-        if !dividend_type_allowed(dividend_type.as_deref(), dividend_type_filter) {
+        if !dividend_type_allowed(dividend_type, dividend_type_filter) {
             continue;
         }
 
         events.push(DividendEvent {
-            ticker,
+            ticker: ticker.to_string(),
             ex_date,
-            declared_date: declared_col.and_then(|col| array_value_as_date(col, row)),
-            record_date: record_col.and_then(|col| array_value_as_date(col, row)),
-            payable_date: payable_col.and_then(|col| array_value_as_date(col, row)),
-            dividend_type,
-            amount: amount_col.and_then(|col| array_value_as_f64(col, row)),
+            declared_date: declared_dates.and_then(|col| col.date(row)),
+            record_date: record_dates.and_then(|col| col.date(row)),
+            payable_date: payable_dates.and_then(|col| col.date(row)),
+            dividend_type: dividend_type.map(str::to_string),
+            amount: amounts.and_then(|col| col.f64(row)),
         });
     }
 
@@ -345,8 +387,11 @@ pub(crate) fn aggregate_dividend_events(events: Vec<DividendEvent>) -> Vec<Divid
     output
 }
 
-fn extract_price_history(batch: &RecordBatch) -> Result<HashMap<(String, NaiveDate), f64>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+fn extract_price_history(
+    batch: &RecordBatch,
+    key: &str,
+) -> Result<HashMap<(String, NaiveDate), f64>> {
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
@@ -354,6 +399,8 @@ fn extract_price_history(batch: &RecordBatch) -> Result<HashMap<(String, NaiveDa
     let date_col = batch
         .column_by_name("date")
         .ok_or_else(|| RecipeError::Other("missing 'date' column".to_string()))?;
+    let values = ColumnValues::new(value_col.as_ref());
+    let dates = ColumnValues::new(date_col.as_ref());
     let mut prices = HashMap::new();
 
     for row in 0..batch.num_rows() {
@@ -363,10 +410,10 @@ fn extract_price_history(batch: &RecordBatch) -> Result<HashMap<(String, NaiveDa
         if !field_col.value(row).eq_ignore_ascii_case("PX_LAST") {
             continue;
         }
-        let Some(date) = array_value_as_date(date_col, row) else {
+        let Some(date) = dates.date(row) else {
             continue;
         };
-        let Some(price) = array_value_as_f64(value_col, row) else {
+        let Some(price) = values.f64(row) else {
             continue;
         };
         prices.insert((ticker_col.value(row).to_string(), date), price);
@@ -524,7 +571,7 @@ fn sum_optional(values: impl Iterator<Item = f64>) -> Option<f64> {
     seen.then_some(total)
 }
 
-fn build_dividend_yield_batch(rows: &[DividendYieldRow]) -> Result<RecordBatch> {
+fn build_dividend_yield_batch(rows: &[DividendYieldRow], key: &str) -> Result<RecordBatch> {
     let mut ticker = StringBuilder::new();
     let mut date = Date32Builder::new();
     let mut amount = Float64Builder::new();
@@ -550,7 +597,7 @@ fn build_dividend_yield_batch(rows: &[DividendYieldRow]) -> Result<RecordBatch> 
     }
 
     let schema = Arc::new(Schema::new(vec![
-        Field::new("ticker", DataType::Utf8, false),
+        Field::new(key, DataType::Utf8, false),
         Field::new("date", DataType::Date32, false),
         Field::new("dividend_amount", DataType::Float64, true),
         Field::new("trailing_dividend_amount", DataType::Float64, true),
@@ -627,7 +674,7 @@ pub async fn recipe_earning(
     let data_batch = engine.request(data_params).await.map_err(|error| {
         RecipeError::from(error).with_bloomberg_request_ids_from_batch(&header_batch)
     })?;
-    shape_earning_output(&header_batch, data_batch)
+    shape_earning_output(&header_batch, data_batch, engine.key_column().as_str())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -675,12 +722,13 @@ fn build_earning_requests(
 fn shape_earning_output(
     header_batch: &RecordBatch,
     mut data_batch: RecordBatch,
+    key: &str,
 ) -> Result<RecordBatch> {
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(header_batch);
     let result: Result<_> = (|| {
         if header_batch.num_rows() > 0 && data_batch.num_rows() > 0 {
-            let renames = build_earning_header_rename(header_batch, &data_batch);
+            let renames = build_earning_header_rename(header_batch, &data_batch, key);
             if !renames.is_empty() {
                 request_ids.collect(&data_batch);
                 data_batch = apply_column_renames(&data_batch, &renames)?;
@@ -774,15 +822,18 @@ fn to_option_overrides(overrides: Vec<(String, String)>) -> Option<Vec<(String, 
     }
 }
 
+/// Rename data columns after the header row; the engine's `key` column and
+/// `field` are never renamed.
 fn build_earning_header_rename(
     header_batch: &RecordBatch,
     data_batch: &RecordBatch,
+    key: &str,
 ) -> Vec<(String, String)> {
     let mut header_values: HashMap<String, String> = HashMap::new();
 
     for field in header_batch.schema().fields() {
         let column_name = field.name();
-        if column_name == "ticker" || column_name == "field" {
+        if column_name == key || column_name == "field" {
             continue;
         }
 
@@ -790,8 +841,9 @@ fn build_earning_header_rename(
             continue;
         };
 
+        let values = ColumnValues::new(column.as_ref());
         let first_value = (0..header_batch.num_rows())
-            .find_map(|idx| array_value_as_string(column, idx))
+            .find_map(|idx| values.string(idx))
             .map(|raw| raw.trim().to_string())
             .filter(|raw| !raw.is_empty());
 
@@ -814,7 +866,7 @@ fn build_earning_header_rename(
     let mut renames = Vec::new();
     for field in data_batch.schema().fields() {
         let data_col = field.name();
-        if data_col == "ticker" || data_col == "field" {
+        if data_col == key || data_col == "field" {
             continue;
         }
 
@@ -1136,6 +1188,7 @@ pub async fn recipe_turnover(
     let format = TurnoverFormat::parse(options.format.as_deref())?;
     let params = build_turnover_request(tickers.clone(), &start, &end, false, &options);
     let direct = engine.request(params).await?;
+    let key = engine.key_column().as_str();
     let numeric_long = direct
         .column_by_name("value")
         .is_some_and(|column| column.data_type().is_numeric());
@@ -1143,17 +1196,17 @@ pub async fn recipe_turnover(
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&direct);
     let result: Result<_> = async {
-        let mut rows = extract_turnover_rows(&direct)?;
+        let mut rows = extract_turnover_rows(&direct, key)?;
         drop(direct);
         let missing = missing_turnover_tickers(&tickers, &rows);
         if !missing.is_empty() {
             let params = build_turnover_request(missing.clone(), &start, &end, true, &options);
             let fallback = engine.request(params).await?;
             request_ids.collect(&fallback);
-            append_turnover_fallback(&mut rows, &missing, &fallback)?;
-            merge_turnover_metadata(&mut metadata, fallback.schema().metadata());
+            append_turnover_fallback(&mut rows, &missing, &fallback, key)?;
+            merge_turnover_metadata(&mut metadata, fallback.schema().metadata())?;
         }
-        build_turnover_batch(rows, metadata)
+        build_turnover_batch(rows, metadata, key)
     }
     .await;
     let batch =
@@ -1164,7 +1217,7 @@ pub async fn recipe_turnover(
             crate::currency::recipe_adjust_ccy(engine, data, target, start, end, options).await?;
     }
     let output = shape_turnover_output(data, factor, format, numeric_long)?;
-    apply_turnover_presentation(output, &presentation)
+    apply_turnover_presentation(output, &presentation, key)
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -1324,13 +1377,14 @@ fn take_turnover_alias(kwargs: &mut HashMap<String, String>, aliases: &[&str]) -
 fn apply_turnover_presentation(
     mut batch: RecordBatch,
     presentation: &TurnoverPresentation,
+    key: &str,
 ) -> Result<RecordBatch> {
     if let Some(descending) = presentation.descending
         && batch.num_rows() > 1
         && batch.column_by_name("date").is_some()
     {
         let mut columns = Vec::with_capacity(3);
-        for (name, descending) in [("ticker", false), ("date", descending), ("field", false)] {
+        for (name, descending) in [(key, false), ("date", descending), ("field", false)] {
             if let Some(column) = batch.column_by_name(name) {
                 columns.push(SortColumn {
                     values: column.clone(),
@@ -1375,7 +1429,7 @@ fn apply_turnover_presentation(
     let Ok(date_index) = batch.schema().index_of("date") else {
         return Ok(batch);
     };
-    let dates = batch.column(date_index);
+    let dates = ColumnValues::new(batch.column(date_index).as_ref());
     let mut periods =
         StringBuilder::with_capacity(batch.num_rows(), batch.num_rows().saturating_mul(10));
     let mut label = String::with_capacity(10);
@@ -1405,21 +1459,15 @@ fn apply_turnover_presentation(
 }
 
 fn format_turnover_period_label(
-    dates: &ArrayRef,
+    dates: ColumnValues<'_>,
     row: usize,
     periodicity: TurnoverPeriodicity,
     label: &mut String,
 ) {
     label.clear();
-    let Some(date) = array_value_as_date(dates, row) else {
-        if row < dates.len() && !dates.is_null(row) {
-            if let Some(strings) = dates.as_any().downcast_ref::<StringArray>() {
-                label.push_str(strings.value(row));
-            } else if let Some(strings) = dates.as_any().downcast_ref::<LargeStringArray>() {
-                label.push_str(strings.value(row));
-            } else if let Some(value) = array_value_as_string(dates, row) {
-                label.push_str(&value);
-            }
+    let Some(date) = dates.date(row) else {
+        if let Some(value) = dates.string(row) {
+            label.push_str(&value);
         }
         return;
     };
@@ -1503,11 +1551,11 @@ struct TurnoverRow {
     value: Option<f64>,
 }
 
-fn extract_turnover_rows(batch: &RecordBatch) -> Result<Vec<TurnoverRow>> {
+fn extract_turnover_rows(batch: &RecordBatch, key: &str) -> Result<Vec<TurnoverRow>> {
     if batch.num_rows() == 0 {
         return Ok(Vec::new());
     }
-    let tickers = as_string_col(batch, "ticker")?;
+    let tickers = as_string_col(batch, key)?;
     let fields = as_string_col(batch, "field")?;
     let dates = batch
         .column_by_name("date")
@@ -1515,6 +1563,8 @@ fn extract_turnover_rows(batch: &RecordBatch) -> Result<Vec<TurnoverRow>> {
     let values = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("turnover response missing 'value'".to_string()))?;
+    let dates = ColumnValues::new(dates.as_ref());
+    let values = ColumnValues::new(values.as_ref());
     let mut rows = Vec::with_capacity(batch.num_rows());
     for row in 0..batch.num_rows() {
         if tickers.is_null(row)
@@ -1525,8 +1575,8 @@ fn extract_turnover_rows(batch: &RecordBatch) -> Result<Vec<TurnoverRow>> {
         }
         rows.push(TurnoverRow {
             ticker: tickers.value(row).to_string(),
-            date: array_value_as_date(dates, row).map(naive_to_date32),
-            value: array_value_as_f64(values, row),
+            date: dates.date(row).map(naive_to_date32),
+            value: values.f64(row),
         });
     }
     Ok(rows)
@@ -1551,11 +1601,12 @@ fn append_turnover_fallback(
     rows: &mut Vec<TurnoverRow>,
     missing: &[String],
     batch: &RecordBatch,
+    key: &str,
 ) -> Result<()> {
     if batch.num_rows() == 0 {
         return Ok(());
     }
-    let tickers = as_string_col(batch, "ticker")?;
+    let tickers = as_string_col(batch, key)?;
     let fields = as_string_col(batch, "field")?;
     let dates = batch
         .column_by_name("date")
@@ -1567,6 +1618,9 @@ fn append_turnover_fallback(
         .iter()
         .map(|ticker| (ticker.as_str(), BTreeMap::new()))
         .collect();
+    let dates = ColumnValues::new(dates.as_ref());
+    let value_view = ColumnValues::new(values.as_ref());
+    let text_values = value_view.is_text();
     for row in 0..batch.num_rows() {
         if tickers.is_null(row) || fields.is_null(row) {
             continue;
@@ -1582,15 +1636,15 @@ fn append_turnover_fallback(
         } else {
             continue;
         };
-        let Some(date) = array_value_as_date(dates, row) else {
+        let Some(date) = dates.date(row) else {
             continue;
         };
         let input = &mut by_date.entry(naive_to_date32(date)).or_default()[index];
-        input.value = array_value_as_f64(values, row);
-        input.present = if let Some(strings) = values.as_any().downcast_ref::<StringArray>() {
-            !strings.is_null(row) && !strings.value(row).trim().is_empty()
-        } else if let Some(strings) = values.as_any().downcast_ref::<LargeStringArray>() {
-            !strings.is_null(row) && !strings.value(row).trim().is_empty()
+        input.value = value_view.f64(row);
+        input.present = if text_values {
+            value_view
+                .text(row)
+                .is_some_and(|value| !value.trim().is_empty())
         } else {
             !values.is_null(row)
         };
@@ -1624,27 +1678,37 @@ fn append_turnover_fallback(
 fn merge_turnover_metadata(
     metadata: &mut HashMap<String, String>,
     extra: &HashMap<String, String>,
-) {
+) -> Result<()> {
     for (key, value) in extra {
-        if let Some(previous) = metadata.get_mut(key) {
-            if key.starts_with("xbbg.")
-                && let (
-                    Ok(serde_json::Value::Object(mut left)),
-                    Ok(serde_json::Value::Object(right)),
-                ) = (serde_json::from_str(previous), serde_json::from_str(value))
-            {
-                left.extend(right);
-                *previous = serde_json::Value::Object(left).to_string();
-            }
-        } else {
+        let Some(previous) = metadata.get_mut(key) else {
             metadata.insert(key.clone(), value.clone());
+            continue;
+        };
+        if key == METADATA_KEY_FIELD_EXCEPTIONS {
+            // Dictionary indices are local to each payload; merge occurrences by value.
+            let invalid = |err: serde_json::Error| {
+                RecipeError::Other(format!(
+                    "invalid {METADATA_KEY_FIELD_EXCEPTIONS} metadata: {err}"
+                ))
+            };
+            let mut merged = FieldExceptions::from_json(previous).map_err(invalid)?;
+            merged.extend(FieldExceptions::from_json(value).map_err(invalid)?);
+            *previous = merged.to_json().map_err(invalid)?;
+        } else if key.starts_with("xbbg.")
+            && let (Ok(serde_json::Value::Object(mut left)), Ok(serde_json::Value::Object(right))) =
+                (serde_json::from_str(previous), serde_json::from_str(value))
+        {
+            left.extend(right);
+            *previous = serde_json::Value::Object(left).to_string();
         }
     }
+    Ok(())
 }
 
 fn build_turnover_batch(
     rows: Vec<TurnoverRow>,
     metadata: HashMap<String, String>,
+    key: &str,
 ) -> Result<RecordBatch> {
     let mut tickers = StringBuilder::with_capacity(rows.len(), rows.len() * 24);
     let mut dates = Date32Builder::with_capacity(rows.len());
@@ -1658,7 +1722,7 @@ fn build_turnover_batch(
     }
     let schema = Schema::new_with_metadata(
         vec![
-            Field::new("ticker", DataType::Utf8, true),
+            Field::new(key, DataType::Utf8, true),
             Field::new("date", DataType::Date32, true),
             Field::new("field", DataType::Utf8, true),
             Field::new("value", DataType::Float64, true),
@@ -1845,6 +1909,45 @@ mod tests {
     use arrow_schema::{DataType, Field, Schema};
 
     use super::*;
+    use crate::utils::array_value_as_f64;
+
+    #[test]
+    fn canonical_name_matches_agrees_with_canonical_name() {
+        let values = [
+            "Regular Cash",
+            " regular  cash ",
+            "REGULAR-CASH",
+            "Regular Cash (Final)",
+            "Spin-off",
+            "Spinoff",
+            "Régular Cash",
+            "--",
+            "",
+            "a_b",
+        ];
+        let candidates = [
+            "regular_cash",
+            "Regular_Cash",
+            "regular cash",
+            "regular_cash_final",
+            "spin_off",
+            "spinoff",
+            "r_gular_cash",
+            "regular__cash",
+            "_regular_cash",
+            "a_b",
+            "",
+        ];
+        for value in values {
+            for candidate in candidates {
+                assert_eq!(
+                    canonical_name_matches(value, candidate),
+                    canonical_name(value) == candidate,
+                    "{value:?} vs {candidate:?}"
+                );
+            }
+        }
+    }
 
     #[test]
     fn test_build_earning_header_rename() {
@@ -1884,7 +1987,7 @@ mod tests {
         )
         .unwrap();
 
-        let rename_map = build_earning_header_rename(&header_batch, &data_batch);
+        let rename_map = build_earning_header_rename(&header_batch, &data_batch, "ticker");
 
         assert!(rename_map.contains(&("Period 1 Value".to_string(), "fy2023".to_string())));
         assert!(rename_map.contains(&("Period 2 Value".to_string(), "fy2024".to_string())));
@@ -2205,7 +2308,7 @@ mod tests {
             r#"["synthetic-value-request","synthetic-shard-request","synthetic-value-request"]"#
                 .to_string(),
         );
-        let output = shape_earning_output(&header, data.clone()).unwrap();
+        let output = shape_earning_output(&header, data.clone(), "ticker").unwrap();
         assert_eq!(
             output
                 .schema()
@@ -2232,7 +2335,7 @@ mod tests {
                 .metadata()
                 .contains_key("xbbg.bloomberg_request_id")
         );
-        let output = shape_earning_output(&header.slice(0, 0), data).unwrap();
+        let output = shape_earning_output(&header.slice(0, 0), data, "ticker").unwrap();
         assert!(output.column_by_name("Period 1 Value_pct").is_some());
         assert_eq!(
             output.schema().metadata()["xbbg.bloomberg_request_ids"],
@@ -2325,7 +2428,7 @@ mod tests {
             ("ABC US Equity", "20240101", "TURNOVER", Some("12")),
             ("XYZ US Equity", "20240101", "turnover", None),
         ]);
-        let rows = extract_turnover_rows(&batch).unwrap();
+        let rows = extract_turnover_rows(&batch, "ticker").unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[1].value, None);
         assert_eq!(
@@ -2379,13 +2482,14 @@ mod tests {
             ("XYZ US Equity", "20240103", "VOLUME", Some("10")),
         ]);
         let mut rows = Vec::new();
-        append_turnover_fallback(&mut rows, &["ABC US Equity".to_string()], &batch).unwrap();
+        append_turnover_fallback(&mut rows, &["ABC US Equity".to_string()], &batch, "ticker")
+            .unwrap();
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].value, Some(12.0));
         assert_eq!(rows[1].value, Some(0.0));
         assert!(rows.iter().all(|row| row.ticker == "ABC US Equity"));
         assert!(rows[0].date < rows[1].date);
-        let output = build_turnover_batch(rows, HashMap::new()).unwrap();
+        let output = build_turnover_batch(rows, HashMap::new(), "ticker").unwrap();
         assert_eq!(
             as_string_col(&output, "field").unwrap().value(0),
             "TURNOVER"
@@ -2411,6 +2515,7 @@ mod tests {
                 "xbbg.eid_data".to_string(),
                 r#"{"ABC US Equity":[1]}"#.to_string(),
             )]),
+            "ticker",
         )
         .unwrap();
         for (name, expected_columns) in [
@@ -2701,6 +2806,7 @@ mod tests {
                 },
             ],
             HashMap::from([("xbbg.eid_data".into(), r#"{"ABC US Equity":[1]}"#.into())]),
+            "security",
         )
         .unwrap();
         let metadata = source.schema().metadata().clone();
@@ -2711,7 +2817,7 @@ mod tests {
         ]);
         let presentation = take_turnover_presentation(&mut options).unwrap();
         let shaped = shape_turnover_output(source, 2.0, TurnoverFormat::Long, false).unwrap();
-        let output = apply_turnover_presentation(shaped, &presentation).unwrap();
+        let output = apply_turnover_presentation(shaped, &presentation, "security").unwrap();
         assert_eq!(
             output
                 .schema()
@@ -2719,10 +2825,10 @@ mod tests {
                 .iter()
                 .map(|field| field.name().as_str())
                 .collect::<Vec<_>>(),
-            vec!["ticker", "date", "period", "field", "value"]
+            vec!["security", "date", "period", "field", "value"]
         );
         assert_eq!(
-            as_string_col(&output, "ticker")
+            as_string_col(&output, "security")
                 .unwrap()
                 .iter()
                 .collect::<Vec<_>>(),
@@ -2777,7 +2883,8 @@ mod tests {
                 ("periodicitySelection", periodicity),
             ]);
             let presentation = take_turnover_presentation(&mut options).unwrap();
-            let output = apply_turnover_presentation(source.clone(), &presentation).unwrap();
+            let output =
+                apply_turnover_presentation(source.clone(), &presentation, "ticker").unwrap();
             assert_eq!(
                 output
                     .schema()
@@ -2790,27 +2897,33 @@ mod tests {
             let periods = as_string_col(&output, "period").unwrap();
             assert_eq!(periods.value(0), expected[0]);
             assert_eq!(periods.value(1), expected[1]);
-            let empty = apply_turnover_presentation(source.slice(0, 0), &presentation).unwrap();
+            let empty =
+                apply_turnover_presentation(source.slice(0, 0), &presentation, "ticker").unwrap();
             assert_eq!(empty.schema(), output.schema());
             assert_eq!(empty.num_rows(), 0);
         }
         let dates: ArrayRef = Arc::new(StringArray::from(vec![None, Some("not-a-date")]));
+        let dates = ColumnValues::new(dates.as_ref());
         let mut label = "previous label".to_string();
-        format_turnover_period_label(&dates, 0, TurnoverPeriodicity::Daily, &mut label);
+        format_turnover_period_label(dates, 0, TurnoverPeriodicity::Daily, &mut label);
         assert_eq!(label, "");
-        format_turnover_period_label(&dates, 1, TurnoverPeriodicity::Daily, &mut label);
+        format_turnover_period_label(dates, 1, TurnoverPeriodicity::Daily, &mut label);
         assert_eq!(label, "not-a-date");
     }
 
     #[test]
     fn test_turnover_presentation_hides_dates_last_for_every_output_format() {
         let source = build_turnover_batch(
-            extract_turnover_rows(&historical_batch(&[
-                ("ABC US Equity", "20240102", "TURNOVER", Some("12")),
-                ("ABC US Equity", "20240705", "TURNOVER", Some("24")),
-            ]))
+            extract_turnover_rows(
+                &historical_batch(&[
+                    ("ABC US Equity", "20240102", "TURNOVER", Some("12")),
+                    ("ABC US Equity", "20240705", "TURNOVER", Some("24")),
+                ]),
+                "ticker",
+            )
             .unwrap(),
             HashMap::new(),
+            "ticker",
         )
         .unwrap();
         for format in ["long", "wide", "long_typed", "long_metadata"] {
@@ -2829,7 +2942,7 @@ mod tests {
                 false,
             )
             .unwrap();
-            let output = apply_turnover_presentation(shaped, &presentation).unwrap();
+            let output = apply_turnover_presentation(shaped, &presentation, "ticker").unwrap();
             assert_eq!(output.num_rows(), 2);
             assert!(output.column_by_name("date").is_none());
             assert!(output.column_by_name("period").is_none());
@@ -2851,7 +2964,8 @@ mod tests {
         for pairs in [Vec::new(), vec![("Dates", "Show"), ("DateFormat", "D")]] {
             let mut options = turnover_presentation_options(&pairs);
             let presentation = take_turnover_presentation(&mut options).unwrap();
-            let output = apply_turnover_presentation(source.clone(), &presentation).unwrap();
+            let output =
+                apply_turnover_presentation(source.clone(), &presentation, "ticker").unwrap();
             assert_eq!(output.schema(), source.schema());
             for (original, result) in source.columns().iter().zip(output.columns()) {
                 assert!(Arc::ptr_eq(original, result));
@@ -2871,10 +2985,58 @@ mod tests {
                 "xbbg.eid_data".to_string(),
                 r#"{"XYZ US Equity":[2]}"#.to_string(),
             )]),
-        );
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_str(&metadata["xbbg.eid_data"]).unwrap();
         assert_eq!(value["ABC US Equity"][0], 1);
         assert_eq!(value["XYZ US Equity"][0], 2);
+    }
+
+    #[test]
+    fn test_turnover_metadata_merges_compact_field_exceptions_by_value() {
+        let encode = |occurrences: &[(&str, &str)]| {
+            let mut exceptions = FieldExceptions::default();
+            for (ticker, field) in occurrences {
+                exceptions.record(
+                    ticker,
+                    xbbg_async::diagnostics::FieldExceptionMeta {
+                        field: (*field).to_string(),
+                        category: "BAD_FLD".to_string(),
+                        code: 9,
+                        subcategory: "NOT_APPLICABLE_TO_HISTORICAL_DATA".to_string(),
+                        message: "Field not applicable to security".to_string(),
+                    },
+                );
+            }
+            exceptions.to_json().unwrap()
+        };
+        let key = METADATA_KEY_FIELD_EXCEPTIONS.to_string();
+        let mut metadata = HashMap::from([(key.clone(), encode(&[("ABC US Equity", "TURNOVER")]))]);
+        let fallback = encode(&[
+            ("ABC US Equity", "EQY_WEIGHTED_AVG_PX"),
+            ("XYZ US Equity", "VOLUME"),
+        ]);
+        merge_turnover_metadata(&mut metadata, &HashMap::from([(key.clone(), fallback)])).unwrap();
+
+        let merged = FieldExceptions::from_json(&metadata[&key])
+            .unwrap()
+            .expanded();
+        let fields = |ticker: &str| {
+            merged[ticker]
+                .iter()
+                .map(|exception| exception.field.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(fields("ABC US Equity"), ["TURNOVER", "EQY_WEIGHTED_AVG_PX"]);
+        assert_eq!(fields("XYZ US Equity"), ["VOLUME"]);
+
+        let malformed = HashMap::from([(key, "{not json".to_string())]);
+        let error = merge_turnover_metadata(&mut metadata, &malformed).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("invalid xbbg.field_exceptions metadata")
+        );
     }
 
     #[test]

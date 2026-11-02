@@ -11,7 +11,7 @@ use xbbg_async::engine::{Engine, RequestParams};
 use xbbg_async::services::{Operation, Service};
 
 use crate::error::{RecipeError, Result};
-use crate::utils::{array_value_as_string, as_string_col, clean_bloomberg_text};
+use crate::utils::{ColumnValues, as_string_col, clean_bloomberg_text, str_entry};
 
 const EQUITY_RESOLVE_FIELDS: &[&str] = &["PARSEKYABLE_DES", "EQY_PRIM_SECURITY_COMP_EXCH"];
 const BOND_ISSUER_FIELDS: &[&str] = &[
@@ -69,7 +69,7 @@ pub async fn recipe_resolve_isins(engine: &Engine, isins: Vec<String>) -> Result
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&batch);
     let result = (|| {
-        let values = refdata_value_map(&batch)?;
+        let values = refdata_value_map(&batch, engine.key_column().as_str())?;
         let rows = build_resolve_isin_rows(&isins, &lookups, &values);
         build_resolve_isins_batch(&rows)
     })();
@@ -99,7 +99,7 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
     let mut request_ids = BloombergRequestIds::default();
     request_ids.collect(&bond_batch);
     let result: Result<_> = async {
-        let bond_values = refdata_value_map(&bond_batch)?;
+        let bond_values = refdata_value_map(&bond_batch, engine.key_column().as_str())?;
 
         let mut rows = build_issuer_rows_without_isin(&bond_isins, &lookups, &bond_values);
         let parent_tickers = rows
@@ -117,7 +117,7 @@ pub async fn recipe_issuer_isins(engine: &Engine, bond_isins: Vec<String>) -> Re
             };
             let parent_batch = engine.request(params).await?;
             request_ids.collect(&parent_batch);
-            let parent_values = refdata_value_map(&parent_batch)?;
+            let parent_values = refdata_value_map(&parent_batch, engine.key_column().as_str())?;
             for row in &mut rows {
                 let Some(parent_ticker) = row.parent_ticker.as_ref() else {
                     continue;
@@ -276,21 +276,25 @@ fn first_clean_field(fields: Option<&HashMap<String, String>>, names: &[&str]) -
     })
 }
 
+/// Long reference values keyed by security then field, read from the engine's
+/// `key` column.
 pub(crate) fn refdata_value_map(
     batch: &RecordBatch,
+    key: &str,
 ) -> Result<HashMap<String, HashMap<String, String>>> {
-    let ticker_col = as_string_col(batch, "ticker")?;
+    let ticker_col = as_string_col(batch, key)?;
     let field_col = as_string_col(batch, "field")?;
     let value_col = batch
         .column_by_name("value")
         .ok_or_else(|| RecipeError::Other("missing 'value' column".to_string()))?;
+    let raw_values = ColumnValues::new(value_col.as_ref());
     let mut values: HashMap<String, HashMap<String, String>> = HashMap::new();
 
     for row in 0..batch.num_rows() {
         if ticker_col.is_null(row) || field_col.is_null(row) || value_col.is_null(row) {
             continue;
         }
-        let Some(raw_value) = array_value_as_string(value_col, row) else {
+        let Some(raw_value) = raw_values.string(row) else {
             continue;
         };
         // These are Bloomberg missing-value markers. Literal "nan"/"null" can
@@ -303,15 +307,8 @@ pub(crate) fn refdata_value_map(
         {
             continue;
         }
-        let value = if value.len() == raw_value.len() {
-            raw_value
-        } else {
-            value.to_string()
-        };
-        values
-            .entry(ticker_col.value(row).to_string())
-            .or_default()
-            .insert(field_col.value(row).to_ascii_uppercase(), value);
+        str_entry(&mut values, ticker_col.value(row))
+            .insert(field_col.value(row).to_ascii_uppercase(), value.to_string());
     }
 
     Ok(values)
@@ -539,7 +536,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let mapped = refdata_value_map(&batch).unwrap();
+        let mapped = refdata_value_map(&batch, "ticker").unwrap();
         assert_eq!(mapped["/ISIN/US0378331005"]["PARSEKYABLE_DES"], "AAPL US");
     }
 }

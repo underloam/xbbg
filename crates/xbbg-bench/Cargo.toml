@@ -72,5 +72,13 @@ harness = false
 name = "subscription_delivery"
 harness = false
 
+[[bench]]
+name = "request_decode_replay"
+harness = false
+
+[[bench]]
+name = "subscription_read_latency"
+harness = false
+
 [lints]
 workspace = true

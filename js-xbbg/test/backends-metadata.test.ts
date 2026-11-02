@@ -1,18 +1,16 @@
 import type { Table } from 'apache-arrow';
 
-import { DataType, tableFromIPC, tableToIPC } from 'apache-arrow';
+import { DataType, tableFromIPC } from 'apache-arrow';
 import { expectTypeOf } from 'vitest';
 
-import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
-import {
-  ipcToPolars,
-  nativeArrowToBackend,
-  nativeArrowToPolars,
-  toArrowTableFromNative,
-} from '../src/backends';
+import { ipcFileToPolars, nativeArrowToBackend, toArrowTableFromNative } from '../src/backends';
 import type { BloombergFieldError, ResultMetadata } from '../src/index';
 import type { NativeArrowZeroCopyBatch } from '../src/napi';
-import { emptyFieldInfoArrowBatch, int32ArrowBatch } from './subscription-fixtures';
+import {
+  emptyFieldInfoArrowBatch,
+  int32ArrowBatch,
+  ipcFileFromBatch,
+} from './subscription-fixtures';
 
 // Metadata decoding must also work in wrapper-only installations without an addon.
 // Only the optional Polars peer is replaced; Arrow and JSON conversion are real.
@@ -91,18 +89,8 @@ const jsonConversions = [
 ];
 const polarsConversions = [
   {
-    name: 'native Polars transfer',
-    convert: (batch: NativeArrowZeroCopyBatch) => nativeArrowToPolars(batch),
-  },
-  {
-    name: 'file IPC Polars backend',
-    convert: (batch: NativeArrowZeroCopyBatch) =>
-      ipcToPolars(Buffer.from(tableToIPC(tableFromNativeArrowBatch(batch), 'file'))),
-  },
-  {
-    name: 'stream IPC Polars backend',
-    convert: (batch: NativeArrowZeroCopyBatch) =>
-      ipcToPolars(Buffer.from(tableToIPC(tableFromNativeArrowBatch(batch), 'stream'))),
+    name: 'native file IPC Polars backend',
+    convert: (batch: NativeArrowZeroCopyBatch) => ipcFileToPolars(ipcFileFromBatch(batch)),
   },
 ];
 const conversions = [...arrowConversions, ...jsonConversions, ...polarsConversions];

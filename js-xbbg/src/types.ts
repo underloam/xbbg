@@ -2,6 +2,7 @@ import type { Table } from 'apache-arrow';
 
 import type {
   IndexMemberField,
+  KeyColumn,
   OverflowPolicy,
   SdkLogLevel,
   ValidationMode,
@@ -147,6 +148,19 @@ export interface EngineConfig {
   shardMaxConcurrent?: number;
   /** Field validation before a request is sent. Default `'disabled'`. */
   validationMode?: ValidationMode;
+  /**
+   * Name of the result column holding each row's security. Default `'ticker'`,
+   * deprecated: it collides with Bloomberg's `TICKER` field once identifiers are
+   * case-folded, and the first result that uses it emits a `DeprecationWarning`
+   * (code `XBBG_TICKER_KEY_COLUMN`). `'security'` becomes the default in the next
+   * major release.
+   */
+  keyColumn?: KeyColumn;
+  /**
+   * Maximum number of already-queued updates combined into one subscription read
+   * batch. Default 16. Reads never wait for a batch to fill: a quiet stream still
+   * gets one-row batches. `StreamOptions.flushThreshold` overrides it per stream.
+   */
   subscriptionFlushThreshold?: number;
   maxEventQueueSize?: number;
   commandQueueSize?: number;
@@ -405,6 +419,11 @@ export interface StreamOptions {
   delivery?: SubscriptionDeliveryMode;
   options?: readonly string[];
   conflate?: boolean;
+  /**
+   * Maximum number of already-queued updates (or dirty state topics) combined into
+   * one read batch. Default: the engine's `subscriptionFlushThreshold` (16). Reads
+   * never wait for a batch to fill.
+   */
   flushThreshold?: number;
   overflowPolicy?: OverflowPolicy;
   streamCapacity?: number;
@@ -712,6 +731,7 @@ export type BackendKind = 'arrow' | 'json' | 'polars';
 // Shared Python/JS vocabulary is generated from defs/bloomberg.toml.
 export type {
   FormatKind,
+  KeyColumn,
   OverflowPolicy,
   SdkLogLevel,
   SubscriptionDeliveryMode,

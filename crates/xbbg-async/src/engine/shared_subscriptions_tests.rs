@@ -21,6 +21,13 @@ fn value<'a>(row: &'a SubscriptionUpdate, name: &str) -> Option<&'a UpdateValue>
         .map(|value| &value.value)
 }
 
+fn text_field<'a>(row: &'a SubscriptionUpdate, name: &str) -> Option<&'a str> {
+    match value(row, name) {
+        Some(UpdateValue::Str(value)) => Some(value.as_ref()),
+        _ => None,
+    }
+}
+
 fn row_signature(row: &SubscriptionUpdate) -> Vec<(String, Option<String>)> {
     row.values
         .iter()
@@ -370,6 +377,136 @@ async fn delayed_policies_and_known_delayed_attach_are_consumer_local() {
         rejected.try_next(),
         Some(Err(BlpError::SubscriptionFailure { .. }))
     ));
+}
+
+#[tokio::test]
+async fn delayed_status_tracks_transitions_and_reapplies_after_a_status_reset() {
+    let (hub, _) = hub();
+    let mut warn = hub
+        .subscribe(request(&["IBM US Equity"], &["BID"]))
+        .await
+        .unwrap();
+    let mut raise_req = request(&["IBM US Equity"], &["BID"]);
+    raise_req.delayed_policy = DelayedPolicy::Raise;
+    let mut raise = hub.subscribe(raise_req).await.unwrap();
+    let (session, key) = test_feed(&hub, "IBM US Equity");
+    let status = warn.status();
+    let delayed = || status.load().topic_statuses()["IBM US Equity"].delayed;
+    for json in [r#"{"BID":1,"IS_DELAYED_STREAM":false}"#, r#"{"BID":2}"#] {
+        data(&session, key, json);
+        next(&mut warn);
+        next(&mut raise);
+        assert_eq!(delayed(), Some(false), "{json}");
+    }
+    assert!(warn.take_warnings().is_empty());
+
+    // A cached false must not skip the policy when the feed turns delayed.
+    data(&session, key, r#"{"BID":3,"IS_DELAYED_STREAM":true}"#);
+    next(&mut warn);
+    assert_eq!(delayed(), Some(true));
+    assert!(matches!(
+        raise.try_next(),
+        Some(Err(BlpError::SubscriptionFailure { .. }))
+    ));
+    for (json, expected) in [
+        (r#"{"BID":4}"#, Some(true)),
+        (r#"{"BID":5,"IS_DELAYED_STREAM":false}"#, Some(false)),
+        (r#"{"BID":6}"#, Some(false)),
+        (r#"{"BID":7,"IS_DELAYED_STREAM":true}"#, Some(true)),
+    ] {
+        data(&session, key, json);
+        next(&mut warn);
+        assert_eq!(delayed(), expected, "{json}");
+    }
+    let warnings = warn.take_warnings();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "delayed data is announced once per topic"
+    );
+    assert_eq!(warnings[0].message_type, "DelayedStream");
+
+    // Other status writers reset the topic; the next tick restores the feed's
+    // value, as an unconditional per-tick reconcile would.
+    for reset in [None, Some(false)] {
+        status.update(|state| state.set_delayed("IBM US Equity", reset));
+        assert_eq!(delayed(), reset);
+        data(&session, key, r#"{"BID":8}"#);
+        next(&mut warn);
+        assert_eq!(delayed(), Some(true));
+    }
+    let mut replaced = SubscriptionStatusState::clone(&status.load());
+    replaced.set_delayed("IBM US Equity", None);
+    status.store(Arc::new(replaced));
+    assert_eq!(delayed(), None);
+    data(&session, key, r#"{"BID":9}"#);
+    next(&mut warn);
+    assert_eq!(delayed(), Some(true));
+    assert!(warn.take_warnings().is_empty());
+}
+
+#[tokio::test]
+async fn feed_metadata_slots_follow_layout_identity_and_version() {
+    let (hub, _) = hub();
+    let stream = hub
+        .subscribe(request(&["IBM US Equity"], &["BID"]))
+        .await
+        .unwrap();
+    let feed = hub
+        .registry
+        .lock()
+        .values()
+        .find(|feed| feed.identity.topic == "IBM US Equity")
+        .cloned()
+        .unwrap();
+    let layout = |version, second: &str, third: &str| {
+        Arc::new(FieldLayout::new(
+            version,
+            vec![
+                FieldMeta::new("BID", 0, FieldKind::F64),
+                FieldMeta::new(second, 1, FieldKind::Unknown),
+                FieldMeta::new(third, 2, FieldKind::Unknown),
+            ],
+        ))
+    };
+    // Returns the feed's (live, delayed): INITPAINT keeps a new feed not live.
+    let publish = |source: &Arc<FieldLayout>, values: Vec<(FieldIndex, UpdateValue)>| {
+        feed.on_update(&SubscriptionUpdate {
+            timestamp_us: 1,
+            topic_id: 0,
+            topic: Arc::from("IBM US Equity"),
+            layout: Arc::clone(source),
+            values: values
+                .into_iter()
+                .map(|(index, value)| UpdateField { index, value })
+                .collect(),
+        });
+        let state = feed.state.lock();
+        (state.live, state.delayed)
+    };
+    let paint = || UpdateValue::Str(Arc::from("INITPAINT"));
+
+    let first = layout(1, EVENT_SUBTYPE, IS_DELAYED_STREAM);
+    let values = vec![
+        (0, UpdateValue::F64(1.0)),
+        (1, paint()),
+        (2, UpdateValue::Bool(true)),
+    ];
+    assert_eq!(publish(&first, values), (false, Some(true)));
+    // A new version moves both metadata fields.
+    let moved = layout(2, IS_DELAYED_STREAM, EVENT_SUBTYPE);
+    let values = vec![(1, UpdateValue::Bool(false)), (2, paint())];
+    assert_eq!(publish(&moved, values), (false, Some(false)));
+    // The same version from a rebuilt decoder is still a different layout.
+    let rebuilt = layout(2, EVENT_SUBTYPE, IS_DELAYED_STREAM);
+    let values = vec![(1, paint()), (2, UpdateValue::Bool(true))];
+    assert_eq!(publish(&rebuilt, values), (false, Some(true)));
+    let values = vec![(0, UpdateValue::F64(2.0))];
+    assert_eq!(publish(&rebuilt, values), (true, Some(true)));
+    assert_eq!(
+        stream.status().load().topic_statuses()["IBM US Equity"].delayed,
+        Some(true)
+    );
 }
 
 #[tokio::test]

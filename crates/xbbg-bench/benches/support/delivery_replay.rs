@@ -458,6 +458,7 @@ async fn iteration(
                         }
                         delta_checksum += expected_update.timestamp_us as u64;
                     }
+                    mode => unreachable!("replay does not cover delivery mode {mode}"),
                 }
             }
             read_rows += delivery.data.num_rows();
