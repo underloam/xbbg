@@ -86,7 +86,8 @@
     "@langchain/core": ">=1.0.0 <2"
   },
   "overrides": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "minimatch": "11.0.4"
   },
   "engines": {
     "node": ">=24"

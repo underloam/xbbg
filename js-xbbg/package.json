@@ -114,7 +114,8 @@
     "@xbbg/core-win32-x64": "file:packages/xbbg-core-win32-x64"
   },
   "overrides": {
-    "esbuild": "0.28.2"
+    "esbuild": "0.28.2",
+    "minimatch": "11.0.4"
   },
   "engines": {
     "node": ">=24"
