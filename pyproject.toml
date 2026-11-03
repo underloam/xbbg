@@ -7,9 +7,10 @@ name = "xbbg"
 description = "Independent client for Bloomberg-connected data workflows"
 readme = { file = "README.md", content-type = "text/markdown" }
 # No upper bound. pip skips every release whose Requires-Python excludes the
-# running interpreter and installs the newest one that admits it, so with a cap
-# a CPython newer than our wheels got the 2022 pure-Python 0.7.7 (Python 3.15
-# users did until 1.6.0). Uncapped, pip picks this release and builds the sdist.
+# running interpreter and installs the newest one that admits it. With a cap, a
+# CPython newer than our wheels therefore got an older line: the 2022
+# pure-Python 0.7.7 (Python 3.15 users did until 1.6.0), or 0.x once 0.12.4
+# dropped its own cap. Uncapped, pip picks this release and builds the sdist.
 # The classifiers and the release wheel matrix list the supported versions.
 requires-python = ">=3.11"
 license = "Apache-2.0"
