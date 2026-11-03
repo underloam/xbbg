@@ -15,43 +15,37 @@ pytestmark = pytest.mark.skipif(
     reason="GIL release is only observable on a GIL build",
 )
 
-# Long enough for the operating system to schedule the probe's helper thread.
-MIN_CALL_SECONDS = 0.1
-MAX_PIVOT_COPIES = 64
 
-
-def _long_format_batch(min_seconds: float):
-    """Return a synthetic long-format batch whose native pivot runs for at least ``min_seconds``."""
-    base = _core.ArrowTable.from_pylist(
+def _long_format_batch():
+    """Return a synthetic long-format batch of 10,000 securities with five fields each."""
+    return _core.ArrowTable.from_pylist(
         [
             {"ticker": f"SYNTH{ticker:05d} Equity", "field": f"FIELD_{field}", "value": f"{ticker}.{field}"}
             for ticker in range(10_000)
             for field in range(5)
         ]
-    )
-    copies = 1
-    while True:
-        batch = _core.ArrowTable.concat_tables([base] * copies).to_record_batch()
-        started = time.perf_counter()
-        _core.ext_pivot_to_wide(batch)
-        if time.perf_counter() - started >= min_seconds or copies >= MAX_PIVOT_COPIES:
-            return batch
-        copies *= 2
+    ).to_record_batch()
 
 
 def test_detached_native_kernel_lets_another_thread_run():
-    batch = _long_format_batch(MIN_CALL_SECONDS)
+    batch = _long_format_batch()
     pivoted = []
 
     assert releases_gil(lambda: pivoted.append(_core.ext_pivot_to_wide(batch)))
     assert pivoted[0].num_rows == 10_000
 
 
+def test_release_shorter_than_a_thread_wakeup_is_detected():
+    # time.sleep(0) releases the GIL only for the length of a system call, too
+    # briefly for a single call to give the operating system time to wake the helper.
+    assert releases_gil(lambda: time.sleep(0))
+
+
 def test_python_loop_keeps_other_threads_waiting_and_restores_switch_interval():
     interval = sys.getswitchinterval()
 
     def spin():
-        deadline = time.perf_counter() + MIN_CALL_SECONDS
+        deadline = time.perf_counter() + 0.05
         while time.perf_counter() < deadline:
             pass
 
