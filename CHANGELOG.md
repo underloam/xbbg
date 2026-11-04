@@ -57,6 +57,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
   - The engine opens its request sessions, its subscription sessions and each worker's warm-up services concurrently. On a Desktop API connection, engine startup drops from about 250 ms to 80 ms.
   - Async calls start a missing default engine on a worker thread instead of blocking the event loop.
   - Requests without extra keyword arguments skip the request-schema lookup.
+- **Benchmark reports can be committed as written.** Provenance keeps package versions, the xbbg commit and build profile, and the Python version and GIL mode. It drops paths, host OS and CPU details, compiler flags, environment variables and binary hashes. Reports carry the UTC date instead of a local timestamp, and archive files are numbered within the day. Competitor reports save the exception type instead of Bloomberg's error text, and name a mismatched row and field without its values.
 
 ### Fixed
 

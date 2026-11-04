@@ -451,30 +451,28 @@ def _round_optional(value: float | None) -> float | None:
 
 def result_document(
     results: Sequence[BenchmarkResult],
-    output_path: Path | None,
     cases: Sequence[ShapeCase],
 ) -> dict[str, Any]:
-    from benchmark_contracts import collect_provenance
+    from benchmark_contracts import collect_provenance, report_date
 
     inputs = [asdict(case) for case in cases]
     return {
-        "schema_version": 2,
+        "schema_version": 3,
         "version": getattr(xbbg, "__version__", "unknown"),
-        "timestamp": datetime.now().astimezone().isoformat(),
+        "date": report_date(),
         "offline": True,
         "coverage": "synthetic native Arrow carriers only; no Bloomberg SDK event or network coverage",
         "benchmark_file": Path(__file__).name,
-        "output_path": str(output_path) if output_path is not None else None,
         "provenance": collect_provenance(inputs=inputs, benchmark_file=Path(__file__).name),
         "benchmarks": {"Binding Handoff - Offline": [asdict(result) for result in results]},
     }
 
 
 def write_results(document: dict[str, Any], results_dir: Path) -> Path:
+    from benchmark_contracts import archive_path
+
     results_dir.mkdir(parents=True, exist_ok=True)
-    timestamp_short = datetime.now().strftime("%Y%m%d_%H%M%S")
-    output_path = results_dir / f"handoff_offline_{timestamp_short}.json"
-    document["output_path"] = str(output_path)
+    output_path = archive_path(results_dir, "handoff_offline", ".json")
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(document, file, indent=2, default=str)
     with (results_dir / "handoff_offline_latest.json").open("w", encoding="utf-8") as file:
@@ -491,8 +489,7 @@ def run(args: argparse.Namespace) -> tuple[list[BenchmarkResult], dict[str, Any]
     from benchmark_contracts import collect_provenance
 
     provenance = collect_provenance(inputs=[asdict(case) for case in cases], benchmark_file=Path(__file__).name)
-    build_info = provenance["artifact"]["build_info"]
-    profile = build_info.get("profile", "unknown") if isinstance(build_info, dict) else "unknown"
+    profile = provenance["build"].get("profile", "unknown")
     package_label = f"xbbg-python-extension ({profile})"
 
     logger.info("Offline Native Handoff Benchmark")
@@ -530,7 +527,7 @@ def run(args: argparse.Namespace) -> tuple[list[BenchmarkResult], dict[str, Any]
                 result.python_tracemalloc_peak_mb,
             )
 
-    document = result_document(results, None, cases)
+    document = result_document(results, cases)
     output_path = write_results(document, args.results_dir)
     logger.info("Wrote JSON results: %s", output_path)
     return results, document, output_path

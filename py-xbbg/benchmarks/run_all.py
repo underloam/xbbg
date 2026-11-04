@@ -15,14 +15,12 @@ from __future__ import annotations
 import argparse
 import inspect
 from dataclasses import asdict, is_dataclass
-
-from datetime import datetime
 import json
 import logging
 from pathlib import Path
 import sys
 
-from benchmark_contracts import close_shared_sessions, collect_provenance
+from benchmark_contracts import archive_path, close_shared_sessions, collect_provenance, report_date
 import config as benchmark_config
 
 logger = logging.getLogger(__name__)
@@ -81,12 +79,12 @@ def run_benchmark_module(module_name: str):
         return []
 
 
-def generate_markdown_report(all_results: dict, output_path: Path, version: str, timestamp: str):
+def generate_markdown_report(all_results: dict, output_path: Path, version: str, date: str):
     """Generate a compact report whose labels match each measurement boundary."""
     with output_path.open("w", encoding="utf-8") as file:
         file.write("# xbbg Benchmark Results\n\n")
         file.write(f"**Version:** {version}\n")
-        file.write(f"**Generated:** {timestamp}\n\n")
+        file.write(f"**Date (UTC):** {date}\n\n")
         for operation, results in all_results.items():
             file.write(f"## {operation}\n\n")
             if not results:
@@ -127,14 +125,14 @@ def generate_json_report(
     all_results: dict,
     output_path: Path,
     version: str,
-    timestamp: str,
+    date: str,
     provenance: dict,
 ):
     """Generate JSON without reintroducing legacy ambiguous metric aliases."""
     json_data = {
         "schema_version": 2,
         "version": version,
-        "timestamp": timestamp,
+        "date": date,
         "provenance": provenance,
         "benchmarks": {},
     }
@@ -231,26 +229,25 @@ def main(argv: list[str] | None = None):
     close_shared_sessions()
 
     # Generate reports with version-based naming
-    timestamp_full = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    timestamp_short = datetime.now().strftime("%Y%m%d_%H%M%S")
+    date = report_date()
 
     # Version-specific files (OVERWRITES for same version)
     version_json = RESULTS_DIR / f"benchmark_v{version}.json"
     version_md = RESULTS_DIR / f"benchmark_v{version}.md"
 
-    # Timestamped archive (NEVER overwritten)
-    archive_json = RESULTS_DIR / f"benchmark_v{version}_{timestamp_short}.json"
-    archive_md = RESULTS_DIR / f"benchmark_v{version}_{timestamp_short}.md"
+    # Archive copy numbered within the UTC day (NEVER overwritten)
+    archive_json = archive_path(RESULTS_DIR, f"benchmark_v{version}", ".json")
+    archive_md = archive_json.with_suffix(".md")
 
     logger.info(f"\n\n{'=' * 70}")
     logger.info("Generating Reports")
     logger.info(f"{'=' * 70}\n")
 
     # Generate version-specific files (overwrites)
-    generate_json_report(all_results, version_json, version, timestamp_full, provenance)
+    generate_json_report(all_results, version_json, version, date, provenance)
     logger.info(f"✓ Version JSON: {version_json}")
 
-    generate_markdown_report(all_results, version_md, version, timestamp_full)
+    generate_markdown_report(all_results, version_md, version, date)
     logger.info(f"✓ Version MD:   {version_md}")
 
     # Generate timestamped archives

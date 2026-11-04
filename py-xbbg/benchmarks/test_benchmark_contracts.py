@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 from importlib import import_module
+import json
+import os
+from pathlib import Path
+import platform
+import sys
 
-from benchmark_contracts import empirical_percentile
+from benchmark_contracts import collect_provenance, empirical_percentile
 from config import PACKAGES
 import pytest
 
@@ -22,6 +27,29 @@ def test_p99_requires_one_hundred_observations() -> None:
 def test_other_percentiles_are_rejected() -> None:
     with pytest.raises(ValueError):
         empirical_percentile([1.0] * 100, 90)
+
+
+def test_provenance_identifies_neither_machine_nor_user() -> None:
+    """Reports are committed: provenance may carry versions and build profile, nothing host-specific."""
+    provenance = collect_provenance(inputs={"tickers": ["IBM US Equity"]}, benchmark_file="run_all.py")
+
+    assert set(provenance) == {"schema_version", "benchmark_file", "runtime", "build", "dependencies", "inputs_sha256"}
+    assert set(provenance["runtime"]) == {"python", "implementation", "free_threaded", "gil_enabled"}
+    assert set(provenance["build"]) <= {"profile", "optLevel", "allocator", "gitCommit"}
+    text = json.dumps(provenance)
+    identifying = [
+        sys.executable,
+        str(Path.home()),
+        Path.home().name,
+        platform.node(),
+        platform.processor(),
+        platform.platform(),
+        os.environ.get("USERNAME", ""),
+        os.environ.get("USER", ""),
+    ]
+    for value in filter(None, identifying):
+        assert value not in text and json.dumps(value)[1:-1] not in text, value
+    assert "\\" not in text and "/" not in text
 
 
 def test_package_configuration_uses_real_imports() -> None:

@@ -107,15 +107,16 @@ The standard runner writes to `py-xbbg/benchmarks/results/`:
 ```text
 benchmark_v{version}.json
 benchmark_v{version}.md
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.json
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.md
+benchmark_v{version}_{YYYYMMDD}_{n}.json
+benchmark_v{version}_{YYYYMMDD}_{n}.md
 latest.json
 latest.md
 ```
 
-Version files are overwritten on another run of the same version; timestamped
-files preserve each run. `latest.*` are local symlinks or copies. Offline handoff
-and competitor-equivalence scripts also write their own timestamped reports.
+Version files are overwritten on another run of the same version; archive files
+preserve each run, numbered within its UTC date. `latest.*` are local symlinks or
+copies. Offline handoff and competitor-equivalence scripts also write their own
+numbered reports.
 
 | Standard-runner metric | Meaning |
 |------------------------|---------|
@@ -131,5 +132,11 @@ values are comparable. Historical reports may predate the current measurement
 schema; see [results/README.md](results/README.md).
 
 Live benchmarks are local-only; they are not an offline CI performance gate.
-Review generated provenance before sharing reports and remove local paths or
-other identifying environment details.
+
+Reports are written to be committed and shared as they are. They contain timings,
+result shapes and request inputs, plus provenance limited to package versions, the
+xbbg commit and build profile, and the Python version and GIL mode. They record no
+paths, host name, OS build, CPU model or count, compiler flags, environment
+variables or local time (only the UTC date), no Bloomberg error text (only the
+exception type), and no returned Bloomberg values (equivalence mismatches name
+the row and field, not the data).

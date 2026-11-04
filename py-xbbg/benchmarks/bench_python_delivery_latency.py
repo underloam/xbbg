@@ -33,10 +33,8 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-import platform
 import statistics
 import sys
-import sysconfig
 import threading
 import time
 from typing import Any
@@ -48,7 +46,6 @@ FIELD = "BID"
 DEFAULT_SAMPLES = 2_000
 DEFAULT_WARMUP = 200
 DEFAULT_LAG_INTERVAL_MS = 1.0
-REDACTED_PATH = "<path redacted>"
 
 
 @dataclass(frozen=True)
@@ -223,38 +220,23 @@ async def measure(factory: Any, *, samples: int, warmup: int, lag_interval_s: fl
     ]
 
 
-def shareable_provenance(inputs: dict[str, Any]) -> dict[str, Any]:
-    """``collect_provenance`` minus the absolute paths it records (they can name the user)."""
-    provenance = collect_provenance(inputs=inputs, benchmark_file=Path(__file__).name)
-    provenance["runtime"].pop("executable", None)
-    provenance["artifact"].pop("extension_path", None)
-    provenance["environment"].pop("sdk_root", None)
-    build_info = provenance["artifact"].get("build_info")
-    if isinstance(build_info, dict) and isinstance(build_info.get("rustFlags"), list):
-        build_info["rustFlags"] = [
-            REDACTED_PATH if "/" in flag or "\\" in flag else flag for flag in build_info["rustFlags"]
-        ]
-    return provenance
-
-
 def format_ms(value: float | None) -> str:
     return "n/a" if value is None else f"{value:.3f} ms"
 
 
 def print_report(results: Sequence[Distribution], provenance: dict[str, Any]) -> None:
     runtime = provenance["runtime"]
-    build_info = provenance["artifact"]["build_info"]
+    build_info = provenance["build"]
     print("xbbg Python-consumer delivery latency (offline test-support driver)")
     print(
-        f"interpreter: {platform.python_implementation()} {platform.python_version()}, "
-        f"free-threaded build: {bool(sysconfig.get_config_var('Py_GIL_DISABLED'))}, "
+        f"interpreter: {runtime['implementation']} {runtime['python']}, "
+        f"free-threaded build: {runtime['free_threaded']}, "
         f"GIL enabled: {runtime['gil_enabled']}"
     )
-    if isinstance(build_info, dict):
-        print(
-            f"extension: {build_info.get('profile')} {build_info.get('target')}, "
-            f"opt-level {build_info.get('optLevel')}, allocator {build_info.get('allocator')}"
-        )
+    print(
+        f"extension: {build_info.get('profile')}, opt-level {build_info.get('optLevel')}, "
+        f"allocator {build_info.get('allocator')}"
+    )
     width = max(len(result.name) for result in results)
     for result in results:
         print(
@@ -277,7 +259,7 @@ def main(argv: Sequence[str] | None = None) -> list[Distribution]:
         "topic": TOPIC,
         "field": FIELD,
     }
-    provenance = shareable_provenance(inputs)
+    provenance = collect_provenance(inputs=inputs, benchmark_file=Path(__file__).name)
     if args.json:
         document = {
             "benchmark_file": Path(__file__).name,

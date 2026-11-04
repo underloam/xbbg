@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 from dataclasses import dataclass
+from datetime import UTC, datetime
 import hashlib
 from importlib import import_module, metadata
 import json
@@ -13,6 +14,7 @@ import platform
 import statistics
 import subprocess
 import sys
+import sysconfig
 import time
 import tracemalloc
 from typing import Any
@@ -223,64 +225,61 @@ def _run_fresh_probe(module_name: str, function_name: str, encoded_args: str) ->
     return 0
 
 
+# Only these build facts are reported: rustFlags and targetFeatures describe the
+# host CPU of a native build, and rustcVersion/target add nothing a comparison needs.
+_REPORTED_BUILD_INFO = ("profile", "optLevel", "allocator", "gitCommit")
+
+
 def collect_provenance(*, inputs: Any, benchmark_file: str) -> dict[str, Any]:
-    """Capture the environment needed to interpret a benchmark comparison."""
-    extension_path: str | None = None
-    build_info: dict[str, Any] | None = None
-    artifact_sha256: str | None = None
+    """Describe what a report measured, without anything that identifies the machine or user.
+
+    Reports are committed and shared, so provenance carries only what is needed to
+    compare runs: package versions, the xbbg commit and build profile, and the Python
+    implementation. Paths, host name, OS build, CPU model and count, compiler flags,
+    environment variables, binary hashes and local times are deliberately left out.
+    """
+    build_info: dict[str, Any] = {}
     try:
-        core = import_module("xbbg._core")
-        raw_build_info = getattr(core, "__build_info__", None)
-        if isinstance(raw_build_info, dict):
-            build_info = {str(key): value for key, value in raw_build_info.items()}
-        module_file = getattr(core, "__file__", None)
-        if module_file:
-            extension_path = str(Path(module_file).resolve())
-            artifact_sha256 = file_sha256(Path(extension_path))
-    except (ImportError, OSError):
-        pass
+        raw_build_info = getattr(import_module("xbbg._core"), "__build_info__", None)
+    except ImportError:
+        raw_build_info = None
+    if isinstance(raw_build_info, dict):
+        build_info = {key: raw_build_info[key] for key in _REPORTED_BUILD_INFO if key in raw_build_info}
 
     is_gil_enabled = getattr(sys, "_is_gil_enabled", None)
     packages = {name: _package_version(name) for name in ("xbbg", "pyarrow", "pandas", "polars", "narwhals", "blpapi")}
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "benchmark_file": benchmark_file,
         "runtime": {
-            "python": sys.version,
+            "python": platform.python_version(),
             "implementation": platform.python_implementation(),
-            "abi_flags": getattr(sys, "abiflags", ""),
-            "gil_enabled": is_gil_enabled() if callable(is_gil_enabled) else "unknown",
-            "executable": str(Path(sys.executable).resolve()),
+            "free_threaded": bool(sysconfig.get_config_var("Py_GIL_DISABLED")),
+            "gil_enabled": is_gil_enabled() if callable(is_gil_enabled) else True,
         },
-        "system": {
-            "platform": platform.platform(),
-            "machine": platform.machine(),
-            "processor": platform.processor() or "unknown",
-            "cpu_count": os.cpu_count(),
-        },
-        "artifact": {
-            "extension_path": extension_path,
-            "sha256": artifact_sha256,
-            "build_info": build_info if build_info is not None else "unknown",
-        },
+        "build": build_info,
         "dependencies": packages,
-        "environment": {
-            "sdk_root": os.environ.get("BLPAPI_ROOT", "unknown"),
-            "rust_log": os.environ.get("RUST_LOG", "unset"),
-            "python_hash_seed": os.environ.get("PYTHONHASHSEED", "random"),
-        },
         "inputs_sha256": hashlib.sha256(
             json.dumps(inputs, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
         ).hexdigest(),
     }
 
 
-def file_sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as file:
-        for chunk in iter(lambda: file.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def report_date() -> str:
+    """UTC calendar date of a run; a local time and zone offset would reveal where it ran."""
+    return datetime.now(UTC).date().isoformat()
+
+
+def archive_path(directory: Path, stem: str, suffix: str) -> Path:
+    """First unused ``{stem}_{YYYYMMDD}_{n}{suffix}`` for today's UTC date.
+
+    Archive names number runs within a day instead of recording the time of day.
+    """
+    day = datetime.now(UTC).strftime("%Y%m%d")
+    run = 1
+    while (path := directory / f"{stem}_{day}_{run}{suffix}").exists():
+        run += 1
+    return path
 
 
 def _package_version(name: str) -> str:
