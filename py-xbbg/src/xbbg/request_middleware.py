@@ -53,6 +53,10 @@ class RequestContext:
     table: Any | None = None
     frame: DataFrameResult | None = None
     error: Exception | None = None
+    # Typed endpoints (bdp, bdh) set the Arrow type for fields without Bloomberg
+    # metadata; the request terminal then resolves ``params.field_types`` just before
+    # dispatch, so a middleware that answers the request never needs an engine.
+    field_type_default: str | None = None
 
     def to_dispatch_dict(self) -> dict[str, Any]:
         """Materialize the current request state immediately before engine dispatch."""

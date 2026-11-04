@@ -616,8 +616,19 @@ def _request_environment_from_config(config: Any, source: str) -> RequestEnviron
     )
 
 
+async def _resolve_deferred_field_types(engine: Any, context: RequestContext) -> None:
+    """Resolve a typed endpoint's field types against the engine; caller overrides win."""
+    params = context.params
+    resolved = dict(await engine.resolve_field_types(list(params.fields or []), None, context.field_type_default))
+    resolved.update(params.field_types or {})
+    params.field_types = resolved
+    context.field_type_default = None
+
+
 async def _execute_request_terminal(context: RequestContext) -> DataFrameResult:
     engine = await _engine._aget_engine()
+    if context.field_type_default is not None:
+        await _resolve_deferred_field_types(engine, context)
     started = time.perf_counter()
 
     try:
@@ -698,6 +709,7 @@ async def arequest(
     request_tz: str | None = None,
     output_tz: str | None = None,
     _raw: bool = False,
+    _field_type_default: str | None = None,
 ):
     """Async generic Bloomberg request.
 
@@ -903,6 +915,7 @@ async def arequest(
         securities=list(securities_list or []),
         fields=list(fields_list or []),
         environment=_snapshot_request_environment(),
+        field_type_default=_field_type_default,
     )
 
     try:

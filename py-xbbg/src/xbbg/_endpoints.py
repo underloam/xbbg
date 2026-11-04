@@ -871,9 +871,8 @@ async def _build_abdp_plan(args: dict[str, Any]) -> _EndpointPlan:
     elements, overrides = await _request_options._aroute_kwargs(Service.REFDATA, Operation.REFERENCE_DATA, kwargs)
     fmt = Format(args["format"]) if isinstance(args.get("format"), str) else args.get("format")
 
-    # The engine owns field-type caching; caller overrides win over resolved types.
-    resolved_types = dict(await (await _engine._aget_engine()).resolve_field_types(field_list, None, "string"))
-    resolved_types.update(args.get("field_types") or {})
+    # Types are resolved by the request terminal, after middleware, so a middleware
+    # that answers the request itself never starts an engine; see _execute_request_terminal.
 
     return _EndpointPlan(
         request_kwargs={
@@ -882,12 +881,13 @@ async def _build_abdp_plan(args: dict[str, Any]) -> _EndpointPlan:
             "overrides": overrides if overrides else None,
             "security_overrides": security_overrides,
             "elements": elements if elements else None,
-            "field_types": resolved_types,
             "format": fmt,
             "include_security_errors": args.get("include_security_errors", False),
             "return_eids": args.get("return_eids", False),
             "on_delayed": args.get("on_delayed"),
             "validate_fields": args.get("validate_fields"),
+            "field_types": args.get("field_types"),
+            "_field_type_default": "string",
         },
         backend=args.get("backend"),
         postprocess=None,
@@ -942,9 +942,7 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
     elements, overrides = await _request_options._aroute_kwargs(Service.REFDATA, Operation.HISTORICAL_DATA, kwargs)
     presentation_periodicity = _request_options._periodicity_selection(elements)
 
-    # The engine owns field-type caching; caller overrides win over resolved types.
-    resolved_types = dict(await (await _engine._aget_engine()).resolve_field_types(field_list, None, "float64"))
-    resolved_types.update(args.get("field_types") or {})
+    # Resolved by the request terminal after middleware, like _build_abdp_plan.
 
     backend = args.get("backend")
     needs_presentation_postprocess = (
@@ -971,11 +969,12 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
             "security_overrides": security_overrides,
             "elements": elements if elements else None,
             "options": options if options else None,
-            "field_types": resolved_types,
             "format": fmt,
             "validate_fields": args.get("validate_fields"),
             "return_eids": args.get("return_eids", False),
             "on_delayed": args.get("on_delayed"),
+            "field_types": args.get("field_types"),
+            "_field_type_default": "float64",
         },
         backend=backend,
         postprocess=postprocess if needs_presentation_postprocess else None,
