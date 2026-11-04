@@ -7,12 +7,14 @@
   </a>
 </p>
 
-[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)<br>
-**Python** [![PyPI version](https://img.shields.io/pypi/v/xbbg.svg)](https://pypi.org/project/xbbg/) [![conda-forge version](https://img.shields.io/conda/vn/conda-forge/xbbg.svg)](https://anaconda.org/conda-forge/xbbg) [![Python versions](https://img.shields.io/pypi/pyversions/xbbg.svg)](https://pypi.org/project/xbbg/) [![PyPI downloads per month](https://static.pepy.tech/badge/xbbg/month)](https://pepy.tech/projects/xbbg) [![PyPI downloads total](https://static.pepy.tech/badge/xbbg)](https://pepy.tech/projects/xbbg)<br>
-**JavaScript** [![npm version](https://img.shields.io/npm/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![Node.js versions](https://img.shields.io/node/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![npm downloads per month](https://img.shields.io/npm/dm/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core)<br>
-**Java** [![Maven Central version](https://img.shields.io/maven-central/v/io.github.underloam/xbbg.svg)](https://central.sonatype.com/artifact/io.github.underloam/xbbg) [![Java versions](https://img.shields.io/badge/java-8%2B%20%7C%2017%2B-blue.svg)](java-xbbg/README.md) [![Javadoc](https://javadoc.io/badge2/io.github.underloam/xbbg/javadoc.svg)](https://javadoc.io/doc/io.github.underloam/xbbg) [![GitHub release downloads](https://img.shields.io/github/downloads/underloam/xbbg/total.svg)](https://github.com/underloam/xbbg/releases)<br>
-**Rust** [![crates.io version](https://img.shields.io/crates/v/xbbg_core.svg)](https://crates.io/crates/xbbg_core) [![MSRV](https://img.shields.io/crates/msrv/xbbg_core.svg)](https://crates.io/crates/xbbg_core) [![crates.io downloads](https://img.shields.io/crates/d/xbbg_core.svg)](https://crates.io/crates/xbbg_core)
+[![Python](https://xbbg.org/badges/xbbg/python.svg)](https://pypi.org/project/xbbg/)
+[![TypeScript](https://xbbg.org/badges/xbbg/javascript.svg)](https://www.npmjs.com/package/@xbbg/core)<br>
+[![Java](https://xbbg.org/badges/xbbg/java.svg)](java-xbbg/README.md)
+[![Rust](https://xbbg.org/badges/xbbg/rust.svg)](https://crates.io/crates/xbbg_core)<br>
+[![CI](https://xbbg.org/badges/xbbg/ci.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
+[![Documentation](https://xbbg.org/badges/xbbg/docs.svg)](https://xbbg.org/)
+[![Discord](https://xbbg.org/badges/xbbg/discord.svg)](https://discord.gg/P34uMwgCjC)
+[![License](https://xbbg.org/badges/xbbg/license.svg)](LICENSE)
 
 **Links:** [Documentation](https://xbbg.org/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 

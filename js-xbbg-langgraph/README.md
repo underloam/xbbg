@@ -5,11 +5,10 @@
   <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
 </a>
 
-[![npm version](https://img.shields.io/npm/v/%40xbbg%2Flanggraph.svg)](https://www.npmjs.com/package/@xbbg/langgraph)
-[![Node.js versions](https://img.shields.io/node/v/%40xbbg%2Flanggraph.svg)](https://www.npmjs.com/package/@xbbg/langgraph)
-[![npm downloads per month](https://img.shields.io/npm/dm/%40xbbg%2Flanggraph.svg)](https://www.npmjs.com/package/@xbbg/langgraph)
-[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)
+[![LangGraph](https://xbbg.org/badges/xbbg/langgraph-js.svg)](https://www.npmjs.com/package/@xbbg/langgraph)
+[![CI](https://xbbg.org/badges/xbbg/ci.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
+[![Documentation](https://xbbg.org/badges/xbbg/docs.svg)](https://xbbg.org/javascript/guides/langgraph)
+[![Discord](https://xbbg.org/badges/xbbg/discord.svg)](https://discord.gg/P34uMwgCjC)
 
 **Links:** [Documentation](https://xbbg.org/javascript/) · [Tool reference](https://github.com/underloam/xbbg/blob/main/js-xbbg-langgraph/REFERENCE.md) · [`@xbbg/core`](https://www.npmjs.com/package/@xbbg/core) · [GitHub](https://github.com/underloam/xbbg) · [Changelog](https://github.com/underloam/xbbg/blob/main/CHANGELOG.md)
 

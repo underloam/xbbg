@@ -1,16 +1,15 @@
 <!-- markdownlint-disable MD033 MD041 -->
 <div align="center">
 
-<a href="https://xbbg.org/">
+<a href="https://xbbg.org/java/">
   <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
 </a>
 
-[![Maven Central version](https://img.shields.io/maven-central/v/io.github.underloam/xbbg.svg)](https://central.sonatype.com/artifact/io.github.underloam/xbbg)
-[![Java versions](https://img.shields.io/badge/java-8%2B%20%7C%2017%2B-blue.svg)](#install)
-[![Javadoc](https://javadoc.io/badge2/io.github.underloam/xbbg/javadoc.svg)](https://javadoc.io/doc/io.github.underloam/xbbg)
-[![GitHub release downloads](https://img.shields.io/github/downloads/underloam/xbbg/total.svg)](https://github.com/underloam/xbbg/releases)
-[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)
+[![Java](https://xbbg.org/badges/xbbg/java.svg)](https://central.sonatype.com/artifact/io.github.underloam/xbbg)
+[![Javadoc](https://xbbg.org/badges/xbbg/javadoc.svg)](https://javadoc.io/doc/io.github.underloam/xbbg)
+[![CI](https://xbbg.org/badges/xbbg/ci.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
+[![Documentation](https://xbbg.org/badges/xbbg/docs.svg)](https://xbbg.org/java/)
+[![Discord](https://xbbg.org/badges/xbbg/discord.svg)](https://discord.gg/P34uMwgCjC)
 
 **Links:** [Documentation](https://xbbg.org/) · [Javadoc](https://javadoc.io/doc/io.github.underloam/xbbg) · [GitHub](https://github.com/underloam/xbbg) · [Changelog](https://github.com/underloam/xbbg/blob/main/CHANGELOG.md)
 
