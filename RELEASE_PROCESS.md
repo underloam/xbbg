@@ -283,12 +283,7 @@ After a successful OIDC publish, set each package's npm **Publishing access** to
 
 #### Maven Central publishing setup
 
-Maven Central has no tokenless publishing, so `maven-publish.yml` publishes through the Central Portal with a user token and a GPG signing key held in the protected GitHub environment `maven-central`. One-time setup:
-
-1. **Namespace.** Sign in to the Central Portal (<https://central.sonatype.com>) and add the namespace `io.github.underloam`. `underloam` is a GitHub organization, so it is not verified automatically: the Portal shows a verification key; create a temporary public repository named after that key under `underloam`, press verify, then delete the repository.
-2. **Token.** Generate a Portal user token (a username/password pair).
-3. **Signing key.** Create a GPG key whose only identity is the project identity (for example `xbbg contributors <noreply@underloam.invalid>`, never a personal name or address), publish the public key to `keyserver.ubuntu.com` (Central checks signatures against public keyservers), and export the private key with `gpg --armor --export-secret-keys`.
-4. **Environment.** Create the GitHub environment `maven-central` (an admin step; current repository credentials cannot create environments) with the secrets `MAVEN_CENTRAL_USERNAME` and `MAVEN_CENTRAL_PASSWORD` (the token pair), `MAVEN_GPG_KEY` (the armored private key) and `MAVEN_GPG_PASSPHRASE`. Restrict it to `v*` tags and add required reviewers if releases need an approval.
+Maven Central has no tokenless publishing, so `maven-publish.yml` publishes through the Central Portal with the user token (`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`) and GPG signing key (`MAVEN_GPG_KEY`, `MAVEN_GPG_PASSPHRASE`) stored in the `maven-central` GitHub environment (restricted to `v*` tags).
 
 Each release, after `semantic_version.yml` tags `vX.Y.Z`, dispatch `maven-publish.yml` from that tag. A version already on Central is skipped, so a rerun is safe; `dry-run=true` builds and signs the bundle without uploading it. Check `https://repo1.maven.org/maven2/io/github/underloam/xbbg/X.Y.Z/` afterwards (search.maven.org lags behind the repository by up to an hour). The POMs stay `0.0.0-SNAPSHOT` in git; the workflow stamps the release version and checks it against the Cargo workspace version, `Xbbg.version()` and `Xbbg.nativeVersion()`.
 

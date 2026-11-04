@@ -1,3 +1,23 @@
+<!-- markdownlint-disable MD033 MD041 -->
+<div align="center">
+
+<a href="https://xbbg.org/">
+  <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
+</a>
+
+[![Maven Central version](https://img.shields.io/maven-central/v/io.github.underloam/xbbg.svg)](https://central.sonatype.com/artifact/io.github.underloam/xbbg)
+[![Java versions](https://img.shields.io/badge/java-8%2B%20%7C%2017%2B-blue.svg)](#install)
+[![Javadoc](https://javadoc.io/badge2/io.github.underloam/xbbg/javadoc.svg)](https://javadoc.io/doc/io.github.underloam/xbbg)
+[![GitHub release downloads](https://img.shields.io/github/downloads/underloam/xbbg/total.svg)](https://github.com/underloam/xbbg/releases)
+[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
+[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)
+
+**Links:** [Documentation](https://xbbg.org/) · [Javadoc](https://javadoc.io/doc/io.github.underloam/xbbg) · [GitHub](https://github.com/underloam/xbbg) · [Changelog](https://github.com/underloam/xbbg/blob/main/CHANGELOG.md)
+
+</div>
+
+---
+
 # xbbg for Java
 
 Java bindings for [xbbg](../README.md): the same request, recipe, extension and subscription
@@ -442,19 +462,6 @@ tag after `semantic_version.yml` (a tag pushed with `GITHUB_TOKEN` starts no wor
 - Release jobs use no Maven cache; the consumers resolve from a fresh `-Dmaven.repo.local`.
 - `dry-run: true` signs and builds the bundle without uploading it and attaches it to the run as
   `maven-central-bundle`.
-
-One-time setup:
-
-1. Central Portal (https://central.sonatype.com): sign in as the `underloam` GitHub account so
-   the `io.github.underloam` namespace is verified (an organisation namespace needs the
-   verification-repository step instead), and generate a user token.
-2. A signing key: `gpg --quick-gen-key ...`, publish the public key to `keys.openpgp.org` or
-   `keyserver.ubuntu.com`, and export the private key with `gpg --armor --export-secret-keys`.
-3. A GitHub environment `maven-central` holding the secrets `MAVEN_CENTRAL_USERNAME` and
-   `MAVEN_CENTRAL_PASSWORD` (the token pair), `MAVEN_GPG_KEY` (the armored private key) and
-   `MAVEN_GPG_PASSPHRASE`, optionally with required reviewers and restricted to `v*` tags.
-   Environment rules apply to the ref the workflow runs on, so dispatch from the tag
-   ("Use workflow from" the `vX.Y.Z` tag), as for npm and PyPI.
 
 A local dry run of the release build, after staging all three platforms' release natives:
 
