@@ -1,0 +1,64 @@
+<svg width="1200" height="236" viewBox="0 0 1200 236" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">xbbg install footprint comparison</title>
+  <desc id="desc">Usable install footprint on Windows x64, Python 3.14: xbbg + narwhals is 19.8 MiB versus 130.8–191.1 MiB for pandas/Polars wrappers.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1200" y2="236" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#173f38"/>
+      <stop offset="0.58" stop-color="#15302b"/>
+      <stop offset="1" stop-color="#1b1a1f"/>
+    </linearGradient>
+    <clipPath id="frame">
+      <rect width="1200" height="236" rx="26"/>
+    </clipPath>
+  </defs>
+  <rect width="1200" height="236" rx="26" fill="url(#bg)"/>
+  <g clip-path="url(#frame)">
+    <text x="-10" y="228" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif" font-size="236" font-weight="800" fill="#ffffff" opacity="0.025">xbbgxbbgxbbgxbbg</text>
+  </g>
+  <rect x="0.5" y="0.5" width="1199" height="235" rx="25.5" stroke="#ffffff" stroke-opacity="0.11"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="28" y="32" font-size="12" font-weight="700" fill="#5eead4" letter-spacing="1.4">USABLE INSTALL FOOTPRINT · WINDOWS X64, PYTHON 3.14 (LOWER IS SMALLER)</text>
+    <text x="1172" y="32" font-size="11.5" fill="#a7beb7" text-anchor="end">narwhals is the only required Python dependency</text>
+    <line x1="28" y1="44" x2="1172" y2="44" stroke="#ffffff" stroke-opacity="0.10"/>
+    <g transform="translate(28 62)">
+      <text x="0" y="13" font-size="13" font-weight="700" fill="#ffffff">xbbg 1.8.1 + narwhals 2.28.0</text>
+      <text x="230" y="13" font-size="11.5" fill="#a7beb7">No blpapi Python wheel or mandatory pandas/NumPy</text>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.04"/>
+      <rect x="560" y="1" width="45" height="16" rx="5" fill="#5eead4" fill-opacity="0.92"/>
+      <text x="615" y="13" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#5eead4">19.8 MiB</text>
+      <text x="683" y="13" font-size="11.5" fill="#a7beb7">(1.0×)</text>
+    </g>
+    <g transform="translate(28 94)">
+      <text x="0" y="13" font-size="13" font-weight="500" fill="#a7beb7">raw blpapi 3.26.8.1</text>
+      <text x="230" y="13" font-size="11.5" fill="#a7beb7">Low-level SDK bindings only (no DataFrame/async engine)</text>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.04"/>
+      <rect x="560" y="1" width="33" height="16" rx="5" fill="#ffffff" fill-opacity="0.24"/>
+      <text x="603" y="13" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#ffffff">14.7 MiB</text>
+      <text x="671" y="13" font-size="11.5" fill="#a7beb7">(0.74×)</text>
+    </g>
+    <g transform="translate(28 126)">
+      <text x="0" y="13" font-size="13" font-weight="500" fill="#a7beb7">pdblp 0.1.8 / blp 0.0.4</text>
+      <text x="230" y="13" font-size="11.5" fill="#a7beb7">+ pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1</text>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.04"/>
+      <rect x="560" y="1" width="295" height="16" rx="5" fill="#ffffff" fill-opacity="0.24"/>
+      <text x="865" y="13" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#ffffff">130.8 – 131.0 MiB</text>
+      <text x="987" y="13" font-size="11.5" fill="#a7beb7">(6.6×)</text>
+    </g>
+    <g transform="translate(28 158)">
+      <text x="0" y="13" font-size="13" font-weight="500" fill="#a7beb7">bbg-fetch 3.2.0</text>
+      <text x="230" y="13" font-size="11.5" fill="#a7beb7">+ pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1</text>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.04"/>
+      <rect x="560" y="1" width="294" height="16" rx="5" fill="#ffffff" fill-opacity="0.24"/>
+      <text x="864" y="13" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#ffffff">130.9 MiB</text>
+      <text x="932" y="13" font-size="11.5" fill="#a7beb7">(6.6×)</text>
+    </g>
+    <g transform="translate(28 190)">
+      <text x="0" y="13" font-size="13" font-weight="500" fill="#a7beb7">polars-bloomberg 0.6.0</text>
+      <text x="230" y="13" font-size="11.5" fill="#a7beb7">+ polars 1.44.2 + blpapi 3.26.8.1</text>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.04"/>
+      <rect x="560" y="1" width="430" height="16" rx="5" fill="#ffffff" fill-opacity="0.24"/>
+      <text x="1000" y="13" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#ffffff">191.1 MiB</text>
+      <text x="1068" y="13" font-size="11.5" fill="#a7beb7">(9.6×)</text>
+    </g>
+  </g>
+</svg>

@@ -67,6 +67,10 @@ Core scope:
 - JavaScript/Node bindings in [`js-xbbg`](js-xbbg/README.md)
 - Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
 
+<p align="center">
+  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="100%">
+</p>
+
 ## Why xbbg?
 
 xbbg's project goal is direct: be the most complete, technically advanced, and performance-focused open-source Bloomberg client for Python workflows, while staying independent of Bloomberg and requiring users to bring their own authorized Bloomberg access.
@@ -84,7 +88,11 @@ The short version: if all you need is a tiny one-off `bdp()` wrapper, several pa
 | Rust request/parsing engine with Arrow-shaped output | yes | no | no | no | no |
 | Output backends beyond pandas | Narwhals, native, PyArrow, pandas, Polars, DuckDB | application-owned | pandas-first | pandas-first | Polars-first |
 | Typed errors, diagnostics, field cache, testing helpers | yes | application-owned | limited | limited | limited |
-| Usable install footprint (Windows x64, Python 3.14) | xbbg 1.8.1 + narwhals 2.28.0, no `blpapi` = 19.836 MiB | blpapi 3.26.8.1 = 14.702 MiB | pdblp 0.1.8 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 130.816 MiB / blp 0.0.4 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 131.002 MiB | bbg-fetch 3.2.0 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 130.863 MiB | polars-bloomberg 0.6.0 + polars 1.44.2 + blpapi 3.26.8.1 = 191.118 MiB |
+| Usable install footprint (Windows x64, Python 3.14) | 19.8 MiB (`xbbg` + `narwhals`, no `blpapi` wheel) | 14.7 MiB (`blpapi` only) | 130.8 MiB / 131.0 MiB (`+ pandas + numpy + blpapi`) | 130.9 MiB (`+ pandas + numpy + blpapi`) | 191.1 MiB (`+ polars + blpapi`) |
+
+<p align="center">
+  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="100%">
+</p>
 
 ## Installation
 
