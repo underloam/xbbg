@@ -21,6 +21,7 @@ from xbbg.backend import (
     _import_backend_module,
     _pandas_frame_from_native_columns,
     _to_polars_frame,
+    _to_pyarrow_table,
 )
 
 
@@ -186,17 +187,15 @@ class XbbgDataFrame:
     def to_pandas(self) -> Any:
         pd = _import_backend_module(Backend.PANDAS, feature="XbbgDataFrame.to_pandas()")
         try:
-            pa = _import_backend_module(Backend.PYARROW, feature="XbbgDataFrame.to_pandas()")
+            arrow = _to_pyarrow_table(self.native, feature="XbbgDataFrame.to_pandas()")
         except ImportError:
             frame = _pandas_frame_from_native_columns(self.native, pd)
         else:
-            frame = pa.table(self.native).to_pandas(split_blocks=True)
+            frame = arrow.to_pandas(split_blocks=True)
         return _attach_xbbg_metadata_attrs(frame, self.native)
 
     def to_arrow(self) -> Any:
-        pa = _import_backend_module(Backend.PYARROW, feature="XbbgDataFrame.to_arrow()")
-
-        return pa.table(self.native)
+        return _to_pyarrow_table(self.native, feature="XbbgDataFrame.to_arrow()")
 
     def to_polars(self) -> Any:
         return _to_polars_frame(self.native, feature="XbbgDataFrame.to_polars()")

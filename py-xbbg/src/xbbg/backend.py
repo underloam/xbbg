@@ -540,9 +540,14 @@ def _attach_xbbg_metadata_attrs(dataframe: Any, table: Any) -> Any:
     return dataframe
 
 
-def _to_pyarrow_table(table: Any) -> Any:
-    pa = _import_backend_module(Backend.PYARROW)
-    return pa.table(table)
+def _to_pyarrow_table(table: Any, *, feature: str | None = None) -> Any:
+    pa = _import_backend_module(Backend.PYARROW, feature=feature)
+    if is_pyarrow_table(table):
+        return table
+    # ``pa.table`` asks whether its input is a pandas DataFrame before reading the
+    # Arrow C stream, and that check imports pandas (~300 ms cold) even on paths
+    # that never use it. Reading the stream directly yields the same table.
+    return pa.RecordBatchReader.from_stream(table).read_all()
 
 
 def _pandas_frame_from_native_columns(table: Any, pd: Any) -> Any:
@@ -566,11 +571,11 @@ def _pandas_frame_from_native_columns(table: Any, pd: Any) -> Any:
 def _to_pandas_frame(table: Any) -> Any:
     pd = _import_backend_module(Backend.PANDAS)
     try:
-        pa = _import_backend_module(Backend.PYARROW)
+        arrow = _to_pyarrow_table(table)
     except ImportError:
         frame = _pandas_frame_from_native_columns(table, pd)
     else:
-        frame = pa.table(table).to_pandas(split_blocks=True)
+        frame = arrow.to_pandas(split_blocks=True)
     return _attach_xbbg_metadata_attrs(frame, table)
 
 
@@ -629,13 +634,13 @@ def _to_polars_frame(table: Any, *, feature: str | None = None) -> Any:
         return pl.DataFrame(table)
 
     try:
-        pa = _import_backend_module(Backend.PYARROW)
+        arrow = _to_pyarrow_table(table)
     except ImportError:
         # Polars before 1.3 cannot consume an Arrow stream capsule directly.
         # Construct one frame per native batch so the declared 0.20 floor
         # preserves both logical dtypes and native chunk boundaries.
         return _to_polars_frame_from_native_batches(table, pl)
-    return pl.from_arrow(pa.table(table), rechunk=False)
+    return pl.from_arrow(arrow, rechunk=False)
 
 
 class _DuckDBDatabase:
