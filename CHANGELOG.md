@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.8.1] - 2026-11-04
+
 ### Added
 
 - **Java bindings (`java-xbbg`).** `io.github.underloam:xbbg` brings the whole `@xbbg/core` surface to the JVM: Java 8+ bytecode over JNI on the shared Rust engine, with native libraries for macOS arm64, Linux x64 (glibc 2.28+) and Windows x64 bundled in the jar and no runtime dependencies. Every request wrapper, recipe and `ext` helper, subscriptions (ticks, Arrow tables, gap-aware deltas and state deliveries, `latest`, dynamic topics and fields, status and diagnostics), engine configuration (auth, TLS, failover, SOCKS5, ZFP, key column), typed exceptions and warnings follow the Node package; results arrive as an xbbg columnar `Table`, row maps, or Arrow IPC bytes. Requests return `CompletableFuture`s that native threads complete without ever blocking inside JNI, so waiting on virtual threads does not pin their carriers. The JVM natives build with a `release-jni` Cargo profile that turns a Rust panic into a Java exception instead of aborting the JVM. The jar finds the Bloomberg runtime like the Python and Node packages (explicit path, `BLPAPI_LIB_DIR`/`BLPAPI_ROOT`, Terminal install). `io.github.underloam:xbbg-jdk17` adds `Flow` publishers verified with the Reactive Streams TCK, sealed delivery, value and error types for pattern matching, Arrow Java `VectorSchemaRoot` interop, and virtual-thread callbacks.
@@ -1866,7 +1868,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.8.1...HEAD
+[1.8.1]: https://github.com/underloam/xbbg/compare/v1.8.0...v1.8.1
 [1.8.0]: https://github.com/underloam/xbbg/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/underloam/xbbg/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/underloam/xbbg/compare/v1.6.0...v1.6.1
