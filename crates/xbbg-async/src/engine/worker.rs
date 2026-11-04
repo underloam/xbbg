@@ -50,7 +50,7 @@ const SLOW_REQUEST_WARN_THRESHOLD: Duration = Duration::from_secs(30);
 use super::delayed;
 use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID};
 use super::session_lifecycle::{
-    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
+    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
 };
 use super::state::{
     BqlState, BsrchState, BulkDataState, FieldInfoState, GenericState, HistDataState,
@@ -1110,10 +1110,15 @@ impl AsyncRequestWorker {
 
     /// Pre-warm commonly used services. Blocking; only called at creation.
     /// Synchronous opens do not stall event delivery on an async session —
-    /// events keep flowing on the SDK dispatcher thread.
+    /// events keep flowing on the SDK dispatcher thread — and the SDK session
+    /// is thread-safe, so the configured services open concurrently.
     fn warmup(&self) {
-        for service_name in &self.config.warmup_services {
-            match self.session.open_service(service_name) {
+        let services = &self.config.warmup_services;
+        let outcomes = start_concurrently(services.len(), "xbbg-service-warmup", |index| {
+            self.session.open_service(&services[index])
+        });
+        for (service_name, outcome) in services.iter().zip(outcomes) {
+            match outcome {
                 Ok(()) => {
                     self.shared
                         .open_services

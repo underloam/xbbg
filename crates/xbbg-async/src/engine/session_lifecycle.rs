@@ -50,6 +50,45 @@ impl StartupLatch {
     }
 }
 
+/// Run `start(0..count)` concurrently and return the outcomes in index order.
+///
+/// Session startup is a blocking SDK round trip, so pools start their sessions
+/// in parallel: index 0 runs on the caller's thread, the rest on scoped
+/// threads (inline if a thread cannot be spawned). Every call completes before
+/// this returns, so a caller that fails on one outcome drops the others — each
+/// started session is torn down exactly as a serial early return would. A panic
+/// in any call resumes on the caller after the remaining calls finish.
+pub(super) fn start_concurrently<T: Send>(
+    count: usize,
+    thread_name: &str,
+    start: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let start = &start;
+    std::thread::scope(|scope| {
+        let spawned: Vec<_> = (1..count)
+            .map(|index| {
+                std::thread::Builder::new()
+                    .name(format!("{thread_name}-{index}"))
+                    .spawn_scoped(scope, move || start(index))
+                    .map_err(|_| index)
+            })
+            .collect();
+        let mut outcomes = Vec::with_capacity(count);
+        if count > 0 {
+            outcomes.push(start(0));
+        }
+        for handle in spawned {
+            outcomes.push(match handle {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(index) => start(index),
+            });
+        }
+        outcomes
+    })
+}
+
 pub(super) struct PendingServiceOpen {
     cid: i64,
     waiters: Vec<oneshot::Sender<Result<(), BlpError>>>,

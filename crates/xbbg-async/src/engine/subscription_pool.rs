@@ -18,7 +18,7 @@ use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionLi
 
 use super::dispatch::DispatchKey;
 use super::session_lifecycle::{
-    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
+    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
 };
 use super::state::{
     FieldKind, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics, SubscriptionSender,
@@ -2207,16 +2207,17 @@ impl SubscriptionSessionPool {
             max_sessions = config.max_subscription_sessions,
             "creating subscription session pool"
         );
+        let started = start_concurrently(size, "xbbg-subscription-start", |id| {
+            SubscriptionWorkerHandle::spawn(id, Arc::clone(&config), None)
+        });
         let mut available = Vec::with_capacity(size);
         let mut all_workers = Vec::with_capacity(size);
-        for id in 0..size {
-            let handle = SubscriptionWorkerHandle::spawn(id, Arc::clone(&config), None).map_err(
-                |error| {
-                    BlpAsyncError::Blp(BlpError::Internal {
-                        detail: format!("failed to spawn subscription worker {id}: {error}"),
-                    })
-                },
-            )?;
+        for (id, handle) in started.into_iter().enumerate() {
+            let handle = handle.map_err(|error| {
+                BlpAsyncError::Blp(BlpError::Internal {
+                    detail: format!("failed to spawn subscription worker {id}: {error}"),
+                })
+            })?;
             all_workers.push(Arc::downgrade(&handle.inner));
             available.push(handle);
         }
