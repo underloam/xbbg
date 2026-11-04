@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Consumer smoke test: resolves io.github.underloam:xbbg from a file repository the way an
+     application would, then runs consumer.Main (../src) on one JDK toolchain per invocation.
+     See java-xbbg/README.md ("Consumer smoke tests"). -->
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.underloam.consumers</groupId>
+  <artifactId>xbbg-consumer-maven</artifactId>
+  <version>1.0</version>
+  <name>xbbg consumer smoke test (Maven)</name>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <maven.compiler.release>8</maven.compiler.release>
+    <!-- Artifact under test and the repository holding it: `mvnw deploy` in java-xbbg with
+         -DaltDeploymentRepository=id::file:///abs/path/java-xbbg/target/consumer-repo -->
+    <xbbg.version>0.0.0-SNAPSHOT</xbbg.version>
+    <xbbg.repo.url>${project.baseUri}../../target/consumer-repo</xbbg.repo.url>
+    <!-- Runtime JDK, matched against toolchains.xml (setup-java registers major versions: 8, 11, ...) -->
+    <run.jdk>8</run.jdk>
+    <!-- Optional consumer.Main settings (empty = unset) -->
+    <consumer.blpapiArtifact></consumer.blpapiArtifact>
+    <consumer.expectVersion></consumer.expectVersion>
+    <consumer.expectNativeVersion></consumer.expectNativeVersion>
+  </properties>
+
+  <repositories>
+    <repository>
+      <id>xbbg-under-test</id>
+      <url>${xbbg.repo.url}</url>
+      <releases><enabled>true</enabled></releases>
+      <snapshots>
+        <enabled>true</enabled>
+        <updatePolicy>always</updatePolicy>
+      </snapshots>
+    </repository>
+  </repositories>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.underloam</groupId>
+      <artifactId>xbbg</artifactId>
+      <version>${xbbg.version}</version>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <!-- consumer.Main is shared with the Gradle consumer -->
+    <sourceDirectory>${project.basedir}/../src</sourceDirectory>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-compiler-plugin</artifactId>
+        <version>3.16.0</version>
+        <configuration>
+          <compilerArgs><arg>-Xlint:-options</arg></compilerArgs>
+        </configuration>
+      </plugin>
+      <!-- Select the runtime toolchain after compilation so javac stays on the build JDK. -->
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-toolchains-plugin</artifactId>
+        <version>3.3.0</version>
+        <executions>
+          <execution>
+            <id>runtime-jdk</id>
+            <phase>package</phase>
+            <goals><goal>toolchain</goal></goals>
+            <configuration>
+              <toolchains><jdk><version>${run.jdk}</version></jdk></toolchains>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.codehaus.mojo</groupId>
+        <artifactId>exec-maven-plugin</artifactId>
+        <version>3.6.4</version>
+        <executions>
+          <execution>
+            <id>run-main</id>
+            <phase>verify</phase>
+            <goals><goal>exec</goal></goals>
+            <configuration>
+              <executable>java</executable>
+              <timeout>300000</timeout>
+              <arguments>
+                <!-- JEP 472 (24+): no native-access warning. JDK 8 and 11 accept the flag only
+                     together with IgnoreUnrecognizedVMOptions. -->
+                <argument>-XX:+IgnoreUnrecognizedVMOptions</argument>
+                <argument>--enable-native-access=ALL-UNNAMED</argument>
+                <argument>-Dxbbg.cache.dir=${project.build.directory}/xbbg-cache</argument>
+                <argument>-Dconsumer.blpapiArtifact=${consumer.blpapiArtifact}</argument>
+                <argument>-Dconsumer.expectVersion=${consumer.expectVersion}</argument>
+                <argument>-Dconsumer.expectNativeVersion=${consumer.expectNativeVersion}</argument>
+                <argument>-cp</argument>
+                <classpath/>
+                <argument>consumer.Main</argument>
+              </arguments>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+</project>

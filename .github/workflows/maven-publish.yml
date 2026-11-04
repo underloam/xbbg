@@ -1,0 +1,654 @@
+name: Publish Java Packages
+
+# Publishes io.github.underloam:xbbg (Java 8+, bundled JNI natives for windows-x86_64,
+# linux-x86_64 and macos-aarch64), io.github.underloam:xbbg-jdk17 and their parent POM to Maven
+# Central. Stable versions only. Like npm and PyPI, dispatch it manually on the release tag:
+# semantic_version.yml pushes the tag with GITHUB_TOKEN, which does not start tag-triggered
+# workflows. See java-xbbg/README.md ("Releasing to Maven Central").
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Stable version to publish (e.g. v1.2.3); must equal the Cargo workspace version at ref."
+        required: true
+        type: string
+      ref:
+        description: "Git ref to build (default: the v<version> tag). Real publishes require the tag's commit."
+        required: false
+        type: string
+        default: ""
+      dry-run:
+        description: "Build, sign and smoke-test, then stop before uploading to Maven Central."
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  release-version:
+    name: Resolve Maven release version
+    runs-on: ubuntu-latest
+    outputs:
+      should_publish: ${{ steps.version.outputs.should_publish }}
+      version: ${{ steps.version.outputs.version }}
+      # Every later job checks out this commit, never the ref name: a branch or a moved tag
+      # could otherwise resolve to different commits during the 1-2 hour pipeline.
+      sha: ${{ steps.commit.outputs.sha }}
+    steps:
+      - name: Resolve and validate version
+        id: version
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            raw="$INPUT_VERSION"
+          else
+            raw="$GITHUB_REF_NAME"
+          fi
+          number='(0|[1-9][0-9]*)'
+          if [[ ! "$raw" =~ ^v?$number\.$number\.$number$ ]]; then
+            if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+              echo "::error::Maven Central publishes require a stable version like v1.2.3; got '$raw'"
+              exit 1
+            fi
+            echo "::notice::Skipping Maven publish for non-stable tag '$raw'"
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          version="${raw#v}"
+          ref="${INPUT_REF:-v$version}"
+          {
+            echo "should_publish=true"
+            echo "version=$version"
+            echo "ref=$ref"
+          } >> "$GITHUB_OUTPUT"
+          echo "Publishing io.github.underloam:xbbg $version from $ref"
+
+      - uses: actions/checkout@v7
+        if: steps.version.outputs.should_publish == 'true'
+        with:
+          ref: ${{ steps.version.outputs.ref }}
+          fetch-depth: 0
+
+      # Real publishes ship exactly the tagged tree; dry runs may rehearse any ref.
+      - name: Require the release tag's commit
+        if: steps.version.outputs.should_publish == 'true' && !inputs.dry-run
+        shell: bash
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          tag_commit=$(git rev-parse --verify "refs/tags/v$VERSION^{commit}") || {
+            echo "::error::tag v$VERSION does not exist"
+            exit 1
+          }
+          head_commit=$(git rev-parse HEAD)
+          if [[ "$tag_commit" != "$head_commit" ]]; then
+            echo "::error::ref resolves to $head_commit, but v$VERSION is $tag_commit"
+            exit 1
+          fi
+
+      - name: Record the commit to build
+        id: commit
+        if: steps.version.outputs.should_publish == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git rev-parse --verify 'HEAD^{commit}')
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Building commit $sha"
+
+  sdk-version:
+    name: Detect SDK Version
+    needs: release-version
+    if: needs.release-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.detect.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-version.outputs.sha }}
+      - name: Detect latest downloadable Bloomberg C++ SDK version
+        id: detect
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          detect-only: "true"
+          detection-attempts: "5"
+
+  generate-bindings:
+    name: Generate blpapi bindings artifact
+    needs: [release-version, sdk-version]
+    if: needs.release-version.outputs.should_publish == 'true'
+    uses: ./.github/workflows/generate-bindings.yml
+    with:
+      sdk-version: ${{ needs.sdk-version.outputs.version }}
+      ref: ${{ needs.release-version.outputs.sha }}
+
+  build-natives:
+    name: Build JVM natives (${{ matrix.platform }})
+    needs: [release-version, sdk-version, generate-bindings]
+    if: needs.release-version.outputs.should_publish == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            # glibc 2.28 floor (manylinux_2_28), the same image as the wheels and npm addon.
+            container: ghcr.io/${{ github.repository_owner }}/xbbg-manylinux:latest
+            python: /opt/python/cp312-cp312/bin/python
+          - os: windows-latest
+            platform: windows-x86_64
+            python: python
+          - os: macos-15
+            platform: macos-aarch64
+            python: python3
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 90
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      VERSION: ${{ needs.release-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.release-version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-version.outputs.sha }}
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+          cache: false
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure pre-generated bindings path (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bindingsPath = Join-Path $env:GITHUB_WORKSPACE "ci-bindings\bindings.rs"
+          if (-not (Test-Path $bindingsPath)) {
+            throw "Bindings artifact not found at $bindingsPath"
+          }
+          "BLPAPI_PREGENERATED_BINDINGS=$bindingsPath" >> $env:GITHUB_ENV
+
+      - name: Configure pre-generated bindings path (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: ${{ runner.os }}
+
+      # xbbg_sdk_jni's TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
+      # actions/checkout trusts the workspace only in a temporary global config. Without this,
+      # git in the root-run container refuses the checkout ("dubious ownership"), the build
+      # provenance records gitCommit=unknown, and release staging refuses it.
+      - name: Trust the checkout (Linux container)
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Stage release natives
+        shell: bash
+        run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --release --out "$GITHUB_WORKSPACE/java-natives"
+
+      - name: Verify release natives
+        shell: bash
+        run: |
+          ${{ matrix.python }} scripts/stage_jvm_natives.py verify --release --platform ${{ matrix.platform }} \
+            --expect-version "$VERSION" --expect-commit "$RELEASE_SHA" --natives java-natives
+
+      - name: Upload release natives
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-natives-${{ matrix.platform }}
+          path: java-natives/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 7
+
+  assemble:
+    name: Assemble Java artifacts
+    needs: [release-version, build-natives]
+    if: needs.release-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      VERSION: ${{ needs.release-version.outputs.version }}
+      RELEASE_SHA: ${{ needs.release-version.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-version.outputs.sha }}
+
+      - name: Download linux natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-linux-x86_64
+          path: java-xbbg/natives/linux-x86_64
+
+      - name: Download windows natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-windows-x86_64
+          path: java-xbbg/natives/windows-x86_64
+
+      - name: Download macOS natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-macos-aarch64
+          path: java-xbbg/natives/macos-aarch64
+
+      # No dependency cache in release jobs: the cache key ignores the stamped version, so a
+      # restored ~/.m2 could hold an xbbg X.Y.Z from an earlier run.
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Verify release natives
+        run: |
+          python3 scripts/stage_jvm_natives.py verify --release --expect-version "$VERSION" \
+            --expect-commit "$RELEASE_SHA" --natives java-xbbg/natives
+
+      # Publish-time stamping, never committed (like npm's stamp:version).
+      - name: Stamp the release version
+        working-directory: java-xbbg
+        run: ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+
+      # The publish job rebuilds from the same inputs; the commit time pins jar entry
+      # timestamps so both builds produce identical jars.
+      - name: Build release artifacts into a file repository
+        working-directory: java-xbbg
+        run: |
+          timestamp=$(git log -1 --format=%cI)
+          ./mvnw -B -Dxbbg.releaseNatives=true -DskipTests -Dproject.build.outputTimestamp="$timestamp" \
+            -DaltDeploymentRepository="release::file://$RUNNER_TEMP/release-repo" deploy < /dev/null
+
+      - name: Verify jar payloads and versions
+        run: |
+          main_jar="java-xbbg/xbbg/target/xbbg-$VERSION.jar"
+          scans=()
+          for jar in java-xbbg/*/target/*.jar; do
+            [[ "$jar" == "$main_jar" ]] || scans+=(--scan "$jar")
+          done
+          python3 scripts/stage_jvm_natives.py verify --release --expect-version "$VERSION" --natives "$main_jar" "${scans[@]}"
+
+      # Central rejects components without sources and javadoc jars; an empty jar is a build bug.
+      - name: Check Central layout
+        run: |
+          repo="$RUNNER_TEMP/release-repo/io/github/underloam"
+          test -s "$repo/xbbg-parent/$VERSION/xbbg-parent-$VERSION.pom"
+          for artifact in xbbg xbbg-jdk17; do
+            for file in "$artifact-$VERSION.pom" "$artifact-$VERSION.jar" "$artifact-$VERSION-sources.jar" "$artifact-$VERSION-javadoc.jar"; do
+              test -s "$repo/$artifact/$VERSION/$file" || { echo "::error::missing $artifact/$VERSION/$file"; exit 1; }
+            done
+            unzip -Z1 "$repo/$artifact/$VERSION/$artifact-$VERSION.jar" | grep -q '\.class$' \
+              || { echo "::error::$artifact-$VERSION.jar contains no classes"; exit 1; }
+          done
+
+      - name: Upload release repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-release-repo
+          path: ${{ runner.temp }}/release-repo
+          if-no-files-found: error
+          retention-days: 7
+
+  smoke:
+    name: Consumer smoke (${{ matrix.platform }})
+    needs: [release-version, sdk-version, assemble]
+    if: needs.release-version.outputs.should_publish == 'true'
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: windows-x86_64
+            os: windows-latest
+          - platform: macos-aarch64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      VERSION: ${{ needs.release-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-version.outputs.sha }}
+
+      - name: Validate the committed Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
+      - name: Download release repository
+        uses: actions/download-artifact@v8
+        with:
+          name: java-release-repo
+          path: ${{ runner.temp }}/release-repo
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The consumers provision the Bloomberg runtime from this local wheel through
+      # xbbg_sdk_jni; no SDK is installed or on any library path in this job.
+      - name: Download the Bloomberg runtime wheel
+        shell: bash
+        run: |
+          wheels="$RUNNER_TEMP/blpapi-wheel"
+          python -m pip download --no-deps --only-binary=:all: \
+            --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ \
+            --dest "$wheels" "blpapi==$BLPAPI_VERSION"
+          wheel=$(python -c 'import pathlib, sys; [w] = pathlib.Path(sys.argv[1]).glob("*.whl"); print(w.resolve())' "$wheels")
+          repo=$(python -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$RUNNER_TEMP/release-repo")
+          echo "BLPAPI_WHEEL=$wheel" >> "$GITHUB_ENV"
+          echo "XBBG_REPO_URL=$repo" >> "$GITHUB_ENV"
+
+      # No caches: the consumers must resolve xbbg from the downloaded release repository only.
+      - name: Setup Java 8
+        uses: actions/setup-java@v6
+        with:
+          # Temurin publishes no Java 8 build for macOS arm64.
+          distribution: ${{ runner.os == 'macOS' && 'zulu' || 'temurin' }}
+          java-version: "8"
+
+      - name: Setup Java 11, 17, 25 and 21 (default)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+            25
+            21
+
+      # The jar, the stamped xbbg.properties and the native library must all report VERSION.
+      # A fresh local repository: Maven never re-resolves a release version it already holds.
+      - name: Maven consumer on Java 8, 11, 17, 21, 25
+        working-directory: java-xbbg/consumers/maven
+        shell: bash
+        run: |
+          for jdk in 8 11 17 21 25; do
+            ./mvnw -B -Dmaven.repo.local="$RUNNER_TEMP/consumer-m2" \
+              -Drun.jdk="$jdk" -Dxbbg.version="$VERSION" -Dxbbg.repo.url="$XBBG_REPO_URL" \
+              -Dconsumer.blpapiArtifact="$BLPAPI_WHEEL" \
+              -Dconsumer.expectVersion="$VERSION" -Dconsumer.expectNativeVersion="$VERSION" verify < /dev/null
+          done
+
+      - name: Gradle consumer on Java 8, 11, 17, 21, 25
+        working-directory: java-xbbg/consumers/gradle
+        shell: bash
+        run: |
+          case "$RUNNER_ARCH" in
+            X64) arch=X64 ;;
+            ARM64) arch=AARCH64 ;;
+            *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+          esac
+          homes=()
+          for jdk in 8 11 17 21 25; do
+            name="JAVA_HOME_${jdk}_${arch}"
+            [[ -n "${!name:-}" ]] || { echo "::error::$name is not set"; exit 1; }
+            homes+=("$name")
+          done
+          from_env=$(IFS=,; echo "${homes[*]}")
+          ./gradlew --no-daemon --warning-mode=fail \
+            -Dorg.gradle.java.installations.fromEnv="$from_env" \
+            -Dorg.gradle.java.installations.auto-detect=false \
+            -Dorg.gradle.java.installations.auto-download=false \
+            -PxbbgRepo="$XBBG_REPO_URL" -PxbbgVersion="$VERSION" -PblpapiArtifact="$BLPAPI_WHEEL" \
+            -PexpectVersion="$VERSION" -PexpectNativeVersion="$VERSION" smoke < /dev/null
+
+  publish:
+    name: Publish to Maven Central
+    needs: [release-version, assemble, smoke]
+    if: needs.release-version.outputs.should_publish == 'true'
+    runs-on: ubuntu-latest
+    # Holds MAVEN_CENTRAL_USERNAME / MAVEN_CENTRAL_PASSWORD (Central Portal user token) and
+    # MAVEN_GPG_KEY / MAVEN_GPG_PASSPHRASE (armored signing key, published on a keyserver).
+    environment: maven-central
+    # One Central deployment per version at a time, however the run started (tag push, or a
+    # dispatch with or without the v prefix). A deployment is not atomic across retries: never
+    # cancel one in flight.
+    concurrency:
+      group: maven-central-${{ needs.release-version.outputs.version }}
+      cancel-in-progress: false
+    # Publishing is awaited for up to an hour.
+    timeout-minutes: 90
+    env:
+      VERSION: ${{ needs.release-version.outputs.version }}
+      DRY_RUN: ${{ inputs.dry-run && 'true' || 'false' }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-version.outputs.sha }}
+
+      - name: Skip versions already on Maven Central
+        id: existing
+        run: |
+          url="https://repo1.maven.org/maven2/io/github/underloam/xbbg/$VERSION/xbbg-$VERSION.pom"
+          status=$(curl -s -o /dev/null -w '%{http_code}' "$url")
+          case "$status" in
+            200) echo "published=true" >> "$GITHUB_OUTPUT"; echo "::notice::io.github.underloam:xbbg:$VERSION is already on Maven Central" ;;
+            404) echo "published=false" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::unexpected HTTP $status from $url"; exit 1 ;;
+          esac
+
+      - name: Download linux natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-linux-x86_64
+          path: java-xbbg/natives/linux-x86_64
+
+      - name: Download windows natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-windows-x86_64
+          path: java-xbbg/natives/windows-x86_64
+
+      - name: Download macOS natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-macos-aarch64
+          path: java-xbbg/natives/macos-aarch64
+
+      - name: Download smoke-tested release repository
+        uses: actions/download-artifact@v8
+        with:
+          name: java-release-repo
+          path: ${{ runner.temp }}/release-repo
+
+      # No dependency cache in a job that holds the signing key and the Central token.
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Stamp the release version
+        working-directory: java-xbbg
+        run: ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+
+      # -Prelease: release-version and release-natives guards, BouncyCastle signing from
+      # MAVEN_GPG_KEY, then one Central Portal bundle. -DskipUpload=true: nothing leaves the
+      # runner here (and no Central credentials are needed); the bundle is checked first.
+      - name: Sign and bundle
+        if: steps.existing.outputs.published == 'false' || env.DRY_RUN == 'true'
+        working-directory: java-xbbg
+        env:
+          MAVEN_GPG_KEY: ${{ secrets.MAVEN_GPG_KEY }}
+          MAVEN_GPG_PASSPHRASE: ${{ secrets.MAVEN_GPG_PASSPHRASE }}
+        run: |
+          timestamp=$(git log -1 --format=%cI)
+          ./mvnw -B -Prelease -DskipTests -DskipUpload=true -Dproject.build.outputTimestamp="$timestamp" deploy < /dev/null
+
+      # Reproducible build check, before anything is published: every jar and POM in the signed
+      # bundle must be byte-identical to the smoke-tested one, and nothing smoke-tested may be
+      # missing. The upload below sends this exact file (its sha256 is checked again there).
+      - name: Compare the bundle with the smoke-tested repository
+        id: bundle
+        if: steps.existing.outputs.published == 'false' || env.DRY_RUN == 'true'
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/central-bundle.zip"
+          contents="$RUNNER_TEMP/central-bundle"
+          tested="$RUNNER_TEMP/release-repo"
+          cp java-xbbg/target/central-publishing/central-bundle.zip "$bundle"
+          rm -rf "$contents"
+          mkdir "$contents"
+          unzip -q "$bundle" -d "$contents"
+          status=0
+          compared=0
+          while IFS= read -r -d '' file; do
+            path=${file#"$contents/"}
+            compared=$((compared + 1))
+            if ! cmp -s "$file" "$tested/$path"; then
+              echo "::error::$path in the signed bundle differs from the smoke-tested repository (or is missing there)"
+              status=1
+            fi
+          done < <(find "$contents" -type f \( -name '*.jar' -o -name '*.pom' \) -print0)
+          while IFS= read -r -d '' file; do
+            path=${file#"$tested/"}
+            if [[ ! -f "$contents/$path" ]]; then
+              echo "::error::$path was smoke-tested but is not in the signed bundle"
+              status=1
+            fi
+          done < <(find "$tested" -type f \( -name '*.jar' -o -name '*.pom' \) -print0)
+          if (( compared == 0 )); then
+            echo "::error::the signed bundle holds no jars or POMs"
+            status=1
+          fi
+          sha256=$(sha256sum "$bundle" | cut -d' ' -f1)
+          echo "sha256=$sha256" >> "$GITHUB_OUTPUT"
+          echo "Compared $compared files; bundle sha256 $sha256"
+          exit "$status"
+
+      - name: Upload the signed bundle (dry run)
+        if: env.DRY_RUN == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: maven-central-bundle
+          path: ${{ runner.temp }}/central-bundle.zip
+          if-no-files-found: error
+          retention-days: 7
+
+      # The Central Portal Publisher API: upload the compared bundle with automatic publishing,
+      # then wait until Central reports it published (or failed).
+      - name: Publish the bundle to Maven Central
+        id: central
+        if: steps.existing.outputs.published == 'false' && env.DRY_RUN != 'true'
+        env:
+          MAVEN_CENTRAL_USERNAME: ${{ secrets.MAVEN_CENTRAL_USERNAME }}
+          MAVEN_CENTRAL_PASSWORD: ${{ secrets.MAVEN_CENTRAL_PASSWORD }}
+          BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+          bundle="$RUNNER_TEMP/central-bundle.zip"
+          echo "$BUNDLE_SHA256  $bundle" | sha256sum --check --strict -
+          token=$(printf '%s:%s' "$MAVEN_CENTRAL_USERNAME" "$MAVEN_CENTRAL_PASSWORD" | base64 -w0)
+          echo "::add-mask::$token"
+          headers="$RUNNER_TEMP/central-auth-headers"
+          trap 'rm -f "$headers"' EXIT
+          (umask 077 && printf 'Authorization: Bearer %s\n' "$token" > "$headers")
+          api=https://central.sonatype.com/api/v1/publisher
+
+          # Not retried: a repeated upload of an accepted bundle would be a second deployment.
+          if ! id=$(curl --fail-with-body -sS -X POST -H @"$headers" \
+            -F "bundle=@$bundle;type=application/octet-stream" \
+            "$api/upload?name=xbbg-$VERSION&publishingType=AUTOMATIC"); then
+            echo "::error::Central rejected the upload: $id"
+            exit 1
+          fi
+          if [[ ! "$id" =~ ^[A-Za-z0-9-]+$ ]]; then
+            echo "::error::unexpected upload response from Central: $id"
+            exit 1
+          fi
+          echo "deployment=$id" >> "$GITHUB_OUTPUT"
+          echo "Uploaded deployment $id"
+
+          deadline=$((SECONDS + 3600))
+          failures=0
+          while :; do
+            if response=$(curl --fail-with-body -sS -X POST -H @"$headers" "$api/status?id=$id"); then
+              failures=0
+              state=$(jq -r '.deploymentState // empty' <<< "$response")
+              case "$state" in
+                PUBLISHED) echo "Deployment $id is published"; break ;;
+                FAILED)
+                  echo "::error::Central deployment $id failed"
+                  jq '.errors' <<< "$response"
+                  exit 1
+                  ;;
+                PENDING | VALIDATING | VALIDATED | PUBLISHING) echo "Deployment $id: $state" ;;
+                *) echo "::error::unexpected status response from Central: $response"; exit 1 ;;
+              esac
+            else
+              failures=$((failures + 1))
+              echo "::warning::status request $failures for deployment $id failed: $response"
+              if (( failures >= 10 )); then
+                echo "::error::giving up on deployment $id after $failures failed status requests; check central.sonatype.com"
+                exit 1
+              fi
+            fi
+            if (( SECONDS >= deadline )); then
+              echo "::error::deployment $id was not published within an hour; check central.sonatype.com"
+              exit 1
+            fi
+            sleep 15
+          done
+
+      - name: Summary
+        if: always()
+        env:
+          PUBLISHED_BEFORE: ${{ steps.existing.outputs.published }}
+          OUTCOME: ${{ job.status }}
+          BUNDLE_SHA256: ${{ steps.bundle.outputs.sha256 }}
+          DEPLOYMENT: ${{ steps.central.outputs.deployment }}
+        run: |
+          {
+            echo "## Maven Central"
+            echo ""
+            echo "- **Version**: $VERSION"
+            echo "- **Dry run**: $DRY_RUN"
+            echo "- **Already published before this run**: ${PUBLISHED_BEFORE:-unknown}"
+            echo "- **Bundle sha256**: ${BUNDLE_SHA256:-none}"
+            echo "- **Central deployment**: ${DEPLOYMENT:-none}"
+            echo "- **Job status**: $OUTCOME"
+            echo "- **Artifacts**: io.github.underloam:xbbg-parent, io.github.underloam:xbbg, io.github.underloam:xbbg-jdk17"
+          } >> "$GITHUB_STEP_SUMMARY"

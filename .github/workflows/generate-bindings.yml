@@ -7,6 +7,11 @@ on:
         description: Bloomberg C++ SDK version
         required: true
         type: string
+      ref:
+        description: Git ref to generate from (default the caller's ref); release workflows pass the ref they build
+        required: false
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -21,6 +26,8 @@ jobs:
       CARGO_TERM_COLOR: always
     steps:
       - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
 
       - name: Setup Bloomberg SDK
         uses: ./.github/actions/setup-blpapi-sdk
