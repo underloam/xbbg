@@ -48,6 +48,15 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Conversions without pyarrow are column-wise (#370).** pandas output, the Polars < 1.3 path and `convert_ccy` input build columns instead of one dict per row, with the same dtypes and attrs. `ArrowTable.to_polars()` uses the `xbbg.backend` conversion, keeping native chunks instead of falling back to rows. Currency adjustment reuses native Arrow inputs without FFI and drains foreign Arrow streams in one detached step on the calling thread, so producer release callbacks never run on async workers.
 - **SDK discovery no longer imports `blpapi` (#370).** The package is located with `find_spec` and its version read from distribution metadata, so discovery runs no third-party code. `get_sdk_info()` is thread-safe and never publishes a result made stale by `set_sdk_path()`/`clear_sdk_path()`; a broken `blpapi` install is listed as a source, and the library search still filters it out.
 - **Free-threading groundwork (#370).** `PyEngine` and `PySubscription` are frozen classes, clippy forbids `Python::attach`/`try_attach` in the Python bindings, the GIL pin moves into a pixi `gil` feature with a new `py314t` environment, and the pixi duckdb floor matches the package's `>=1.5.1`.
+- **Faster package import and first request.** `import xbbg` takes about 30 ms, and a new process loads neither `importlib.metadata`, `importlib.abc` nor pandas before its first result.
+  - `xbbg.__version__` and the native-extension guard read a `_version.py` that setuptools-scm writes at build time, instead of importing `importlib.metadata` (about 80 ms).
+  - SDK discovery on the import path no longer reads distribution metadata; only `get_sdk_info()` reads the `blpapi` version.
+  - The guard no longer imports `importlib.abc` (25–50 ms).
+  - The Bloomberg SDK library is prepared when `xbbg._core` first loads instead of on `import xbbg`. On Windows, the highest-priority library (manual path, `blpapi` wheel, Terminal DAPI, `BLPAPI_ROOT`) is loaded by full path, so the process binds that copy and only that copy, and `set_sdk_path()` called before first use takes effect.
+  - Converting results to pyarrow, including the default Narwhals output, reads the Arrow C stream directly instead of calling `pa.table`, which imported pandas (about 300 ms).
+  - The engine opens its request sessions, its subscription sessions and each worker's warm-up services concurrently. On a Desktop API connection, engine startup drops from about 250 ms to 80 ms.
+  - Async calls start a missing default engine on a worker thread instead of blocking the event loop.
+  - Requests without extra keyword arguments skip the request-schema lookup.
 
 ### Fixed
 
