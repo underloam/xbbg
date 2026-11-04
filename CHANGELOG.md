@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+## [1.8.0] - 2026-11-04
+
 ### Added
 
 - **Gap-aware subscription delivery (#271).** Python, Node, and Rust support opt-in `drop_oldest` deltas with exact local-eviction counts, and `delivery="state"`/`delivery: 'state'` for fair, conflated current images. Delivery envelopes preserve gaps across Arrow and dataframe backends; state rows expose continuity validity and ordered invalidation/recovery without building Arrow on incoming updates or scanning quiet topics. Python converts delivery backends on the consuming event loop, never on native bridge threads. Rust `SubscriptionDeliveryMode`, `SubscriptionGap`, and `SubscriptionDelivery` are `#[non_exhaustive]`.
@@ -1849,7 +1851,8 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ---
 
-[Unreleased]: https://github.com/underloam/xbbg/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/underloam/xbbg/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/underloam/xbbg/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/underloam/xbbg/compare/v1.6.1...v1.7.0
 [1.6.1]: https://github.com/underloam/xbbg/compare/v1.6.0...v1.6.1
 [1.6.0]: https://github.com/underloam/xbbg/compare/v1.5.1...v1.6.0
