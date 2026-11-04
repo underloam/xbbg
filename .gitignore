@@ -25,6 +25,8 @@ build_rust.bat
 # PyO3 extension build outputs
 py-xbbg/src/xbbg/_core.pyd
 py-xbbg/src/xbbg/*.so
+# Written by setuptools-scm at build time
+py-xbbg/src/xbbg/_version.py
 
 # Logs
 Logs/

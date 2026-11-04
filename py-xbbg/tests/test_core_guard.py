@@ -106,9 +106,12 @@ def test_importing_names_from_a_mismatched_extension_is_refused():
 
     script = textwrap.dedent(
         """
-        import importlib.metadata
+        import sys
+        import types
 
-        importlib.metadata.version = lambda name: "0.0.0"
+        version_file = types.ModuleType("xbbg._version")
+        version_file.version = "0.0.0"
+        sys.modules["xbbg._version"] = version_file
         import xbbg._core_guard as guard
 
         guard._source_checkout = lambda package_dir: None  # judge it as an installed package

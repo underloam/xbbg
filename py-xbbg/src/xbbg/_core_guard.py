@@ -1,17 +1,20 @@
 """Refuse a native ``xbbg._core`` that was built for a different xbbg.
 
 pip and conda install the Python files and the extension together, so an installed
-extension whose stamped ``__version__`` differs from the installed distribution came
-from another build: an interrupted upgrade, pip and conda installing over each other,
-or a binary left behind by an earlier install. An editable install keeps whichever
-extension was last compiled into the source tree while ``git pull`` updates the
-Python sources, and its metadata is as old as that extension, so in a source checkout
-the extension's build commit is compared with the checkout's ``HEAD`` instead.
+extension whose stamped ``__version__`` differs from the version setuptools-scm wrote
+into ``xbbg/_version.py`` came from another build: an interrupted upgrade, pip and
+conda installing over each other, or a binary left behind by an earlier install. An
+editable install keeps whichever extension was last compiled into the source tree
+while ``git pull`` updates the Python sources, and its ``_version.py`` is as old as
+that extension, so in a source checkout the extension's build commit is compared with
+the checkout's ``HEAD`` instead.
+
+The finder also prepares the Bloomberg SDK library just before the extension loads,
+so ``import xbbg`` itself never touches the SDK.
 """
 
 from __future__ import annotations
 
-from importlib.abc import MetaPathFinder
 from importlib.machinery import ExtensionFileLoader, PathFinder
 from pathlib import Path
 import sys
@@ -50,7 +53,7 @@ def install(distribution_version: str | None) -> None:
     """Verify ``xbbg._core`` on every import path, including ``from xbbg._core import ...``.
 
     Args:
-        distribution_version: Installed xbbg version, or ``None`` without package metadata.
+        distribution_version: Version written into ``xbbg/_version.py`` at build time, or ``None`` without one.
     """
     sys.meta_path[:] = [finder for finder in sys.meta_path if not getattr(finder, "xbbg_core_guard", False)]
     sys.meta_path.insert(0, _CoreFinder(distribution_version))
@@ -130,8 +133,12 @@ def _warn_if_built_from_other_commit(core: ModuleType, checkout: Path) -> None:
     )
 
 
-class _CoreFinder(MetaPathFinder):
-    """Find ``xbbg._core`` like the default path finder, verifying it once it has loaded."""
+class _CoreFinder:
+    """Find ``xbbg._core`` like the default path finder, verifying it once it has loaded.
+
+    ``sys.meta_path`` only requires ``find_spec``; subclassing ``importlib.abc.MetaPathFinder``
+    would import ``importlib.resources`` (25-50 ms) on every ``import xbbg``.
+    """
 
     xbbg_core_guard = True
 
@@ -145,6 +152,9 @@ class _CoreFinder(MetaPathFinder):
             return None
         spec = PathFinder.find_spec(fullname, path, target)
         if spec is not None and isinstance(spec.loader, ExtensionFileLoader):
+            from . import _sdk
+
+            _sdk._prepare_sdk_for_core_import()
             spec.loader = _VerifiedCoreLoader(fullname, spec.loader.path, self._distribution_version)
         return spec
 

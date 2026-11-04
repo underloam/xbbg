@@ -14,6 +14,7 @@ _sdk_generation = 0
 _sdk_info: dict | None = None
 _manual_sdk_path: Path | None = None
 _dll_directory_handles: list[object] = []
+_preloaded_libraries: list[object] = []
 logger = logging.getLogger(__name__)
 
 
@@ -109,19 +110,14 @@ def _dapi_candidate_paths() -> list[Path]:
     return candidates
 
 
-def _blpapi_package_location() -> tuple[Path, str | None] | None:
-    """Locate Bloomberg's ``blpapi`` Python package without importing it.
+def _blpapi_package_init() -> Path | None:
+    """Locate ``blpapi/__init__.py`` of Bloomberg's Python package without importing it.
 
     xbbg links the BLPAPI C++ SDK directly and never calls this package's API.
     The pip wheel ships the shared library, which makes its directory the most
     common SDK source for pip users -- probed ahead of a Terminal DAPI install.
-    Only the package location and distribution version are needed, so the
-    package's own code never runs.
-
-    Returns ``(path to blpapi/__init__.py, distribution version or None)``, or
-    ``None`` when the package is not installed.
+    Importing the package would cost ~100 ms and load its own copy of that library.
     """
-    import importlib.metadata
     import importlib.util
 
     try:
@@ -130,11 +126,26 @@ def _blpapi_package_location() -> tuple[Path, str | None] | None:
         return None
     if spec is None or not spec.origin:
         return None
+    return Path(spec.origin)
+
+
+def _blpapi_package_location() -> tuple[Path, str | None] | None:
+    """Return ``(path to blpapi/__init__.py, distribution version or None)`` for ``get_sdk_info``.
+
+    The version comes from ``importlib.metadata`` (~80 ms to import), so SDK
+    discovery on the import path uses :func:`_blpapi_package_init` instead.
+    Returns ``None`` when the package is not installed.
+    """
+    import importlib.metadata
+
+    package_init = _blpapi_package_init()
+    if package_init is None:
+        return None
     try:
         package_version: str | None = importlib.metadata.version("blpapi")
     except importlib.metadata.PackageNotFoundError:
         package_version = None
-    return Path(spec.origin), package_version
+    return package_init, package_version
 
 
 def _copy_sdk_info(info: dict) -> dict:
@@ -355,9 +366,8 @@ def _collect_sdk_candidate_dirs() -> list[Path]:
     add(manual_sdk_path)
 
     # 2. blpapi Python package (most common for pip users)
-    blpapi_location = _blpapi_package_location()
-    if blpapi_location is not None:
-        add(blpapi_location[0].parent)
+    blpapi_init = _blpapi_package_init()
+    add(blpapi_init.parent if blpapi_init is not None else None)
 
     # 3. DAPI (Bloomberg Terminal)
     for dapi_path in _dapi_candidate_paths():
@@ -391,32 +401,39 @@ def _add_sdk_to_dll_search_path() -> None:
 
 
 def _preload_sdk_library() -> bool:
-    """macOS/Linux: dlopen libblpapi so @rpath refs in _core resolve via install-name match.
+    """Load the highest-priority SDK library by full path before _core needs it.
 
-    The pyo3 cdylib (_core) declares `@rpath/libblpapi3_64.so` as a dynamic
-    dependency but ships with no LC_RPATH entries. On macOS, once any image
-    with LC_ID_DYLIB `@rpath/libblpapi3_64.so` is loaded into the process,
-    dyld satisfies subsequent `@rpath/libblpapi3_64.so` references by
-    install-name match — no rpath search occurs. This is the same pattern
-    Bloomberg's own `blpapi/internals.py::_loadLibrary` uses to load its
-    `ffiutils.cpython-*-darwin.so` extension, which also ships with no rpath.
+    _core names its BLPAPI dependency without a path, and the loader satisfies
+    that name from an already-loaded library of the same name.
 
-    On Linux, loading with RTLD_GLOBAL ensures the library's symbols are
-    available to subsequently loaded modules, avoiding a second DT_NEEDED
-    search (which may fail if `site-packages/blpapi` isn't on `LD_LIBRARY_PATH`).
+    - Windows: the search order across directories added with
+      ``os.add_dll_directory`` is unspecified, so without a preload _core may bind
+      a Terminal DAPI copy instead of the higher-priority pip wheel's, and a later
+      ``import blpapi`` would then load a second, different copy into the process.
+    - macOS: the pyo3 cdylib declares `@rpath/libblpapi3_64.so` but ships with no
+      LC_RPATH entries. Once any image with that LC_ID_DYLIB is loaded, dyld
+      satisfies later references by install-name match, the same pattern
+      Bloomberg's own `blpapi/internals.py::_loadLibrary` relies on.
+    - Linux: RTLD_GLOBAL makes the symbols available to subsequently loaded
+      modules, avoiding a second DT_NEEDED search (which may fail if
+      `site-packages/blpapi` isn't on `LD_LIBRARY_PATH`).
 
     Returns True on first successful preload, False if nothing could be
     loaded. Failure is non-fatal — `_import_core` still surfaces the
     friendly error message if the C extension can't open the library.
     """
     import ctypes
+    import sys
 
     for sdk_dir in _collect_sdk_candidate_dirs():
         lib_path = _find_sdk_lib(sdk_dir)
         if lib_path is None:
             continue
         try:
-            ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL)
+            if sys.platform == "win32":
+                _preloaded_libraries.append(ctypes.WinDLL(str(lib_path)))
+            else:
+                _preloaded_libraries.append(ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL))
             return True
         except OSError:
             continue
@@ -426,10 +443,12 @@ def _preload_sdk_library() -> bool:
 def _prepare_sdk_for_core_import() -> None:
     """Prepare the current process to load xbbg._core on any platform.
 
-    Dispatches to the correct per-platform mechanism:
+    The import guard in ``_core_guard`` calls this immediately before the native
+    extension loads, so ``set_sdk_path()`` takes effect if it runs first.
 
-    - Windows: add each detected SDK directory to the DLL search path.
-    - macOS/Linux: dlopen libblpapi so _core's `@rpath/libblpapi3_64.so`
+    - Windows: add each detected SDK directory to the DLL search path, then
+      preload the highest-priority library by full path.
+    - macOS/Linux: preload libblpapi so _core's `@rpath/libblpapi3_64.so`
       dependency resolves via dyld's install-name match (macOS) or is
       already in the process's loaded image list (Linux).
 
@@ -442,7 +461,6 @@ def _prepare_sdk_for_core_import() -> None:
     try:
         if sys.platform == "win32":
             _add_sdk_to_dll_search_path()
-        else:
-            _preload_sdk_library()
+        _preload_sdk_library()
     except Exception:
         logger.debug("Failed to prepare Bloomberg SDK for native extension import", exc_info=True)

@@ -35,7 +35,11 @@ def test_import_xbbg_is_warning_free():
 
 
 def test_blpapi_package_is_located_without_running_it(tmp_path):
-    """SDK discovery reads blpapi's location and metadata; the package's own code never runs."""
+    """SDK discovery reads blpapi's location and metadata; the package's own code never runs.
+
+    ``import xbbg`` and the native-extension import also skip ``importlib.metadata``,
+    which costs ~80 ms; only ``get_sdk_info()`` reads blpapi's distribution version.
+    """
     import xbbg
 
     site = tmp_path / "site"
@@ -60,9 +64,12 @@ def test_blpapi_package_is_located_without_running_it(tmp_path):
         import sys
 
         import xbbg
+        import xbbg._core
 
+        metadata_before_info = "importlib.metadata" in sys.modules
         info = xbbg.get_sdk_info()
         print(json.dumps({
+            "metadata_before_info": metadata_before_info,
             "executed": getattr(builtins, "STAND_IN_BLPAPI_EXECUTED", False),
             "imported": "blpapi" in sys.modules,
             "sources": [
@@ -85,9 +92,37 @@ def test_blpapi_package_is_located_without_running_it(tmp_path):
     payload = json.loads(result.stdout.strip().splitlines()[-1])
     _CASE.assertFalse(payload["executed"])
     _CASE.assertFalse(payload["imported"])
+    _CASE.assertFalse(payload["metadata_before_info"])
     _CASE.assertEqual(len(payload["sources"]), 1, payload)
     _CASE.assertEqual(payload["sources"][0]["version"], "9.9.9")
     _CASE.assertEqual(Path(payload["sources"][0]["path"]).resolve(), (package / "__init__.py").resolve())
+
+
+def test_sdk_preload_binds_the_first_loadable_library_by_full_path(monkeypatch, tmp_path):
+    """Windows search order across added DLL directories is unspecified, so the preload decides which SDK _core binds."""
+    import ctypes
+
+    from xbbg import _sdk
+
+    broken_dir, wheel_dir, dapi_dir = (tmp_path / name for name in ("broken", "wheel", "dapi"))
+    libraries = {path: path / "blpapi3_64.dll" for path in (broken_dir, wheel_dir, dapi_dir)}
+    loaded = []
+
+    def load(path):
+        if path == str(libraries[broken_dir]):
+            raise OSError("not a valid Win32 application")
+        loaded.append(path)
+        return f"handle:{path}"
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(_sdk, "_collect_sdk_candidate_dirs", lambda: [broken_dir, wheel_dir, dapi_dir])
+    monkeypatch.setattr(_sdk, "_find_sdk_lib", libraries.get)
+    monkeypatch.setattr(_sdk, "_preloaded_libraries", [])
+    monkeypatch.setattr(ctypes, "WinDLL", load, raising=False)
+
+    _CASE.assertTrue(_sdk._preload_sdk_library())
+    _CASE.assertEqual(loaded, [str(libraries[wheel_dir])])
+    _CASE.assertEqual(_sdk._preloaded_libraries, [f"handle:{libraries[wheel_dir]}"])
 
 
 def test_get_lib_version_failure_is_debug_observable(monkeypatch, caplog):
@@ -308,21 +343,3 @@ def test_windows_dll_directory_handles_are_retained(monkeypatch, tmp_path):
 
     _CASE.assertEqual(handles, [str(sdk_dir)])
     _CASE.assertEqual(_sdk._dll_directory_handles, [f"handle:{sdk_dir}"])
-
-
-def test_package_prepare_failure_is_debug_observable(monkeypatch, caplog):
-    import xbbg
-    from xbbg import _sdk
-
-    def raise_prepare():
-        raise RuntimeError("boom")
-
-    monkeypatch.setattr(_sdk, "_prepare_sdk_for_core_import", raise_prepare)
-
-    with caplog.at_level(logging.DEBUG, logger="xbbg"):
-        importlib.reload(xbbg)
-
-    _CASE.assertTrue(
-        any("Failed to prepare Bloomberg SDK for package import" in record.message for record in caplog.records)
-    )
-    _CASE.assertTrue(any(record.exc_info for record in caplog.records))

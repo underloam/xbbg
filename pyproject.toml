@@ -105,6 +105,9 @@ python-source = "py-xbbg/src"
 [tool.setuptools_scm]
 tag_regex = '^(?:v|xbbg==)?(?P<version>\d+\.\d+\.\d+(?:(?:a|b|rc|alpha|beta)\d+)?)$'
 fallback_version = "0+unknown"
+# Read by xbbg/__init__.py and the native-extension guard instead of
+# importlib.metadata, which costs ~80 ms on every import.
+version_file = "py-xbbg/src/xbbg/_version.py"
 
 # Restrict git describe to Python release tags. JS-only tags use `js-vX.Y.Z` and
 # must not participate in Python package version inference.
@@ -129,6 +132,7 @@ exclude = [
   "venv",
   ".venv",
   "**/*.pyi",
+  "py-xbbg/src/xbbg/_version.py",
 ]
 
 [tool.ruff.format]
