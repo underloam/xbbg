@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Added
+
+- **Java bindings (`java-xbbg`).** `io.github.underloam:xbbg` brings the whole `@xbbg/core` surface to the JVM: Java 8+ bytecode over JNI on the shared Rust engine, with native libraries for macOS arm64, Linux x64 (glibc 2.28+) and Windows x64 bundled in the jar and no runtime dependencies. Every request wrapper, recipe and `ext` helper, subscriptions (ticks, Arrow tables, gap-aware deltas and state deliveries, `latest`, dynamic topics and fields, status and diagnostics), engine configuration (auth, TLS, failover, SOCKS5, ZFP, key column), typed exceptions and warnings follow the Node package; results arrive as an xbbg columnar `Table`, row maps, or Arrow IPC bytes. Requests return `CompletableFuture`s that native threads complete without ever blocking inside JNI, so waiting on virtual threads does not pin their carriers. The JVM natives build with a `release-jni` Cargo profile that turns a Rust panic into a Java exception instead of aborting the JVM. The jar finds the Bloomberg runtime like the Python and Node packages (explicit path, `BLPAPI_LIB_DIR`/`BLPAPI_ROOT`, Terminal install). `io.github.underloam:xbbg-jdk17` adds `Flow` publishers verified with the Reactive Streams TCK, sealed delivery, value and error types for pattern matching, Arrow Java `VectorSchemaRoot` interop, and virtual-thread callbacks.
+- **Bloomberg runtime provisioning (`crates/xbbg-sdk`).** Installs `blpapi3_64.dll`/`libblpapi3_64.so` from a Python package index (Bloomberg's, or a corporate Artifactory/Nexus mirror serving HTML or JSON pages), a conda channel (conda-forge `libblpapi` through sharded repodata, or a mirror), or a `.whl`/`.conda`/`.tar.bz2` file, for Windows x64, Linux x64 or macOS arm64 from any host. It checks the archive against the index or repodata hash and the library against the wheel `RECORD` or conda `paths.json`, uses the OS trust store, proxies and per-host credentials, installs atomically into a versioned cache with provenance, and works offline from that cache. The Java package calls it only when no local runtime exists and a source is configured (`Xbbg.setSdkSource`, `-Dxbbg.sdk.source`, `XBBG_SDK_SOURCE`); it never links blpapi itself, which `cargo deny` enforces.
+- **Java CI and Maven Central releases.** Required CI jobs check Java formatting (google-java-format), compile with javac lint and Error Prone as errors, build javadoc, run SpotBugs, build the natives on all three platforms, run the tests on Java 8, 11, 17, 21 and 25 on each OS, and run Maven and Gradle consumer projects that provision the Bloomberg runtime from a downloaded wheel. `maven-publish.yml` publishes both artifacts for a release tag after the same smoke tests, signed, and verifies that Central serves the tested jars.
+
+### Changed
+
+- **MSRV is Rust 1.97 (from 1.88)** for every crate, including the published ones and source builds of the Python package. The provisioning crate's uv dependencies need it.
+- **Dependency policy for the provisioning stack.** `deny.toml` allows the `bzip2-1.0.6` and `CDLA-Permissive-2.0` licences and ignores, with reasons, the advisories its uv and rattler dependencies carry: RUSTSEC-2023-0071 (`rsa`, reached through uv's cloud-storage auth, which xbbg never configures; also ignored in `.cargo/audit.toml`) and four unmaintained crates. Only `xbbg-sdk` may use `uv-client` and `rattler_repodata_gateway`.
+
+### Fixed
+
+- **Connection failures are session errors in every binding.** When the Bloomberg session cannot start (no Terminal, wrong host or port), the engine reported an internal error, `failed to spawn worker 0: session start failed`, which dropped the SDK's reason. It now reports a session error that keeps it, for example `Session start failed: request worker 0: connect event failed`: `BlpSessionError` in Python and Node instead of `BlpInternalError`, `BlpError::SessionStart` in Rust.
+
 ## [1.8.0] - 2026-11-04
 
 ### Added
