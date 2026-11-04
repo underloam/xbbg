@@ -288,7 +288,10 @@ jobs:
       # Publish-time stamping, never committed (like npm's stamp:version).
       - name: Stamp the release version
         working-directory: java-xbbg
-        run: ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+        run: |
+          timestamp=$(git log -1 --format=%cI)
+          ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+          python3 -c 'import pathlib, re, sys; p = pathlib.Path("pom.xml"); p.write_text(re.sub(r"<project\.build\.outputTimestamp>[^<]+</project\.build\.outputTimestamp>", f"<project.build.outputTimestamp>{sys.argv[1]}</project.build.outputTimestamp>", p.read_text(), count=1), encoding="utf-8")' "$timestamp"
 
       # The publish job rebuilds from the same inputs; the commit time pins jar entry
       # timestamps so both builds produce identical jars.
@@ -505,7 +508,10 @@ jobs:
 
       - name: Stamp the release version
         working-directory: java-xbbg
-        run: ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+        run: |
+          timestamp=$(git log -1 --format=%cI)
+          ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
+          python3 -c 'import pathlib, re, sys; p = pathlib.Path("pom.xml"); p.write_text(re.sub(r"<project\.build\.outputTimestamp>[^<]+</project\.build\.outputTimestamp>", f"<project.build.outputTimestamp>{sys.argv[1]}</project.build.outputTimestamp>", p.read_text(), count=1), encoding="utf-8")' "$timestamp"
 
       # -Prelease: release-version and release-natives guards, BouncyCastle signing from
       # MAVEN_GPG_KEY, then one Central Portal bundle. -DskipUpload=true: nothing leaves the
