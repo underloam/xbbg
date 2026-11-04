@@ -122,9 +122,15 @@ where
     F: Future<Output = PyResult<T>> + Send + 'static,
     T: for<'a> IntoPyObject<'a> + Send + 'static,
 {
+    // Box before wrapping: the gate and pyo3-async-runtimes nest the future in
+    // several generic layers, and without optimization each layer's poll or
+    // spawn frame holds copies of everything it wraps. Unboxed, a debug build
+    // gave those frames 280-560 KB each for Arrow requests and recipes, and
+    // `ext.turnover` overflowed its 2 MiB bridge worker. Boxed, every layer
+    // carries one pointer.
     future_into_py(
         py,
-        complete_for_python(INTERPRETER_SHUTDOWN.subscribe(), fut),
+        complete_for_python(INTERPRETER_SHUTDOWN.subscribe(), Box::pin(fut)),
     )
 }
 
@@ -791,6 +797,32 @@ mod tests {
             .await;
             assert!(suppressed.is_err());
         });
+    }
+
+    /// Bridge layers must not carry the binding future through their frames.
+    /// Unoptimized, they once stacked ~1.9 MB of poll frames over the ~27 KB
+    /// `recipe_turnover` future and overflowed a 2 MiB bridge worker. This
+    /// future holds 128 KB across an await, through the real bridge runtime.
+    #[test]
+    fn large_binding_futures_complete_on_bridge_workers() {
+        const BALLAST: usize = 128 * 1024;
+        Python::initialize();
+        let sum = Python::attach(|py| {
+            pyo3_async_runtimes::tokio::run(py, async {
+                let completion = Python::attach(|py| {
+                    let awaitable = shutdown_safe_future(py, async {
+                        let ballast = [1_u8; BALLAST];
+                        tokio::task::yield_now().await;
+                        Ok(ballast.iter().map(|&byte| usize::from(byte)).sum::<usize>())
+                    })?;
+                    pyo3_async_runtimes::tokio::into_future(awaitable)
+                })?;
+                let value = completion.await?;
+                Python::attach(|py| value.bind(py).extract::<usize>())
+            })
+        })
+        .expect("a large future completes through the bridge");
+        assert_eq!(sum, BALLAST);
     }
 
     #[test]
