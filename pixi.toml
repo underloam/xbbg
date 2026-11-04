@@ -21,7 +21,7 @@ python = ">=3.11,<3.16"
 # (`Missing .seh_endepilogue`, an LLVM Windows unwind-info bug), and the
 # `install` task builds with that flag. 1.98.1 builds it; lift the cap once a
 # newer rustc does.
-rust = ">=1.88,<1.99"
+rust = ">=1.97,<1.99"
 # conda-forge package `libclang` (versioned on its own schedule; often tracks LLVM major).
 # bindgen loads `$CONDA_PREFIX/lib` via LIBCLANG_PATH in [activation.env].
 libclang = ">=22"

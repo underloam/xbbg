@@ -34,7 +34,7 @@ license = "Apache-2.0"
 repository = "https://github.com/underloam/xbbg"
 homepage = "https://xbbg.org/"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97"
 
 [workspace.lints.rust]
 unreachable_pub = "warn"
