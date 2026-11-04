@@ -955,11 +955,18 @@ def _check_platform(
 
 
 def _check_jar_metadata(path: Path, *, natives: bool, expect_version: str | None) -> list[str]:
-    if expect_version is None:
-        return []
     problems: list[str] = []
     with zipfile.ZipFile(path) as jar:
         names = set(jar.namelist())
+        if not natives:
+            prefix = f"{RESOURCE_ROOT}/"
+            for name in sorted(names):
+                if not name.endswith("/") and (
+                    name.startswith(prefix) or name.lower().endswith((".dll", ".so", ".dylib"))
+                ):
+                    problems.append(f"{path}: non-native jar contains native file {name}")
+        if expect_version is None:
+            return problems
         manifest = (
             parse_manifest(jar.read("META-INF/MANIFEST.MF").decode("utf-8")) if "META-INF/MANIFEST.MF" in names else {}
         )

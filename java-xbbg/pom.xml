@@ -332,6 +332,11 @@
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
         <artifactId>maven-source-plugin</artifactId>
+        <configuration>
+          <!-- The xbbg module adds ${xbbg.natives.dir} as a resource for the runtime jar;
+               -sources.jar carries only .java sources, never resource or native files. -->
+          <excludeResources>true</excludeResources>
+        </configuration>
         <executions>
           <execution>
             <id>attach-sources</id>

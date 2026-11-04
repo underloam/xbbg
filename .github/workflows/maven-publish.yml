@@ -319,6 +319,8 @@ jobs:
             done
             unzip -Z1 "$repo/$artifact/$VERSION/$artifact-$VERSION.jar" | grep -q '\.class$' \
               || { echo "::error::$artifact-$VERSION.jar contains no classes"; exit 1; }
+            unzip -Z1 "$repo/$artifact/$VERSION/$artifact-$VERSION-sources.jar" | grep -q '\.java$' \
+              || { echo "::error::$artifact-$VERSION-sources.jar contains no .java sources"; exit 1; }
           done
 
       - name: Upload release repository
@@ -652,3 +654,40 @@ jobs:
             echo "- **Job status**: $OUTCOME"
             echo "- **Artifacts**: io.github.underloam:xbbg-parent, io.github.underloam:xbbg, io.github.underloam:xbbg-jdk17"
           } >> "$GITHUB_STEP_SUMMARY"
+
+  release-assets:
+    name: Attach Release Assets
+    needs: [release-version, assemble, smoke, publish]
+    if: needs.release-version.outputs.should_publish == 'true' && !inputs.dry-run
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.release-version.outputs.version }}
+    steps:
+      - name: Download smoke-tested release repository
+        uses: actions/download-artifact@v8
+        with:
+          name: java-release-repo
+          path: ${{ runner.temp }}/release-repo
+
+      - name: Stage Java release assets
+        run: |
+          set -euo pipefail
+          repo="$RUNNER_TEMP/release-repo/io/github/underloam"
+          dist="$RUNNER_TEMP/dist"
+          rm -rf "$dist"
+          mkdir -p "$dist"
+          cp "$repo/xbbg-parent/$VERSION/xbbg-parent-$VERSION.pom" "$dist/"
+          for artifact in xbbg xbbg-jdk17; do
+            for file in "$artifact-$VERSION.jar" "$artifact-$VERSION-sources.jar" "$artifact-$VERSION-javadoc.jar" "$artifact-$VERSION.pom"; do
+              cp "$repo/$artifact/$VERSION/$file" "$dist/"
+            done
+          done
+          ls -lh "$dist"
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ needs.release-version.outputs.version }}
+          files: ${{ runner.temp }}/dist/*

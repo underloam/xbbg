@@ -171,7 +171,7 @@ in `scripts/mcp_release_config.py`; their schema-specific JSON formats remain se
 |----------|------|---------|
 | Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15 and free-threaded 3.14t/3.15t), sdist, publish to PyPI, attach to GitHub release |
 | Release | `npm-publish.yml` | Build and publish stable `@xbbg/core` prebuilt native packages for supported platforms, then publish the `@xbbg/core` wrapper and `@xbbg/langgraph` package via npm trusted publishing |
-| Release | `maven-publish.yml` | Build release JNI natives on Linux (manylinux_2_28), Windows and macOS arm64, stamp and assemble `io.github.underloam:xbbg` and `xbbg-jdk17`, run the Maven and Gradle consumers on Java 8–25 on all three platforms against those exact jars, then sign and publish to Maven Central and check the published jars are byte-identical |
+| Release | `maven-publish.yml` | Build release JNI natives on Linux (manylinux_2_28), Windows and macOS arm64, stamp and assemble `io.github.underloam:xbbg` and `xbbg-jdk17`, run the Maven and Gradle consumers on Java 8–25 on all three platforms against those exact jars, sign and publish to Maven Central, check the published jars are byte-identical, and attach the jars and POMs to the GitHub release |
 
 ### crates.io publishing
 

@@ -783,6 +783,14 @@ def test_verify_checks_versions_and_bloomberg_files_in_jars(tmp_path: Path) -> N
         f"{addon}: Implementation-Version '1.7.0', expected 2.0.0"
     )
 
+    sources_jar = tmp_path / "xbbg-sources.jar"
+    with zipfile.ZipFile(sources_jar, "w") as archive:
+        archive.writestr("io/github/underloam/xbbg/Xbbg.java", "package io.github.underloam.xbbg;")
+        archive.writestr("io/github/underloam/xbbg/native/windows-x86_64/xbbg_jni.dll", b"MZ")
+    assert natives.verify([], [sources_jar]) == [
+        f"{sources_jar}: non-native jar contains native file io/github/underloam/xbbg/native/windows-x86_64/xbbg_jni.dll"
+    ]
+
 
 def test_verify_reports_empty_and_missing_inputs(tmp_path: Path) -> None:
     empty = tmp_path / "empty"
