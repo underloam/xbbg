@@ -12,10 +12,16 @@ requires-pixi = ">=0.71"
 
 [dependencies]
 python = ">=3.11,<3.16"
-# Must track `rust-version` in the root Cargo.toml `[workspace.package]`. The
-# published sdist compiles the Rust extension on the user's machine, so this is
-# a real compatibility contract, not just a dev-env convenience.
-rust = ">=1.88"
+# The lower bound must track `rust-version` in the root Cargo.toml
+# `[workspace.package]`. The published sdist compiles the Rust extension on the
+# user's machine, so that bound is a real compatibility contract, not just a
+# dev-env convenience.
+# The upper bound only applies to these environments: rustc 1.99.1 fails to
+# compile `libm` with `-C target-cpu=native` on Windows when the host is Zen 5
+# (`Missing .seh_endepilogue`, an LLVM Windows unwind-info bug), and the
+# `install` task builds with that flag. 1.98.1 builds it; lift the cap once a
+# newer rustc does.
+rust = ">=1.88,<1.99"
 # conda-forge package `libclang` (versioned on its own schedule; often tracks LLVM major).
 # bindgen loads `$CONDA_PREFIX/lib` via LIBCLANG_PATH in [activation.env].
 libclang = ">=22"
