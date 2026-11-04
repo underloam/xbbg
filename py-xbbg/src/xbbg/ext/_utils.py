@@ -47,7 +47,7 @@ async def _native_recipe(
     if request_options is not None:
         kwargs["request_options"] = _recipe_request_options(request_options)
     try:
-        engine = _engine._get_engine()
+        engine = await _engine._aget_engine()
         return await recipe(engine, *args, **kwargs)
     except Exception as exc:
         mapped = _engine._normalize_engine_exception(exc)

@@ -55,7 +55,7 @@ async def afetch_exchange_info(ticker: str, **kwargs) -> ExchangeInfo:
     errors propagate. ``engine=`` may select an explicit scoped engine; BDP
     request/presentation options are not accepted. Pandas is not required.
     """
-    values = await _engine._get_engine(**kwargs).resolve_exchange(ticker)
+    values = await (await _engine._aget_engine(**kwargs)).resolve_exchange(ticker)
     return _exchange_info_from_native(values)
 
 

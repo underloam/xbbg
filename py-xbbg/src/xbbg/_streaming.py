@@ -888,7 +888,7 @@ async def asubscribe(
 
     effective_backend = None if backend is None else _backend.resolve_backend(backend, None)
 
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     logger.debug("subscribe: tickers=%s fields=%s", ticker_list, field_list)
 
     session_limit = _SYNC_STREAM_SESSION_LIMIT.get()
@@ -1352,7 +1352,7 @@ async def avwap(
 
     effective_backend = _backend._resolve_backend(backend)
 
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     py_sub = await engine.subscribe_with_options(
         Service.MKTVWAP.value,
         ticker_list,
@@ -1427,7 +1427,7 @@ async def amktbar(
     if end_time:
         options.append(f"end_time={end_time}")
 
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     py_sub = await engine.subscribe_with_options(
         Service.MKTBAR.value,
         ticker_list,
@@ -1490,7 +1490,7 @@ async def adepth(
     effective_backend = _backend._resolve_backend(backend)
 
     # Get engine and subscribe
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     try:
         py_sub = await engine.subscribe_with_options(
             Service.MKTDEPTH.value,
@@ -1567,7 +1567,7 @@ async def achains(
     options: list[str] = [f"chainType={chain_type}"]
 
     # Get engine and subscribe
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     try:
         py_sub = await engine.subscribe_with_options(
             Service.MKTLIST.value,

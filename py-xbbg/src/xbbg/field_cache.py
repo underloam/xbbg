@@ -66,7 +66,7 @@ async def aresolve_field_types(
         Dict mapping field names to Arrow type strings.
     """
     try:
-        engine = _engine._get_engine()
+        engine = await _engine._aget_engine()
         return await engine.resolve_field_types(
             list(fields),
             overrides if overrides else None,
@@ -99,7 +99,7 @@ async def get_field_info(fields: Sequence[str]) -> list[FieldInfo]:
     """
     await cache_field_types(fields)
 
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     result: list[FieldInfo] = []
     for field in fields:
         info = engine.get_field_info(field)

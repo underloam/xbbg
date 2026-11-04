@@ -305,7 +305,7 @@ async def _aget_valid_elements(service: str, operation: str) -> set[str]:
     Falls back to empty set if schema not available.
     """
     try:
-        elements = await _engine._get_engine().list_valid_elements(service, operation)
+        elements = await (await _engine._aget_engine()).list_valid_elements(service, operation)
     except Exception:
         logger.debug("Schema lookup failed for %s/%s, using empty set", service, operation, exc_info=True)
         return set()
@@ -518,6 +518,11 @@ async def _aroute_kwargs(
         - elements: List of (name, value) for valid request elements
         - overrides: List of (name, value) for Bloomberg field overrides
     """
+    # Nothing to route: skip the schema lookup, which starts the engine and
+    # introspects the service on first use.
+    if not kwargs:
+        return [], []
+
     # Normalize service/operation to strings
     svc = service.value if isinstance(service, Service) else service
     op = operation.value if isinstance(operation, Operation) else operation

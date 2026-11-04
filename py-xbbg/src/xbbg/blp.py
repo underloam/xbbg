@@ -483,7 +483,7 @@ async def aseat_type() -> str:
     otherwise the Desktop terminal OS-logon user is used.  First use may take a
     moment and timeout failures are retryable.
     """
-    return await _engine._get_engine().seat_type()
+    return await (await _engine._aget_engine()).seat_type()
 
 
 async def acheck_entitlements(
@@ -496,7 +496,7 @@ async def acheck_entitlements(
     otherwise the Desktop terminal OS-logon user is used.  First use may take a
     moment and timeout failures are retryable.
     """
-    return await _engine._get_engine().check_entitlements(service, list(eids))
+    return await (await _engine._aget_engine()).check_entitlements(service, list(eids))
 
 
 async def adelay_status(
@@ -539,7 +539,7 @@ async def adelay_status(
     from . import _core
 
     try:
-        engine = _engine._get_engine()
+        engine = await _engine._aget_engine()
         batch = await _core.recipe_delay_status(engine, _request_options._normalize_tickers(tickers), check_identity)
     except Exception as exc:
         mapped = _engine._normalize_engine_exception(exc)
@@ -557,7 +557,7 @@ async def aidentity_is_authorized(service: str = Service.REFDATA.value) -> bool:
     otherwise the Desktop terminal OS-logon user is used.  First use may take a
     moment and timeout failures are retryable.
     """
-    return await _engine._get_engine().identity_is_authorized(service)
+    return await (await _engine._aget_engine()).identity_is_authorized(service)
 
 
 def _coerce_server_snapshot(value: Any) -> tuple[tuple[str, int], ...]:
@@ -617,7 +617,7 @@ def _request_environment_from_config(config: Any, source: str) -> RequestEnviron
 
 
 async def _execute_request_terminal(context: RequestContext) -> DataFrameResult:
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     started = time.perf_counter()
 
     try:

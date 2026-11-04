@@ -122,7 +122,7 @@ async def aget_schema(service: str) -> ServiceSchema:
     Returns:
         ServiceSchema object with operations and element definitions.
     """
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     json_str = await engine.get_schema(service)
     return ServiceSchema.from_json(json_str)
 
@@ -137,7 +137,7 @@ async def aget_operation(service: str, operation: str) -> OperationSchema:
     Returns:
         OperationSchema object with request/response definitions.
     """
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     json_str = await engine.get_operation(service, operation)
     return OperationSchema.from_dict(json.loads(json_str))
 
@@ -151,7 +151,7 @@ async def alist_operations(service: str) -> list[str]:
     Returns:
         List of operation names.
     """
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     return await engine.list_operations(service)
 
 
@@ -166,7 +166,7 @@ async def aget_enum_values(service: str, operation: str, element: str) -> list[s
     Returns:
         List of valid enum values, or None if not an enum.
     """
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     return await engine.get_enum_values(service, operation, element)
 
 
@@ -180,7 +180,7 @@ async def alist_valid_elements(service: str, operation: str) -> list[str] | None
     Returns:
         List of valid element names.
     """
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
     return await engine.list_valid_elements(service, operation)
 
 

@@ -872,7 +872,7 @@ async def _build_abdp_plan(args: dict[str, Any]) -> _EndpointPlan:
     fmt = Format(args["format"]) if isinstance(args.get("format"), str) else args.get("format")
 
     # The engine owns field-type caching; caller overrides win over resolved types.
-    resolved_types = dict(await _engine._get_engine().resolve_field_types(field_list, None, "string"))
+    resolved_types = dict(await (await _engine._aget_engine()).resolve_field_types(field_list, None, "string"))
     resolved_types.update(args.get("field_types") or {})
 
     return _EndpointPlan(
@@ -943,7 +943,7 @@ async def _build_abdh_plan(args: dict[str, Any]) -> _EndpointPlan:
     presentation_periodicity = _request_options._periodicity_selection(elements)
 
     # The engine owns field-type caching; caller overrides win over resolved types.
-    resolved_types = dict(await _engine._get_engine().resolve_field_types(field_list, None, "float64"))
+    resolved_types = dict(await (await _engine._aget_engine()).resolve_field_types(field_list, None, "float64"))
     resolved_types.update(args.get("field_types") or {})
 
     backend = args.get("backend")

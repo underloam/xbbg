@@ -7,6 +7,7 @@ one engine-construction seam to replace.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextvars
 import logging
@@ -446,6 +447,18 @@ def _get_engine(*, engine: Engine | None = None):
                 _engine = _core.PyEngine()
             logger.info("PyEngine connected to Bloomberg")
         return _engine
+
+
+async def _aget_engine(*, engine: Engine | None = None):
+    """Async :func:`_get_engine`: start a missing global engine off the event loop.
+
+    Starting the engine blocks while Bloomberg sessions connect (hundreds of
+    milliseconds, longer while the SDK retries), which would otherwise stall
+    every other task on the caller's loop during the first request.
+    """
+    if engine is not None or _active_engine.get() is not None or _engine is not None:
+        return _get_engine(engine=engine)
+    return await asyncio.to_thread(_get_engine)
 
 
 _TICKER_KEY_COLUMN_WARNING = (
