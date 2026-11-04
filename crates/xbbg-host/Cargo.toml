@@ -1,0 +1,30 @@
+[package]
+name = "xbbg-host"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-neutral glue shared by xbbg language bindings"
+publish = false
+
+[dependencies]
+arrow = { workspace = true, features = ["ipc"] }
+base64 = { workspace = true }
+chrono = { workspace = true, features = ["std"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["sync", "rt", "time", "macros"] }
+xbbg_core = { workspace = true }
+xbbg-async = { workspace = true }
+xbbg-ext = { workspace = true }
+xbbg-log = { workspace = true }
+xbbg-recipes = { workspace = true }
+
+[features]
+default = ["live"]
+live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
+test-support = ["live", "xbbg-async/test-support"]
+
+[lints]
+workspace = true

@@ -35,6 +35,7 @@ Latest release: xbbg==1.8.0 (release: [notes](https://github.com/underloam/xbbg/
 - [Quickstart](#quickstart)
 - [Exchange auctions and imbalance](#exchange-auctions-and-imbalance)
 - [JavaScript and Node](#javascript-and-node)
+- [Java](#java)
 - [Configuration and engines](#configuration-and-engines)
 - [Common API surface](#common-api-surface)
 - [Entitlement IDs](#entitlement-ids)
@@ -49,7 +50,7 @@ Latest release: xbbg==1.8.0 (release: [notes](https://github.com/underloam/xbbg/
 
 ## What is xbbg?
 
-xbbg is a Bloomberg client with Python as the primary surface and companion JavaScript/Node bindings, all backed by a shared Rust engine for request execution, response parsing, Arrow-shaped data movement, async workers, typed errors, and diagnostics.
+xbbg is a Bloomberg client with Python as the primary surface and companion JavaScript/Node and Java bindings, all backed by a shared Rust engine for request execution, response parsing, Arrow-shaped data movement, async workers, typed errors, and diagnostics.
 
 Use xbbg when you already have Bloomberg access and want higher-level helpers for common request patterns, plus an escape hatch for lower-level Bloomberg service requests.
 
@@ -61,6 +62,7 @@ Core scope:
 - sync and async Python APIs backed by the same engine
 - output as Narwhals, native xbbg Arrow carriers, PyArrow, pandas, Polars, DuckDB, and other optional Narwhals-backed libraries
 - JavaScript/Node bindings in [`js-xbbg`](js-xbbg/README.md)
+- Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
 
 ## Why xbbg?
 
@@ -376,6 +378,42 @@ const tools = createAllBloombergTools({ maxSecurities: 10, maxFields: 10 });
 ```
 
 Use the existing [`apps/xbbg-mcp`](apps/xbbg-mcp/README.md) package only when you specifically need MCP.
+
+## Java
+
+[`java-xbbg`](java-xbbg/README.md) provides the same functions as `@xbbg/core` for the JVM: `io.github.underloam:xbbg` runs on Java 8 and later through JNI on the same Rust engine, with native libraries for macOS arm64, Linux x64 (glibc 2.28+), and Windows x64 bundled in the jar and no other runtime dependencies. `io.github.underloam:xbbg-jdk17` is an optional Java 17+ add-on with `java.util.concurrent.Flow` publishers, sealed result and error types for pattern matching, Arrow Java (`VectorSchemaRoot`) interop, and virtual-thread callbacks. Both are published to Maven Central with the releases that include them, so any Maven-repository build tool (Maven, Gradle, sbt, Bazel) can consume them.
+
+```xml
+<dependency>
+  <groupId>io.github.underloam</groupId>
+  <artifactId>xbbg</artifactId>
+  <version><!-- xbbg release --></version>
+</dependency>
+```
+
+```java
+import io.github.underloam.xbbg.BdhOptions;
+import io.github.underloam.xbbg.Blp;
+import io.github.underloam.xbbg.Xbbg;
+import io.github.underloam.xbbg.subscription.Subscription;
+import io.github.underloam.xbbg.table.Table;
+import java.time.Duration;
+import java.util.Arrays;
+
+Xbbg.configure("localhost", 8194); // the default: local Terminal / DAPI
+
+Table ref = Xbbg.await(Blp.bdp(Arrays.asList("AAPL US Equity", "MSFT US Equity"),
+    Arrays.asList("PX_LAST", "SECURITY_NAME")));
+Table hist = Xbbg.await(Blp.bdh("SPX Index", "PX_LAST",
+    BdhOptions.builder().start("2024-01-01").end("2024-12-31").build()));
+
+try (Subscription sub = Xbbg.await(Blp.subscribe("AAPL US Equity", "LAST_PRICE"))) {
+  sub.next(Duration.ofSeconds(30))
+      .ifPresent(tick -> System.out.println(tick.topic() + " " + tick.get("LAST_PRICE")));
+}
+```
+
+Every call that reaches Bloomberg returns a `CompletableFuture`; `Xbbg.await` blocks for the result and rethrows the original typed exception. The JNI boundary never blocks a Java thread inside native code, so waiting on virtual threads is safe. The jar finds the Bloomberg runtime the same way the Python and Node packages do (an explicit path, `BLPAPI_LIB_DIR`/`BLPAPI_ROOT`, or a Terminal install). Machines without one can provision `blpapi3_64.dll`/`libblpapi3_64.so` from a Python package index or conda channel, including corporate mirrors, with `Xbbg.setSdkSource(...)` or `-Dxbbg.sdk.source=...`; nothing is downloaded unless a source is configured. On JDK 24 and later, start the JVM with `--enable-native-access=ALL-UNNAMED` to avoid the native-access warning. See [`java-xbbg/README.md`](java-xbbg/README.md) for the full guide.
 
 ## Configuration and engines
 
@@ -849,6 +887,7 @@ Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 
 - Documentation: [xbbg.org](https://xbbg.org/)
 - JavaScript/Node bindings: [js-xbbg/README.md](js-xbbg/README.md)
+- Java bindings: [java-xbbg/README.md](java-xbbg/README.md)
 - Python LangChain/LangGraph tools: [usage](#python-langchain-and-langgraph)
 - JavaScript LangChain/LangGraph tools: [js-xbbg-langgraph/README.md](js-xbbg-langgraph/README.md)
 - PyPI: [pypi.org/project/xbbg](https://pypi.org/project/xbbg/)

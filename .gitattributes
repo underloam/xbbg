@@ -10,5 +10,17 @@
 *.json text eol=lf
 *.md text eol=lf
 
+# Java (java-xbbg): the wrapper scripts run under sh on Linux, macOS, WSL and Git Bash, so they
+# keep LF even in Windows checkouts; Windows command scripts keep CRLF. Sources and build files
+# are LF everywhere.
+mvnw text eol=lf
+gradlew text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.java text eol=lf
+*.kts text eol=lf
+pom.xml text eol=lf
+*.jar binary
+
 # Pixi lock file (machine-generated)
 pixi.lock linguist-language=YAML linguist-generated

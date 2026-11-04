@@ -19,6 +19,7 @@ use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionLi
 use super::dispatch::DispatchKey;
 use super::session_lifecycle::{
     PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
+    worker_start_error,
 };
 use super::state::{
     FieldKind, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics, SubscriptionSender,
@@ -2214,9 +2215,11 @@ impl SubscriptionSessionPool {
         let mut all_workers = Vec::with_capacity(size);
         for (id, handle) in started.into_iter().enumerate() {
             let handle = handle.map_err(|error| {
-                BlpAsyncError::Blp(BlpError::Internal {
-                    detail: format!("failed to spawn subscription worker {id}: {error}"),
-                })
+                worker_start_error(
+                    &format!("subscription worker {id}"),
+                    &format!("failed to spawn subscription worker {id}"),
+                    error,
+                )
             })?;
             all_workers.push(Arc::downgrade(&handle.inner));
             available.push(handle);
@@ -2266,9 +2269,11 @@ impl SubscriptionSessionPool {
         let handle =
             SubscriptionWorkerHandle::spawn(id, Arc::clone(&self.config), Some(runtime_handle))
                 .map_err(|error| {
-                    BlpAsyncError::Blp(BlpError::Internal {
-                        detail: format!("failed to create dynamic subscription worker: {error}"),
-                    })
+                    worker_start_error(
+                        &format!("dynamic subscription worker {id}"),
+                        "failed to create dynamic subscription worker",
+                        error,
+                    )
                 })?;
         let mut all_workers = self.all_workers.lock();
         if self.shutdown.load(Ordering::Acquire) {

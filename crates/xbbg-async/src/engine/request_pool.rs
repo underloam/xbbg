@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use xbbg_core::BlpError;
 
 use super::key_column::{self, KeyColumn};
-use super::session_lifecycle::start_concurrently;
+use super::session_lifecycle::{start_concurrently, worker_start_error};
 use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
@@ -435,10 +435,12 @@ impl RequestWorkerPool {
         });
         let mut workers = Vec::with_capacity(size);
         for (id, worker) in started.into_iter().enumerate() {
-            let worker = worker.map_err(|e| {
-                BlpAsyncError::Blp(BlpError::Internal {
-                    detail: format!("failed to spawn worker {}: {}", id, e),
-                })
+            let worker = worker.map_err(|error| {
+                worker_start_error(
+                    &format!("request worker {id}"),
+                    &format!("failed to spawn worker {id}"),
+                    error,
+                )
             })?;
             workers.push(Arc::new(worker));
         }
