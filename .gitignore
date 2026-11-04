@@ -40,6 +40,14 @@ Logs/
 js-xbbg/*.node
 js-xbbg/packages/xbbg-core-*/napi_xbbg.node
 
+# Java (java-xbbg): Maven outputs (per-module, including -Dxbbg.target=target-*), staged
+# JNI libraries, and consumer smoke-test outputs
+java-xbbg/**/target/
+java-xbbg/**/target-*/
+java-xbbg/natives/
+java-xbbg/consumers/**/build/
+java-xbbg/consumers/**/.gradle/
+
 # Ignore local PMC mapping and cache files
 xbbg/markets/pmc_map.json
 xbbg/markets/cached/pmc_cache.pkl

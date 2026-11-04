@@ -9,9 +9,14 @@ members = [
     "crates/xbbg-recipes",
     "crates/xbbg-log",
     "crates/xbbg-bench",
+    # Host-neutral binding glue and Bloomberg SDK provisioning (no blpapi link)
+    "crates/xbbg-host",
+    "crates/xbbg-sdk",
     # Language bindings
     "bindings/pyo3-xbbg",
     "bindings/napi-xbbg",
+    "bindings/jni-xbbg",
+    "bindings/jni-xbbg-sdk",
     # Applications
     "apps/xbbg-mcp",
 ]
@@ -24,6 +29,7 @@ default-members = [
     "crates/xbbg-recipes",
     "crates/xbbg-log",
     "crates/xbbg-bench",
+    "crates/xbbg-host",
     "bindings/pyo3-xbbg",
 ]
 resolver = "3"
@@ -70,6 +76,10 @@ xbbg-async = { path = "crates/xbbg-async", version = "1.8.0", default-features =
 xbbg-ext = { path = "crates/xbbg-ext", version = "1.8.0" }
 xbbg-log = { path = "crates/xbbg-log", version = "1.8.0" }
 xbbg-recipes = { path = "crates/xbbg-recipes", version = "1.8.0", default-features = false }
+# Unpublished crates: only unpublished bindings depend on them, so they carry no
+# version and stay out of `scripts/stamp_workspace_version.py`.
+xbbg-host = { path = "crates/xbbg-host", default-features = false }
+xbbg-sdk = { path = "crates/xbbg-sdk" }
 
 # ── Arrow columnar carriers ───────────────────────────────────────────────────
 arrow = { version = "59.2.0", default-features = false }
@@ -131,6 +141,34 @@ pyo3-build-config = "0.29.2"
 pyo3-arrow = "0.19"
 pyo3-async-runtimes = "0.29"
 pyo3-stub-gen = { version = "0.23", default-features = false }
+jni = "0.22.4"
+
+# ── Bloomberg SDK provisioning (crates/xbbg-sdk) ──────────────────────────────
+# uv publishes every crate as 0.0.x with no semver promise, so the uv crates are
+# pinned exactly and move together; rattler crates are pinned for the same reason.
+uv-cache = "=0.0.99"
+uv-client = "=0.0.99"
+uv-distribution-filename = "=0.0.99"
+uv-distribution-types = "=0.0.99"
+uv-normalize = "=0.0.99"
+uv-pep440 = "=0.0.99"
+uv-platform-tags = "=0.0.99"
+rattler_conda_types = { version = "=0.58.1", default-features = false }
+rattler_digest = { version = "=2.1.0", default-features = false }
+rattler_networking = { version = "=0.34.6", default-features = false }
+rattler_package_streaming = { version = "=0.28.3", default-features = false }
+rattler_redaction = { version = "=0.2.7", default-features = false }
+rattler_repodata_gateway = { version = "=0.38.1", default-features = false }
+reqwest = { version = "0.13.5", default-features = false }
+reqwest-middleware = { package = "astral-reqwest-middleware", version = "0.5.1" }
+reqwest-retry = { package = "astral-reqwest-retry", version = "0.9.1" }
+async-trait = "0.1"
+base64 = "0.23"
+csv = "1.4"
+hex = "0.4"
+http = "1"
+url = "2"
+zip = { version = "9.3", default-features = false }
 
 # ── MCP server ────────────────────────────────────────────────────────────────
 rmcp = "3.5.1"
@@ -157,6 +195,13 @@ codegen-units = 1     # Single codegen unit = better optimization opportunities
 panic = "abort"       # No unwinding = smaller/faster code (can't catch panics)
 strip = "symbols"     # Remove debug symbols for smaller binary
 opt-level = 3         # Speed-first; size delta on wheels is small vs the 25-45% perf cost of "z"
+
+# JVM natives (bindings/jni-xbbg, bindings/jni-xbbg-sdk). Same optimization as
+# release, but a Rust panic must unwind so each JNI entry point can turn it into a
+# Java exception instead of aborting the host JVM. Output: target/release-jni/.
+[profile.release-jni]
+inherits = "release"
+panic = "unwind"
 
 # Optimize all deps in dev builds (many are unusably slow at opt-level 0)
 [profile.dev.package."*"]

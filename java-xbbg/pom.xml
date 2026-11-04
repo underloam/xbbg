@@ -1,0 +1,561 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+
+  <groupId>io.github.underloam</groupId>
+  <artifactId>xbbg-parent</artifactId>
+  <!-- Development version. maven-publish.yml stamps the release version at publish time
+       (versions:set, never committed), the way npm-publish.yml stamps package.json. -->
+  <version>0.0.0-SNAPSHOT</version>
+  <packaging>pom</packaging>
+
+  <!-- Central Portal required metadata: name, description, url, licenses, developers, scm -->
+  <name>xbbg (parent)</name>
+  <description>Bloomberg data access for the JVM, backed by the xbbg Rust engine.</description>
+  <url>https://github.com/underloam/xbbg</url>
+  <licenses>
+    <license>
+      <name>Apache-2.0</name>
+      <url>https://www.apache.org/licenses/LICENSE-2.0.txt</url>
+      <distribution>repo</distribution>
+    </license>
+  </licenses>
+  <developers>
+    <developer>
+      <id>underloam</id>
+      <name>xbbg contributors</name>
+      <url>https://github.com/underloam/xbbg</url>
+    </developer>
+  </developers>
+  <scm>
+    <connection>scm:git:https://github.com/underloam/xbbg.git</connection>
+    <developerConnection>scm:git:ssh://git@github.com/underloam/xbbg.git</developerConnection>
+    <url>https://github.com/underloam/xbbg</url>
+    <tag>HEAD</tag>
+  </scm>
+  <issueManagement>
+    <system>GitHub</system>
+    <url>https://github.com/underloam/xbbg/issues</url>
+  </issueManagement>
+
+  <modules>
+    <module>xbbg</module>
+    <module>xbbg-jdk17</module>
+  </modules>
+
+  <properties>
+    <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+    <project.reporting.outputEncoding>UTF-8</project.reporting.outputEncoding>
+    <!-- Reproducible builds: fixed jar entry timestamps. Releases pass the tagged commit's time. -->
+    <project.build.outputTimestamp>2026-11-03T00:00:00Z</project.build.outputTimestamp>
+    <maven.compiler.release>8</maven.compiler.release>
+    <junit.version>5.14.4</junit.version>
+    <!-- Arrow Java classes are Java 11 bytecode: only xbbg-jdk17 may depend on them (optional). -->
+    <arrow.version>19.0.0</arrow.version>
+    <!-- Arrow's allocator reflects into java.nio on 17+; add to the argLine of modules that use Arrow. -->
+    <xbbg.arrowJvmArgs>--add-opens=java.base/java.nio=org.apache.arrow.memory.core,ALL-UNNAMED</xbbg.arrowJvmArgs>
+    <!-- Set -Dtest.jdk=1.8 (or 11, 17, 25...) to fork surefire on that toolchain from ~/.m2/toolchains.xml or -t file -->
+    <test.jdk></test.jdk>
+    <!-- modules that need a newer runtime override this with a version range -->
+    <surefire.jdk>${test.jdk}</surefire.jdk>
+    <!-- JEP 472: JDK 24+ warns on System.load from the unnamed module. JDK 8/11 reject the
+         flag ("Unrecognized option") unless IgnoreUnrecognizedVMOptions is set, which they honour
+         for launcher options too; verified on 8, 11, 17, 21, 25. -->
+    <xbbg.nativeAccessArgs>-XX:+IgnoreUnrecognizedVMOptions --enable-native-access=ALL-UNNAMED</xbbg.nativeAccessArgs>
+    <!-- Output directory name per module; parallel local builds pass -Dxbbg.target=target-<name>. -->
+    <xbbg.target>target</xbbg.target>
+    <!-- Staged JNI libraries, laid out as <platform>/<file> (see scripts/stage_jvm_natives.py). -->
+    <xbbg.natives.dir>${maven.multiModuleProjectDirectory}/natives</xbbg.natives.dir>
+    <!-- -Dxbbg.requireNatives=true: the host platform's natives must be staged and native tests
+         must run instead of skipping (CI test jobs). Forwarded to the test JVM. -->
+    <xbbg.requireNatives>false</xbbg.requireNatives>
+    <!-- Live Bloomberg tests are opt-in: -Dxbbg.excludedGroups= -Dgroups=live -->
+    <xbbg.excludedGroups>live</xbbg.excludedGroups>
+    <!-- Quality gates (lint-java in CI): Error Prone runs inside javac (needs a JDK 21+ build and
+         the exports in .mvn/jvm.config); google-java-format and ktfmt through Spotless. -->
+    <errorprone.version>2.52.0</errorprone.version>
+    <google-java-format.version>2.0.0</google-java-format.version>
+    <ktfmt.version>0.64</ktfmt.version>
+    <!-- Main and test code compile with -Werror (javac lint and Error Prone warnings fail the
+         build) and javadoc warnings fail the javadoc jar. -Dxbbg.failOnWarning=false lists every
+         warning without failing, while fixing them. -->
+    <xbbg.failOnWarning>true</xbbg.failOnWarning>
+    <!-- Extra Error Prone flags, e.g. -Dxbbg.errorprone.flags="-XepPatchChecks:MissingOverride -XepPatchLocation:IN_PLACE" -->
+    <xbbg.errorprone.flags></xbbg.errorprone.flags>
+    <!-- The JaCoCo agent (prepare-agent, -Pcoverage only); empty otherwise. -->
+    <argLine></argLine>
+    <!-- -Pcoverage minimums (covered ratio of the module's own classes); modules override them. -->
+    <xbbg.coverage.line>0.00</xbbg.coverage.line>
+    <xbbg.coverage.branch>0.00</xbbg.coverage.branch>
+  </properties>
+
+  <!-- Plain managed versions, no BOM imports: consumers resolve this POM as the parent of the
+       published artifacts, and an import would make every consumer download junit/arrow BOMs. -->
+  <dependencyManagement>
+    <dependencies>
+      <dependency>
+        <groupId>org.junit.jupiter</groupId>
+        <artifactId>junit-jupiter</artifactId>
+        <version>${junit.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-vector</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-memory-core</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-memory-netty</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <dependency>
+        <groupId>org.apache.arrow</groupId>
+        <artifactId>arrow-memory-unsafe</artifactId>
+        <version>${arrow.version}</version>
+      </dependency>
+      <!-- Arrow's classes carry Checker Framework annotations that Arrow declares only as
+           `provided`; compiling against them without the annotation types is a javac classfile
+           warning. The version Arrow ${arrow.version} builds with. -->
+      <dependency>
+        <groupId>org.checkerframework</groupId>
+        <artifactId>checker-qual</artifactId>
+        <version>3.53.1</version>
+      </dependency>
+      <dependency>
+        <groupId>io.github.underloam</groupId>
+        <artifactId>xbbg</artifactId>
+        <version>${project.version}</version>
+      </dependency>
+    </dependencies>
+  </dependencyManagement>
+
+  <build>
+    <directory>${project.basedir}/${xbbg.target}</directory>
+    <pluginManagement>
+      <plugins>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-clean-plugin</artifactId>
+          <version>3.5.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-resources-plugin</artifactId>
+          <version>3.5.0</version>
+          <configuration>
+            <!-- never filter native binaries -->
+            <nonFilteredFileExtensions>
+              <nonFilteredFileExtension>dll</nonFilteredFileExtension>
+              <nonFilteredFileExtension>so</nonFilteredFileExtension>
+              <nonFilteredFileExtension>dylib</nonFilteredFileExtension>
+            </nonFilteredFileExtensions>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-compiler-plugin</artifactId>
+          <version>3.16.0</version>
+          <configuration>
+            <!-- main and test code compile warning-free (-Werror) -->
+            <failOnWarning>${xbbg.failOnWarning}</failOnWarning>
+            <compilerArgs>
+              <!-- every javac lint except "source value 8 is obsolete" (JDK 21+ with release 8) -->
+              <arg>-Xlint:all,-options</arg>
+              <arg>-Xmaxwarns</arg>
+              <arg>10000</arg>
+              <arg>-Xmaxerrs</arg>
+              <arg>10000</arg>
+              <!-- Error Prone with its default severities: ERROR checks fail every compile and
+                   WARNING checks fail it through -Werror. -->
+              <arg>-XDcompilePolicy=simple</arg>
+              <arg>--should-stop=ifError=FLOW</arg>
+              <!-- needed on JDK 21: type annotations visible to plugins (JDK-8225377) -->
+              <arg>-XDaddTypeAnnotationsToSymbol=true</arg>
+              <arg>-Xplugin:ErrorProne ${xbbg.errorprone.flags}</arg>
+            </compilerArgs>
+            <annotationProcessorPaths>
+              <path>
+                <groupId>com.google.errorprone</groupId>
+                <artifactId>error_prone_core</artifactId>
+                <version>${errorprone.version}</version>
+              </path>
+            </annotationProcessorPaths>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-surefire-plugin</artifactId>
+          <version>3.6.1</version>
+          <configuration>
+            <!-- @{argLine}: the JaCoCo agent, set late by jacoco:prepare-agent -->
+            <argLine>@{argLine} ${xbbg.nativeAccessArgs}</argLine>
+            <excludedGroups>${xbbg.excludedGroups}</excludedGroups>
+            <trimStackTrace>false</trimStackTrace>
+            <systemPropertyVariables>
+              <!-- Tests never touch the user's real cache. -->
+              <xbbg.cache.dir>${project.build.directory}/xbbg-cache</xbbg.cache.dir>
+              <xbbg.requireNatives>${xbbg.requireNatives}</xbbg.requireNatives>
+            </systemPropertyVariables>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-jar-plugin</artifactId>
+          <version>3.5.1</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-source-plugin</artifactId>
+          <version>3.4.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-javadoc-plugin</artifactId>
+          <version>3.12.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-install-plugin</artifactId>
+          <version>3.2.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-deploy-plugin</artifactId>
+          <version>3.2.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-gpg-plugin</artifactId>
+          <version>3.2.8</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-toolchains-plugin</artifactId>
+          <version>3.3.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-enforcer-plugin</artifactId>
+          <version>3.7.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-antrun-plugin</artifactId>
+          <version>3.2.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.apache.maven.plugins</groupId>
+          <artifactId>maven-site-plugin</artifactId>
+          <version>3.22.0</version>
+        </plugin>
+        <plugin>
+          <!-- Release stamping: mvnw versions:set -DnewVersion=X.Y.Z (maven-publish.yml) -->
+          <groupId>org.codehaus.mojo</groupId>
+          <artifactId>versions-maven-plugin</artifactId>
+          <version>2.23.0</version>
+          <configuration>
+            <generateBackupPoms>false</generateBackupPoms>
+            <processAllModules>true</processAllModules>
+          </configuration>
+        </plugin>
+        <plugin>
+          <groupId>org.sonatype.central</groupId>
+          <artifactId>central-publishing-maven-plugin</artifactId>
+          <version>0.12.0</version>
+        </plugin>
+        <plugin>
+          <groupId>com.diffplug.spotless</groupId>
+          <artifactId>spotless-maven-plugin</artifactId>
+          <version>3.11.0</version>
+        </plugin>
+        <plugin>
+          <groupId>com.github.spotbugs</groupId>
+          <artifactId>spotbugs-maven-plugin</artifactId>
+          <version>4.10.5.0</version>
+        </plugin>
+        <plugin>
+          <groupId>org.jacoco</groupId>
+          <artifactId>jacoco-maven-plugin</artifactId>
+          <version>0.8.16</version>
+        </plugin>
+      </plugins>
+    </pluginManagement>
+
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>enforce-build-env</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <requireMavenVersion><version>[3.9.0,)</version></requireMavenVersion>
+                <!-- build JDK: Error Prone runs on 21+; bytecode targets come from maven.compiler.release -->
+                <requireJavaVersion><version>[21,)</version></requireJavaVersion>
+                <!-- every plugin pinned, so builds (and Renovate) see one exact set -->
+                <requirePluginVersions>
+                  <banLatest>true</banLatest>
+                  <banRelease>true</banRelease>
+                  <banSnapshots>true</banSnapshots>
+                </requirePluginVersions>
+                <banDuplicatePomDependencyVersions/>
+              </rules>
+            </configuration>
+          </execution>
+          <execution>
+            <!-- one version of every dependency, at least the highest version anything asks for,
+                 and no SNAPSHOT dependency in a stamped (release) build -->
+            <id>enforce-dependencies</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <dependencyConvergence/>
+                <requireUpperBoundDeps/>
+                <requireReleaseDeps>
+                  <onlyWhenRelease>true</onlyWhenRelease>
+                  <message>A release build cannot depend on SNAPSHOT versions.</message>
+                </requireReleaseDeps>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-source-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>attach-sources</id>
+            <goals><goal>jar-no-fork</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-javadoc-plugin</artifactId>
+        <configuration>
+          <release>${maven.compiler.release}</release>
+          <!-- every doclint group, including `missing`: each public and protected type and
+               member is documented -->
+          <doclint>all</doclint>
+          <quiet>true</quiet>
+          <!-- reproducible javadoc jars: no generation timestamps in the HTML -->
+          <notimestamp>true</notimestamp>
+          <!-- doclint errors always fail; javadoc warnings fail too (same switch as -Werror) -->
+          <failOnWarnings>${xbbg.failOnWarning}</failOnWarnings>
+          <additionalOptions>
+            <additionalOption>-Xmaxwarns</additionalOption>
+            <additionalOption>10000</additionalOption>
+            <additionalOption>-Xmaxerrs</additionalOption>
+            <additionalOption>10000</additionalOption>
+          </additionalOptions>
+        </configuration>
+        <executions>
+          <execution>
+            <id>attach-javadocs</id>
+            <goals><goal>jar</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- google-java-format (Google style) for Java, ktfmt (Google style) for the consumer
+             Gradle scripts. `mvnw spotless:apply` formats; `verify` checks. -->
+        <groupId>com.diffplug.spotless</groupId>
+        <artifactId>spotless-maven-plugin</artifactId>
+        <configuration>
+          <java>
+            <includes>
+              <include>src/main/java/**/*.java</include>
+              <include>src/test/java/**/*.java</include>
+              <!-- consumer smoke source: matched from the parent project only -->
+              <include>consumers/src/**/*.java</include>
+            </includes>
+            <googleJavaFormat>
+              <version>${google-java-format.version}</version>
+              <style>GOOGLE</style>
+            </googleJavaFormat>
+          </java>
+          <kotlin>
+            <!-- consumer Gradle scripts: matched from the parent project only -->
+            <includes>
+              <include>consumers/gradle/*.gradle.kts</include>
+            </includes>
+            <ktfmt>
+              <version>${ktfmt.version}</version>
+              <style>GOOGLE</style>
+            </ktfmt>
+          </kotlin>
+        </configuration>
+        <executions>
+          <execution>
+            <id>spotless-check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- SpotBugs on main code at every confidence (effort Max, threshold Low): any finding
+             fails `verify`. Proven false positives may only be excluded through
+             spotbugs-exclude.xml, each entry with its reason. -->
+        <groupId>com.github.spotbugs</groupId>
+        <artifactId>spotbugs-maven-plugin</artifactId>
+        <configuration>
+          <effort>Max</effort>
+          <threshold>Low</threshold>
+          <failOnError>true</failOnError>
+          <excludeFilterFile>${maven.multiModuleProjectDirectory}/spotbugs-exclude.xml</excludeFilterFile>
+        </configuration>
+        <executions>
+          <execution>
+            <id>spotbugs-check</id>
+            <phase>verify</phase>
+            <goals><goal>check</goal></goals>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <!-- mvnw -Dtest.jdk=1.8 verify : run tests on a JDK toolchain (setup-java writes ~/.m2/toolchains.xml) -->
+    <profile>
+      <id>test-on-toolchain</id>
+      <activation>
+        <property><name>test.jdk</name></property>
+      </activation>
+      <build>
+        <pluginManagement>
+          <plugins>
+            <plugin>
+              <groupId>org.apache.maven.plugins</groupId>
+              <artifactId>maven-surefire-plugin</artifactId>
+              <configuration>
+                <jdkToolchain>
+                  <version>${surefire.jdk}</version>
+                </jdkToolchain>
+              </configuration>
+            </plugin>
+          </plugins>
+        </pluginManagement>
+      </build>
+    </profile>
+
+    <!-- mvnw -Pcoverage verify : JaCoCo measures each module's own classes during its tests,
+         writes <module>/target/site/jacoco/ and fails when line or branch coverage drops below
+         the module's minimum (xbbg.coverage.line, xbbg.coverage.branch). The minimums are
+         measured with the native and subscription fixture tests (-Dxbbg.requireNatives=true,
+         XBBG_TEST_SUBSCRIPTIONS=1). The agent is attached only here: attached to every run, it
+         kept the Java 8, 11 and 25 test forks from starting on Windows (JDK 21 build). -->
+    <profile>
+      <id>coverage</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.jacoco</groupId>
+            <artifactId>jacoco-maven-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>jacoco-agent</id>
+                <goals><goal>prepare-agent</goal></goals>
+              </execution>
+              <execution>
+                <id>jacoco-report</id>
+                <goals><goal>report</goal></goals>
+              </execution>
+              <execution>
+                <id>jacoco-check</id>
+                <goals><goal>check</goal></goals>
+                <configuration>
+                  <rules>
+                    <rule>
+                      <element>BUNDLE</element>
+                      <limits>
+                        <limit>
+                          <counter>LINE</counter>
+                          <value>COVEREDRATIO</value>
+                          <minimum>${xbbg.coverage.line}</minimum>
+                        </limit>
+                        <limit>
+                          <counter>BRANCH</counter>
+                          <value>COVEREDRATIO</value>
+                          <minimum>${xbbg.coverage.branch}</minimum>
+                        </limit>
+                      </limits>
+                    </rule>
+                  </rules>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- mvnw -Prelease deploy : stamped version only, complete release natives (module xbbg),
+         sign, upload one bundle to the Central Portal and wait until it is published.
+         Credentials: settings.xml server "central"; MAVEN_GPG_KEY / MAVEN_GPG_PASSPHRASE env vars.
+         Add -DskipUpload=true for a dry run that only writes target/central-publishing/central-bundle.zip. -->
+    <profile>
+      <id>release</id>
+      <build>
+        <plugins>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-enforcer-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>enforce-release</id>
+                <goals><goal>enforce</goal></goals>
+                <configuration>
+                  <rules>
+                    <requireReleaseVersion>
+                      <message>Stamp the release version first: mvnw versions:set -DnewVersion=X.Y.Z</message>
+                    </requireReleaseVersion>
+                    <requireReleaseDeps/>
+                  </rules>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.apache.maven.plugins</groupId>
+            <artifactId>maven-gpg-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>sign-artifacts</id>
+                <phase>verify</phase>
+                <goals><goal>sign</goal></goals>
+                <configuration>
+                  <!-- MAVEN_GPG_KEY / MAVEN_GPG_PASSPHRASE env vars; no local gpg binary needed -->
+                  <signer>bc</signer>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <groupId>org.sonatype.central</groupId>
+            <artifactId>central-publishing-maven-plugin</artifactId>
+            <extensions>true</extensions>
+            <configuration>
+              <publishingServerId>central</publishingServerId>
+              <autoPublish>true</autoPublish>
+              <waitUntil>published</waitUntil>
+              <waitMaxTime>3600</waitMaxTime>
+              <deploymentName>xbbg ${project.version}</deploymentName>
+            </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+  </profiles>
+</project>

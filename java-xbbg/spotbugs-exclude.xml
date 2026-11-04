@@ -1,0 +1,82 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SpotBugs exclusions for xbbg and xbbg-jdk17 (effort Max, threshold Low; any other finding fails
+  `verify`). Only findings that are correct by design belong here, each matched as narrowly as
+  possible and with the reason it is not a defect. Fix the code instead whenever that is possible.
+-->
+<FindBugsFilter
+    xmlns="https://github.com/spotbugs/filter/3.0.0"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+    xsi:schemaLocation="https://github.com/spotbugs/filter/3.0.0 https://raw.githubusercontent.com/spotbugs/spotbugs/3.1.0/spotbugs/etc/findbugsfilter.xsd">
+
+  <!-- TickBatch is the internal transfer object of one native subscription read (contract §7): it
+       adopts the arrays xbbg_jni allocates for that read (and the test fixtures build), and no
+       caller keeps or modifies them afterwards. Copying them would double the per-tick cost of every
+       read; the accessors only hand out elements or copies. -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.internal.TickBatch"/>
+    <Method name="&lt;init&gt;"/>
+    <Bug pattern="EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- The conversion failure is the exception the reader rethrows. An exception is an identity
+       object (cause chain, stack trace, suppressed list); a copy would lose what callers inspect. -->
+  <Match>
+    <Or>
+      <Class name="io.github.underloam.xbbg.internal.NativeDelivery"/>
+      <Class name="io.github.underloam.xbbg.internal.NativeDrain"/>
+    </Or>
+    <Method name="conversionFailure"/>
+    <Bug pattern="EI_EXPOSE_REP"/>
+  </Match>
+
+  <!-- ErrorKind's records exist to pattern-match on a failure: each one's single component is the
+       exception being classified, and it must be that very exception, not a copy. -->
+  <Match>
+    <Class name="~io\.github\.underloam\.xbbg\.jdk17\.ErrorKind\$.*"/>
+    <Field name="error"/>
+    <Bug pattern="EI_EXPOSE_REP,EI_EXPOSE_REP2"/>
+  </Match>
+
+  <!-- Rethrows the caller's original unchecked failure unchanged. Its static type is
+       RuntimeException only because it was unwrapped from a CompletionException or
+       ExecutionException; every rethrow in xbbg goes through this one helper. -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.internal.Futures"/>
+    <Method name="throwIfUnchecked"/>
+    <Bug pattern="THROWS_METHOD_THROWS_RUNTIMEEXCEPTION"/>
+  </Match>
+
+  <!-- YasOptions is immutable. SpotBugs takes it for mutable only because its accessor settleDt()
+       (Bloomberg's settlement-date option, named as in the JavaScript API) starts with "set". -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.YasOptions"/>
+    <Method name="defaults"/>
+    <Bug pattern="MS_EXPOSE_REP"/>
+  </Match>
+
+  <!-- A value class for one entry of Bloomberg's fieldExceptions element, named like the
+       JavaScript type BloombergFieldException; it is data, never thrown. -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.table.BloombergFieldException"/>
+    <Bug pattern="NM_CLASS_NOT_EXCEPTION"/>
+  </Match>
+
+  <!-- /opt/bloomberg/DAPI is where the Bloomberg Terminal installs its runtime on Linux and macOS,
+       one of the locations the runtime search must try (contract §3.3). -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.internal.BlpapiLocator"/>
+    <Method name="candidates"/>
+    <Bug pattern="DMI_HARDCODED_ABSOLUTE_FILENAME"/>
+  </Match>
+
+  <!-- The cache root must match Rust's xbbg_sdk::default_cache_root, which reads $HOME. The JVM's
+       user.home comes from the account database and differs where HOME is overridden (containers,
+       sudo), which would hide runtimes provisioned by Python or the CLI; user.home is the fallback
+       only when HOME is unset or empty. -->
+  <Match>
+    <Class name="io.github.underloam.xbbg.internal.NativeLibraries"/>
+    <Method name="cacheRoot"/>
+    <Bug pattern="ENV_USE_PROPERTY_INSTEAD_OF_ENV"/>
+  </Match>
+</FindBugsFilter>

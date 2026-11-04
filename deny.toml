@@ -2,14 +2,16 @@
 # https://embarkstudios.github.io/cargo-deny/
 
 [graph]
-# Supported platforms: Linux x64, Windows x64/x86
+# Shipped platforms: Linux x64, Windows x64/x86, macOS arm64 (wheels, napi, xbbg-mcp, JVM natives).
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
     "i686-pc-windows-msvc",
+    "aarch64-apple-darwin",
 ]
-# Include the optional stub generator so its binding dependencies are checked too.
-features = ["pyo3-xbbg/stub-gen"]
+# Include the optional stub generator and the JNI test-support fixtures so their dependencies
+# are checked too.
+features = ["pyo3-xbbg/stub-gen", "jni-xbbg/test-support"]
 
 # ════════════════════════════════════════════════════════════════════════════
 # Advisories - check for known security vulnerabilities
@@ -28,6 +30,15 @@ ignore = [
     "RUSTSEC-2025-0090",  # unic-emoji-char
     "RUSTSEC-2025-0098",  # unic-ucd-version
     "RUSTSEC-2025-0100",  # unic-ucd-ident
+    # Bloomberg runtime downloader (crates/xbbg-sdk, JVM only). uv-client depends on uv-auth
+    # unconditionally (no feature drops it); xbbg-sdk builds uv's client with
+    # AuthIntegration::NoAuthMiddleware, so uv's credential code never runs. Keep
+    # .cargo/audit.toml in sync.
+    { id = "RUSTSEC-2023-0071", reason = "rsa (Marvin timing side channel, no fixed release) via uv-client -> uv-auth -> reqsign: xbbg-sdk disables uv-auth and never signs or decrypts with RSA" },
+    { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
+    { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
+    { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
+    { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained, via rattler_conda_types -> serde_yaml (unconditional): xbbg-sdk parses no YAML" },
 ]
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -53,6 +64,18 @@ allow = [
 ]
 confidence-threshold = 0.8
 
+# Per-crate exceptions instead of global allows (Bloomberg runtime downloader, crates/xbbg-sdk).
+[[licenses.exceptions]]
+# Mozilla CA root data; an unconditional dependency of uv-client. xbbg-sdk hands uv its own
+# client that verifies against the OS trust store.
+crate = "webpki-root-certs"
+allow = ["CDLA-Permissive-2.0"]
+
+[[licenses.exceptions]]
+# bzip2's BSD-style licence; rattler reads .tar.bz2 conda packages through it.
+crate = "libbz2-rs-sys"
+allow = ["bzip2-1.0.6"]
+
 # ════════════════════════════════════════════════════════════════════════════
 # Bans - deny specific crates or versions
 # ════════════════════════════════════════════════════════════════════════════
@@ -62,15 +85,24 @@ wildcards = "allow"
 highlight = "all"
 
 deny = [
-    # Only the core owns the Bloomberg SDK seam, including test fixtures.
+    # Only the core owns the Bloomberg SDK seam, including test fixtures. Nothing on the
+    # downloader side (xbbg-sdk, jni-xbbg-sdk) may appear in these lists: that keeps
+    # xbbg_sdk_jni free of blpapi.
     { name = "xbbg-blpapi-sys", wrappers = ["xbbg_core"] },
     # Internal engine layers may only be imported by their intended dependents.
-    { name = "xbbg_core", wrappers = ["xbbg-async", "xbbg-bench", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
-    { name = "xbbg-async", wrappers = ["xbbg-recipes", "xbbg-bench", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
-    { name = "xbbg-ext", wrappers = ["xbbg-async", "xbbg-recipes", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
-    { name = "xbbg-log", wrappers = ["xbbg-async", "xbbg-recipes", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg_core", wrappers = ["xbbg-async", "xbbg-bench", "xbbg-host", "pyo3-xbbg", "napi-xbbg", "jni-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-async", wrappers = ["xbbg-recipes", "xbbg-bench", "xbbg-host", "pyo3-xbbg", "napi-xbbg", "jni-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-ext", wrappers = ["xbbg-async", "xbbg-recipes", "xbbg-host", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-log", wrappers = ["xbbg-async", "xbbg-recipes", "xbbg-host", "pyo3-xbbg", "napi-xbbg", "jni-xbbg", "xbbg-mcp"] },
     { name = "xbbg-arrow", wrappers = ["pyo3-xbbg"] },
-    { name = "xbbg-recipes", wrappers = ["pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    { name = "xbbg-recipes", wrappers = ["xbbg-host", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
+    # Host-neutral binding glue, shared by language bindings only.
+    { name = "xbbg-host", wrappers = ["jni-xbbg"] },
+    # The Bloomberg runtime downloader and its stack stay behind the provisioning binding. Only
+    # the entry points can be confined: the other uv/rattler crates depend on each other.
+    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk"] },
+    { name = "uv-client", wrappers = ["xbbg-sdk"] },
+    { name = "rattler_repodata_gateway", wrappers = ["xbbg-sdk"] },
     # Python frameworks stay in the Python binding or their own ecosystem.
     { name = "pyo3", wrappers = ["pyo3-xbbg", "numpy", "pyo3-arrow", "pyo3-async-runtimes", "pyo3-stub-gen"] },
     { name = "numpy", wrappers = ["pyo3-arrow"] },
@@ -90,6 +122,10 @@ deny = [
     { name = "napi-sys", wrappers = ["napi"] },
     { name = "rmcp", wrappers = ["xbbg-mcp"] },
     { name = "rmcp-macros", wrappers = ["rmcp"] },
+    # JVM frameworks stay in the JNI bindings.
+    { name = "jni", wrappers = ["jni-xbbg", "jni-xbbg-sdk"] },
+    { name = "jni-sys", wrappers = ["jni"] },
+    { name = "jni-macros", wrappers = ["jni"] },
 ]
 
 skip = []
