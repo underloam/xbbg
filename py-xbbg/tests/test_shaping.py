@@ -341,19 +341,27 @@ async def test_shaping_keeps_the_event_loop_running(large_carriers: dict[str, An
 @pytest.mark.asyncio
 @pytest.mark.parametrize("name", sorted(_LARGE_KERNELS))
 async def test_python_threads_run_while_shaping_is_pending(large_carriers: dict[str, Any], name: str) -> None:
+    """Another Python thread reaches the loop while a kernel is still shaping.
+
+    A kernel that held the GIL could never let the helper thread run before it
+    finished. A kernel that releases it can still finish first when the OS is slow
+    to schedule the helper (seen on free-threaded macOS runners), so one such
+    round proves nothing either way: rounds repeat until the helper wins one.
+    """
     loop = asyncio.get_running_loop()
-    shaping = _LARGE_KERNELS[name](large_carriers)
-    worker_ran: asyncio.Future[None] = loop.create_future()
+    for _ in range(20):
+        shaping = _LARGE_KERNELS[name](large_carriers)
+        worker_ran: asyncio.Future[None] = loop.create_future()
 
-    def worker() -> None:
-        loop.call_soon_threadsafe(worker_ran.set_result, None)
+        def worker(worker_ran: asyncio.Future[None] = worker_ran) -> None:
+            loop.call_soon_threadsafe(worker_ran.set_result, None)
 
-    thread = threading.Thread(target=worker, name="shaping-progress-probe")
-    thread.start()
-    done, _ = await asyncio.wait({shaping, worker_ran}, return_when=asyncio.FIRST_COMPLETED)
-    thread.join()
-
-    # Another Python thread ran and reached the loop before the kernel finished.
-    assert worker_ran in done
-    assert not shaping.done()
-    assert (await shaping).num_rows > 0
+        thread = threading.Thread(target=worker, name="shaping-progress-probe")
+        thread.start()
+        done, _ = await asyncio.wait({shaping, worker_ran}, return_when=asyncio.FIRST_COMPLETED)
+        thread.join()
+        helper_won = worker_ran in done and not shaping.done()
+        assert (await shaping).num_rows > 0
+        if helper_won:
+            return
+    pytest.fail("the helper thread never reached the loop before the kernel finished")
