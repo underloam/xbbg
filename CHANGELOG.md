@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 ## [Unreleased]
 
+### Changed
+
+- **Python `ticker` key-column deprecation warns at most once per process (#371).** Results using `key_column="ticker"` now emit `FutureWarning` on the first result in a process rather than at every request call site, matching Node's one-time `DeprecationWarning` and MCP's startup log.
+
 ## [1.8.1] - 2026-11-04
 
 ### Added

@@ -22,6 +22,7 @@ def _keyed(key: str) -> ArrowTable:
 def _configure(monkeypatch, key_column: str | None) -> None:
     config = None if key_column is None else _core.PyEngineConfig(key_column=key_column)
     monkeypatch.setattr(_engine, "_config", config)
+    monkeypatch.setattr(_engine, "_ticker_key_column_warned", False)
 
 
 def _request(monkeypatch, table: ArrowTable):
@@ -39,12 +40,17 @@ def _request(monkeypatch, table: ArrowTable):
     )
 
 
-def test_ticker_keyed_results_warn_at_the_callers_line(monkeypatch):
+def test_ticker_keyed_results_warn_once_per_process_at_the_callers_line(monkeypatch):
     _configure(monkeypatch, None)
     with pytest.warns(FutureWarning, match="key_column='security'") as caught:
         _request(monkeypatch, _keyed("ticker"))
+        _request(monkeypatch, _keyed("ticker"))
     assert len(caught) == 1
     assert caught[0].filename == __file__
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        _request(monkeypatch, _keyed("ticker"))
 
 
 def test_security_engines_never_warn_even_for_bloomberg_ticker_columns(monkeypatch):

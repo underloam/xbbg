@@ -335,8 +335,8 @@ def configure(
             ``"fatal"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"``, or
             ``"trace"``), and ``key_column``, the name of the result column
             holding each row's security: ``"ticker"`` (default, deprecated;
-            results that use it emit a ``FutureWarning``) or ``"security"``,
-            which becomes the default in the next major release.
+            the first result that uses it emits a ``FutureWarning``) or
+            ``"security"``, which becomes the default in the next major release.
             ``tls_client_credentials`` and ``tls_trust_material`` accept file
             paths as ``str`` or in-memory DER material as ``bytes`` (PKCS#12
             credentials and PKCS#7 trust). Supply both, using the same
@@ -482,12 +482,21 @@ def _active_key_column() -> str:
     return KEY_COLUMN_DEFAULT
 
 
-def _warn_ticker_key_column(table: Any) -> None:
-    """Emit a ``FutureWarning`` for a result keyed by the deprecated ``ticker`` column."""
-    if "ticker" in table.column_names and _active_key_column() == "ticker":
-        from .exceptions import _warn_at_user_frame
+_ticker_key_column_warned = False
 
-        _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
+
+def _warn_ticker_key_column(table: Any) -> None:
+    """Emit at most one ``FutureWarning`` per process for a result keyed by ``ticker``."""
+    global _ticker_key_column_warned
+    if _ticker_key_column_warned or _active_key_column() != "ticker" or "ticker" not in table.column_names:
+        return
+    with _engine_lock:
+        if _ticker_key_column_warned:
+            return
+        _ticker_key_column_warned = True
+    from .exceptions import _warn_at_user_frame
+
+    _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
 
 
 def _normalize_engine_exception(exc: Exception) -> Exception:

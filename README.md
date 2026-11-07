@@ -458,10 +458,10 @@ value, xbbg omits the request element and preserves the service default.
 Results name the column holding each row's security `ticker`. Once a consumer
 folds identifier case (a database load through unquoted identifiers, or
 upper-casing columns to match mnemonics), that name collides with Bloomberg's
-`TICKER` field, so it is deprecated: results that still use it emit a
-`FutureWarning`, and the next major release renames the column `security`,
-after Bloomberg's `securityData.security` element. Switch now with an engine
-setting:
+`TICKER` field, so it is deprecated: the first result in a process that still
+uses it emits a `FutureWarning`, and the next major release renames the column
+`security`, after Bloomberg's `securityData.security` element. Switch now with
+an engine setting:
 
 ```python
 from xbbg import blp, configure
