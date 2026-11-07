@@ -16,7 +16,7 @@
 [![Discord](https://xbbg.org/badges/xbbg/discord.svg)](https://discord.gg/P34uMwgCjC)
 [![License](https://xbbg.org/badges/xbbg/license.svg)](LICENSE)
 
-**Links:** [Documentation](https://xbbg.org/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+**Links:** [Documentation](https://xbbg.org/) · [Python](https://xbbg.org/python/) · [Node.js](https://xbbg.org/javascript/) · [Java](https://xbbg.org/java/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 </div>
 
@@ -68,7 +68,7 @@ Core scope:
 - Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
 
 <p align="center">
-  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="100%">
+  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
 </p>
 
 ## Why xbbg?
@@ -88,10 +88,9 @@ The short version: if all you need is a tiny one-off `bdp()` wrapper, several pa
 | Rust request/parsing engine with Arrow-shaped output | yes | no | no | no | no |
 | Output backends beyond pandas | Narwhals, native, PyArrow, pandas, Polars, DuckDB | application-owned | pandas-first | pandas-first | Polars-first |
 | Typed errors, diagnostics, field cache, testing helpers | yes | application-owned | limited | limited | limited |
-| Usable install footprint (Windows x64, Python 3.14) | 19.8 MiB (`xbbg` + `narwhals`, no `blpapi` wheel) | 14.7 MiB (`blpapi` only) | 130.8 MiB / 131.0 MiB (`+ pandas + numpy + blpapi`) | 130.9 MiB (`+ pandas + numpy + blpapi`) | 191.1 MiB (`+ polars + blpapi`) |
 
 <p align="center">
-  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="100%">
+  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
 </p>
 
 ## Installation
