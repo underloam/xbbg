@@ -39,6 +39,7 @@ ignore = [
     { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained, via rattler_conda_types -> serde_yaml (unconditional): xbbg-sdk parses no YAML" },
+    { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained (no upstream upgrade yet), via uv-client -> uv-extract and rattler_package_streaming: xbbg-sdk verifies archive and library hashes against index/repodata before extraction" },
 ]
 
 # ════════════════════════════════════════════════════════════════════════════
