@@ -33,6 +33,19 @@ def _metadata_result(metadata: dict[bytes, bytes], kind: str, values: list[float
         )
         return batch if kind.endswith("batch") else pa.Table.from_batches([batch])
 
+    text = {key.decode(): value.decode() for key, value in metadata.items()}
+
+    def metadata_sizes() -> dict[str, int]:
+        return {key: len(value.encode()) for key, value in text.items()}
+
+    def metadata_value(key: str, max_bytes: int | None = None) -> str | None:
+        value = text.get(key)
+        if value is None or max_bytes is None:
+            if value is not None and len(value) > 1_000_000:
+                raise AssertionError("oversized native metadata must be fetched as a bounded prefix")
+            return value
+        return value.encode()[:max_bytes].decode("utf-8", errors="ignore")
+
     class ArrowColumn:
         name = "price"
         data_type = "Float64"
@@ -59,7 +72,13 @@ def _metadata_result(metadata: dict[bytes, bytes], kind: str, values: list[float
 
         @property
         def metadata(self) -> dict[str, str]:
-            return {key.decode(): value.decode() for key, value in metadata.items()}
+            raise AssertionError("bounded projection must not copy all native metadata")
+
+        def metadata_sizes(self) -> dict[str, int]:
+            return metadata_sizes()
+
+        def metadata_value(self, key: str, max_bytes: int | None = None) -> str | None:
+            return metadata_value(key, max_bytes)
 
         def select(self, columns: list[int]) -> ArrowTable:
             assert columns == [0]
@@ -84,6 +103,12 @@ def _metadata_result(metadata: dict[bytes, bytes], kind: str, values: list[float
 
         def to_table(self) -> ArrowTable:
             return ArrowTable()
+
+        def metadata_sizes(self) -> dict[str, int]:
+            return metadata_sizes()
+
+        def metadata_value(self, key: str, max_bytes: int | None = None) -> str | None:
+            return metadata_value(key, max_bytes)
 
         def select(self, columns: list[int]) -> ArrowTable:
             return self.to_table().select(columns)
@@ -583,6 +608,46 @@ def test_native_preview_keeps_small_strings_from_large_backing_buffers() -> None
     batch = table.to_batches()[0]
     _, batch_artifact = _project(batch, max_rows=1)
     assert batch_artifact["data"] == artifact["data"]
+
+
+def test_native_oversized_cell_is_omitted_while_small_cells_materialize() -> None:
+    core = pytest.importorskip("xbbg._core")
+    table = core.ArrowTable.from_pylist(
+        [
+            {"ticker": "AAA US Equity", "note": "x" * 10_000_000},
+            {"ticker": "BBB US Equity", "note": "small"},
+        ]
+    )
+    content, artifact = _project(table, max_result_bytes=4096, max_content_bytes=4096)
+    for result in (content, artifact):
+        assert result["data"] == [{"ticker": "AAA US Equity"}, {"ticker": "BBB US Equity", "note": "small"}]
+        assert result["truncated"] is True
+        assert "max_result_bytes" in result["truncation"]["reasons"]
+
+
+@pytest.mark.parametrize("kind", ["pyarrow_table", "native_table", "native_batch"])
+@pytest.mark.parametrize(
+    "limits",
+    [{"max_result_bytes": 256, "max_content_bytes": 256, "max_result_nodes": 64}, {}],
+    ids=["tiny", "default"],
+)
+def test_oversized_generic_metadata_is_truncated_without_error(kind: str, limits: dict[str, int]) -> None:
+    metadata = {
+        b"source": b"x" * 50_000_000,
+        b"xbbg.delayed": b'{"AAA US Equity":{"delayed":true,"delay_minutes":15}}',
+    }
+    content, artifact = _project(_metadata_result(metadata, kind, [1.5]), **limits)
+    for result in (content, artifact):
+        assert result["rowCount"] == 1
+        assert result["truncated"] is True
+        source = result["data"].get("metadata", {}).get("source", "")
+        assert set(source) <= {"x"}
+        assert len(source) <= BloombergToolsOptions().max_string_chars
+    if not limits:
+        assert artifact["data"]["metadata"]["source"] == "x" * BloombergToolsOptions().max_string_chars
+        assert "max_string_chars" in artifact["truncation"]["reasons"]
+        assert artifact["data"]["delayed"] == {"AAA US Equity": {"delayed": True, "delay_minutes": 15}}
+        assert artifact["data"]["rows"] == [{"price": 1.5}]
 
 
 def test_clipped_chart_cannot_be_rendered_as_an_intact_spec() -> None:

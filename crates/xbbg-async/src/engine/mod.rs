@@ -643,7 +643,12 @@ pub struct EngineConfig {
     pub max_event_queue_size: usize,
     /// Command channel capacity (backpressure)
     pub command_queue_size: usize,
-    /// Consumer-side Arrow batch size hint; the engine emits subscription updates immediately.
+    /// Maximum number of already-queued subscription updates (or dirty state
+    /// topics) combined into one Arrow batch per read (default: 16). A read
+    /// returns as soon as the first update arrives and adds only updates that
+    /// are already waiting, so quiet streams still get one-row batches; nothing
+    /// waits for a batch to fill, and the engine emits every update immediately.
+    /// `SubscribeRequest::flush_threshold` overrides it per subscription.
     pub subscription_flush_threshold: usize,
     /// Subscription stream capacity (backpressure)
     pub subscription_stream_capacity: usize,
@@ -801,7 +806,7 @@ impl Default for EngineConfig {
             tls: None,
             max_event_queue_size: 10_000,
             command_queue_size: 256,
-            subscription_flush_threshold: 1,
+            subscription_flush_threshold: 16,
             subscription_stream_capacity: 256,
             overflow_policy: OverflowPolicy::default(),
             request_pool_size: 2,
@@ -882,17 +887,29 @@ impl Engine {
             "starting Engine with worker pools"
         );
 
-        // Create request worker pool
-        let request_pool = Arc::new(RequestWorkerPool::new(
-            config.request_pool_size,
-            config.clone(),
-        )?);
-
-        // Create subscription session pool
-        let subscription_pool = Arc::new(SubscriptionSessionPool::new(
-            config.subscription_pool_size,
-            config.clone(),
-        )?);
+        // The pools are independent until the runtime is attached, so their
+        // sessions start concurrently. Both complete before either result is
+        // inspected; the request pool's error wins, and whichever pool did
+        // start is dropped (stopping its sessions) on the early return.
+        let (request_pool, subscription_pool) = std::thread::scope(|scope| {
+            let subscription_pool = std::thread::Builder::new()
+                .name("xbbg-subscription-pool-start".to_string())
+                .spawn_scoped(scope, || {
+                    SubscriptionSessionPool::new(config.subscription_pool_size, config.clone())
+                });
+            let request_pool = RequestWorkerPool::new(config.request_pool_size, config.clone());
+            let subscription_pool = match subscription_pool {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(_) => {
+                    SubscriptionSessionPool::new(config.subscription_pool_size, config.clone())
+                }
+            };
+            (request_pool, subscription_pool)
+        });
+        let request_pool = Arc::new(request_pool?);
+        let subscription_pool = Arc::new(subscription_pool?);
 
         let total_sessions = config.request_pool_size + config.subscription_pool_size;
         xbbg_log::info!(
@@ -1878,6 +1895,7 @@ mod tests {
         assert_eq!(config.runtime_worker_threads, 2);
         assert_eq!(config.max_subscription_sessions, 32);
         assert!(config.max_subscription_sessions >= config.subscription_pool_size);
+        assert_eq!(config.subscription_flush_threshold, 16);
     }
 
     #[test]

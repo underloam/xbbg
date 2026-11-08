@@ -2,12 +2,17 @@ import { Table } from 'apache-arrow';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
-import { nativeArrowToBackend, nativeArrowToPolars, toArrowTableFromNative } from '../src/backends';
+import { ipcFileToPolars, nativeArrowToBackend, toArrowTableFromNative } from '../src/backends';
 import { wrapError } from '../src/errors';
 import type * as Core from '../src/index';
-import type { NativeSubscription, NativeSubscriptionDelivery } from '../src/napi';
+import type {
+  NativeArrowIpcFile,
+  NativeArrowZeroCopyBatch,
+  NativeSubscription,
+  NativeSubscriptionDelivery,
+} from '../src/napi';
 import type { ResultMetadata, StreamOptions, SubscriptionDelivery } from '../src/types';
-import { int32ArrowBatch, jsonValue } from './subscription-fixtures';
+import { int32ArrowBatch, ipcFileFromBatch, jsonValue } from './subscription-fixtures';
 
 type NativeSubscriptionFixtureOptions = Pick<
   StreamOptions,
@@ -31,11 +36,17 @@ interface NativePublicationPause {
   release(): void;
 }
 
-function corruptDeliveryBuffers(delivery: NativeSubscriptionDelivery): void {
-  for (const column of delivery.data.columns) {
-    column.data?.fill(0x7f);
-    column.offsets?.fill(0x7f);
-    column.nullBitmap?.fill(0x7f);
+function corruptDeliveryBuffers(
+  delivery: NativeSubscriptionDelivery<NativeArrowZeroCopyBatch | NativeArrowIpcFile>,
+): void {
+  if (delivery.data.kind === 'ipcFile') {
+    delivery.data.ipc.fill(0x7f);
+  } else {
+    for (const column of delivery.data.columns) {
+      column.data?.fill(0x7f);
+      column.offsets?.fill(0x7f);
+      column.nullBitmap?.fill(0x7f);
+    }
   }
   if (delivery.gapBefore !== undefined) {
     Object.defineProperty(delivery.gapBefore, 'droppedUpdates', {
@@ -126,6 +137,33 @@ describe.skipIf(!enabled)('native subscription deliveries', () => {
     await arrow.unsubscribe(false);
   });
 
+  test('decodes present, cleared, and absent scalar fields from columnar batches', async () => {
+    const source = await fixture(4, 'drop_newest');
+    const topic = 'SCALAR SYNTHETIC Equity';
+    const subscription = new api.Subscription(
+      await source.subscribe([topic], ['BID', 'FLAG', 'NAME']),
+    );
+    source.publishJson(topic, '{"BID":4.5,"FLAG":true,"NAME":"first"}');
+    source.publishJson(topic, '{"BID":null,"NAME":"second"}');
+    const first = (await subscription.next()).value;
+    const second = (await subscription.next()).value;
+
+    expect(first?.toObject()).toStrictEqual({
+      BID: 4.5,
+      FLAG: true,
+      NAME: 'first',
+      timestampUs: first?.timestampUs,
+      topic,
+    });
+    expect(second?.topic).toBe(topic);
+    expect(second?.has('BID')).toBeTruthy();
+    expect(second?.get('BID')).toBeNull();
+    expect(second?.has('FLAG')).toBeFalsy();
+    expect(second?.get('FLAG')).toBeUndefined();
+    expect(second?.str('NAME')).toBe('second');
+    await subscription.unsubscribe(false);
+  });
+
   test('guards inherited drop-oldest reads and exports its exact gap with retained Arrow data', async () => {
     const source = await fixture();
     const native = await source.subscribe(['SYNTHETIC Equity'], ['BID']);
@@ -190,7 +228,8 @@ describe.skipIf(!enabled)('native subscription deliveries', () => {
       'xbbg.bloomberg_request_id': 'synthetic-support-id',
       'xbbg.eid_data': '{"SYN":[101]}',
     };
-    const frame = nativeArrowToPolars(int32ArrowBatch(null, metadata)) as PolarsDeliveryFrame;
+    const file = ipcFileFromBatch(int32ArrowBatch(null, metadata));
+    const frame = ipcFileToPolars(file) as PolarsDeliveryFrame;
     expect(frame.getColumn('answer').toArray()).toStrictEqual([null]);
     expect(frame.metadata).toStrictEqual(metadata);
     expect(frame.bloombergRequestId).toBe('synthetic-support-id');
@@ -234,11 +273,13 @@ describe.skipIf(!enabled)('native subscription deliveries', () => {
     const native = await source.subscribe(['SYNTHETIC Equity'], ['BID']);
     for (const value of [1.25, 2.5, 3.75])
       source.publishJson('SYNTHETIC Equity', JSON.stringify({ BID: value }));
-    const failing = new api.DeliveryStream(native, (delivery) => {
-      const frame = nativeArrowToPolars(delivery.data) as PolarsDeliveryFrame;
-      expect(frame.getColumn('BID').toArray()).toStrictEqual([3.75]);
-      corruptDeliveryBuffers(delivery);
-      throw new Error('synthetic failure after real Polars conversion');
+    const failing = new api.DeliveryStream(native, {
+      ipcFile: (delivery) => {
+        const frame = ipcFileToPolars(delivery.data) as PolarsDeliveryFrame;
+        expect(frame.getColumn('BID').toArray()).toStrictEqual([3.75]);
+        corruptDeliveryBuffers(delivery);
+        throw new Error('synthetic failure after real Polars conversion');
+      },
     });
     await expect(failing.next()).rejects.toThrow('synthetic failure after real Polars conversion');
     const subscription = new api.Subscription(native);

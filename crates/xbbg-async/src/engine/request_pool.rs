@@ -21,6 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use xbbg_core::BlpError;
 
 use super::key_column::{self, KeyColumn};
+use super::session_lifecycle::{start_concurrently, worker_start_error};
 use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
@@ -417,8 +418,9 @@ impl RequestWorkerPool {
     /// Create a new pool with the specified number of workers.
     ///
     /// Each worker owns a pre-warmed asynchronous Bloomberg session; creation
-    /// blocks until every session has started (parity with the previous
-    /// thread-per-worker design, which also blocked on session startup).
+    /// starts every session concurrently and blocks until all have finished.
+    /// On failure the lowest failing worker id is reported and every worker
+    /// that did start is dropped (stopping its session).
     pub fn new(size: usize, config: Arc<EngineConfig>) -> Result<Self, BlpAsyncError> {
         if size == 0 {
             return Err(BlpAsyncError::ConfigError {
@@ -428,12 +430,17 @@ impl RequestWorkerPool {
 
         xbbg_log::info!(pool_size = size, "creating request worker pool");
 
+        let started = start_concurrently(size, "xbbg-request-start", |id| {
+            AsyncRequestWorker::new(id, Arc::clone(&config))
+        });
         let mut workers = Vec::with_capacity(size);
-        for id in 0..size {
-            let worker = AsyncRequestWorker::new(id, config.clone()).map_err(|e| {
-                BlpAsyncError::Blp(BlpError::Internal {
-                    detail: format!("failed to spawn worker {}: {}", id, e),
-                })
+        for (id, worker) in started.into_iter().enumerate() {
+            let worker = worker.map_err(|error| {
+                worker_start_error(
+                    &format!("request worker {id}"),
+                    &format!("failed to spawn worker {id}"),
+                    error,
+                )
             })?;
             workers.push(Arc::new(worker));
         }

@@ -22,7 +22,7 @@ mimalloc = { workspace = true, optional = true }
 pyo3 = { workspace = true }
 pyo3-async-runtimes = { workspace = true, features = ["tokio-runtime"] }
 pyo3-stub-gen = { workspace = true, features = ["infer_signature"], optional = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 xbbg-log = { workspace = true }
 arrow-array = { workspace = true, features = ["ffi", "chrono-tz"] }
 arrow-schema = { workspace = true, features = ["ffi"] }
@@ -35,6 +35,10 @@ xbbg_core = { workspace = true }
 xbbg-async = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-recipes = { workspace = true }
+
+[build-dependencies]
+pyo3-build-config = { workspace = true }
+
 [features]
 default = ["live"]
 mimalloc = ["dep:mimalloc"]

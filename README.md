@@ -7,20 +7,23 @@
   </a>
 </p>
 
-[![CI](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml/badge.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
-[![Discord](https://img.shields.io/badge/Discord-Join%20Chat-5865F2?logo=discord&logoColor=white)](https://discord.gg/P34uMwgCjC)<br>
-**Python** [![PyPI version](https://img.shields.io/pypi/v/xbbg.svg)](https://pypi.org/project/xbbg/) [![conda-forge version](https://img.shields.io/conda/vn/conda-forge/xbbg.svg)](https://anaconda.org/conda-forge/xbbg) [![Python versions](https://img.shields.io/pypi/pyversions/xbbg.svg)](https://pypi.org/project/xbbg/) [![PyPI downloads per month](https://static.pepy.tech/badge/xbbg/month)](https://pepy.tech/projects/xbbg) [![PyPI downloads total](https://static.pepy.tech/badge/xbbg)](https://pepy.tech/projects/xbbg)<br>
-**JavaScript** [![npm version](https://img.shields.io/npm/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![Node.js versions](https://img.shields.io/node/v/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core) [![npm downloads per month](https://img.shields.io/npm/dm/%40xbbg%2Fcore.svg)](https://www.npmjs.com/package/@xbbg/core)<br>
-**Rust** [![crates.io version](https://img.shields.io/crates/v/xbbg_core.svg)](https://crates.io/crates/xbbg_core) [![MSRV](https://img.shields.io/crates/msrv/xbbg_core.svg)](https://crates.io/crates/xbbg_core) [![crates.io downloads](https://img.shields.io/crates/d/xbbg_core.svg)](https://crates.io/crates/xbbg_core)
+[![Python](https://xbbg.org/badges/xbbg/python.svg)](https://pypi.org/project/xbbg/)
+[![TypeScript](https://xbbg.org/badges/xbbg/javascript.svg)](https://www.npmjs.com/package/@xbbg/core)<br>
+[![Java](https://xbbg.org/badges/xbbg/java.svg)](java-xbbg/README.md)
+[![Rust](https://xbbg.org/badges/xbbg/rust.svg)](https://crates.io/crates/xbbg_core)<br>
+[![CI](https://xbbg.org/badges/xbbg/ci.svg)](https://github.com/underloam/xbbg/actions/workflows/ci-rust.yml)
+[![Documentation](https://xbbg.org/badges/xbbg/docs.svg)](https://xbbg.org/)
+[![Discord](https://xbbg.org/badges/xbbg/discord.svg)](https://discord.gg/P34uMwgCjC)
+[![License](https://xbbg.org/badges/xbbg/license.svg)](LICENSE)
 
-**Links:** [Documentation](https://xbbg.org/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
+**Links:** [Documentation](https://xbbg.org/) · [Python](https://xbbg.org/python/) · [Node.js](https://xbbg.org/javascript/) · [Java](https://xbbg.org/java/) · [Quickstart](#quickstart) · [Configuration](#configuration-and-engines) · [Examples notebook](py-xbbg/examples/xbbg_jupyter_examples.ipynb) · [Contributing](CONTRIBUTING.md) · [Changelog](CHANGELOG.md)
 
 </div>
 
 ---
 
 <!-- xbbg:latest-release-start -->
-Latest release: xbbg==1.7.0 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v1.7.0))
+Latest release: xbbg==1.8.1 (release: [notes](https://github.com/underloam/xbbg/releases/tag/v1.8.1))
 <!-- xbbg:latest-release-end -->
 
 > This `main` branch is the Rust-powered v1 release. For the legacy pure-Python line, use [`release/0.x`](https://github.com/underloam/xbbg/tree/release/0.x).
@@ -35,6 +38,7 @@ Latest release: xbbg==1.7.0 (release: [notes](https://github.com/underloam/xbbg/
 - [Quickstart](#quickstart)
 - [Exchange auctions and imbalance](#exchange-auctions-and-imbalance)
 - [JavaScript and Node](#javascript-and-node)
+- [Java](#java)
 - [Configuration and engines](#configuration-and-engines)
 - [Common API surface](#common-api-surface)
 - [Entitlement IDs](#entitlement-ids)
@@ -49,7 +53,7 @@ Latest release: xbbg==1.7.0 (release: [notes](https://github.com/underloam/xbbg/
 
 ## What is xbbg?
 
-xbbg is a Bloomberg client with Python as the primary surface and companion JavaScript/Node bindings, all backed by a shared Rust engine for request execution, response parsing, Arrow-shaped data movement, async workers, typed errors, and diagnostics.
+xbbg is a Bloomberg client with Python as the primary surface and companion JavaScript/Node and Java bindings, all backed by a shared Rust engine for request execution, response parsing, Arrow-shaped data movement, async workers, typed errors, and diagnostics.
 
 Use xbbg when you already have Bloomberg access and want higher-level helpers for common request patterns, plus an escape hatch for lower-level Bloomberg service requests.
 
@@ -61,6 +65,11 @@ Core scope:
 - sync and async Python APIs backed by the same engine
 - output as Narwhals, native xbbg Arrow carriers, PyArrow, pandas, Polars, DuckDB, and other optional Narwhals-backed libraries
 - JavaScript/Node bindings in [`js-xbbg`](js-xbbg/README.md)
+- Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
+
+<p align="center">
+  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
+</p>
 
 ## Why xbbg?
 
@@ -79,7 +88,10 @@ The short version: if all you need is a tiny one-off `bdp()` wrapper, several pa
 | Rust request/parsing engine with Arrow-shaped output | yes | no | no | no | no |
 | Output backends beyond pandas | Narwhals, native, PyArrow, pandas, Polars, DuckDB | application-owned | pandas-first | pandas-first | Polars-first |
 | Typed errors, diagnostics, field cache, testing helpers | yes | application-owned | limited | limited | limited |
-| Usable install footprint (Windows x64, Python 3.14) | xbbg 1.7.0 + narwhals 2.28.0, no `blpapi` = 19.297 MiB | blpapi 3.26.8.1 = 14.702 MiB | pdblp 0.1.8 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 130.816 MiB / blp 0.0.4 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 131.002 MiB | bbg-fetch 3.2.0 + pandas 3.0.5 + numpy 2.5.3 + blpapi 3.26.8.1 = 130.863 MiB | polars-bloomberg 0.6.0 + polars 1.44.2 + blpapi 3.26.8.1 = 191.118 MiB |
+
+<p align="center">
+  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
+</p>
 
 ## Installation
 
@@ -102,7 +114,7 @@ the wheel is just the easiest discovery path for many users:
 pip install blpapi --index-url=https://blpapi.bloomberg.com/repository/releases/python/simple/
 ```
 
-Supported Python versions: **3.11 through 3.15**.
+Supported Python versions: **3.11 through 3.15**. Free-threaded CPython 3.14t/3.15t wheels are available in beta with the `pyarrow` and `pandas` extras; polars, duckdb and the LangGraph adapter are not supported there. See [docs/free-threading.md](docs/free-threading.md).
 
 Requirements and notes:
 
@@ -377,6 +389,42 @@ const tools = createAllBloombergTools({ maxSecurities: 10, maxFields: 10 });
 
 Use the existing [`apps/xbbg-mcp`](apps/xbbg-mcp/README.md) package only when you specifically need MCP.
 
+## Java
+
+[`java-xbbg`](java-xbbg/README.md) provides the same functions as `@xbbg/core` for the JVM: `io.github.underloam:xbbg` runs on Java 8 and later through JNI on the same Rust engine, with native libraries for macOS arm64, Linux x64 (glibc 2.28+), and Windows x64 bundled in the jar and no other runtime dependencies. `io.github.underloam:xbbg-jdk17` is an optional Java 17+ add-on with `java.util.concurrent.Flow` publishers, sealed result and error types for pattern matching, Arrow Java (`VectorSchemaRoot`) interop, and virtual-thread callbacks. Both are published to Maven Central with the releases that include them, so any Maven-repository build tool (Maven, Gradle, sbt, Bazel) can consume them.
+
+```xml
+<dependency>
+  <groupId>io.github.underloam</groupId>
+  <artifactId>xbbg</artifactId>
+  <version><!-- xbbg release --></version>
+</dependency>
+```
+
+```java
+import io.github.underloam.xbbg.BdhOptions;
+import io.github.underloam.xbbg.Blp;
+import io.github.underloam.xbbg.Xbbg;
+import io.github.underloam.xbbg.subscription.Subscription;
+import io.github.underloam.xbbg.table.Table;
+import java.time.Duration;
+import java.util.Arrays;
+
+Xbbg.configure("localhost", 8194); // the default: local Terminal / DAPI
+
+Table ref = Xbbg.await(Blp.bdp(Arrays.asList("AAPL US Equity", "MSFT US Equity"),
+    Arrays.asList("PX_LAST", "SECURITY_NAME")));
+Table hist = Xbbg.await(Blp.bdh("SPX Index", "PX_LAST",
+    BdhOptions.builder().start("2024-01-01").end("2024-12-31").build()));
+
+try (Subscription sub = Xbbg.await(Blp.subscribe("AAPL US Equity", "LAST_PRICE"))) {
+  sub.next(Duration.ofSeconds(30))
+      .ifPresent(tick -> System.out.println(tick.topic() + " " + tick.get("LAST_PRICE")));
+}
+```
+
+Every call that reaches Bloomberg returns a `CompletableFuture`; `Xbbg.await` blocks for the result and rethrows the original typed exception. The JNI boundary never blocks a Java thread inside native code, so waiting on virtual threads is safe. The jar finds the Bloomberg runtime the same way the Python and Node packages do (an explicit path, `BLPAPI_LIB_DIR`/`BLPAPI_ROOT`, or a Terminal install). Machines without one can provision `blpapi3_64.dll`/`libblpapi3_64.so` from a Python package index or conda channel, including corporate mirrors, with `Xbbg.setSdkSource(...)` or `-Dxbbg.sdk.source=...`; nothing is downloaded unless a source is configured. On JDK 24 and later, start the JVM with `--enable-native-access=ALL-UNNAMED` to avoid the native-access warning. See [`java-xbbg/README.md`](java-xbbg/README.md) for the full guide.
+
 ## Configuration and engines
 
 By default, xbbg starts a Rust-backed engine and connects to local Bloomberg Desktop API / DAPI on `localhost:8194`. Configure the engine before the first request when you need a different transport, authentication mode, worker count, timeout policy, field cache, or logging behavior.
@@ -409,10 +457,10 @@ value, xbbg omits the request element and preserves the service default.
 Results name the column holding each row's security `ticker`. Once a consumer
 folds identifier case (a database load through unquoted identifiers, or
 upper-casing columns to match mnemonics), that name collides with Bloomberg's
-`TICKER` field, so it is deprecated: results that still use it emit a
-`FutureWarning`, and the next major release renames the column `security`,
-after Bloomberg's `securityData.security` element. Switch now with an engine
-setting:
+`TICKER` field, so it is deprecated: the first result in a process that still
+uses it emits a `FutureWarning`, and the next major release renames the column
+`security`, after Bloomberg's `securityData.security` element. Switch now with
+an engine setting:
 
 ```python
 from xbbg import blp, configure
@@ -849,6 +897,7 @@ Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 
 - Documentation: [xbbg.org](https://xbbg.org/)
 - JavaScript/Node bindings: [js-xbbg/README.md](js-xbbg/README.md)
+- Java bindings: [java-xbbg/README.md](java-xbbg/README.md)
 - Python LangChain/LangGraph tools: [usage](#python-langchain-and-langgraph)
 - JavaScript LangChain/LangGraph tools: [js-xbbg-langgraph/README.md](js-xbbg-langgraph/README.md)
 - PyPI: [pypi.org/project/xbbg](https://pypi.org/project/xbbg/)

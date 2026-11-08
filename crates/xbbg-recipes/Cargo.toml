@@ -19,6 +19,7 @@ xbbg-ext = { workspace = true }
 xbbg-log = { workspace = true }
 arrow-array = { workspace = true, features = ["chrono-tz"] }
 arrow-arith = { workspace = true }
+arrow-buffer = { workspace = true }
 arrow-schema = { workspace = true }
 arrow-cast = { workspace = true }
 arrow-ord = { workspace = true }

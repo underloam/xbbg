@@ -12,6 +12,8 @@ use tokio::sync::oneshot;
 use xbbg_core::BlpError;
 
 use super::dispatch::SERVICE_OPEN_CID_TAG;
+use crate::BlpAsyncError;
+use crate::error_presentation::blp_error_display;
 
 const SERVICE_OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -48,6 +50,63 @@ impl StartupLatch {
         }
         outcome.result.take().expect("checked above")
     }
+}
+
+/// Run `start(0..count)` concurrently and return the outcomes in index order.
+///
+/// Session startup is a blocking SDK round trip, so pools start their sessions
+/// in parallel: index 0 runs on the caller's thread, the rest on scoped
+/// threads (inline if a thread cannot be spawned). Every call completes before
+/// this returns, so a caller that fails on one outcome drops the others — each
+/// started session is torn down exactly as a serial early return would. A panic
+/// in any call resumes on the caller after the remaining calls finish.
+pub(super) fn start_concurrently<T: Send>(
+    count: usize,
+    thread_name: &str,
+    start: impl Fn(usize) -> T + Sync,
+) -> Vec<T> {
+    let start = &start;
+    std::thread::scope(|scope| {
+        let spawned: Vec<_> = (1..count)
+            .map(|index| {
+                std::thread::Builder::new()
+                    .name(format!("{thread_name}-{index}"))
+                    .spawn_scoped(scope, move || start(index))
+                    .map_err(|_| index)
+            })
+            .collect();
+        let mut outcomes = Vec::with_capacity(count);
+        if count > 0 {
+            outcomes.push(start(0));
+        }
+        for handle in spawned {
+            outcomes.push(match handle {
+                Ok(handle) => handle
+                    .join()
+                    .unwrap_or_else(|panic| std::panic::resume_unwind(panic)),
+                Err(index) => start(index),
+            });
+        }
+        outcomes
+    })
+}
+
+/// Classify a worker that failed to start. A session-start failure keeps its
+/// kind and SDK label, prefixed with `worker` (e.g. `request worker 0`);
+/// anything else is internal, as `{internal}: <the failure's full text>`.
+pub(super) fn worker_start_error(worker: &str, internal: &str, error: BlpError) -> BlpAsyncError {
+    BlpAsyncError::Blp(match error {
+        BlpError::SessionStart { source, label } => BlpError::SessionStart {
+            source,
+            label: Some(match label {
+                Some(label) => format!("{worker}: {label}"),
+                None => worker.to_owned(),
+            }),
+        },
+        other => BlpError::Internal {
+            detail: format!("{internal}: {}", blp_error_display(&other)),
+        },
+    })
 }
 
 pub(super) struct PendingServiceOpen {
@@ -181,6 +240,57 @@ impl<F: Fn()> Drop for PendingWaiter<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_start_failures_keep_session_kind_and_sdk_label() {
+        use crate::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
+
+        let present = |error: BlpAsyncError| {
+            let presentation = ErrorPresentation::from_async(error, ErrorStyle::JavaScript);
+            (presentation.kind, presentation.message)
+        };
+        let refused = BlpError::SessionStart {
+            source: None,
+            label: Some("connect event failed".into()),
+        };
+        assert_eq!(
+            present(worker_start_error(
+                "request worker 0",
+                "failed to spawn worker 0",
+                refused
+            )),
+            (
+                ErrorKind::Session,
+                "Session start failed: request worker 0: connect event failed".to_string()
+            )
+        );
+        let unlabelled = BlpError::SessionStart {
+            source: None,
+            label: None,
+        };
+        assert_eq!(
+            present(worker_start_error(
+                "subscription worker 1",
+                "unused",
+                unlabelled
+            )),
+            (
+                ErrorKind::Session,
+                "Session start failed: subscription worker 1".to_string()
+            )
+        );
+        assert_eq!(
+            present(worker_start_error(
+                "request worker 2",
+                "failed to spawn worker 2",
+                BlpError::Timeout
+            )),
+            (
+                ErrorKind::Internal,
+                "Internal error: failed to spawn worker 2: operation timed out".to_string()
+            )
+        );
+    }
 
     const SERVICE: &str = "//blp/refdata";
 

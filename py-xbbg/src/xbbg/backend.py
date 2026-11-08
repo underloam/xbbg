@@ -191,7 +191,7 @@ BACKEND_DESCRIPTORS: dict[Backend, BackendDescriptor] = {
         package_name="pandas",
         module_name="pandas",
         extra_name="pandas",
-        min_version=(2, 0),
+        min_version=(2, 2, 2),
         conversion=BackendConversion.PANDAS,
     ),
     Backend.POLARS: _descriptor(
@@ -215,7 +215,7 @@ BACKEND_DESCRIPTORS: dict[Backend, BackendDescriptor] = {
         package_name="duckdb",
         module_name="duckdb",
         extra_name="duckdb",
-        min_version=(1, 5),
+        min_version=(1, 5, 1),
         conversion=BackendConversion.DUCKDB,
     ),
     Backend.CUDF: _descriptor(
@@ -540,29 +540,59 @@ def _attach_xbbg_metadata_attrs(dataframe: Any, table: Any) -> Any:
     return dataframe
 
 
-def _to_pyarrow_table(table: Any) -> Any:
-    pa = _import_backend_module(Backend.PYARROW)
-    return pa.table(table)
+def _to_pyarrow_table(table: Any, *, feature: str | None = None) -> Any:
+    pa = _import_backend_module(Backend.PYARROW, feature=feature)
+    if is_pyarrow_table(table):
+        return table
+    # ``pa.table`` asks whether its input is a pandas DataFrame before reading the
+    # Arrow C stream, and that check imports pandas (~300 ms cold) even on paths
+    # that never use it. Reading the stream directly yields the same table.
+    return pa.RecordBatchReader.from_stream(table).read_all()
+
+
+def _pandas_frame_from_native_columns(table: Any, pd: Any) -> Any:
+    """Build a pandas frame column by column from a native Arrow table.
+
+    Used only without pyarrow, which pandas needs for any Arrow handoff. Each
+    column becomes one Python list; pandas infers the same dtypes it infers
+    from row records, without one dict and one key string per cell.
+    """
+    names = table.column_names
+    if not table.num_rows:
+        # Column-wise construction infers float64 for empty lists, while the
+        # row-record constructor yields object columns.
+        return pd.DataFrame.from_records([], columns=names)
+    return pd.DataFrame(
+        {name: table.column(index).to_pylist() for index, name in enumerate(names)},
+        columns=names,
+    )
 
 
 def _to_pandas_frame(table: Any) -> Any:
     pd = _import_backend_module(Backend.PANDAS)
     try:
-        pa = _import_backend_module(Backend.PYARROW)
+        arrow = _to_pyarrow_table(table)
     except ImportError:
-        # Slow fallback for installations without pyarrow: materializes one
-        # Python dict per cell path instead of consuming the Arrow C stream.
-        frame = pd.DataFrame.from_records(table.to_pylist(), columns=table.column_names)
+        frame = _pandas_frame_from_native_columns(table, pd)
     else:
-        frame = pa.table(table).to_pandas(split_blocks=True)
+        frame = arrow.to_pandas(split_blocks=True)
     return _attach_xbbg_metadata_attrs(frame, table)
 
 
 _POLARS_CAPSULE_CONSTRUCTOR_MIN_VERSION = (1, 3)
 
 
+def _legacy_polars_series(pl: Any, name: str, values: list[Any], dtype: Any) -> Any:
+    time_zone = getattr(dtype, "time_zone", None)
+    if time_zone is None or time_zone == "UTC":
+        return pl.Series(name, values, dtype=dtype)
+    # Polars 0.20's Series constructor rejects time-zone-aware values for a
+    # non-UTC dtype; build the instants in UTC, then relabel the zone.
+    return pl.Series(name, values, dtype=pl.Datetime(dtype.time_unit, "UTC")).dt.convert_time_zone(time_zone)
+
+
 def _to_polars_frame_from_native_batches(table: Any, pl: Any) -> Any:
-    """Materialize legacy Polars input one native batch at a time with its schema."""
+    """Materialize legacy Polars input one native batch and column at a time with its schema."""
     schema = nw.Schema(native_schema(table)).to_polars()
     unknown = getattr(pl, "Unknown", None)
     unsupported = [name for name, dtype in schema.items() if unknown is not None and dtype == unknown]
@@ -571,7 +601,17 @@ def _to_polars_frame_from_native_batches(table: Any, pl: Any) -> Any:
             "installed Polars does not support native Arrow dtype(s) for column(s): "
             + ", ".join(repr(name) for name in unsupported)
         )
-    frames = [pl.DataFrame(batch.to_pylist(), schema=schema) for batch in table.to_batches() if batch.num_rows]
+    columns = list(schema.items())
+    frames = [
+        pl.DataFrame(
+            [
+                _legacy_polars_series(pl, name, batch.column(index).to_pylist(), dtype)
+                for index, (name, dtype) in enumerate(columns)
+            ]
+        )
+        for batch in table.to_batches()
+        if batch.num_rows
+    ]
     if not frames:
         return pl.DataFrame(schema=schema)
     if len(frames) == 1:
@@ -594,13 +634,13 @@ def _to_polars_frame(table: Any, *, feature: str | None = None) -> Any:
         return pl.DataFrame(table)
 
     try:
-        pa = _import_backend_module(Backend.PYARROW)
+        arrow = _to_pyarrow_table(table)
     except ImportError:
         # Polars before 1.3 cannot consume an Arrow stream capsule directly.
         # Construct one frame per native batch so the declared 0.20 floor
         # preserves both logical dtypes and native chunk boundaries.
         return _to_polars_frame_from_native_batches(table, pl)
-    return pl.from_arrow(pa.table(table), rechunk=False)
+    return pl.from_arrow(arrow, rechunk=False)
 
 
 class _DuckDBDatabase:

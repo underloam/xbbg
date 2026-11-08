@@ -1,4 +1,4 @@
-"""Engine ownership, scoped routing, and field-type cache lifecycle.
+"""Engine ownership and scoped routing.
 
 Request, schema, and subscription modules look up the same engine here. Keeping
 this state below the facade avoids lazy import cycles and gives offline callers
@@ -7,6 +7,7 @@ one engine-construction seam to replace.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
 import contextvars
 import logging
@@ -18,20 +19,6 @@ import warnings
 from ._sync import _stop_notebook_sync_loop
 
 logger = logging.getLogger(__name__)
-
-
-_FIELD_TYPE_RESOLUTION_CACHE_MAXSIZE = 1024
-_FIELD_TYPE_RESOLUTION_CACHE: dict[tuple[tuple[str, ...], str], dict[str, str]] = {}
-_FIELD_TYPE_RESOLUTION_CACHE_LOCK = threading.Lock()
-_FIELD_TYPE_RESOLUTION_CACHE_GENERATION = 0
-
-
-def _clear_field_type_resolution_cache() -> None:
-    """Clear cached field type resolutions after schema/cache invalidation."""
-    global _FIELD_TYPE_RESOLUTION_CACHE_GENERATION
-    with _FIELD_TYPE_RESOLUTION_CACHE_LOCK:
-        _FIELD_TYPE_RESOLUTION_CACHE.clear()
-        _FIELD_TYPE_RESOLUTION_CACHE_GENERATION += 1
 
 
 # Engine configuration (set before first use)
@@ -112,7 +99,7 @@ class Engine:
 
 
 def _atexit_cleanup() -> None:
-    """Signal interpreter finalization before releasing process-global resources."""
+    """Signal interpreter finalization, release the global engine, then wait for native teardown."""
     global _engine
     core = sys.modules.get("xbbg._core")
     if core is not None:
@@ -130,11 +117,32 @@ def _atexit_cleanup() -> None:
             engine.signal_shutdown()
         except Exception:
             logger.debug("Exception during atexit cleanup (ignored)", exc_info=True)
+        # The last reference hands the native engine to a teardown thread.
+        del engine
 
     try:
         _stop_notebook_sync_loop()
     except Exception:
         logger.debug("Exception stopping notebook sync bridge (ignored)", exc_info=True)
+
+    if core is not None:
+        try:
+            core._wait_native_teardown()
+        except Exception:
+            logger.error("Failed to wait for native engine teardown", exc_info=True)
+
+
+def _wait_native_teardown() -> None:
+    """Wait until released engines have stopped their Bloomberg sessions.
+
+    Dropping an engine's last reference hands it to a native teardown thread;
+    waiting here keeps explicit shutdown synchronous without holding the GIL.
+    Callers drop their own references first. In-flight async calls keep the
+    engine alive until they finish, so the wait does not cover engines they hold.
+    """
+    core = sys.modules.get("xbbg._core")
+    if core is not None:
+        core._wait_native_teardown()
 
 
 # Register cleanup handler
@@ -142,10 +150,12 @@ atexit.register(_atexit_cleanup)
 
 
 def shutdown() -> None:
-    """Signal the Bloomberg engine to shutdown.
+    """Shut down the Bloomberg engine.
 
-    Signals all worker threads to stop. They will terminate when they
-    finish their current work or see the shutdown signal.
+    Signals all worker threads to stop and releases the engine. Once this call
+    has released the last reference, it returns after the engine has stopped
+    its Bloomberg sessions; that teardown runs on a native thread, so other
+    Python threads keep running meanwhile.
 
     This is called automatically during Python interpreter shutdown.
     You usually don't need to call this directly.
@@ -166,6 +176,8 @@ def shutdown() -> None:
 
     if engine is not None:
         engine.signal_shutdown()
+        del engine
+        _wait_native_teardown()
 
 
 def reset() -> None:
@@ -194,6 +206,8 @@ def reset() -> None:
 
     if engine is not None:
         engine.signal_shutdown()
+        del engine
+        _wait_native_teardown()
 
 
 def is_connected() -> bool:
@@ -321,8 +335,8 @@ def configure(
             ``"fatal"``, ``"error"``, ``"warn"``, ``"info"``, ``"debug"``, or
             ``"trace"``), and ``key_column``, the name of the result column
             holding each row's security: ``"ticker"`` (default, deprecated;
-            results that use it emit a ``FutureWarning``) or ``"security"``,
-            which becomes the default in the next major release.
+            the first result that uses it emits a ``FutureWarning``) or
+            ``"security"``, which becomes the default in the next major release.
             ``tls_client_credentials`` and ``tls_trust_material`` accept file
             paths as ``str`` or in-memory DER material as ``bytes`` (PKCS#12
             credentials and PKCS#7 trust). Supply both, using the same
@@ -405,37 +419,10 @@ def configure(
             stacklevel=2,
         )
         previous_engine.signal_shutdown()
+        del previous_engine
+        _wait_native_teardown()
 
     logger.info("Engine configured: %s", configured)
-
-
-async def _resolve_field_types_cached(
-    fields: list[str],
-    overrides: dict[str, str] | None,
-    default_type: str,
-) -> dict[str, str]:
-    """Resolve Bloomberg field types with a bounded Python-side memo."""
-    key = (tuple(fields), default_type)
-    with _FIELD_TYPE_RESOLUTION_CACHE_LOCK:
-        generation = _FIELD_TYPE_RESOLUTION_CACHE_GENERATION
-        cached = _FIELD_TYPE_RESOLUTION_CACHE.get(key)
-
-    if cached is None:
-        fetched = await _get_engine().resolve_field_types(fields, None, default_type)
-        with _FIELD_TYPE_RESOLUTION_CACHE_LOCK:
-            if generation != _FIELD_TYPE_RESOLUTION_CACHE_GENERATION:
-                cached = dict(fetched)
-            else:
-                cached = _FIELD_TYPE_RESOLUTION_CACHE.get(key)
-                if cached is None:
-                    if len(_FIELD_TYPE_RESOLUTION_CACHE) >= _FIELD_TYPE_RESOLUTION_CACHE_MAXSIZE:
-                        _FIELD_TYPE_RESOLUTION_CACHE.pop(next(iter(_FIELD_TYPE_RESOLUTION_CACHE)))
-                    cached = dict(fetched)
-                    _FIELD_TYPE_RESOLUTION_CACHE[key] = cached
-    resolved = dict(cached)
-    if overrides:
-        resolved.update(overrides)
-    return resolved
 
 
 def _get_engine(*, engine: Engine | None = None):
@@ -462,6 +449,18 @@ def _get_engine(*, engine: Engine | None = None):
         return _engine
 
 
+async def _aget_engine(*, engine: Engine | None = None):
+    """Async :func:`_get_engine`: start a missing global engine off the event loop.
+
+    Starting the engine blocks while Bloomberg sessions connect (hundreds of
+    milliseconds, longer while the SDK retries), which would otherwise stall
+    every other task on the caller's loop during the first request.
+    """
+    if engine is not None or _active_engine.get() is not None or _engine is not None:
+        return _get_engine(engine=engine)
+    return await asyncio.to_thread(_get_engine)
+
+
 _TICKER_KEY_COLUMN_WARNING = (
     "xbbg results name the security column 'ticker', which collides with Bloomberg's TICKER field. "
     "The next major release renames it 'security'; pass key_column='security' to xbbg.configure() "
@@ -483,12 +482,21 @@ def _active_key_column() -> str:
     return KEY_COLUMN_DEFAULT
 
 
-def _warn_ticker_key_column(table: Any) -> None:
-    """Emit a ``FutureWarning`` for a result keyed by the deprecated ``ticker`` column."""
-    if "ticker" in table.column_names and _active_key_column() == "ticker":
-        from .exceptions import _warn_at_user_frame
+_ticker_key_column_warned = False
 
-        _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
+
+def _warn_ticker_key_column(table: Any) -> None:
+    """Emit at most one ``FutureWarning`` per process for a result keyed by ``ticker``."""
+    global _ticker_key_column_warned
+    if _ticker_key_column_warned or _active_key_column() != "ticker" or "ticker" not in table.column_names:
+        return
+    with _engine_lock:
+        if _ticker_key_column_warned:
+            return
+        _ticker_key_column_warned = True
+    from .exceptions import _warn_at_user_frame
+
+    _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
 
 
 def _normalize_engine_exception(exc: Exception) -> Exception:

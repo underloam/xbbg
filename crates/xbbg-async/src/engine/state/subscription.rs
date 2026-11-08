@@ -479,15 +479,18 @@ impl SubscriptionState {
         timestamp_us: i64,
     ) -> SubscriptionUpdate {
         let mut values: SmallVec<[UpdateField; 8]> = SmallVec::new();
+        let mut ordered = true;
         self.visit_projected_values(layout, source, |index, value| {
+            ordered &= values.last().is_none_or(|last| last.index <= index);
             values.push(UpdateField {
                 index,
                 value: value.clone(),
             });
         });
-        if !self.capture_all_fields {
+        if !self.capture_all_fields && !ordered {
             // The shared decoder visits schema order; filtered consumers retain
-            // the requested-field order used by their standalone decoder.
+            // the requested-field order used by their standalone decoder. An
+            // already ordered delta is exactly what the sort would return.
             values.sort_unstable_by_key(|field| field.index);
         }
         SubscriptionUpdate {

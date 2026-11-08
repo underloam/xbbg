@@ -197,21 +197,27 @@ pub fn is_specific_contract(ticker: &str) -> bool {
     true
 }
 
-/// Normalize tickers to a list, handling single string or slice input.
+/// Normalize tickers to a list.
+///
+/// Takes ownership and returns the list unchanged: order, duplicates and
+/// surrounding whitespace are preserved.
 ///
 /// # Examples
 ///
 /// ```
 /// use xbbg_ext::utils::ticker::normalize_tickers;
 ///
-/// let single = normalize_tickers(&["AAPL US Equity"]);
+/// let single = normalize_tickers(vec!["AAPL US Equity".to_string()]);
 /// assert_eq!(single, vec!["AAPL US Equity"]);
 ///
-/// let multi = normalize_tickers(&["AAPL US Equity", "MSFT US Equity"]);
+/// let multi = normalize_tickers(vec![
+///     "AAPL US Equity".to_string(),
+///     "MSFT US Equity".to_string(),
+/// ]);
 /// assert_eq!(multi.len(), 2);
 /// ```
-pub fn normalize_tickers(tickers: &[&str]) -> Vec<String> {
-    tickers.iter().map(|s| s.to_string()).collect()
+pub fn normalize_tickers(tickers: Vec<String>) -> Vec<String> {
+    tickers
 }
 
 /// Build a futures ticker from components.
@@ -235,15 +241,13 @@ pub fn build_futures_ticker(prefix: &str, month_code: &str, year: &str, asset: &
     format!("{}{}{} {}", prefix, month_code, year, asset)
 }
 
-/// Filter tickers to only equity tickers.
+/// Filter tickers to only equity tickers, in place.
 ///
-/// Excludes equity options (containing "=").
-pub fn filter_equity_tickers(tickers: &[&str]) -> Vec<String> {
+/// Keeps tickers containing "Equity" and excludes equity options (containing "=").
+/// Survivors keep their input order and are not copied.
+pub fn filter_equity_tickers(mut tickers: Vec<String>) -> Vec<String> {
+    tickers.retain(|t| t.contains("Equity") && !t.contains('='));
     tickers
-        .iter()
-        .filter(|t| t.contains("Equity") && !t.contains('='))
-        .map(|s| s.to_string())
-        .collect()
 }
 
 #[cfg(test)]
@@ -312,21 +316,27 @@ mod tests {
     #[test]
     fn test_filter_equity_tickers() {
         let tickers = vec![
-            "AAPL US Equity",
-            "ES1 Index",
-            "MSFT US Equity",
-            "AAPL=US 01/15/24 C150 Equity", // Option, should be excluded
+            "AAPL US Equity".to_string(),
+            "ES1 Index".to_string(),
+            "MSFT US Equity".to_string(),
+            "AAPL=US 01/15/24 C150 Equity".to_string(), // Option, should be excluded
+            "AAPL US Equity".to_string(),
         ];
-        let filtered = filter_equity_tickers(&tickers);
-        assert_eq!(filtered.len(), 2);
-        assert!(filtered.contains(&"AAPL US Equity".to_string()));
-        assert!(filtered.contains(&"MSFT US Equity".to_string()));
+        let filtered = filter_equity_tickers(tickers);
+        assert_eq!(
+            filtered,
+            vec!["AAPL US Equity", "MSFT US Equity", "AAPL US Equity"]
+        );
     }
 
     #[test]
-    fn test_normalize_tickers() {
-        let tickers = normalize_tickers(&["AAPL US Equity", "MSFT US Equity"]);
-        assert_eq!(tickers.len(), 2);
-        assert_eq!(tickers[0], "AAPL US Equity");
+    fn test_normalize_tickers_preserves_input() {
+        let input = vec![
+            " MSFT US Equity".to_string(),
+            "AAPL US Equity ".to_string(),
+            " MSFT US Equity".to_string(),
+        ];
+        let tickers = normalize_tickers(input.clone());
+        assert_eq!(tickers, input);
     }
 }

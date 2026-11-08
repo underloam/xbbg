@@ -54,7 +54,6 @@ def endpoint_capture(monkeypatch):
         captured["kwargs"] = kwargs
         return object()
 
-    _request_options._VALID_ELEMENTS_CACHE.clear()
     monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     monkeypatch.setattr(blp, "arequest", fake_arequest)
     monkeypatch.setattr(backend_module, "convert_backend_frame", lambda frame, _backend: frame)
@@ -88,7 +87,6 @@ def arrow_endpoint(monkeypatch):
         captured["kwargs"] = kwargs
         return raw
 
-    _request_options._VALID_ELEMENTS_CACHE.clear()
     monkeypatch.setattr(_engine, "_get_engine", lambda: FakeEngine())
     monkeypatch.setattr(blp, "arequest", fake_arequest)
     return captured
@@ -402,7 +400,7 @@ PRESENTATION_BACKEND_CASES = [
     ("pandas", "pandas"),
     ("polars", "polars"),
     ("polars_lazy", "polars"),
-    ("narwhals_lazy", None),
+    ("narwhals_lazy", "polars"),
     ("duckdb", "duckdb"),
 ]
 

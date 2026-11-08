@@ -1,0 +1,274 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.underloam</groupId>
+    <artifactId>xbbg-parent</artifactId>
+    <version>0.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>xbbg</artifactId>
+  <name>xbbg</name>
+  <description>Bloomberg data access for Java 8+, backed by the xbbg Rust engine (bundled natives).</description>
+
+  <properties>
+    <maven.compiler.release>8</maven.compiler.release>
+    <!-- Natives guards, switched on by the require-natives / release-natives / release profiles below. -->
+    <xbbg.hostNativesCheck.skip>true</xbbg.hostNativesCheck.skip>
+    <xbbg.releaseNativesCheck.skip>true</xbbg.releaseNativesCheck.skip>
+    <!-- -Pcoverage minimums: measured on JDK 21 with native and subscription fixture tests
+         (line 63.4%, branch 57.2%), rounded down. Raise them as coverage grows. -->
+    <xbbg.coverage.line>0.63</xbbg.coverage.line>
+    <xbbg.coverage.branch>0.57</xbbg.coverage.branch>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <resources>
+      <resource>
+        <directory>src/main/resources</directory>
+        <excludes>
+          <exclude>io/github/underloam/xbbg/xbbg.properties</exclude>
+        </excludes>
+      </resource>
+      <!-- The only filtered resource: version=${project.version}, read by Xbbg.version(). -->
+      <resource>
+        <directory>src/main/resources</directory>
+        <filtering>true</filtering>
+        <includes>
+          <include>io/github/underloam/xbbg/xbbg.properties</include>
+        </includes>
+      </resource>
+      <!-- JNI libraries are staged by scripts/stage_jvm_natives.py, never committed; a missing
+           directory is skipped (tests that need natives skip unless -Dxbbg.requireNatives=true). -->
+      <resource>
+        <directory>${xbbg.natives.dir}</directory>
+        <targetPath>io/github/underloam/xbbg/native</targetPath>
+        <excludes>
+          <exclude>**/.*</exclude>
+          <exclude>**/.*/**</exclude>
+        </excludes>
+      </resource>
+    </resources>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.github.underloam.xbbg</Automatic-Module-Name>
+              <!-- honoured by the JDK only for the main jar of `java -jar`; harmless otherwise -->
+              <Enable-Native-Access>ALL-UNNAMED</Enable-Native-Access>
+            </manifestEntries>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-enforcer-plugin</artifactId>
+        <executions>
+          <execution>
+            <!-- The published artifact has zero third-party runtime dependencies. -->
+            <id>ban-runtime-dependencies</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <rules>
+                <bannedDependencies>
+                  <excludes>
+                    <exclude>*:*:*:*:compile</exclude>
+                    <exclude>*:*:*:*:runtime</exclude>
+                    <exclude>*:*:*:*:provided</exclude>
+                    <exclude>*:*:*:*:system</exclude>
+                  </excludes>
+                  <message>io.github.underloam:xbbg must not depend on anything at runtime (test scope only).</message>
+                </bannedDependencies>
+              </rules>
+            </configuration>
+          </execution>
+          <execution>
+            <id>require-host-natives</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <skip>${xbbg.hostNativesCheck.skip}</skip>
+              <rules>
+                <requireProperty>
+                  <property>xbbg.host.platform</property>
+                  <message>-Dxbbg.requireNatives=true needs a bundled platform host (windows-x86_64, linux-x86_64, macos-aarch64).</message>
+                </requireProperty>
+                <requireFilesExist>
+                  <message>-Dxbbg.requireNatives=true: stage this host's natives first (python scripts/stage_jvm_natives.py stage) or point -Dxbbg.natives.dir at them.</message>
+                  <files>
+                    <file>${xbbg.natives.dir}/${xbbg.host.platform}/natives.properties</file>
+                    <file>${xbbg.natives.dir}/${xbbg.host.platform}/${xbbg.host.engine}</file>
+                    <file>${xbbg.natives.dir}/${xbbg.host.platform}/${xbbg.host.sdk}</file>
+                  </files>
+                </requireFilesExist>
+              </rules>
+            </configuration>
+          </execution>
+          <execution>
+            <id>require-release-natives</id>
+            <goals><goal>enforce</goal></goals>
+            <configuration>
+              <skip>${xbbg.releaseNativesCheck.skip}</skip>
+              <rules>
+                <requireFilesExist>
+                  <message>Release jars bundle every platform: stage each with scripts/stage_jvm_natives.py stage --release into ${xbbg.natives.dir}.</message>
+                  <files>
+                    <file>${xbbg.natives.dir}/windows-x86_64/natives.properties</file>
+                    <file>${xbbg.natives.dir}/windows-x86_64/xbbg_jni.dll</file>
+                    <file>${xbbg.natives.dir}/windows-x86_64/xbbg_sdk_jni.dll</file>
+                    <file>${xbbg.natives.dir}/linux-x86_64/natives.properties</file>
+                    <file>${xbbg.natives.dir}/linux-x86_64/libxbbg_jni.so</file>
+                    <file>${xbbg.natives.dir}/linux-x86_64/libxbbg_sdk_jni.so</file>
+                    <file>${xbbg.natives.dir}/macos-aarch64/natives.properties</file>
+                    <file>${xbbg.natives.dir}/macos-aarch64/libxbbg_jni.dylib</file>
+                    <file>${xbbg.natives.dir}/macos-aarch64/libxbbg_sdk_jni.dylib</file>
+                  </files>
+                </requireFilesExist>
+              </rules>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+      <plugin>
+        <!-- Release natives guard: provenance says release-jni without test-support, release=true
+             (written only by the release mode of stage_jvm_natives.py, after its release checks) and
+             portable code generation, every library matches its recorded sha256, no library
+             contains the test-support marker, and nothing else sits in the natives directory.
+             Runs after the enforcer's file checks. -->
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-antrun-plugin</artifactId>
+        <executions>
+          <execution>
+            <id>check-release-natives</id>
+            <phase>initialize</phase>
+            <goals><goal>run</goal></goals>
+            <configuration>
+              <skip>${xbbg.releaseNativesCheck.skip}</skip>
+              <target>
+                <macrodef name="xbbg-check-library">
+                  <attribute name="platform"/>
+                  <attribute name="file"/>
+                  <sequential>
+                    <local name="xbbg.sha256.ok"/>
+                    <checksum file="${xbbg.natives.dir}/@{platform}/@{file}" algorithm="SHA-256"
+                              property="${@{platform}.@{file}.sha256}" verifyproperty="xbbg.sha256.ok"/>
+                    <fail message="@{platform}/@{file} does not match the sha256 in its natives.properties">
+                      <condition><isfalse value="${xbbg.sha256.ok}"/></condition>
+                    </fail>
+                    <fail message="@{platform}/@{file} is a test-support build (contains NativeTestSupport)">
+                      <condition>
+                        <resourcecontains resource="${xbbg.natives.dir}/@{platform}/@{file}" substring="NativeTestSupport"/>
+                      </condition>
+                    </fail>
+                  </sequential>
+                </macrodef>
+                <macrodef name="xbbg-check-platform">
+                  <attribute name="platform"/>
+                  <attribute name="engine"/>
+                  <attribute name="sdk"/>
+                  <sequential>
+                    <property file="${xbbg.natives.dir}/@{platform}/natives.properties" prefix="@{platform}"/>
+                    <fail message="@{platform}: release natives need profile=release-jni (stage --release), found ${@{platform}.profile}">
+                      <condition><not><equals arg1="${@{platform}.profile}" arg2="release-jni"/></not></condition>
+                    </fail>
+                    <fail message="@{platform}: natives were not staged with stage --release (release=${@{platform}.release})">
+                      <condition><not><equals arg1="${@{platform}.release}" arg2="true"/></not></condition>
+                    </fail>
+                    <fail message="@{platform}: release natives need portable code generation (portable=${@{platform}.portable})">
+                      <condition><not><equals arg1="${@{platform}.portable}" arg2="true"/></not></condition>
+                    </fail>
+                    <fail message="@{platform}: test-support natives cannot be released (testSupport=${@{platform}.testSupport})">
+                      <condition><not><equals arg1="${@{platform}.testSupport}" arg2="false"/></not></condition>
+                    </fail>
+                    <fail message="@{platform}: natives.properties records no abi">
+                      <condition><not><isset property="@{platform}.abi"/></not></condition>
+                    </fail>
+                    <xbbg-check-library platform="@{platform}" file="@{engine}"/>
+                    <xbbg-check-library platform="@{platform}" file="@{sdk}"/>
+                  </sequential>
+                </macrodef>
+                <xbbg-check-platform platform="windows-x86_64" engine="xbbg_jni.dll" sdk="xbbg_sdk_jni.dll"/>
+                <xbbg-check-platform platform="linux-x86_64" engine="libxbbg_jni.so" sdk="libxbbg_sdk_jni.so"/>
+                <xbbg-check-platform platform="macos-aarch64" engine="libxbbg_jni.dylib" sdk="libxbbg_sdk_jni.dylib"/>
+                <resourcecount property="xbbg.natives.files">
+                  <fileset dir="${xbbg.natives.dir}" defaultexcludes="false"/>
+                </resourcecount>
+                <fail message="${xbbg.natives.dir} must hold exactly the 9 staged files (3 platforms x 2 libraries + natives.properties), found ${xbbg.natives.files}">
+                  <condition><not><equals arg1="${xbbg.natives.files}" arg2="9"/></not></condition>
+                </fail>
+              </target>
+            </configuration>
+          </execution>
+        </executions>
+      </plugin>
+    </plugins>
+  </build>
+
+  <profiles>
+    <profile>
+      <id>host-windows-x86_64</id>
+      <activation><os><family>windows</family><arch>amd64</arch></os></activation>
+      <properties>
+        <xbbg.host.platform>windows-x86_64</xbbg.host.platform>
+        <xbbg.host.engine>xbbg_jni.dll</xbbg.host.engine>
+        <xbbg.host.sdk>xbbg_sdk_jni.dll</xbbg.host.sdk>
+      </properties>
+    </profile>
+    <profile>
+      <id>host-linux-x86_64</id>
+      <activation><os><name>linux</name><arch>amd64</arch></os></activation>
+      <properties>
+        <xbbg.host.platform>linux-x86_64</xbbg.host.platform>
+        <xbbg.host.engine>libxbbg_jni.so</xbbg.host.engine>
+        <xbbg.host.sdk>libxbbg_sdk_jni.so</xbbg.host.sdk>
+      </properties>
+    </profile>
+    <profile>
+      <id>host-macos-aarch64</id>
+      <activation><os><family>mac</family><arch>aarch64</arch></os></activation>
+      <properties>
+        <xbbg.host.platform>macos-aarch64</xbbg.host.platform>
+        <xbbg.host.engine>libxbbg_jni.dylib</xbbg.host.engine>
+        <xbbg.host.sdk>libxbbg_sdk_jni.dylib</xbbg.host.sdk>
+      </properties>
+    </profile>
+    <!-- -Dxbbg.requireNatives=true: fail early when this host's natives are not staged. -->
+    <profile>
+      <id>require-natives</id>
+      <activation><property><name>xbbg.requireNatives</name><value>true</value></property></activation>
+      <properties>
+        <xbbg.hostNativesCheck.skip>false</xbbg.hostNativesCheck.skip>
+      </properties>
+    </profile>
+    <!-- -Dxbbg.releaseNatives=true: the jar must carry complete release natives (CI jar assembly). -->
+    <profile>
+      <id>release-natives</id>
+      <activation><property><name>xbbg.releaseNatives</name><value>true</value></property></activation>
+      <properties>
+        <xbbg.releaseNativesCheck.skip>false</xbbg.releaseNativesCheck.skip>
+      </properties>
+    </profile>
+    <!-- -Prelease implies the release natives guard. -->
+    <profile>
+      <id>release</id>
+      <properties>
+        <xbbg.releaseNativesCheck.skip>false</xbbg.releaseNativesCheck.skip>
+      </properties>
+    </profile>
+  </profiles>
+</project>

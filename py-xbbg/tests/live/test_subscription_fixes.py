@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from datetime import UTC, datetime
 import sys
 
@@ -203,71 +204,33 @@ async def test_tick_mode_timestamp_timezone_issue_273():
 
 
 async def test_error_propagation():
-    """Test Fix #2: Error propagation for invalid subscriptions.
+    """Test Fix #2: an invalid subscription fails the consumer with BlpRequestError.
 
-    Subscribe to an invalid security and verify the error is propagated
-    to the Python consumer as an exception (not silently swallowed).
+    Bloomberg answers an unknown security with a subscription failure within about a
+    second. The read is bounded, so a failure that never reaches Python fails the test
+    instead of hanging the suite, and the engine and log level are restored either way.
     """
-    from xbbg._core import PyEngine, set_log_level
+    from xbbg._core import BlpRequestError, PyEngine, get_log_level, set_log_level
 
+    previous_level = get_log_level()
     set_log_level("warn")
-
     engine = PyEngine()
-
-    print(f"\n{'=' * 60}")
-    print("TEST: Error propagation (Fix #2)")
-    print(f"{'=' * 60}")
-
-    # Mix valid and invalid tickers
-    sub = await engine.subscribe(
-        ["TOTALLY_INVALID_TICKER_XYZ Equity"],
-        ["LAST_PRICE"],
-    )
-
-    print(f"Subscription created (is_active={sub.is_active})")
-
-    got_error = False
-    got_data = False
-    batch_count = 0
-
     try:
-        async for batch in sub:
-            batch_count += 1
-            rows = assert_arrow_record_batch(batch)
-            got_data = got_data or bool(rows)
-            print(f"  Got data batch: {batch.num_rows} rows")
-            if batch_count >= 3:
-                break
-    except StopAsyncIteration:
-        print("  Stream ended (StopAsyncIteration)")
-    except Exception as e:
-        got_error = True
-        print(f"  Got error: {type(e).__name__}: {e}")
-
-    # Give a moment for Bloomberg to send failure
-    if not got_error and not got_data:
+        sub = await engine.subscribe(["TOTALLY_INVALID_TICKER_XYZ Equity"], ["LAST_PRICE"])
         try:
-            batch = await asyncio.wait_for(sub.__anext__(), timeout=10.0)
-            rows = assert_arrow_record_batch(batch)
-            got_data = got_data or bool(rows)
-        except StopAsyncIteration:
-            print("  Stream ended after wait")
-        except TimeoutError:
-            print("  Timed out waiting for response (no error, no data)")
-        except Exception as e:
-            got_error = True
-            print(f"  Got error after wait: {type(e).__name__}: {e}")
-
-    try:
-        await sub.unsubscribe()
-    except Exception:
-        pass
-
-    if got_error:
-        print("PASSED: Error was propagated to consumer\n")
-    else:
-        print("NOTE: No error received (Bloomberg may have returned empty data or timed out)")
-        print("      This is expected if Bloomberg handles unknown tickers gracefully.\n")
+            try:
+                batch = await asyncio.wait_for(sub.__anext__(), timeout=30.0)
+            except BlpRequestError as exc:
+                assert "Invalid Security" in str(exc), f"Unexpected subscription failure: {exc}"
+            else:
+                raise AssertionError(f"Invalid security produced data instead of an error: {batch.num_rows} rows")
+        finally:
+            with contextlib.suppress(Exception):
+                await asyncio.wait_for(sub.unsubscribe(), timeout=5.0)
+    finally:
+        engine.signal_shutdown()
+        set_log_level(previous_level)
+    print("PASSED: subscription failure reached the consumer as BlpRequestError\n")
 
 
 async def test_schema_types():

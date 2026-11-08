@@ -164,7 +164,7 @@ async def abta(
         df = await xbbg.abta(["AAPL US Equity", "MSFT US Equity"], "rsi")
     """
     ticker_list = _request_options._normalize_tickers(tickers)
-    engine = _engine._get_engine()
+    engine = await _engine._aget_engine()
 
     async def fetch_single(ticker: str) -> Any | Exception:
         """Fetch TA data for a single ticker."""
@@ -242,7 +242,8 @@ def ta_study_params(study: str) -> dict[str, Any]:
         {'period': 20, 'upperBand': 2.0, 'lowerBand': 2.0, 'priceSourceClose': 'PX_LAST'}
     """
     attr_name = _get_study_attr_name(study)
-    return TA_DEFAULTS.get(attr_name, {})
+    # Copy so callers cannot mutate the defaults merged into later requests.
+    return dict(TA_DEFAULTS.get(attr_name, {}))
 
 
 def generate_ta_stubs(output_dir: str | None = None) -> str:

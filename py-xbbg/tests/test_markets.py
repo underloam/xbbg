@@ -8,6 +8,13 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime
+import json
+import os
+from pathlib import Path
+import subprocess
+import sys
+import textwrap
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec
 
@@ -76,6 +83,7 @@ def engine_seam(monkeypatch):
     return engine, get_engine
 
 
+@pytest.mark.thread_unsafe(reason="exchange overrides are process-wide")
 class TestNativeOverrides:
     def test_public_set_is_visible_directly_in_core(self):
         set_exchange_override(
@@ -216,6 +224,26 @@ class TestNativeOverrides:
         with ThreadPoolExecutor(max_workers=4) as pool:
             assert list(pool.map(set_and_read, range(12))) == [DAY] * 12
         assert len(list_exchange_overrides()) == 12
+
+    def test_concurrent_set_get_list_ends_with_union(self):
+        workers = 16
+        barrier = threading.Barrier(workers)
+        tickers = [f"SYN{index} US Equity" for index in range(workers)]
+
+        def set_get_list(ticker):
+            barrier.wait(timeout=30)
+            _core.ext_set_exchange_override(ticker, timezone="UTC", day=DAY)
+            seen = _core.ext_get_exchange_override(ticker)
+            listed = _core.ext_list_exchange_overrides()
+            _core.ext_set_exchange_override(ticker, mic="XNYS")
+            return seen["day"], ticker in listed
+
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            assert list(pool.map(set_get_list, tickers)) == [(DAY, True)] * workers
+
+        final = _core.ext_list_exchange_overrides()
+        assert set(final) == set(tickers)
+        assert {(info["mic"], info["timezone"], info["day"]) for info in final.values()} == {("XNYS", "UTC", DAY)}
 
 
 class TestExchangeAdapters:
@@ -394,6 +422,55 @@ class TestNativeSessions:
     @pytest.mark.parametrize("country, expected", [(" us ", "America/New_York"), ("JP", "Asia/Tokyo"), ("ZZ", None)])
     def test_country_timezone_lookup_is_native(self, country, expected):
         assert _core.ext_infer_timezone(country) == expected
+
+    def test_cold_concurrent_rule_access_in_fresh_process(self):
+        script = textwrap.dedent(
+            """
+            import json
+            import threading
+
+            workers = 24
+            barrier = threading.Barrier(workers)
+            results = [None] * workers
+            errors = []
+
+            def read_rules(index):
+                try:
+                    barrier.wait(timeout=60)
+                    from xbbg import _core
+
+                    results[index] = [
+                        _core.ext_get_market_rule("XNYS", None),
+                        _core.ext_get_market_rule(None, "US"),
+                        sorted(_core.ext_derive_sessions("09:00", "15:00", "XTKS", None).items()),
+                        _core.ext_infer_timezone("JP"),
+                    ]
+                except BaseException as exc:
+                    errors.append(repr(exc))
+
+            threads = [threading.Thread(target=read_rules, args=(index,)) for index in range(workers)]
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            print(json.dumps({"errors": errors, "results": results}))
+            """
+        )
+        env = {**os.environ, "PYTHONPATH": str(Path(_engine.__file__).resolve().parents[1])}
+        completed = subprocess.run(
+            [sys.executable, "-c", script], capture_output=True, text=True, env=env, timeout=120, check=False
+        )
+
+        assert completed.returncode == 0, completed.stdout + completed.stderr
+        payload = json.loads(completed.stdout.splitlines()[-1])
+        assert payload["errors"] == []
+        first = payload["results"][0]
+        assert all(result == first for result in payload["results"])
+        nyse, us_fallback, tokyo, japan_tz = first
+        assert (nyse["pre_minutes"], nyse["post_minutes"]) == (330, 240)
+        assert us_fallback == nyse
+        assert dict(tokyo)["day"] == ["09:00", "15:30"]
+        assert japan_tz == "Asia/Tokyo"
 
 
 class TestNativeTimeConversion:

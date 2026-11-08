@@ -27,6 +27,9 @@ async def aconvert_ccy(
     propagate instead of returning mixed-currency data. Non-numeric strings
     remain unchanged. Results use the configured backend, or ``backend=``.
     """
+    # Unwrap Narwhals results (the default xbbg output) so Arrow-backed frames take
+    # the zero-copy path below; Narwhals warns when its own frames reach is_pandas_dataframe.
+    data = nw.to_native(data, pass_through=True)
     if is_pandas_dataframe(data) or (
         not hasattr(data, "__arrow_c_stream__") and not hasattr(data, "__arrow_c_array__")
     ):
@@ -37,7 +40,9 @@ async def aconvert_ccy(
             from xbbg._core import ArrowTable
 
             data = (
-                ArrowTable.from_pylist(frame.iter_rows(named=True)) if len(frame) else ArrowTable.empty(frame.columns)
+                ArrowTable.from_pydict({name: frame.get_column(name).to_list() for name in frame.columns})
+                if len(frame)
+                else ArrowTable.empty(frame.columns)
             )
     return await _call_native_recipe(
         "recipe_adjust_ccy",

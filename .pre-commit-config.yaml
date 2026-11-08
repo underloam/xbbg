@@ -4,12 +4,14 @@ repos:
     rev: v6.0.0
     hooks:
       - id: end-of-file-fixer
-        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|java-xbbg/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
       - id: trailing-whitespace
-        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|java-xbbg/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
       - id: mixed-line-ending
         args: [--fix=lf]
-        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
+        files: ^(py-xbbg/|py-xbbg-langgraph/|js-xbbg/|js-xbbg-langgraph/|java-xbbg/|crates/|bindings/|apps/|scripts/|\.github/|pyproject\.toml|Cargo\.toml|README\.md|\.pre-commit-config\.yaml)
+        # Windows command scripts keep CRLF (.gitattributes).
+        exclude: \.(cmd|bat)$
 
   # Local hooks — tools provided by the pixi environment
   - repo: local
@@ -122,6 +124,14 @@ repos:
         entry: npm --prefix js-xbbg-langgraph run lint:imports
         language: system
         files: ^js-xbbg-langgraph/
+        pass_filenames: false
+
+      # mvnw reads its wrapper settings next to the script, so it runs from the repo root.
+      - id: java-format-check
+        name: java-format-check
+        entry: java-xbbg/mvnw -q -f java-xbbg/pom.xml spotless:check
+        language: system
+        files: ^java-xbbg/
         pass_filenames: false
 
       - id: cargo-fmt

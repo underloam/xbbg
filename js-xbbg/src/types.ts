@@ -156,6 +156,11 @@ export interface EngineConfig {
    * major release.
    */
   keyColumn?: KeyColumn;
+  /**
+   * Maximum number of already-queued updates combined into one subscription read
+   * batch. Default 16. Reads never wait for a batch to fill: a quiet stream still
+   * gets one-row batches. `StreamOptions.flushThreshold` overrides it per stream.
+   */
   subscriptionFlushThreshold?: number;
   maxEventQueueSize?: number;
   commandQueueSize?: number;
@@ -414,6 +419,11 @@ export interface StreamOptions {
   delivery?: SubscriptionDeliveryMode;
   options?: readonly string[];
   conflate?: boolean;
+  /**
+   * Maximum number of already-queued updates (or dirty state topics) combined into
+   * one read batch. Default: the engine's `subscriptionFlushThreshold` (16). Reads
+   * never wait for a batch to fill.
+   */
   flushThreshold?: number;
   overflowPolicy?: OverflowPolicy;
   streamCapacity?: number;

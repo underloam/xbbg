@@ -53,6 +53,10 @@ class RequestContext:
     table: Any | None = None
     frame: DataFrameResult | None = None
     error: Exception | None = None
+    # Typed endpoints (bdp, bdh) set the Arrow type for fields without Bloomberg
+    # metadata; the request terminal then resolves ``params.field_types`` just before
+    # dispatch, so a middleware that answers the request never needs an engine.
+    field_type_default: str | None = None
 
     def to_dispatch_dict(self) -> dict[str, Any]:
         """Materialize the current request state immediately before engine dispatch."""
@@ -104,11 +108,15 @@ async def run_request_middleware(
     context: RequestContext,
     terminal: RequestHandler,
 ) -> DataFrameResult:
+    # One snapshot per request: middleware added or removed while this request
+    # runs only affects later requests.
+    chain = tuple(_request_middleware)
+
     async def invoke(index: int, current_context: RequestContext) -> DataFrameResult:
-        if index >= len(_request_middleware):
+        if index >= len(chain):
             return await terminal(current_context)
 
-        middleware = _request_middleware[index]
+        middleware = chain[index]
 
         async def call_next(next_context: RequestContext) -> DataFrameResult:
             return await invoke(index + 1, next_context)

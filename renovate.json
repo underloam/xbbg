@@ -2,7 +2,7 @@
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": ["config:recommended", ":dependencyDashboard"],
   "labels": ["dependencies"],
-  "enabledManagers": ["npm", "github-actions", "cargo", "pep621", "pixi", "pre-commit", "dockerfile"],
+  "enabledManagers": ["npm", "github-actions", "cargo", "pep621", "pixi", "pre-commit", "dockerfile", "maven", "maven-wrapper", "gradle", "gradle-wrapper"],
   "rangeStrategy": "update-lockfile",
   "lockFileMaintenance": {
     "enabled": true,
@@ -50,6 +50,29 @@
       "groupName": "rust crates"
     },
     {
+      "description": "uv publishes its crates as exact 0.0.x pins with no semver promise, rattler crates are pinned exactly and depend on each other's exact versions, and xbbg-sdk passes rattler's authentication middleware into uv's client, so both share astral-reqwest-middleware (and astral-reqwest-retry, renamed reqwest-middleware/reqwest-retry in Cargo.toml). Move them all in one PR: a split update does not compile.",
+      "matchManagers": ["cargo"],
+      "matchPackageNames": ["/^uv-/", "/^rattler/", "/^astral-reqwest-/", "reqwest-middleware", "reqwest-retry"],
+      "groupName": "uv and rattler crates"
+    },
+    {
+      "description": "Group Java build tooling: Maven and Gradle wrappers, Maven plugins, Gradle plugins and test libraries (java-xbbg).",
+      "matchManagers": ["maven", "maven-wrapper", "gradle", "gradle-wrapper"],
+      "groupName": "java build tooling"
+    },
+    {
+      "description": "Arrow Java is an optional dependency of io.github.underloam:xbbg-jdk17: keep its updates apart from build tooling.",
+      "matchManagers": ["maven"],
+      "matchPackageNames": ["/^org\\.apache\\.arrow:/"],
+      "groupName": "java runtime dependencies"
+    },
+    {
+      "description": "The xbbg artifacts are this repository's own: their versions are stamped at publish time, and the consumer smoke projects must keep testing the locally built jar.",
+      "matchManagers": ["maven", "gradle"],
+      "matchPackageNames": ["/^io\\.github\\.underloam:/"],
+      "enabled": false
+    },
+    {
       "description": "Group Python, PEP 621, and Pixi updates.",
       "matchManagers": ["pep621", "pixi"],
       "groupName": "python and pixi dependencies"
@@ -66,7 +89,7 @@
       "enabled": false
     },
     {
-      "description": "Pixi pins that encode support contracts: python mirrors requires-python and the per-version test environments, rust tracks the workspace rust-version (MSRV), libclang is the bindgen floor, and nodejs mirrors engines. Lock-file maintenance still refreshes them within range.",
+      "description": "Pixi pins that encode support contracts: python matches the tested CPython range (the requires-python floor up to the newest wheel-matrix version, a ceiling requires-python deliberately omits) and the per-version test environments, rust tracks the workspace rust-version (MSRV), libclang is the bindgen floor, and nodejs mirrors engines. Lock-file maintenance still refreshes them within range.",
       "matchManagers": ["pixi"],
       "matchPackageNames": ["python", "rust", "libclang", "nodejs"],
       "enabled": false

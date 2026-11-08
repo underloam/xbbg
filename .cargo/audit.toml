@@ -1,6 +1,14 @@
 # cargo-audit configuration (used by the CI Audit job)
 # https://github.com/rustsec/rustsec/tree/main/cargo-audit#configuration
+#
+# cargo-audit fails on vulnerabilities and only warns on unmaintained crates; deny.toml
+# [advisories] carries the full policy, with a reason for every ignored advisory.
 
 [advisories]
-# Previous pyo3 advisory ignores were retired after the graph moved to pyo3 0.29.
-ignore = []
+ignore = [
+    # rsa Marvin timing side channel (no fixed release), reached through
+    # uv-client -> uv-auth -> reqsign in the Bloomberg runtime downloader (crates/xbbg-sdk).
+    # xbbg-sdk disables uv-auth (AuthIntegration::NoAuthMiddleware) and never signs or decrypts
+    # with RSA. Same entry, with its reason, in deny.toml.
+    "RUSTSEC-2023-0071",
+]

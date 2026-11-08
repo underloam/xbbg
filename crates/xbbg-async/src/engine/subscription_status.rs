@@ -252,6 +252,9 @@ type SubscriptionStatusObserver = dyn Fn(
 #[derive(Default)]
 pub struct SubscriptionStatusHandle {
     snapshot: ArcSwap<SubscriptionStatusState>,
+    /// Count of published snapshots, advanced after each store and before the
+    /// publishing call returns.
+    revision: std::sync::atomic::AtomicU64,
     mutation_lock: ParkingMutex<()>,
     observer: Option<Arc<SubscriptionStatusObserver>>,
     pending_warnings: std::sync::atomic::AtomicUsize,
@@ -266,6 +269,7 @@ impl SubscriptionStatusHandle {
         let pending_warnings = initial.warnings.len();
         Self {
             snapshot: ArcSwap::from_pointee(initial),
+            revision: std::sync::atomic::AtomicU64::new(0),
             mutation_lock: ParkingMutex::new(()),
             observer: None,
             pending_warnings: std::sync::atomic::AtomicUsize::new(pending_warnings),
@@ -304,9 +308,24 @@ impl SubscriptionStatusHandle {
         self.snapshot.load()
     }
 
+    /// Number of snapshots published so far.
+    ///
+    /// A value derived from a snapshot stays current while this count is
+    /// unchanged. Read the count before [`Self::load`], so the loaded snapshot
+    /// is at least as new as the count it is cached with.
+    pub(crate) fn revision(&self) -> u64 {
+        self.revision.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn advance_revision(&self) {
+        self.revision
+            .fetch_add(1, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn store(&self, next: Arc<SubscriptionStatusState>) {
         let _guard = self.mutation_lock.lock();
         let previous = self.snapshot.swap(next.clone());
+        self.advance_revision();
         self.pending_warnings
             .store(next.warnings.len(), std::sync::atomic::Ordering::Release);
         let count = next.event_sequence.wrapping_sub(previous.event_sequence) as usize;
@@ -353,6 +372,7 @@ impl SubscriptionStatusHandle {
         let warnings = next.take_warnings();
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
+        self.advance_revision();
         self.pending_warnings
             .store(0, std::sync::atomic::Ordering::Release);
         self.notify_observer(&current, &next, SubscriptionStatusScope::Global, &[]);
@@ -383,6 +403,7 @@ impl SubscriptionStatusHandle {
         let events = next.observer_events.take().unwrap_or_default();
         let next = Arc::new(next);
         self.snapshot.store(next.clone());
+        self.advance_revision();
         self.pending_warnings
             .store(next.warnings.len(), std::sync::atomic::Ordering::Release);
         self.notify_observer(&current, &next, scope, &events);

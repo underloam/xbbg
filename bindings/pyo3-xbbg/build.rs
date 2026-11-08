@@ -2,6 +2,9 @@
 mod build_provenance;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `#[cfg(Py_3_13)]` and friends for the target interpreter, with their
+    // `rustc-check-cfg` declarations.
+    pyo3_build_config::use_pyo3_cfgs();
     build_provenance::emit()?;
     // setup.py exports the setuptools-scm version of the distribution being built.
     // Plain Cargo builds (tests, stub generation) report the crate version instead.

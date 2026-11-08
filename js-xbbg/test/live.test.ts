@@ -205,6 +205,14 @@ function maybeSkipEntitlement(t: any, err: any): boolean {
     'Channel closed',
     'Timed out',
     'Problem accessing the saved search',
+    // Saved screens and search domains that this login does not have. Mirrors the
+    // Python live suite's skip_if_screen_unavailable / skip_if_bsrch_unavailable.
+    'Cannot find screen',
+    'SCREEN_NOT_FOUND',
+    'Failed to build query',
+    'empty criteriaArray',
+    'NOT_ENTITLED',
+    'blocked from accessing serviceCode=BEQS',
   ];
   if (markers.some((marker) => message.includes(marker))) {
     t.skip(`Entitlement/unavailable: ${message}`);

@@ -1,0 +1,107 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 https://maven.apache.org/xsd/maven-4.0.0.xsd">
+  <modelVersion>4.0.0</modelVersion>
+  <parent>
+    <groupId>io.github.underloam</groupId>
+    <artifactId>xbbg-parent</artifactId>
+    <version>0.0.0-SNAPSHOT</version>
+  </parent>
+
+  <artifactId>xbbg-jdk17</artifactId>
+  <name>xbbg-jdk17</name>
+  <description>Java 17+ add-on for xbbg: sealed/record events, Flow publishers, Arrow interop.</description>
+
+  <properties>
+    <maven.compiler.release>17</maven.compiler.release>
+    <!-- with -Dtest.jdk=1.8/11 this module's tests still need a 17+ toolchain -->
+    <surefire.jdk>[17,)</surefire.jdk>
+    <!-- Reactive Streams TCK (TestNG) runs on the JUnit Platform through the TestNG engine -->
+    <reactive-streams.version>1.0.4</reactive-streams.version>
+    <testng-engine.version>1.0.6</testng-engine.version>
+    <!-- -Pcoverage minimums: measured on JDK 21 (line 88.1%, branch 86.4%), rounded down. -->
+    <xbbg.coverage.line>0.88</xbbg.coverage.line>
+    <xbbg.coverage.branch>0.86</xbbg.coverage.branch>
+  </properties>
+
+  <dependencies>
+    <dependency>
+      <groupId>io.github.underloam</groupId>
+      <artifactId>xbbg</artifactId>
+    </dependency>
+    <!-- Arrow Java interop (ArrowBackends, ArrowTables) is opt-in: add arrow-vector and an
+         allocator (arrow-memory-unsafe or arrow-memory-netty) to use it. -->
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-vector</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.apache.arrow</groupId>
+      <artifactId>arrow-memory-unsafe</artifactId>
+      <optional>true</optional>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.jupiter</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <!-- annotation types on Arrow's classes, so compiling the tests against them is warning-free -->
+    <dependency>
+      <groupId>org.checkerframework</groupId>
+      <artifactId>checker-qual</artifactId>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.reactivestreams</groupId>
+      <artifactId>reactive-streams-tck-flow</artifactId>
+      <version>${reactive-streams.version}</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.junit.support</groupId>
+      <artifactId>testng-engine</artifactId>
+      <version>${testng-engine.version}</version>
+      <scope>test</scope>
+      <exclusions>
+        <!-- keep junit-jupiter's platform and the TCK's TestNG instead of the engine's older pins -->
+        <exclusion>
+          <groupId>org.junit.platform</groupId>
+          <artifactId>junit-platform-engine</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>org.testng</groupId>
+          <artifactId>testng</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+  </dependencies>
+
+  <build>
+    <plugins>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-surefire-plugin</artifactId>
+        <configuration>
+          <argLine>@{argLine} ${xbbg.nativeAccessArgs} ${xbbg.arrowJvmArgs}</argLine>
+        </configuration>
+      </plugin>
+      <plugin>
+        <groupId>org.apache.maven.plugins</groupId>
+        <artifactId>maven-jar-plugin</artifactId>
+        <configuration>
+          <archive>
+            <manifestEntries>
+              <Automatic-Module-Name>io.github.underloam.xbbg.jdk17</Automatic-Module-Name>
+            </manifestEntries>
+            <manifest>
+              <addDefaultImplementationEntries>true</addDefaultImplementationEntries>
+            </manifest>
+          </archive>
+        </configuration>
+      </plugin>
+    </plugins>
+  </build>
+
+</project>

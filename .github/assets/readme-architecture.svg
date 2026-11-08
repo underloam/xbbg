@@ -1,0 +1,96 @@
+<svg width="720" height="424" viewBox="0 0 720 424" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="title desc">
+  <title id="title">xbbg architecture</title>
+  <desc id="desc">Four application surfaces backed by one shared Rust and Arrow engine over the Bloomberg C++ SDK.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="720" y2="424" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#173f38"/>
+      <stop offset="0.58" stop-color="#15302b"/>
+      <stop offset="1" stop-color="#1b1a1f"/>
+    </linearGradient>
+    <clipPath id="frame">
+      <rect width="720" height="424" rx="22"/>
+    </clipPath>
+  </defs>
+  <rect width="720" height="424" rx="22" fill="url(#bg)"/>
+  <g clip-path="url(#frame)">
+    <text x="-8" y="418" font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif" font-size="200" font-weight="800" fill="#ffffff" opacity="0.025">xbbgxbbgxbbgxbbg</text>
+  </g>
+  <rect x="0.5" y="0.5" width="719" height="423" rx="21.5" stroke="#ffffff" stroke-opacity="0.12"/>
+  <g font-family="Inter, -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif">
+    <text x="24" y="32" font-size="13" font-weight="800" fill="#5eead4" letter-spacing="1.2">1. APPLICATION SURFACES</text>
+    <text x="696" y="32" font-size="12" fill="#b5cac3" text-anchor="end">One request model across Python, Node.js, Java &amp; MCP</text>
+    <g transform="translate(24 48)">
+      <rect width="332" height="46" rx="10" fill="#102521" stroke="#5eead4" stroke-opacity="0.38"/>
+      <text x="14" y="20" font-size="15" font-weight="800" fill="#ffffff">Python · xbbg</text>
+      <text x="14" y="37" font-size="12" fill="#b5cac3">Sync &amp; async · Narwhals, PyArrow, pandas, Polars, DuckDB</text>
+    </g>
+    <g transform="translate(364 48)">
+      <rect width="332" height="46" rx="10" fill="#102521" stroke="#5eead4" stroke-opacity="0.38"/>
+      <text x="14" y="20" font-size="15" font-weight="800" fill="#ffffff">TypeScript · @xbbg/core</text>
+      <text x="14" y="37" font-size="12" fill="#b5cac3">Native N-API addon · Apache Arrow tables &amp; JSON rows</text>
+    </g>
+    <g transform="translate(24 102)">
+      <rect width="332" height="46" rx="10" fill="#102521" stroke="#5eead4" stroke-opacity="0.38"/>
+      <text x="14" y="20" font-size="15" font-weight="800" fill="#ffffff">Java · io.github.underloam:xbbg</text>
+      <text x="14" y="37" font-size="12" fill="#b5cac3">JNI (Java 8+) &amp; xbbg-jdk17 (Flow, Arrow Java)</text>
+    </g>
+    <g transform="translate(364 102)">
+      <rect width="332" height="46" rx="10" fill="#102521" stroke="#5eead4" stroke-opacity="0.38"/>
+      <text x="14" y="20" font-size="15" font-weight="800" fill="#ffffff">Agents · xbbg-mcp &amp; langgraph</text>
+      <text x="14" y="37" font-size="12" fill="#b5cac3">Standalone MCP server &amp; LangChain / LangGraph tools</text>
+    </g>
+    <!-- Arrow down: surfaces -> engine -->
+    <path d="M190 150 V164 H530 V150 M360 164 V176" stroke="#5eead4" stroke-opacity="0.65" stroke-width="2" stroke-linecap="round"/>
+    <path d="M355 172 L360 179 L365 172" stroke="#5eead4" stroke-opacity="0.9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Tier 2: Shared Rust Engine -->
+    <rect x="24" y="182" width="672" height="136" rx="14" fill="#102521" stroke="#5eead4" stroke-opacity="0.55" stroke-width="1.5"/>
+    <text x="40" y="205" font-size="15.5" font-weight="800" fill="#ffffff">2. Shared Rust Engine</text>
+    <text x="680" y="205" font-family="'JetBrains Mono', 'Geist Mono', ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" font-weight="700" fill="#5eead4" text-anchor="end">xbbg-core · xbbg-async · xbbg-ext · xbbg-recipes</text>
+    <g transform="translate(40 216)">
+      <rect width="316" height="42" rx="8" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="12" y="18" font-size="13.5" font-weight="700" fill="#5eead4">Request execution &amp; sharding</text>
+      <text x="12" y="34" font-size="11.5" fill="#b5cac3">BDP · BDH · BDS · BDIB · BDTICK · BQL · BEQS · BSRCH</text>
+    </g>
+    <g transform="translate(364 216)">
+      <rect width="316" height="42" rx="8" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="12" y="18" font-size="13.5" font-weight="700" fill="#5eead4">Session &amp; worker pools</text>
+      <text x="12" y="34" font-size="11.5" fill="#b5cac3">Round-robin workers · shared &amp; isolated feeds</text>
+    </g>
+    <g transform="translate(40 264)">
+      <rect width="316" height="42" rx="8" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="12" y="18" font-size="13.5" font-weight="700" fill="#5eead4">Field cache, validation &amp; recipes</text>
+      <text x="12" y="34" font-size="11.5" fill="#b5cac3">Futures · CDX · ETFs · fixed income · auctions</text>
+    </g>
+    <g transform="translate(364 264)">
+      <rect width="316" height="42" rx="8" fill="#ffffff" fill-opacity="0.05" stroke="#ffffff" stroke-opacity="0.10"/>
+      <text x="12" y="18" font-size="13.5" font-weight="700" fill="#5eead4">Arrow C Data Interface</text>
+      <text x="12" y="34" font-size="11.5" fill="#b5cac3">Columnar batches projected once at the API edge</text>
+    </g>
+
+    <!-- Arrow down: engine -> SDK -->
+    <path d="M360 318 V336" stroke="#5eead4" stroke-opacity="0.65" stroke-width="2" stroke-linecap="round"/>
+    <path d="M355 332 L360 339 L365 332" stroke="#5eead4" stroke-opacity="0.9" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <!-- Tier 3: Bloomberg C++ SDK -->
+    <rect x="24" y="342" width="672" height="68" rx="14" fill="#102521" stroke="#ffffff" stroke-opacity="0.20"/>
+    <text x="40" y="364" font-size="15" font-weight="800" fill="#ffffff">3. Bloomberg C / C++ SDK (blpapi)</text>
+    <text x="680" y="364" font-size="12" fill="#b5cac3" text-anchor="end">Loaded at runtime via blpapi-sys · Auth &amp; entitlements</text>
+    <g transform="translate(40 374)">
+      <rect width="154" height="28" rx="7" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="77" y="18.5" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">Desktop (DAPI)</text>
+    </g>
+    <g transform="translate(202 374)">
+      <rect width="154" height="28" rx="7" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="77" y="18.5" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">B-PIPE / SAPI</text>
+    </g>
+    <g transform="translate(364 374)">
+      <rect width="154" height="28" rx="7" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="77" y="18.5" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">ZFP Leased Line</text>
+    </g>
+    <g transform="translate(526 374)">
+      <rect width="154" height="28" rx="7" fill="#ffffff" fill-opacity="0.06" stroke="#ffffff" stroke-opacity="0.12"/>
+      <text x="77" y="18.5" font-size="12.5" font-weight="700" fill="#ffffff" text-anchor="middle">TLS · SOCKS5 · Failover</text>
+    </g>
+  </g>
+</svg>

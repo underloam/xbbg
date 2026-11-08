@@ -7,13 +7,14 @@ use arrow_array::ArrayRef;
 use arrow_array::RecordBatch;
 use arrow_schema::{Field, Schema};
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use tokio::sync::oneshot;
 use xbbg_log::trace;
 
 use super::typed_builder::{ArrowType, TypedBuilder};
 use super::value_utils::{
-    ResponseMetadata, arrow_type_for_element, should_emit_scalar_field, top_level_response_error,
+    ResponseMetadata, arrow_type_for_element, find_children, should_emit_scalar_field,
+    top_level_response_error,
 };
 use xbbg_core::{BlpError, Element, Message, Name};
 
@@ -24,6 +25,23 @@ const CORE_TICK_FIELDS: [(&str, ArrowType); 4] = [
     ("value", ArrowType::Float64),
     ("size", ArrowType::Int64),
 ];
+
+/// Interned `IntradayTickResponse` names shared by the accumulated and
+/// streaming tick decoders.
+pub(super) struct TickResponseNames {
+    pub(super) tick_data: Name,
+    /// Outer `tickData` children in `find_children` order: `eidData`, `tickData`.
+    pub(super) tick_data_children: [Name; 2],
+    /// Core tick fields in `CORE_TICK_FIELDS` order.
+    pub(super) core_fields: [Name; 4],
+}
+
+pub(super) static TICK_RESPONSE_NAMES: LazyLock<TickResponseNames> =
+    LazyLock::new(|| TickResponseNames {
+        tick_data: Name::get_or_intern("tickData"),
+        tick_data_children: ["eidData", "tickData"].map(Name::get_or_intern),
+        core_fields: CORE_TICK_FIELDS.map(|(name, _)| Name::get_or_intern(name)),
+    });
 
 struct TickField {
     output_name: String,
@@ -160,18 +178,21 @@ impl IntradayTickState {
     /// columns. Response metadata outside the tick array is attached to the
     /// resulting Arrow schema.
     fn process_message(&mut self, msg: &Message) {
+        let names = &*TICK_RESPONSE_NAMES;
         let root = msg.elements();
 
-        let Some(tick_data_outer) = root.get_by_str("tickData") else {
+        let Some(tick_data_outer) = root.get(&names.tick_data) else {
             trace!("No tickData in message");
             return;
         };
 
-        if let Some(eids) = tick_data_outer.get_by_str("eidData") {
+        // `eidData` is usually absent: find both children in one pass.
+        let [eids, tick_data] = find_children(&tick_data_outer, &names.tick_data_children);
+        if let Some(eids) = eids {
             self.response_meta.record_eid_data(&self.ticker, &eids);
         }
 
-        let Some(tick_data) = tick_data_outer.get_by_str("tickData") else {
+        let Some(tick_data) = tick_data else {
             trace!("No inner tickData array in message");
             return;
         };
@@ -297,9 +318,7 @@ impl IntradayTickState {
         self.column_name_set.insert(output_name.clone());
 
         let mut builder = TypedBuilder::new(arrow_type_for_element(child));
-        for _ in 0..self.row_count {
-            builder.append_null();
-        }
+        builder.append_nulls(self.row_count);
 
         let lookup_name = Name::get_or_intern(&output_name);
         self.tick_fields.push(TickField {

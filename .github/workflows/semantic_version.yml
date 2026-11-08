@@ -373,5 +373,5 @@ jobs:
           echo "- **crates.io**: ${{ needs.publish-crates.result }} (published by this run via crates-publish.yml)"
           echo ""
           echo "### Next Steps"
-          echo "Dispatch **pypi_upload.yml** and **npm-publish.yml** on the new tag. A GITHUB_TOKEN tag push does not start tag-triggered workflows, so those two still need a manual dispatch; crates.io is already handled above."
+          echo "Dispatch **pypi_upload.yml**, **npm-publish.yml** and **maven-publish.yml** on the new tag. A GITHUB_TOKEN tag push does not start tag-triggered workflows, so those three still need a manual dispatch; crates.io is already handled above."
         } >> "$GITHUB_STEP_SUMMARY"

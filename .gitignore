@@ -25,6 +25,8 @@ build_rust.bat
 # PyO3 extension build outputs
 py-xbbg/src/xbbg/_core.pyd
 py-xbbg/src/xbbg/*.so
+# Written by setuptools-scm at build time
+py-xbbg/src/xbbg/_version.py
 
 # Logs
 Logs/
@@ -37,6 +39,14 @@ Logs/
 **/node_modules/
 js-xbbg/*.node
 js-xbbg/packages/xbbg-core-*/napi_xbbg.node
+
+# Java (java-xbbg): Maven outputs (per-module, including -Dxbbg.target=target-*), staged
+# JNI libraries, and consumer smoke-test outputs
+java-xbbg/**/target/
+java-xbbg/**/target-*/
+java-xbbg/natives/
+java-xbbg/consumers/**/build/
+java-xbbg/consumers/**/.gradle/
 
 # Ignore local PMC mapping and cache files
 xbbg/markets/pmc_map.json

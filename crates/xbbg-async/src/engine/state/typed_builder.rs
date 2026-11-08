@@ -2,10 +2,12 @@
 //!
 //! This module provides:
 //! - `TypedBuilder`: A builder that can hold different Arrow array builder types
-//! - `ColumnSet`: A collection of named columns for building RecordBatches
+//! - `ColumnSet`: A collection of named columns for building RecordBatches,
+//!   addressable by name or by a `ColumnSlot` resolved once per column
 //!
 //! These work directly with `xbbg_core::Value` - no JSON intermediate.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use arrow_array::builder::{
@@ -14,7 +16,6 @@ use arrow_array::builder::{
 };
 use arrow_array::{ArrayRef, RecordBatch};
 use arrow_schema::{DataType, Field, Schema, TimeUnit};
-use indexmap::IndexMap;
 use xbbg_core::{BlpError, Value};
 
 use super::value_utils::{
@@ -357,6 +358,30 @@ impl TypedBuilder {
         }
     }
 
+    /// Append `n` nulls; equivalent to `n` calls to [`TypedBuilder::append_null`].
+    pub fn append_nulls(&mut self, n: usize) {
+        // Arrow materializes a validity bitmap even for zero nulls; keep the
+        // buffers identical to appending no nulls at all.
+        if n == 0 {
+            return;
+        }
+        match self {
+            TypedBuilder::Float64(b) => b.append_nulls(n),
+            TypedBuilder::Int64(b) => b.append_nulls(n),
+            TypedBuilder::Int32(b) => b.append_nulls(n),
+            TypedBuilder::String(b) => b.append_nulls(n),
+            TypedBuilder::Bool(b) => b.append_nulls(n),
+            TypedBuilder::Date32(b) => b.append_nulls(n),
+            TypedBuilder::TimestampMicros(b) => b.append_nulls(n),
+            TypedBuilder::Time64Micros(b) => b.append_nulls(n),
+        }
+    }
+
+    /// Append nulls until the builder holds `len` values.
+    fn pad_to(&mut self, len: usize) {
+        self.append_nulls(len.saturating_sub(self.len()));
+    }
+
     /// Get the number of values appended.
     pub fn len(&self) -> usize {
         match self {
@@ -421,29 +446,91 @@ impl TypedBuilder {
     }
 }
 
+/// Handle to one [`ColumnSet`] column, resolved once by name.
+///
+/// Appending through a slot skips the name lookup that the name-based methods
+/// repeat for every value. A slot is only meaningful for the set that resolved it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ColumnSlot(usize);
+
 /// A collection of named columns for building RecordBatches.
 ///
-/// Handles dynamic column creation and ensures all columns have the same length.
+/// A column is created by its first write, which fixes its type from a type
+/// hint or that first value and back-fills nulls for the rows completed before
+/// it. A column not written in a row is null-padded when it is next written or
+/// when the set is finished, so ending a row is O(1) and a row costs only the
+/// values written. Hot callers resolve names to [`ColumnSlot`]s once with
+/// [`ColumnSet::slot`] and append through them.
 ///
 /// # Example
 ///
 /// ```ignore
 /// let mut cols = ColumnSet::new();
 /// cols.append("ticker", Value::String("AAPL US Equity"));
-/// cols.append("price", Value::Float64(150.0));
-/// cols.end_row(); // Ensures all columns have same length
+/// let price = cols.slot("price");
+/// cols.append_slot(price, Value::Float64(150.0));
+/// cols.end_row(); // Columns not written in this row read as null
 ///
 /// let batch = cols.finish()?;
 /// ```
 pub struct ColumnSet {
-    /// Columns in insertion order (preserves field order)
-    columns: IndexMap<String, TypedBuilder>,
+    /// Resolved columns, indexed by slot.
+    columns: Vec<SlotColumn>,
+    /// Name to slot, consulted only while resolving names.
+    slots: HashMap<String, usize>,
+    /// Written slots in first-write order, which is the output column order.
+    written: Vec<usize>,
     /// Type hints for columns (optional, from field_types config)
-    type_hints: IndexMap<String, ArrowType>,
+    type_hints: HashMap<String, ArrowType>,
     /// Current row count
     row_count: usize,
     /// Non-null values rejected by the selected column types.
     response_meta: ResponseMetadata,
+}
+
+/// One resolved column; it joins the output once written.
+struct SlotColumn {
+    name: String,
+    /// Created by the first write, which fixes the column type.
+    builder: Option<TypedBuilder>,
+}
+
+impl SlotColumn {
+    /// The builder for the current row: created on the first write, then
+    /// padded with nulls for the rows this column missed.
+    fn row_builder(
+        &mut self,
+        slot: usize,
+        row_count: usize,
+        type_hints: &HashMap<String, ArrowType>,
+        written: &mut Vec<usize>,
+        first_value_type: impl FnOnce() -> ArrowType,
+    ) -> &mut TypedBuilder {
+        let Self { name, builder } = self;
+        let builder = builder.get_or_insert_with(|| {
+            written.push(slot);
+            let arrow_type = type_hints
+                .get(name.as_str())
+                .copied()
+                .unwrap_or_else(first_value_type);
+            TypedBuilder::new(arrow_type)
+        });
+        builder.pad_to(row_count);
+        builder
+    }
+
+    /// Pad to `row_count` and finish a written column.
+    fn finish(&mut self, row_count: usize) -> (Field, ArrayRef) {
+        let builder = self
+            .builder
+            .as_mut()
+            .expect("written columns always have a builder");
+        builder.pad_to(row_count);
+        (
+            Field::new(self.name.as_str(), builder.data_type(), true),
+            builder.finish(),
+        )
+    }
 }
 
 impl ColumnSet {
@@ -474,8 +561,10 @@ impl ColumnSet {
     /// Create a new empty ColumnSet.
     pub fn new() -> Self {
         Self {
-            columns: IndexMap::new(),
-            type_hints: IndexMap::new(),
+            columns: Vec::new(),
+            slots: HashMap::new(),
+            written: Vec::new(),
+            type_hints: HashMap::new(),
             row_count: 0,
             response_meta: ResponseMetadata::default(),
         }
@@ -485,16 +574,34 @@ impl ColumnSet {
     /// Create with type hints for specific columns.
     fn with_type_hints(hints: impl IntoIterator<Item = (String, ArrowType)>) -> Self {
         Self {
-            columns: IndexMap::new(),
             type_hints: hints.into_iter().collect(),
-            row_count: 0,
-            response_meta: ResponseMetadata::default(),
+            ..Self::new()
         }
     }
 
     /// Set a type hint for a column.
+    ///
+    /// A hint applies when the column is created by its first write.
     pub fn set_type_hint(&mut self, name: &str, arrow_type: ArrowType) {
         self.type_hints.insert(name.to_string(), arrow_type);
+    }
+
+    /// Resolve `name` to a slot once, for appends that skip the name lookup.
+    ///
+    /// Resolving does not add an output column: the slot's first write creates
+    /// it under the same type-hint and first-value rules as [`ColumnSet::append`],
+    /// including the null back-fill for rows completed before that write.
+    pub fn slot(&mut self, name: &str) -> ColumnSlot {
+        if let Some(&slot) = self.slots.get(name) {
+            return ColumnSlot(slot);
+        }
+        let slot = self.columns.len();
+        self.columns.push(SlotColumn {
+            name: name.to_owned(),
+            builder: None,
+        });
+        self.slots.insert(name.to_owned(), slot);
+        ColumnSlot(slot)
     }
 
     /// Append a value to a column.
@@ -502,29 +609,23 @@ impl ColumnSet {
     /// Creates the column if it doesn't exist, inferring type from the value
     /// or using type hints if available.
     pub fn append(&mut self, name: &str, value: Value<'_>) {
-        if let Some(builder) = self.columns.get_mut(name) {
-            if builder.append_value(Some(value)) {
-                self.response_meta.record_type_miss(name);
-            }
-            return;
-        }
+        let slot = self.slot(name);
+        self.append_slot(slot, value);
+    }
 
-        // Use type hint if available, otherwise infer from value. When a column
-        // first appears after earlier rows, pre-pad those completed rows so the
-        // first value remains aligned with the current row.
-        let arrow_type = self
-            .type_hints
-            .get(name)
-            .copied()
-            .unwrap_or_else(|| ArrowType::from_value(&value));
-        let mut builder = TypedBuilder::new(arrow_type);
-        for _ in 0..self.row_count {
-            builder.append_null();
-        }
+    /// Append a value through a resolved slot; see [`ColumnSet::append`].
+    pub fn append_slot(&mut self, slot: ColumnSlot, value: Value<'_>) {
+        let column = &mut self.columns[slot.0];
+        let builder = column.row_builder(
+            slot.0,
+            self.row_count,
+            &self.type_hints,
+            &mut self.written,
+            || ArrowType::from_value(&value),
+        );
         if builder.append_value(Some(value)) {
-            self.response_meta.record_type_miss(name);
+            self.response_meta.record_type_miss(&column.name);
         }
-        self.columns.insert(name.to_string(), builder);
     }
 
     /// Append a string value to a column (convenience method).
@@ -532,35 +633,38 @@ impl ColumnSet {
         self.append(name, Value::String(value));
     }
 
-    /// Append a null to a column.
-    pub fn append_null(&mut self, name: &str) {
-        if let Some(builder) = self.columns.get_mut(name) {
-            builder.append_null();
-        } else {
-            let arrow_type = self
-                .type_hints
-                .get(name)
-                .copied()
-                .unwrap_or(ArrowType::String);
-            let mut builder = TypedBuilder::new(arrow_type);
-            for _ in 0..=self.row_count {
-                builder.append_null();
-            }
-            self.columns.insert(name.to_string(), builder);
-        }
+    /// Append a string through a resolved slot; see [`ColumnSet::append_str`].
+    pub fn append_str_slot(&mut self, slot: ColumnSlot, value: &str) {
+        self.append_slot(slot, Value::String(value));
     }
 
-    /// End the current row, ensuring all columns have the same length.
+    /// Append a null to a column.
     ///
-    /// Call this after appending all values for a row. Any columns that
-    /// weren't updated will get a null appended.
+    /// A column created by a null uses its type hint, or string.
+    pub fn append_null(&mut self, name: &str) {
+        let slot = self.slot(name);
+        self.append_null_slot(slot);
+    }
+
+    /// Append a null through a resolved slot; see [`ColumnSet::append_null`].
+    pub fn append_null_slot(&mut self, slot: ColumnSlot) {
+        self.columns[slot.0]
+            .row_builder(
+                slot.0,
+                self.row_count,
+                &self.type_hints,
+                &mut self.written,
+                || ArrowType::String,
+            )
+            .append_null();
+    }
+
+    /// End the current row.
+    ///
+    /// Columns not written in this row read as null; they are padded when next
+    /// written or when the set is finished.
     pub fn end_row(&mut self) {
         self.row_count += 1;
-        for builder in self.columns.values_mut() {
-            while builder.len() < self.row_count {
-                builder.append_null();
-            }
-        }
     }
 
     /// Get the current row count.
@@ -570,70 +674,68 @@ impl ColumnSet {
 
     /// Get the number of columns.
     pub fn column_count(&self) -> usize {
-        self.columns.len()
+        self.written.len()
     }
 
     /// Get column names in order.
     pub fn column_names(&self) -> impl Iterator<Item = &str> {
-        self.columns.keys().map(|s| s.as_str())
+        self.written
+            .iter()
+            .map(move |&slot| self.columns[slot].name.as_str())
     }
 
     /// Finish building and return a RecordBatch.
-    pub fn finish(self) -> Result<RecordBatch, BlpError> {
-        if self.columns.is_empty() {
+    pub fn finish(mut self) -> Result<RecordBatch, BlpError> {
+        if self.written.is_empty() {
             // Return empty batch with no columns
             return Ok(RecordBatch::new_empty(Arc::new(Schema::empty())));
         }
 
-        // Build schema and arrays
-        let mut fields = Vec::with_capacity(self.columns.len());
-        let mut arrays = Vec::with_capacity(self.columns.len());
-
-        for (name, mut builder) in self.columns {
-            fields.push(Field::new(&name, builder.data_type(), true));
-            arrays.push(builder.finish());
+        let mut fields = Vec::with_capacity(self.written.len());
+        let mut arrays = Vec::with_capacity(self.written.len());
+        for &slot in &self.written {
+            let (field, array) = self.columns[slot].finish(self.row_count);
+            fields.push(field);
+            arrays.push(array);
         }
-
-        let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays)
-            .map(|batch| self.response_meta.attach(batch))
-            .map_err(|e| BlpError::Internal {
-                detail: format!("build RecordBatch: {e}"),
-            })
+        self.build(fields, arrays)
     }
 
     /// Build with a specific column order.
     ///
-    /// Columns not in `order` are appended at the end.
+    /// Columns not in `order` are appended at the end, in first-write order.
     /// Columns in `order` but not in the set are skipped.
     pub fn finish_with_order(mut self, order: &[&str]) -> Result<RecordBatch, BlpError> {
-        if self.columns.is_empty() {
+        if self.written.is_empty() {
             return self.build_empty_with_order(order);
         }
 
-        let mut fields = Vec::with_capacity(self.columns.len());
-        let mut arrays = Vec::with_capacity(self.columns.len());
-        let mut used = std::collections::HashSet::new();
-
-        // First, add columns in specified order
+        let mut fields = Vec::with_capacity(self.written.len());
+        let mut arrays = Vec::with_capacity(self.written.len());
+        // Ordered removal keeps the leftovers in first-write order.
+        let mut remaining = std::mem::take(&mut self.written);
         for &name in order {
-            if let Some(mut builder) = self.columns.swap_remove(name) {
-                fields.push(Field::new(name, builder.data_type(), true));
-                arrays.push(builder.finish());
-                used.insert(name.to_string());
-            }
+            let Some(&slot) = self.slots.get(name) else {
+                continue;
+            };
+            let Some(position) = remaining.iter().position(|&written| written == slot) else {
+                continue;
+            };
+            remaining.remove(position);
+            let (field, array) = self.columns[slot].finish(self.row_count);
+            fields.push(field);
+            arrays.push(array);
         }
-
-        // Then, add remaining columns in their original order
-        for (name, mut builder) in self.columns {
-            if !used.contains(&name) {
-                fields.push(Field::new(&name, builder.data_type(), true));
-                arrays.push(builder.finish());
-            }
+        for slot in remaining {
+            let (field, array) = self.columns[slot].finish(self.row_count);
+            fields.push(field);
+            arrays.push(array);
         }
+        self.build(fields, arrays)
+    }
 
-        let schema = Arc::new(Schema::new(fields));
-        RecordBatch::try_new(schema, arrays)
+    fn build(self, fields: Vec<Field>, arrays: Vec<ArrayRef>) -> Result<RecordBatch, BlpError> {
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), arrays)
             .map(|batch| self.response_meta.attach(batch))
             .map_err(|e| BlpError::Internal {
                 detail: format!("build RecordBatch: {e}"),
@@ -893,5 +995,156 @@ mod tests {
         assert_eq!(batch.schema().field(0).name(), "ticker");
         assert_eq!(batch.schema().field(1).name(), "field");
         assert_eq!(batch.schema().field(2).name(), "value");
+    }
+
+    #[test]
+    fn column_set_pads_unwritten_columns_lazily() {
+        use arrow_array::{Array, Int64Array, StringArray};
+
+        let mut cols = ColumnSet::new();
+        for row in 0..3 {
+            cols.append("a", Value::Int64(row));
+            cols.end_row();
+        }
+        // First written after three completed rows and never again.
+        cols.append("late", Value::String("x"));
+        cols.append("a", Value::Int64(3));
+        cols.end_row();
+        cols.append("a", Value::Int64(4));
+        cols.end_row();
+        // A null creating a column back-fills earlier rows; "a" misses this row.
+        cols.append_null("unseen");
+        cols.end_row();
+
+        assert_eq!(cols.row_count(), 6);
+        assert_eq!(
+            cols.column_names().collect::<Vec<_>>(),
+            ["a", "late", "unseen"]
+        );
+        let batch = cols.finish().unwrap();
+        assert_eq!(batch.num_rows(), 6);
+        let a = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        assert_eq!(
+            a.iter().collect::<Vec<_>>(),
+            [Some(0), Some(1), Some(2), Some(3), Some(4), None]
+        );
+        let late = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(
+            late.iter().collect::<Vec<_>>(),
+            [None, None, None, Some("x"), None, None]
+        );
+        assert_eq!(batch.column(2).data_type(), &DataType::Utf8);
+        assert_eq!(batch.column(2).null_count(), 6);
+    }
+
+    #[test]
+    fn finish_with_order_lists_ordered_columns_first_and_keeps_first_write_order() {
+        let mut cols = ColumnSet::new();
+        for name in ["a", "b", "c", "d"] {
+            cols.append_str(name, name);
+        }
+        cols.end_row();
+        // Unknown and repeated names are skipped; unlisted columns keep their
+        // first-write order.
+        let batch = cols.finish_with_order(&["b", "missing", "b"]).unwrap();
+        let names: Vec<_> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        assert_eq!(names, ["b", "a", "c", "d"]);
+        assert_eq!(batch.num_rows(), 1);
+    }
+
+    #[test]
+    fn resolved_slots_become_columns_only_when_written() {
+        let mut cols = ColumnSet::with_type_hints([("value".to_string(), ArrowType::Float64)]);
+        let value = cols.slot("value");
+        let late = cols.slot("late");
+        assert_ne!(late, value);
+        assert_eq!(cols.slot("value"), value);
+        cols.end_row();
+        assert_eq!(cols.column_count(), 0);
+        assert_eq!(cols.column_names().count(), 0);
+        // An empty set still types its ordered columns from hints alone.
+        let batch = cols.finish_with_order(&["ticker", "value"]).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        assert_eq!(batch.schema().field(0).data_type(), &DataType::Utf8);
+        assert_eq!(batch.schema().field(1).data_type(), &DataType::Float64);
+
+        // A hint set after resolution still applies to the first write.
+        let mut cols = ColumnSet::new();
+        let value = cols.slot("value");
+        cols.slot("unwritten");
+        cols.set_type_hint("value", ArrowType::Float64);
+        cols.append_slot(value, Value::Int64(1));
+        cols.end_row();
+        let batch = cols.finish().unwrap();
+        assert_eq!(batch.num_columns(), 1);
+        assert_eq!(batch.schema().field(0).data_type(), &DataType::Float64);
+    }
+
+    #[test]
+    fn slot_appends_match_name_appends() {
+        use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+
+        let rows: [&[(&str, Option<Value<'static>>)]; 3] = [
+            &[
+                ("ticker", Some(Value::String("A"))),
+                ("count", Some(Value::String("not a count"))),
+            ],
+            &[
+                ("ticker", Some(Value::String("B"))),
+                ("late", None),
+                ("count", Some(Value::Int64(7))),
+            ],
+            &[("late", Some(Value::Float64(1.5)))],
+        ];
+        let build = |by_slot: bool| {
+            let mut cols = ColumnSet::with_type_hints([("count".to_string(), ArrowType::Int64)]);
+            // Resolution order must not decide output order; first writes do.
+            let slots: HashMap<&str, ColumnSlot> = if by_slot {
+                ["late", "count", "ticker"]
+                    .into_iter()
+                    .map(|name| (name, cols.slot(name)))
+                    .collect()
+            } else {
+                HashMap::new()
+            };
+            for row in rows {
+                for (name, value) in row {
+                    match (by_slot, value.clone()) {
+                        (true, Some(value)) => cols.append_slot(slots[name], value),
+                        (true, None) => cols.append_null_slot(slots[name]),
+                        (false, Some(value)) => cols.append(name, value),
+                        (false, None) => cols.append_null(name),
+                    }
+                }
+                cols.end_row();
+            }
+            cols.finish().unwrap()
+        };
+        let by_slot = build(true);
+        assert_eq!(by_slot, build(false));
+        let names: Vec<_> = by_slot
+            .schema()
+            .fields()
+            .iter()
+            .map(|field| field.name().clone())
+            .collect();
+        assert_eq!(names, ["ticker", "count", "late"]);
+        assert_eq!(
+            by_slot.schema_ref().metadata()[METADATA_KEY_TYPE_MISSES],
+            r#"{"count":1}"#
+        );
     }
 }

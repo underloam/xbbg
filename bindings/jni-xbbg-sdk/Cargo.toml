@@ -1,0 +1,23 @@
+[package]
+name = "jni-xbbg-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "JNI bindings for xbbg Bloomberg SDK provisioning; never links blpapi"
+publish = false
+
+[lib]
+name = "xbbg_sdk_jni"
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = { workspace = true }
+xbbg-sdk = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
+
+[lints]
+workspace = true

@@ -17,8 +17,10 @@ import pandas as pd
 from xbbg import blp
 from benchmark_contracts import (
     PYTHON_MEMORY_SCOPE,
+    archive_path,
     collect_provenance,
     close_shared_sessions,
+    report_date,
     reused_pdblp_connection,
 )
 from config import (
@@ -292,6 +294,10 @@ def equal_values(a: Any, b: Any) -> bool:
 
 
 def compare_records(expected: list[dict[str, Any]], actual: list[dict[str, Any]]) -> tuple[bool, str]:
+    """Compare normalized rows; the detail names where they differ, never the values.
+
+    Details are saved in shared reports, and the values are Bloomberg data.
+    """
     if len(expected) != len(actual):
         return False, f"row count {len(actual)} != {len(expected)}"
     for idx, (left, right) in enumerate(zip(expected, actual, strict=True)):
@@ -299,7 +305,7 @@ def compare_records(expected: list[dict[str, Any]], actual: list[dict[str, Any]]
             return False, f"row {idx} keys {sorted(right)} != {sorted(left)}"
         for key in left:
             if not equal_values(left[key], right[key]):
-                return False, f"row {idx} {key}: {right[key]!r} != {left[key]!r}"
+                return False, f"row {idx} {key} differs"
     return True, "matched"
 
 
@@ -369,6 +375,9 @@ def measure(
     except Exception as exc:
         if tracemalloc.is_tracing():
             tracemalloc.stop()
+        # Bloomberg error text can carry the login and firm number; only the
+        # exception type is saved, the message goes to this console alone.
+        print(f"  {package} {operation} failed: {type(exc).__name__}: {exc}")
         return (
             Result(
                 package=package,
@@ -376,7 +385,7 @@ def measure(
                 supported=False,
                 equivalent_to_xbbg=None,
                 equality_detail="not run",
-                error=f"{type(exc).__name__}: {exc}",
+                error=type(exc).__name__,
             ),
             None,
         )
@@ -565,7 +574,6 @@ def competitor_calls() -> dict[str, Any]:
 
 
 def main() -> int:
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     xbbg_version = getattr(__import__("xbbg"), "__version__", "unknown")
     operations = xbbg_calls()
@@ -606,9 +614,9 @@ def main() -> int:
                 print(f"  {result.warm_mean_ms:.2f}ms shape={result.shape} equality={marker} {result.equality_detail}")
 
     output = {
-        "schema_version": 2,
+        "schema_version": 3,
         "xbbg_version": xbbg_version,
-        "timestamp": timestamp,
+        "date": report_date(),
         "iterations": ITERATIONS,
         "warmup": WARMUP,
         "timing_scope": (
@@ -633,8 +641,8 @@ def main() -> int:
         ),
         "results": [asdict(result) for result in results],
     }
-    json_path = RESULTS_DIR / f"latest_competitor_equivalence_{timestamp}.json"
-    md_path = RESULTS_DIR / f"latest_competitor_equivalence_{timestamp}.md"
+    json_path = archive_path(RESULTS_DIR, "latest_competitor_equivalence", ".json")
+    md_path = json_path.with_suffix(".md")
     json_path.write_text(json.dumps(output, indent=2), encoding="utf-8")
     write_markdown(md_path, output)
     print(f"wrote {json_path}")
@@ -657,7 +665,7 @@ def write_markdown(path: Path, output: dict[str, Any]) -> None:
         "# Latest xbbg Competitor Benchmark with Equivalence Checks",
         "",
         f"**xbbg version:** {output['xbbg_version']}",
-        f"**Generated:** {output['timestamp']}",
+        f"**Date (UTC):** {output['date']}",
         f"**Iterations:** {output['iterations']} measured + {output['warmup']} warmup",
         "",
         "| Operation | Package | Equal to xbbg | Lifecycle scope | Warm mean ms | Warm max ms | Warm n | CPython tracemalloc MB (untimed) | Shape | Detail |",

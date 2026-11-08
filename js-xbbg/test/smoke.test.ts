@@ -67,6 +67,7 @@ function fakeNativeSubscription(): NativeSubscription {
     nextArrowBatch: async () => null,
     nextUpdates: async () => null,
     nextDelivery: async () => null,
+    nextIpcFileDelivery: async () => null,
     remove: async () => undefined,
     stats: {
       batchesSent: 0,
@@ -78,6 +79,7 @@ function fakeNativeSubscription(): NativeSubscription {
     unsubscribe: async () => [],
     unsubscribeArrow: async () => [],
     unsubscribeDeliveries: async () => [],
+    unsubscribeIpcFileDeliveries: async () => [],
   };
 }
 
@@ -615,20 +617,12 @@ describe('native Arrow zero-copy table construction', () => {
         Promise.resolve({
           kind: 'batch',
           layout: { fields: ['answer'], kinds: ['i32'], version: 1 },
-          updates: [
-            {
-              boolValues: [null],
-              f64Values: [null],
-              fieldIndices: [0],
-              i32Values: [42],
-              i64Values: [null],
-              layoutVersion: 1,
-              stringValues: [null],
-              timestampUs: 123,
-              topic: 'XBTUSD Curncy',
-              topicId: 1,
-            },
-          ],
+          layoutVersion: 1,
+          topics: ['XBTUSD Curncy'],
+          timestampsUs: Float64Array.of(123),
+          rowOffsets: Uint32Array.of(0, 1),
+          fieldIndices: Uint16Array.of(0),
+          values: [42],
         }),
       remove: async () => {},
       stats: { batchesSent: 0, droppedBatches: 0, messagesReceived: 0, slowConsumer: false },

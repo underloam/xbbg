@@ -92,6 +92,7 @@ _ = (_dynamic.field_id, _dynamic.arrow_type, _dynamic.started_at, _dynamic.power
 _ = (
     _dynamic.pytest_configure,
     _dynamic.pytest_collection_modifyitems,
+    _dynamic.pytest_sessionfinish,
     _dynamic.pytestmark,
     _dynamic.stub_engine,
     _dynamic.arrow_endpoint,

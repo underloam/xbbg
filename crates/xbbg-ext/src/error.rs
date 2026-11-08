@@ -32,6 +32,15 @@ pub enum ExtError {
     )]
     UnknownYieldType(String),
 
+    /// Requested more futures candidates than the supported maximum.
+    #[error("futures candidate count {count} exceeds the maximum of {max}")]
+    CandidateCountTooLarge {
+        /// Requested candidate count.
+        count: usize,
+        /// Largest accepted candidate count.
+        max: usize,
+    },
+
     /// Arrow error during DataFrame operations.
     #[error("arrow error: {0}")]
     Arrow(#[from] arrow_schema::ArrowError),

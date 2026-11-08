@@ -1,12 +1,12 @@
 import type { Table } from 'apache-arrow';
 
-import { RecordBatchReader, tableFromIPC, tableToIPC } from 'apache-arrow';
+import { RecordBatchReader } from 'apache-arrow';
 import { createRequire } from 'node:module';
 
 import { FORMAT_BY_NAME } from './_defs_gen';
 import { tableFromNativeArrowBatch } from './arrow-zero-copy';
 import { wrapError } from './errors';
-import type { NativeArrowZeroCopyBatch } from './napi';
+import type { NativeArrowIpcFile, NativeArrowZeroCopyBatch } from './napi';
 import { isPlainObject } from './objects';
 import type {
   BackendKind,
@@ -451,22 +451,15 @@ export function nativeArrowToBackend(
   return attachResultMetadata(table, metadata);
 }
 
-export function nativeArrowToPolars(batch: NativeArrowZeroCopyBatch): unknown {
-  const polars = loadPolars();
-  // The supported nodejs-polars 0.10 API reads file IPC, not streams.
-  const ipc = tableToIPC(tableFromNativeArrowBatch(batch), 'file');
-  const frame = polars.readIPC(Buffer.from(ipc.buffer, ipc.byteOffset, ipc.byteLength));
+/**
+ * Hand natively encoded file IPC to Polars as is. The supported nodejs-polars
+ * 0.10 `readIPC` reads the file format only (`readIPCStream` arrived later), so
+ * Rust writes the file format once and JS neither decodes nor re-encodes it.
+ */
+export function ipcFileToPolars(file: NativeArrowIpcFile): unknown {
+  const frame = loadPolars().readIPC(file.ipc);
   // Configurable metadata respects Polars' column-only ownKeys Proxy.
-  return attachResultMetadata(frame, batch.metadata, true);
-}
-
-export function ipcToPolars(buffer: Buffer): unknown {
-  const reader = RecordBatchReader.from(buffer).open();
-  const metadata = metadataRecordFromMap(reader.schema.metadata);
-  // The supported Polars reader needs file IPC; keep file inputs zero-copy.
-  const ipc = reader.isFile() ? buffer : tableToIPC(tableFromIPC(reader), 'file');
-  const frame = loadPolars().readIPC(Buffer.from(ipc.buffer, ipc.byteOffset, ipc.byteLength));
-  return attachResultMetadata(frame, metadata, true);
+  return attachResultMetadata(frame, file.metadata, true);
 }
 
 function normalizeNativeBackend(backend: BackendKind | undefined): 'arrow' | 'json' {

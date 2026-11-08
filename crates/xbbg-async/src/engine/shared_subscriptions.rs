@@ -17,12 +17,13 @@ use smallvec::SmallVec;
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use xbbg_core::{BlpError, Value};
 
-use super::delayed::DelayedPolicy;
+use super::delayed::{DelayedPolicy, IS_DELAYED_STREAM};
 use super::state::typed_builder::{ArrowType, TypedBuilder};
 use super::state::{
-    FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder, SubscriptionReceiver,
-    SubscriptionSender, SubscriptionState, SubscriptionUpdate, UpdateField, UpdateValue,
-    subscription_channel, subscription_channel_with_policy, subscription_forwarder_channel,
+    FieldIndex, FieldKind, FieldLayout, FieldMeta, MessageOutcome, SubscriptionForwarder,
+    SubscriptionReceiver, SubscriptionSender, SubscriptionState, SubscriptionUpdate, UpdateField,
+    UpdateValue, subscription_channel, subscription_channel_with_policy,
+    subscription_forwarder_channel,
 };
 use super::subscription_pool::FeedRegistration;
 use super::{
@@ -94,8 +95,9 @@ pub struct SubscribeRequest {
     pub session_wait: Option<Duration>,
     pub isolated: bool,
     pub stream_capacity: Option<usize>,
-    /// Maximum updates (deltas) or dirty topics (state) collected per native
-    /// delivery. Neither mode waits for this hint to fill before becoming ready.
+    /// Maximum already-queued updates (deltas) or dirty topics (state) collected
+    /// per native delivery; `None` uses `EngineConfig::subscription_flush_threshold`.
+    /// Neither mode waits for this maximum to fill before becoming ready.
     pub flush_threshold: Option<usize>,
     pub overflow_policy: Option<OverflowPolicy>,
 }
@@ -156,6 +158,9 @@ struct ConsumerTopic {
     awaiting_image: bool,
     awaiting_repaint: bool,
     delayed_warned: bool,
+    /// Feed `delayed` value and consumer status revision this topic last
+    /// reconciled; ticks skip the status lookup while both are unchanged.
+    delayed_synced: Option<(Option<bool>, u64)>,
     warned_fields: HashSet<String>,
     pending_data_loss: usize,
     last_data_loss_us: i64,
@@ -173,6 +178,78 @@ enum RecoveryStage {
 struct FeedRecovery {
     stage: RecoveryStage,
     restart_requested: bool,
+}
+
+/// Source-layout positions of the metadata every tick inspects.
+#[derive(Clone, Copy, Default)]
+struct MetadataSlots {
+    event_type: Option<FieldIndex>,
+    event_subtype: Option<FieldIndex>,
+    delayed_stream: Option<FieldIndex>,
+}
+
+impl MetadataSlots {
+    /// First `MKTDATA_EVENT_SUBTYPE` string and first `IS_DELAYED_STREAM`
+    /// boolean in a delta, as name lookups find them in a decoder layout.
+    fn scan(self, update: &SubscriptionUpdate) -> (Option<&str>, Option<bool>) {
+        let mut subtype = None;
+        let mut delayed = None;
+        for field in &update.values {
+            match &field.value {
+                UpdateValue::Str(value)
+                    if subtype.is_none() && self.event_subtype == Some(field.index) =>
+                {
+                    subtype = Some(value.as_ref());
+                }
+                UpdateValue::Bool(value)
+                    if delayed.is_none() && self.delayed_stream == Some(field.index) =>
+                {
+                    delayed = Some(*value);
+                }
+                _ => {}
+            }
+        }
+        (subtype, delayed)
+    }
+
+    fn is_metadata(&self, index: FieldIndex) -> bool {
+        self.event_type == Some(index) || self.event_subtype == Some(index)
+    }
+}
+
+/// Metadata slots resolved once per decoder layout. Like consumer projections,
+/// the cache is keyed by layout identity and version; holding the layout keeps
+/// its address from being reused by a different layout.
+#[derive(Default)]
+struct MetadataSlotCache {
+    layout: Option<Arc<FieldLayout>>,
+    slots: MetadataSlots,
+}
+
+impl MetadataSlotCache {
+    fn resolve(&mut self, layout: &Arc<FieldLayout>) -> MetadataSlots {
+        let cached = self
+            .layout
+            .as_ref()
+            .is_some_and(|cached| cached.version == layout.version && Arc::ptr_eq(cached, layout));
+        if !cached {
+            // Decoder layouts name each field once; values index fields by position.
+            let position = |name: &str| {
+                layout
+                    .fields
+                    .iter()
+                    .position(|field| field.name.as_ref() == name)
+                    .and_then(|position| FieldIndex::try_from(position).ok())
+            };
+            self.slots = MetadataSlots {
+                event_type: position(EVENT_TYPE),
+                event_subtype: position(EVENT_SUBTYPE),
+                delayed_stream: position(IS_DELAYED_STREAM),
+            };
+            self.layout = Some(Arc::clone(layout));
+        }
+        self.slots
+    }
 }
 
 struct FeedState {
@@ -193,10 +270,14 @@ struct FeedState {
     kinds: HashMap<String, FieldKind>,
     lifecycle: &'static str,
     field_errors: HashMap<String, String>,
+    metadata_slots: MetadataSlotCache,
 }
 
 struct Feed {
     identity: FeedKey,
+    /// `identity.service` is `//blp/mktdata`, the only service with last-value
+    /// semantics (images, repaints, empty-row suppression); decided once.
+    mktdata: bool,
     status_topic: String,
     session: Arc<FeedSession>,
     upstream_key: AtomicUsize,
@@ -231,9 +312,11 @@ impl Feed {
             kinds: HashMap::new(),
             lifecycle: "pending",
             field_errors: HashMap::new(),
+            metadata_slots: MetadataSlotCache::default(),
         };
         seed_image_kinds(&mut state, kinds);
         Arc::new(Self {
+            mktdata: identity.service == MKTDATA,
             identity,
             session,
             upstream_key: AtomicUsize::new(usize::MAX),
@@ -324,15 +407,9 @@ impl Feed {
         if matches!(state.lifecycle, "failed" | "closed") {
             return;
         }
-        let initpaint = text_field(update, EVENT_SUBTYPE) == Some("INITPAINT");
-        let delayed = update.values.iter().find_map(|value| {
-            (update.layout.fields[value.index as usize].name.as_ref() == "IS_DELAYED_STREAM")
-                .then_some(&value.value)
-                .and_then(|value| match value {
-                    UpdateValue::Bool(value) => Some(*value),
-                    _ => None,
-                })
-        });
+        let slots = state.metadata_slots.resolve(&update.layout);
+        let (subtype, delayed) = slots.scan(update);
+        let initpaint = subtype == Some("INITPAINT");
         if let Some(delayed) = delayed {
             state.delayed = Some(delayed);
         }
@@ -367,14 +444,21 @@ impl Feed {
             state.image.fill(None);
         }
         let repainting = state.repainting;
-        let changes =
-            (repainting && initpaint && !frozen).then(|| repaint_changes(update, &state.image));
+        let changes = (repainting && initpaint && !frozen)
+            .then(|| repaint_changes(update, &state.image, slots));
         if repainting && initpaint && !frozen {
             state.repaint_started = true;
         }
         let finish_paint = !initpaint && !frozen && (!repainting || state.repaint_started);
         if !frozen {
-            state.layout = Some(update.layout.clone());
+            // The decoder reuses one layout until its version changes.
+            if state
+                .layout
+                .as_ref()
+                .is_none_or(|layout| !Arc::ptr_eq(layout, &update.layout))
+            {
+                state.layout = Some(update.layout.clone());
+            }
             state.image.resize(update.layout.fields.len(), None);
             for value in &update.values {
                 state.image[value.index as usize] = Some(value.value.clone());
@@ -390,9 +474,8 @@ impl Feed {
         }
         let delayed = state.delayed;
         let revision = state.revision;
-        let suppress_empty = self.identity.service == MKTDATA;
         let mut cleanup = false;
-        let mut notices: HashMap<usize, (Arc<Consumer>, Vec<String>)> = HashMap::new();
+        let mut notices: Vec<(Arc<Consumer>, Vec<String>)> = Vec::new();
         for consumer in &mut state.consumers {
             let Some(owner) = consumer.owner.upgrade() else {
                 cleanup = true;
@@ -417,8 +500,7 @@ impl Feed {
                 consumer.awaiting_image = false;
                 consumer.awaiting_repaint = false;
             }
-            let image_delivery = !owner.request.deliver_rows
-                || owner.request.delivery == SubscriptionDeliveryMode::State;
+            let image_delivery = owner.image_delivery;
             let outcome = if image_delivery {
                 consumer.projection.observe_update(update)
             } else if repainting && initpaint && !consumer.awaiting_image {
@@ -428,7 +510,7 @@ impl Feed {
                 }
                 consumer.projection.project_update(changed, true)
             } else {
-                consumer.projection.project_update(update, suppress_empty)
+                consumer.projection.project_update(update, self.mktdata)
             };
             if matches!(outcome, MessageOutcome::Closed | MessageOutcome::DataLoss) {
                 consumer.active = false;
@@ -440,11 +522,15 @@ impl Feed {
                 }
                 if recovered && image_delivery {
                     consumer.projection.clear_slow_consumer();
-                    notices
-                        .entry(owner.id)
-                        .or_insert_with(|| (owner, Vec::new()))
-                        .1
-                        .push(consumer.projection.topic.to_string());
+                    let label = consumer.projection.topic.to_string();
+                    if let Some((_, labels)) = notices
+                        .iter_mut()
+                        .find(|(notified, _)| notified.id == owner.id)
+                    {
+                        labels.push(label);
+                    } else {
+                        notices.push((owner, vec![label]));
+                    }
                 }
             }
         }
@@ -452,7 +538,7 @@ impl Feed {
         if schedule_restart && let Some(hub) = self.hub.upgrade() {
             hub.schedule_recovery(&self.identity);
         }
-        for (owner, labels) in notices.into_values() {
+        for (owner, labels) in notices {
             owner.status.update(|status| {
                 for label in labels {
                     status.record_subscription_event(
@@ -839,10 +925,7 @@ impl Feed {
                 failure,
             });
             for (index, event) in events {
-                if (!patch.owner.request.deliver_rows
-                    || patch.owner.request.delivery == SubscriptionDeliveryMode::State)
-                    && event.message_type == "DataLoss"
-                {
+                if patch.owner.image_delivery && event.message_type == "DataLoss" {
                     continue;
                 }
                 let mut event = (*event).clone();
@@ -889,29 +972,23 @@ impl Feed {
     }
 }
 
-fn text_field<'a>(update: &'a SubscriptionUpdate, name: &str) -> Option<&'a str> {
-    update.values.iter().find_map(|field| {
-        if update.layout.fields[field.index as usize].name.as_ref() != name {
-            return None;
-        }
-        match &field.value {
-            UpdateValue::Str(value) => Some(value.as_ref()),
-            _ => None,
-        }
-    })
-}
-
 fn apply_delayed(owner: &Consumer, consumer: &mut ConsumerTopic, delayed: Option<bool>) -> bool {
-    let previous = owner
-        .status
-        .load()
-        .topic_statuses()
-        .get(consumer.projection.topic.as_ref())
-        .and_then(|info| info.delayed);
-    if previous != delayed {
-        owner
+    // Every status writer publishes a new snapshot, so an unchanged revision
+    // and feed value mean the status still holds what was last reconciled.
+    let revision = owner.status.revision();
+    if consumer.delayed_synced != Some((delayed, revision)) {
+        let previous = owner
             .status
-            .update(|status| status.set_delayed(&consumer.projection.topic, delayed));
+            .load()
+            .topic_statuses()
+            .get(consumer.projection.topic.as_ref())
+            .and_then(|info| info.delayed);
+        if previous != delayed {
+            owner
+                .status
+                .update(|status| status.set_delayed(&consumer.projection.topic, delayed));
+        }
+        consumer.delayed_synced = Some((delayed, revision));
     }
     if delayed != Some(true) {
         return true;
@@ -1673,6 +1750,9 @@ struct Consumer {
     id: usize,
     hub: Arc<SharedSubscriptions>,
     request: SubscribeRequest,
+    /// Rows disabled or state delivery: ticks update the image instead of a
+    /// queue. Fixed with the immutable request, so it is decided once.
+    image_delivery: bool,
     fields: Mutex<Vec<String>>,
     field_kinds: Mutex<HashMap<String, FieldKind>>,
     zero_as_null: HashSet<String>,
@@ -2009,7 +2089,7 @@ impl SubscriptionHandle {
                     && self.inner.request.deliver_rows
                     && self.inner.request.delivery == SubscriptionDeliveryMode::Deltas
                     && !changed
-                    && feed.identity.service == MKTDATA)
+                    && feed.mktdata)
                     .then(|| initial_image_update(&feed, &state))
                     .flatten();
                 let errors = state.field_errors.clone();
@@ -2068,9 +2148,7 @@ impl SubscriptionHandle {
         }
         self.inner
             .after_detach(&members, |status| status.clear_active());
-        if !self.inner.request.deliver_rows
-            || self.inner.request.delivery == SubscriptionDeliveryMode::State
-        {
+        if self.inner.image_delivery {
             self.inner.stream.close();
         }
         error.map_or(Ok(()), Err)
@@ -2450,6 +2528,7 @@ impl SharedSubscriptions {
             zero_as_null: normalized_fields(request.zero_as_null.clone())
                 .into_iter()
                 .collect(),
+            image_delivery: !request.deliver_rows || state_mode,
             request,
             memberships: Mutex::new(Vec::new()),
             own_session: Mutex::new(Weak::new()),
@@ -2725,6 +2804,7 @@ impl SharedSubscriptions {
                         awaiting_repaint: growth,
                         active: true,
                         delayed_warned: false,
+                        delayed_synced: None,
                         warned_fields: HashSet::new(),
                         pending_data_loss: 0,
                         last_data_loss_us: 0,
@@ -2735,7 +2815,7 @@ impl SharedSubscriptions {
                         && consumer.request.deliver_rows
                         && consumer.request.delivery == SubscriptionDeliveryMode::Deltas
                         && !created
-                        && feed.identity.service == MKTDATA
+                        && feed.mktdata
                         && let Some(image) = initial_image_update(&feed, &state)
                     {
                         // A synthetic image is always one row, including an
@@ -2799,7 +2879,7 @@ impl SharedSubscriptions {
     fn resubscribe(&self, feed: &Arc<Feed>) -> Result<(), BlpAsyncError> {
         let (fields, kinds) = {
             let mut state = feed.state.lock();
-            state.repainting = feed.identity.service == MKTDATA || state.recovery.is_some();
+            state.repainting = feed.mktdata || state.recovery.is_some();
             state.repaint_started = false;
             (state.fields.clone(), state.kinds.clone())
         };
@@ -3087,11 +3167,12 @@ fn seed_image_kinds(state: &mut FeedState, kinds: &HashMap<String, FieldKind>) {
 fn repaint_changes(
     update: &SubscriptionUpdate,
     image: &[Option<UpdateValue>],
+    slots: MetadataSlots,
 ) -> (SubscriptionUpdate, bool) {
     let mut values = SmallVec::new();
     let mut has_data = false;
     for field in &update.values {
-        let metadata = is_metadata(&update.layout.fields[field.index as usize].name);
+        let metadata = slots.is_metadata(field.index);
         let same = image.get(field.index as usize).and_then(Option::as_ref).is_some_and(|previous| {
             previous == &field.value || matches!((previous, &field.value),
                 (UpdateValue::F64(left), UpdateValue::F64(right)) if left.is_nan() && right.is_nan())

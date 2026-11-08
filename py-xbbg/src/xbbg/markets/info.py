@@ -64,7 +64,7 @@ def exch_info(ticker: str, **kwargs) -> pd.Series:
 
 
 async def _afetch_market_info(ticker: str) -> dict[str, Any]:
-    return await _engine._get_engine().fetch_market_info(ticker)
+    return await (await _engine._aget_engine()).fetch_market_info(ticker)
 
 
 def market_info(ticker: str) -> pd.Series:
@@ -135,7 +135,7 @@ def convert_session_times_to_utc(
 async def _amarket_timing(ticker, date, timing, tz, **kwargs) -> str:
     ticker = kwargs.pop("ref", None) or ticker
     kwargs.pop("original", None)
-    engine = _engine._get_engine(**kwargs)
+    engine = await _engine._aget_engine(**kwargs)
     if tz is not None:
         tz = str(tz)
         country = {"NY": "US", "LN": "GB", "TK": "JP", "HK": "HK"}.get(tz.upper())

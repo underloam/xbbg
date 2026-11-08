@@ -201,6 +201,34 @@ jobs:
         run: npm run quality
 
   # ════════════════════════════════════════════════════════════════════════════
+  # Java Lint (fast, no SDK or natives needed)
+  # ════════════════════════════════════════════════════════════════════════════
+  lint-java:
+    name: Lint (Java)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Format check (google-java-format and ktfmt via Spotless)
+        working-directory: java-xbbg
+        run: ./mvnw -B -ntp spotless:check < /dev/null
+
+      # Both modules: javac -Xlint:all and Error Prone on main and test code with -Werror,
+      # javadoc with every doclint group (missing included) and warnings fatal, the Maven
+      # Enforcer dependency rules, then spotbugs:check (effort Max, threshold Low) at verify.
+      # No natives are needed: tests are skipped here and run in java-test.
+      - name: Compile with Error Prone, javadoc, Enforcer and SpotBugs
+        working-directory: java-xbbg
+        run: ./mvnw -B -ntp -DskipTests -Dspotless.check.skip=true verify < /dev/null
+
+  # ════════════════════════════════════════════════════════════════════════════
   # Security - cargo-audit (vulnerabilities)
   # ════════════════════════════════════════════════════════════════════════════
   audit:
@@ -605,15 +633,439 @@ jobs:
           retention-days: 7
 
   # ════════════════════════════════════════════════════════════════════════════
+  # Java (java-xbbg): JNI natives per platform, one jar with all of them, tests on
+  # Java 8-25, and Maven/Gradle consumers of the built jar
+  # ════════════════════════════════════════════════════════════════════════════
+  java-natives:
+    name: Java Natives (${{ matrix.platform }})
+    needs: [sdk-version, generate-bindings]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x86_64
+            # Same image as the release build, so the glibc 2.28 floor is enforced on every PR.
+            container: ghcr.io/${{ github.repository_owner }}/xbbg-manylinux:latest
+            python: /opt/python/cp312-cp312/bin/python
+          - os: windows-latest
+            platform: windows-x86_64
+            python: python
+          - os: macos-15
+            platform: macos-aarch64
+            python: python3
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+    timeout-minutes: 60
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+
+      - name: Download pre-generated bindings
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Configure pre-generated bindings path (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Configure pre-generated bindings path (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bindingsPath = Join-Path $env:GITHUB_WORKSPACE "ci-bindings\bindings.rs"
+          if (-not (Test-Path $bindingsPath)) {
+            throw "Bindings artifact not found at $bindingsPath"
+          }
+          "BLPAPI_PREGENERATED_BINDINGS=$bindingsPath" >> $env:GITHUB_ENV
+
+      - name: Configure pre-generated bindings path (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          BINDINGS_PATH="$GITHUB_WORKSPACE/ci-bindings/bindings.rs"
+          test -s "$BINDINGS_PATH"
+          echo "BLPAPI_PREGENERATED_BINDINGS=$BINDINGS_PATH" >> "$GITHUB_ENV"
+
+      - name: Setup Bloomberg SDK
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: ${{ runner.os }}
+
+      # xbbg_sdk_jni's TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
+      # actions/checkout trusts the workspace only in a temporary global config. Without this,
+      # git in the root-run container refuses the checkout ("dubious ownership"), the build
+      # provenance records gitCommit=unknown, and release staging refuses it.
+      - name: Trust the checkout (Linux container)
+        if: runner.os == 'Linux'
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      # Production libraries: release-jni (panic=unwind), --locked, portable codegen, no
+      # test-support, glibc <= 2.28 on Linux, relocatable on macOS (all checked by the script).
+      - name: Stage release natives
+        shell: bash
+        run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --release --out "$GITHUB_WORKSPACE/java-natives/release"
+
+      # Fixture driver for the Java test matrix; never copied into a jar artifact.
+      - name: Stage test-support natives
+        shell: bash
+        env:
+          # Line tables keep native backtraces readable at a fraction of full debug info's size.
+          CARGO_PROFILE_DEV_DEBUG: line-tables-only
+        run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --locked --features test-support --out "$GITHUB_WORKSPACE/java-natives/test"
+
+      - name: Verify staged natives
+        shell: bash
+        run: |
+          ${{ matrix.python }} scripts/stage_jvm_natives.py verify --release --platform ${{ matrix.platform }} --natives java-natives/release
+          ${{ matrix.python }} scripts/stage_jvm_natives.py verify --platform ${{ matrix.platform }} --natives java-natives/test
+
+      - name: Upload release natives
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-natives-${{ matrix.platform }}
+          path: java-natives/release/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Upload test-support natives
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-natives-test-${{ matrix.platform }}
+          path: java-natives/test/${{ matrix.platform }}
+          if-no-files-found: error
+          retention-days: 7
+
+  java-package:
+    name: Java Package
+    needs: [java-natives]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download linux natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-linux-x86_64
+          path: java-xbbg/natives/linux-x86_64
+
+      - name: Download windows natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-windows-x86_64
+          path: java-xbbg/natives/windows-x86_64
+
+      - name: Download macOS natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-macos-aarch64
+          path: java-xbbg/natives/macos-aarch64
+
+      - name: Setup Java
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Verify release natives
+        run: python3 scripts/stage_jvm_natives.py verify --release --natives java-xbbg/natives
+
+      # Tests run in java-test against fixture natives; this job proves the distributable jar
+      # builds (release natives guard, javadoc, sources) and publishes it to a file repository.
+      - name: Build jars into a file repository
+        working-directory: java-xbbg
+        run: ./mvnw -B -Dxbbg.releaseNatives=true -DskipTests -DaltDeploymentRepository="ci::file://$RUNNER_TEMP/xbbg-maven-repo" deploy < /dev/null
+
+      - name: Verify jar payloads
+        run: |
+          main_jar=java-xbbg/xbbg/target/xbbg-0.0.0-SNAPSHOT.jar
+          scans=()
+          for jar in java-xbbg/*/target/*.jar; do
+            [[ "$jar" == "$main_jar" ]] || scans+=(--scan "$jar")
+          done
+          python3 scripts/stage_jvm_natives.py verify --release --natives "$main_jar" "${scans[@]}"
+
+      - name: Upload Maven repository
+        uses: actions/upload-artifact@v7
+        with:
+          name: java-maven-repo
+          path: ${{ runner.temp }}/xbbg-maven-repo
+          if-no-files-found: error
+          retention-days: 7
+
+  java-test:
+    name: Java Test (${{ matrix.platform }}, Java ${{ matrix.java }})
+    needs: [sdk-version, java-natives]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux-x86_64, windows-x86_64, macos-aarch64]
+        java: ["8", "11", "17", "21", "25"]
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: windows-x86_64
+            os: windows-latest
+          # Exactly one configuration enforces the JaCoCo minimums (-Pcoverage); they were
+          # measured on Java 21 with the native and subscription fixture tests.
+          - platform: windows-x86_64
+            java: "21"
+            coverage: true
+          - platform: macos-aarch64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      # Subscription fixture tests against the synthetic source of the test-support natives.
+      XBBG_TEST_SUBSCRIPTIONS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Bloomberg SDK
+        id: sdk
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: ${{ runner.os }}
+
+      - name: Point the native loader at the Bloomberg runtime
+        shell: bash
+        env:
+          LIB_REL_DIR: ${{ steps.sdk.outputs.lib-rel-dir }}
+          BIN_REL_DIR: ${{ steps.sdk.outputs.bin-rel-dir }}
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then dir="$BIN_REL_DIR"; else dir="$LIB_REL_DIR"; fi
+          echo "BLPAPI_LIB_DIR=$GITHUB_WORKSPACE/$dir" >> "$GITHUB_ENV"
+
+      - name: Download test-support natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-test-${{ matrix.platform }}
+          path: java-xbbg/natives/${{ matrix.platform }}
+
+      - name: Setup test JDK
+        uses: actions/setup-java@v6
+        with:
+          # Temurin publishes no Java 8 build for macOS arm64.
+          distribution: ${{ (matrix.java == '8' && runner.os == 'macOS') && 'zulu' || 'temurin' }}
+          java-version: ${{ matrix.java }}
+
+      - name: Setup build JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      # Compiles on 21 (--release 8/17); surefire forks the tests on the matrix JDK through
+      # the toolchain setup-java registered. -Dxbbg.requireNatives=true fails instead of
+      # skipping when native tests cannot load the fixture natives.
+      - name: Unit and native tests
+        working-directory: java-xbbg
+        shell: bash
+        env:
+          COVERAGE: ${{ matrix.coverage && '-Pcoverage' || '' }}
+        run: ./mvnw -B -Dtest.jdk=${{ matrix.java }} -Dxbbg.requireNatives=true ${COVERAGE:+"$COVERAGE"} verify < /dev/null
+
+  # Newest GA JDK, advisory (not in ci-status): new releases can break before we adapt.
+  java-test-latest:
+    name: Java Test (${{ matrix.platform }}, latest GA Java)
+    needs: [sdk-version, java-natives]
+    timeout-minutes: 30
+    continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: windows-x86_64
+            os: windows-latest
+          - platform: macos-aarch64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      XBBG_TEST_SUBSCRIPTIONS: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Bloomberg SDK
+        id: sdk
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: ${{ runner.os }}
+
+      - name: Point the native loader at the Bloomberg runtime
+        shell: bash
+        env:
+          LIB_REL_DIR: ${{ steps.sdk.outputs.lib-rel-dir }}
+          BIN_REL_DIR: ${{ steps.sdk.outputs.bin-rel-dir }}
+        run: |
+          if [[ "$RUNNER_OS" == "Windows" ]]; then dir="$BIN_REL_DIR"; else dir="$LIB_REL_DIR"; fi
+          echo "BLPAPI_LIB_DIR=$GITHUB_WORKSPACE/$dir" >> "$GITHUB_ENV"
+
+      - name: Download test-support natives
+        uses: actions/download-artifact@v8
+        with:
+          name: java-natives-test-${{ matrix.platform }}
+          path: java-xbbg/natives/${{ matrix.platform }}
+
+      - name: Setup latest GA JDK
+        id: latest
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: latest
+
+      - name: Setup build JDK
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Unit and native tests
+        working-directory: java-xbbg
+        shell: bash
+        env:
+          # setup-java registers the resolved version (e.g. 27.0.1+8) as the toolchain version.
+          TEST_JDK: ${{ steps.latest.outputs.version }}
+        run: ./mvnw -B "-Dtest.jdk=$TEST_JDK" -Dxbbg.requireNatives=true verify < /dev/null
+
+  java-consumer-smoke:
+    name: Java Consumer Smoke (${{ matrix.platform }})
+    needs: [sdk-version, java-package]
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux-x86_64
+            os: ubuntu-latest
+          - platform: windows-x86_64
+            os: windows-latest
+          - platform: macos-aarch64
+            os: macos-15
+    runs-on: ${{ matrix.os }}
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Validate the committed Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v6
+
+      - name: Download Maven repository
+        uses: actions/download-artifact@v8
+        with:
+          name: java-maven-repo
+          path: ${{ runner.temp }}/xbbg-maven-repo
+
+      - name: Setup Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      # The consumers provision the Bloomberg runtime from this local wheel through
+      # xbbg_sdk_jni. No SDK is installed or on any library path in this job, so loading
+      # also proves xbbg_sdk_jni works without blpapi.
+      - name: Download the Bloomberg runtime wheel
+        shell: bash
+        run: |
+          wheels="$RUNNER_TEMP/blpapi-wheel"
+          python -m pip download --no-deps --only-binary=:all: \
+            --index-url https://blpapi.bloomberg.com/repository/releases/python/simple/ \
+            --dest "$wheels" "blpapi==$BLPAPI_VERSION"
+          wheel=$(python -c 'import pathlib, sys; [w] = pathlib.Path(sys.argv[1]).glob("*.whl"); print(w.resolve())' "$wheels")
+          repo=$(python -c 'import pathlib, sys; print(pathlib.Path(sys.argv[1]).resolve().as_uri())' "$RUNNER_TEMP/xbbg-maven-repo")
+          echo "BLPAPI_WHEEL=$wheel" >> "$GITHUB_ENV"
+          echo "XBBG_REPO_URL=$repo" >> "$GITHUB_ENV"
+
+      # No Maven cache: the consumer resolves into a fresh local repository (below).
+      - name: Setup Java 8
+        uses: actions/setup-java@v6
+        with:
+          # Temurin publishes no Java 8 build for macOS arm64.
+          distribution: ${{ runner.os == 'macOS' && 'zulu' || 'temurin' }}
+          java-version: "8"
+
+      - name: Setup Java 11, 17, 25 and 21 (default)
+        uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: |
+            11
+            17
+            25
+            21
+          cache: gradle
+
+      # A fresh local repository, so the consumer tests this run's jars and never an xbbg
+      # restored from a cache or left by an earlier build.
+      - name: Maven consumer on Java 8, 11, 17, 21, 25
+        working-directory: java-xbbg/consumers/maven
+        shell: bash
+        run: |
+          for jdk in 8 11 17 21 25; do
+            ./mvnw -B -Dmaven.repo.local="$RUNNER_TEMP/consumer-m2" -Drun.jdk="$jdk" -Dxbbg.repo.url="$XBBG_REPO_URL" \
+              -Dconsumer.blpapiArtifact="$BLPAPI_WHEEL" verify < /dev/null
+          done
+
+      - name: Gradle consumer on Java 8, 11, 17, 21, 25
+        working-directory: java-xbbg/consumers/gradle
+        shell: bash
+        run: |
+          case "$RUNNER_ARCH" in
+            X64) arch=X64 ;;
+            ARM64) arch=AARCH64 ;;
+            *) echo "::error::unsupported runner architecture $RUNNER_ARCH"; exit 1 ;;
+          esac
+          homes=()
+          for jdk in 8 11 17 21 25; do
+            name="JAVA_HOME_${jdk}_${arch}"
+            [[ -n "${!name:-}" ]] || { echo "::error::$name is not set"; exit 1; }
+            homes+=("$name")
+          done
+          from_env=$(IFS=,; echo "${homes[*]}")
+          ./gradlew --no-daemon --warning-mode=fail \
+            -Dorg.gradle.java.installations.fromEnv="$from_env" \
+            -Dorg.gradle.java.installations.auto-detect=false \
+            -Dorg.gradle.java.installations.auto-download=false \
+            -PxbbgRepo="$XBBG_REPO_URL" -PblpapiArtifact="$BLPAPI_WHEEL" smoke < /dev/null
+
+  # ════════════════════════════════════════════════════════════════════════════
   # Build wheels via setuptools-rust + uv (matrix: OS × Python version)
   # ════════════════════════════════════════════════════════════════════════════
+  # 3.14t/3.15t build free-threaded (cp314t/cp315t) wheels. These legs gate like
+  # the others because releases ship them; the test-freethreaded job that runs
+  # them stays advisory.
   build:
     name: Build (Python ${{ matrix.python }}, ${{ matrix.os }})
     needs: [sdk-version, generate-bindings, check-linux, check-windows, check-macos]
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
         exclude:
@@ -705,6 +1157,7 @@ jobs:
           os: macOS
 
       - name: Setup Python ${{ matrix.python }}
+        id: setup-python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
@@ -718,6 +1171,10 @@ jobs:
           version: ${{ env.UV_VERSION }}
 
       - name: Build wheel (setuptools-rust via uv)
+        env:
+          # Build for the interpreter setup-python selected (free-threaded on the
+          # t legs), not whichever one uv's discovery reaches first.
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: uv build --wheel --out-dir dist/
 
       - name: Upload wheel
@@ -828,20 +1285,20 @@ jobs:
           files: coverage.xml
           fail_ci_if_error: false
 
-      - name: Setup Rust for subscription native smoke
+      - name: Setup Rust for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
 
-      - name: Download bindings for subscription native smoke
+      - name: Download bindings for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         uses: actions/download-artifact@v8
         with:
           name: blpapi-bindings
           path: ci-bindings
 
-      - name: Exercise Python native subscription deliveries
+      - name: Exercise Python native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
         shell: bash
         env:
@@ -857,7 +1314,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
           )
 
       # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
@@ -876,6 +1333,139 @@ jobs:
       - name: Test Python LangGraph adapter
         if: matrix.python != '3.15'
         run: pytest py-xbbg-langgraph/tests -v
+
+  # ════════════════════════════════════════════════════════════════════════════
+  # Test free-threaded wheels (advisory: not a ci-status requirement)
+  # ════════════════════════════════════════════════════════════════════════════
+  # Installs only the optional dependencies xbbg supports on free-threaded Python
+  # (pyarrow, pandas): polars and duckdb publish no free-threaded wheels, so their
+  # tests skip. The LangGraph adapter is not installed either, because langsmith
+  # requires zstandard and orjson, which publish none. PYTHON_GIL stays unset so
+  # an import that re-enables the GIL fails the run instead of going unnoticed.
+  test-freethreaded:
+    name: Test free-threaded (Python ${{ matrix.python }}, ${{ matrix.os }})
+    needs: [sdk-version, build]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.14t", "3.15t"]
+
+    env:
+      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Setup Python ${{ matrix.python }}
+        id: setup-python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python }}
+          allow-prereleases: true
+
+      - name: Setup uv
+        uses: astral-sh/setup-uv@v10.3.0
+        with:
+          version: ${{ env.UV_VERSION }}
+
+      - name: Download wheel
+        uses: actions/download-artifact@v8
+        with:
+          name: wheel-${{ matrix.os }}-py${{ matrix.python }}
+          path: dist
+
+      - name: Setup Bloomberg SDK (Linux)
+        if: runner.os == 'Linux'
+        id: sdk-linux
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Linux
+
+      - name: Setup Bloomberg SDK (macOS)
+        if: runner.os == 'macOS'
+        id: sdk-macos
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: macOS
+
+      - name: Setup Bloomberg SDK (Windows)
+        if: runner.os == 'Windows'
+        id: sdk-windows
+        uses: ./.github/actions/setup-blpapi-sdk
+        with:
+          version: ${{ env.BLPAPI_VERSION }}
+          os: Windows
+
+      - name: Install wheel and free-threaded test dependencies
+        shell: bash
+        env:
+          UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
+        # --no-build: a dependency without a free-threaded wheel fails here
+        # instead of compiling from source.
+        run: |
+          WHEEL=$(echo dist/*.whl)
+          uv pip install --system --no-build "${WHEEL}" "pytest>=8.4" "pytest-asyncio>=0.24" "pytest-run-parallel>=0.10" "pyarrow>=22.0.0" "pandas>=3"
+
+      - name: Copy tests to temp directory
+        # Run from temp dir to avoid importing local source instead of installed package
+        run: |
+          mkdir -p "${{ runner.temp }}/test-run"
+          cp -r py-xbbg/tests "${{ runner.temp }}/test-run/"
+        shell: bash
+
+      - name: Run tests
+        working-directory: ${{ runner.temp }}/test-run
+        shell: bash
+        run: |
+          python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED'), 'setup-python selected a GIL build'"
+          python -W error::RuntimeWarning -c "import sys, xbbg, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
+          python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
+          pytest tests -v -m "not live"
+
+      # pytest-run-parallel runs each test body in 8 threads at once. Tests marked
+      # thread_unsafe (async tests, and tests that change process-wide state such
+      # as configure() or middleware) still run, in one thread.
+      - name: Run tests in parallel threads
+        working-directory: ${{ runner.temp }}/test-run
+        shell: bash
+        run: pytest tests -q -m "not live" --parallel-threads=8
+
+      - name: Setup Rust for native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+
+      - name: Download bindings for native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        uses: actions/download-artifact@v8
+        with:
+          name: blpapi-bindings
+          path: ci-bindings
+
+      - name: Exercise Python native test-support drivers
+        if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
+        shell: bash
+        env:
+          BLPAPI_PREGENERATED_BINDINGS: ${{ github.workspace }}/ci-bindings/bindings.rs
+        run: |
+          export PYO3_PYTHON="$(python -c 'import sys; print(sys.executable)')"
+          export XBBG_DIST_VERSION="$(python -c 'from importlib.metadata import version; print(version("xbbg"))')"
+          cargo build --locked -p pyo3-xbbg --features test-support
+          CORE_TARGET="$(python -c 'from importlib.metadata import distribution; print(next(distribution("xbbg").locate_file("xbbg").glob("_core*.so")))')"
+          CORE_BACKUP="$RUNNER_TEMP/core-delivery-original.so"
+          cp "$CORE_TARGET" "$CORE_BACKUP"
+          trap 'cp "$CORE_BACKUP" "$CORE_TARGET"; rm -f "$CORE_BACKUP"' EXIT
+          cp target/debug/lib_core.so "$CORE_TARGET"
+          (
+            cd "$RUNNER_TEMP/test-run"
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
+          )
 
   # ════════════════════════════════════════════════════════════════════════════
   # Declared floors - resolve the lower bounds we advertise and actually run them
@@ -1127,8 +1717,8 @@ jobs:
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    # geiger, abi-compat, and semver are intentionally advisory.
-    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, build, test, floors, dataframe-previous-majors]
+    # geiger, abi-compat, semver, test-freethreaded, and java-test-latest are intentionally advisory.
+    needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, lint-java, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, java-natives, java-package, java-test, java-consumer-smoke, build, test, floors, dataframe-previous-majors]
     if: always()
     steps:
       - name: Check required jobs

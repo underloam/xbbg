@@ -101,8 +101,8 @@ The tagged source must already contain the correct Cargo versions. `pypi_upload.
 
 Existing published wheels and tags are immutable. Version-reporting corrections ship in a new release rather than replacing an old wheel or moving its tag.
 
-**Still manual after the run:** PyPI and npm are *not* automatic. Both
-`pypi_upload.yml` and `npm-publish.yml` declare `push.tags: ["v*"]`, but the tag is
+**Still manual after the run:** PyPI, npm and Maven Central are *not* automatic.
+`pypi_upload.yml`, `npm-publish.yml` and `maven-publish.yml` declare `push.tags: ["v*"]`, but the tag is
 created with `GITHUB_TOKEN`, and a `GITHUB_TOKEN` tag push does not start
 tag-triggered workflows. Dispatch each one manually on the new tag:
 
@@ -110,6 +110,7 @@ tag-triggered workflows. Dispatch each one manually on the new tag:
 |----------|---------------|
 | `pypi_upload.yml` | ref `vX.Y.Z`, `dry-run=false` |
 | `npm-publish.yml` | `version=vX.Y.Z` |
+| `maven-publish.yml` | "Use workflow from" the `vX.Y.Z` tag (the `maven-central` environment rules apply to that ref), `version=vX.Y.Z`, `dry-run=false` |
 | `mcp_registry_publish.yml` | `version=vX.Y.Z`, after `server.json` is attached to the Release |
 
 `crates-publish.yml` avoids this trap entirely by being invoked as a reusable
@@ -168,8 +169,9 @@ in `scripts/mcp_release_config.py`; their schema-specific JSON formats remain se
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15), sdist, publish to PyPI, attach to GitHub release |
+| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15 and free-threaded 3.14t/3.15t), sdist, publish to PyPI, attach to GitHub release |
 | Release | `npm-publish.yml` | Build and publish stable `@xbbg/core` prebuilt native packages for supported platforms, then publish the `@xbbg/core` wrapper and `@xbbg/langgraph` package via npm trusted publishing |
+| Release | `maven-publish.yml` | Build release JNI natives on Linux (manylinux_2_28), Windows and macOS arm64, stamp and assemble `io.github.underloam:xbbg` and `xbbg-jdk17`, run the Maven and Gradle consumers on Java 8–25 on all three platforms against those exact jars, sign and publish to Maven Central, check the published jars are byte-identical, and attach the jars and POMs to the GitHub release |
 
 ### crates.io publishing
 
@@ -278,6 +280,12 @@ GitHub environment `npm` is intentionally not required because current repositor
 After a successful OIDC publish, set each package's npm **Publishing access** to require 2FA and disallow tokens, then revoke any temporary publish tokens.
 
 `npm-publish.yml` intentionally publishes only stable npm versions (`vX.Y.Z`). Python-style pre-release tags such as `vX.Y.Zb1` still trigger the workflow glob but are skipped because they are not valid npm semver versions for this package family.
+
+#### Maven Central publishing setup
+
+Maven Central has no tokenless publishing, so `maven-publish.yml` publishes through the Central Portal with the user token (`MAVEN_CENTRAL_USERNAME`, `MAVEN_CENTRAL_PASSWORD`) and GPG signing key (`MAVEN_GPG_KEY`, `MAVEN_GPG_PASSPHRASE`) stored in the `maven-central` GitHub environment (restricted to `v*` tags).
+
+Each release, after `semantic_version.yml` tags `vX.Y.Z`, dispatch `maven-publish.yml` from that tag. A version already on Central is skipped, so a rerun is safe; `dry-run=true` builds and signs the bundle without uploading it. Check `https://repo1.maven.org/maven2/io/github/underloam/xbbg/X.Y.Z/` afterwards (search.maven.org lags behind the repository by up to an hour). The POMs stay `0.0.0-SNAPSHOT` in git; the workflow stamps the release version and checks it against the Cargo workspace version, `Xbbg.version()` and `Xbbg.nativeVersion()`.
 
 ### Manual Trigger
 

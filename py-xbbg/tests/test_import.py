@@ -21,12 +21,14 @@ def test_imports():
 
 
 def test_native_extension_reports_the_distribution_version():
-    """The extension is stamped with the exact version of the distribution that built it."""
+    """The extension and the build-time ``_version.py`` both carry the distribution's exact version."""
     from importlib.metadata import version
 
+    import xbbg
     from xbbg import _core
 
     assert _core.__version__ == version("xbbg")
+    assert xbbg.__version__ == version("xbbg")
 
 
 def test_public_python_surface_remains_importable():

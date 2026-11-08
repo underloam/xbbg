@@ -1,0 +1,6 @@
+# Clippy reads the first clippy.toml found walking up from CARGO_MANIFEST_DIR,
+# so this file applies to pyo3-xbbg only.
+disallowed-methods = [
+    { path = "pyo3::marker::Python::attach", reason = "native code must not wait for the interpreter: use the caller's `py` token in pymethods, and return owned payloads from futures so completion converts them (see src/completion.rs)" },
+    { path = "pyo3::marker::Python::try_attach", reason = "native code must not wait for the interpreter: use the caller's `py` token in pymethods, and return owned payloads from futures so completion converts them (see src/completion.rs)" },
+]

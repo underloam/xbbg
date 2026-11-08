@@ -72,6 +72,7 @@ def _checkout_package(tmp_path: Path, layout: str) -> Path:
         (None, contextlib.nullcontext()),  # no package metadata: nothing to compare against
     ],
 )
+@pytest.mark.thread_unsafe(reason="each parametrized pytest.raises context is one object shared by all threads")
 def test_installed_extension_must_be_built_for_the_installed_distribution(tmp_path, distribution_version, outcome):
     package_dir = _installed_package(tmp_path)
 
@@ -105,9 +106,12 @@ def test_importing_names_from_a_mismatched_extension_is_refused():
 
     script = textwrap.dedent(
         """
-        import importlib.metadata
+        import sys
+        import types
 
-        importlib.metadata.version = lambda name: "0.0.0"
+        version_file = types.ModuleType("xbbg._version")
+        version_file.version = "0.0.0"
+        sys.modules["xbbg._version"] = version_file
         import xbbg._core_guard as guard
 
         guard._source_checkout = lambda package_dir: None  # judge it as an installed package
@@ -143,3 +147,157 @@ def test_importing_names_from_a_mismatched_extension_is_refused():
 )
 def test_native_import_classifier_distinguishes_missing_from_outdated(message, name, unavailable):
     assert _core_guard.is_native_import_error(ImportError(message, name=name)) is unavailable
+
+
+_STAND_IN_CORE = textwrap.dedent(
+    """
+    import importlib.abc
+    import importlib.util
+    import sys
+
+    import xbbg
+
+    assert "xbbg._core" not in sys.modules, "xbbg._core was imported by `import xbbg`"
+
+
+    def install_stand_in_core(exec_module):
+        # Serve a pure-Python xbbg._core ahead of the build guard and the real extension.
+        class StandInLoader(importlib.abc.Loader):
+            def create_module(self, spec):
+                return None
+
+            def exec_module(self, module):
+                exec_module(module)
+
+        class StandInFinder(importlib.abc.MetaPathFinder):
+            def find_spec(self, fullname, path, target=None):
+                if fullname == "xbbg._core":
+                    return importlib.util.spec_from_loader(fullname, StandInLoader())
+                return None
+
+        sys.meta_path.insert(0, StandInFinder())
+    """
+)
+
+
+def _run_with_stand_in_core(script: str) -> subprocess.CompletedProcess[str]:
+    import xbbg
+
+    env = {**os.environ, "PYTHONPATH": str(Path(xbbg.__file__).resolve().parents[1])}
+    return subprocess.run(
+        [sys.executable, "-c", _STAND_IN_CORE + textwrap.dedent(script)],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=180,
+        check=False,
+    )
+
+
+def test_concurrent_first_access_waits_for_the_importing_thread():
+    """Threads that reach ``_core`` while another thread imports it share that import."""
+    result = _run_with_stand_in_core(
+        """
+        import threading
+        import time
+
+        entered = threading.Event()
+        release = threading.Event()
+
+
+        def blocking_exec(module):
+            entered.set()
+            if not release.wait(60):
+                raise RuntimeError("stand-in xbbg._core was never released")
+            module.STAND_IN = True
+
+
+        install_stand_in_core(blocking_exec)
+        results = {}
+
+
+        def record(name, call):
+            try:
+                results[name] = call()
+            except BaseException as exc:
+                results[name] = exc
+
+
+        def from_import():
+            from xbbg import _core
+
+            return _core
+
+
+        def waiting_on_import_lock(thread):
+            frame = sys._current_frames().get(thread.ident)
+            while frame is not None:
+                if frame.f_code.co_name == "acquire" and "_bootstrap" in frame.f_code.co_filename:
+                    return True
+                frame = frame.f_back
+            return False
+
+
+        importer = threading.Thread(target=record, args=("importer", xbbg._import_core))
+        importer.start()
+        if not entered.wait(60):
+            raise SystemExit("stand-in xbbg._core never started executing")
+
+        waiters = [
+            threading.Thread(target=record, args=("import_core", xbbg._import_core)),
+            threading.Thread(target=record, args=("from_import", from_import)),
+        ]
+        for waiter in waiters:
+            waiter.start()
+        deadline = time.monotonic() + 60
+        while not all(not waiter.is_alive() or waiting_on_import_lock(waiter) for waiter in waiters):
+            if time.monotonic() > deadline:
+                raise SystemExit("waiting threads never reached importlib's module lock")
+            time.sleep(0.01)
+
+        release.set()
+        for thread in (importer, *waiters):
+            thread.join(60)
+
+        failures = {name: repr(value) for name, value in results.items() if isinstance(value, BaseException)}
+        if failures:
+            raise SystemExit(f"concurrent _core access failed: {failures}")
+        modules = {id(module) for module in results.values()}
+        if len(results) != 3 or len(modules) != 1 or not getattr(results["importer"], "STAND_IN", False):
+            raise SystemExit(f"threads saw different _core modules: {results}")
+        print("shared")
+        """
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Recursive import" not in result.stdout + result.stderr
+    assert result.stdout.strip().endswith("shared")
+
+
+def test_same_thread_reentry_is_still_reported():
+    result = _run_with_stand_in_core(
+        """
+        seen = []
+
+
+        def reentrant_exec(module):
+            try:
+                xbbg._import_core()
+            except ImportError as exc:
+                seen.append(str(exc))
+            else:
+                seen.append("re-entry returned without error")
+
+
+        install_stand_in_core(reentrant_exec)
+        core = xbbg._import_core()
+        if seen != ["Recursive import of _core detected"]:
+            raise SystemExit(f"unexpected re-entry outcome: {seen}")
+        if xbbg._import_core() is not core:
+            raise SystemExit("_core was not cached after the import finished")
+        print("reported")
+        """
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stdout.strip().endswith("reported")

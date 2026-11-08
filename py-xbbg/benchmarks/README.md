@@ -7,8 +7,8 @@ comparisons; installing a package does not add it to every benchmark.
 ## Bloomberg Data Usage
 
 All request benchmarks require an authorized Bloomberg Terminal or B-PIPE
-connection and the relevant entitlements. Only `bench_handoff_offline.py` is
-offline.
+connection and the relevant entitlements. Only `bench_handoff_offline.py` and
+`bench_python_delivery_latency.py` are offline.
 
 With the defaults in `config.py`, each successful package/scenario pair makes one
 fresh-process call, one discarded warmup call, five measured warm calls, and one
@@ -28,6 +28,7 @@ your internal policies.
 | `harness.py` | Separate BDP, BDH, and BQL comparison with `polars-bloomberg`; reports same-process first calls and warm timings. |
 | `bench_raw_blpapi.py` | Standalone SDK BDP phase timing; not a lane in `run_all.py`. |
 | `bench_handoff_offline.py` | Native Arrow handoff into supported Python consumers using synthetic fixture data; no live requests. |
+| `bench_python_delivery_latency.py` | Publish-to-delivery latency for an asyncio consumer of the offline subscription test driver, the producer's `publish_json` call time, and event-loop lag reported separately. Requires a release build of `xbbg._core` with the `test-support` feature (see the script docstring); prints results and writes no files. |
 
 The standard runner labels the current installation `xbbg-rust`; the equivalence
 script labels it `xbbg-latest`. Both import the real `xbbg` package. There is no
@@ -73,6 +74,7 @@ python py-xbbg/benchmarks/bench_raw_blpapi.py
 
 # No Bloomberg connection needed
 python py-xbbg/benchmarks/bench_handoff_offline.py --quick
+python py-xbbg/benchmarks/bench_python_delivery_latency.py  # release test-support build only
 ```
 
 ## Configuration
@@ -105,15 +107,16 @@ The standard runner writes to `py-xbbg/benchmarks/results/`:
 ```text
 benchmark_v{version}.json
 benchmark_v{version}.md
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.json
-benchmark_v{version}_{YYYYMMDD_HHMMSS}.md
+benchmark_v{version}_{YYYYMMDD}_{n}.json
+benchmark_v{version}_{YYYYMMDD}_{n}.md
 latest.json
 latest.md
 ```
 
-Version files are overwritten on another run of the same version; timestamped
-files preserve each run. `latest.*` are local symlinks or copies. Offline handoff
-and competitor-equivalence scripts also write their own timestamped reports.
+Version files are overwritten on another run of the same version; archive files
+preserve each run, numbered within its UTC date. `latest.*` are local symlinks or
+copies. Offline handoff and competitor-equivalence scripts also write their own
+numbered reports.
 
 | Standard-runner metric | Meaning |
 |------------------------|---------|
@@ -129,5 +132,11 @@ values are comparable. Historical reports may predate the current measurement
 schema; see [results/README.md](results/README.md).
 
 Live benchmarks are local-only; they are not an offline CI performance gate.
-Review generated provenance before sharing reports and remove local paths or
-other identifying environment details.
+
+Reports are written to be committed and shared as they are. They contain timings,
+result shapes and request inputs, plus provenance limited to package versions, the
+xbbg commit and build profile, and the Python version and GIL mode. They record no
+paths, host name, OS build, CPU model or count, compiler flags, environment
+variables or local time (only the UTC date), no Bloomberg error text (only the
+exception type), and no returned Bloomberg values (equivalence mismatches name
+the row and field, not the data).

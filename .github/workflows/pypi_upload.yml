@@ -53,13 +53,14 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   # Build wheels via setuptools-rust + uv (Linux x64, Windows x64) × Python
   # ════════════════════════════════════════════════════════════════════════════
+  # 3.14t/3.15t build the free-threaded (cp314t/cp315t) wheels.
   build:
     name: Build (Python ${{ matrix.python }}, ${{ matrix.os }})
     needs: [sdk-version, generate-bindings]
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
+        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
         os: [ubuntu-latest, windows-latest, macos-latest]
         include:
           # Linux wheels build inside the manylinux_2_28 (AlmaLinux 8) container so
@@ -139,20 +140,31 @@ jobs:
 
       - name: Setup Python ${{ matrix.python }}
         if: runner.os != 'Linux'
+        id: setup-python
         uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python }}
           allow-prereleases: true
 
+      # Build with the interpreter setup-python selected (free-threaded on the t
+      # legs), not whichever one uv's discovery reaches first.
+      - name: Select Python ${{ matrix.python }} for uv (macOS/Windows)
+        if: runner.os != 'Linux'
+        shell: bash
+        env:
+          PYTHON_PATH: ${{ steps.setup-python.outputs.python-path }}
+        run: echo "UV_PYTHON=$PYTHON_PATH" >> "$GITHUB_ENV"
+
       # Inside the manylinux container, use its bundled interpreters instead of
       # actions/setup-python (whose Ubuntu-built CPython needs glibc > 2.28).
+      # Free-threaded builds live beside them, e.g. /opt/python/cp314-cp314t.
       - name: Select manylinux Python ${{ matrix.python }} (Linux)
         if: runner.os == 'Linux'
         env:
           PYTHON_VERSION: ${{ matrix.python }}
         run: |
-          tag="cp${PYTHON_VERSION//./}"
-          PYBIN="/opt/python/${tag}-${tag}/bin"
+          abi="cp${PYTHON_VERSION//./}"
+          PYBIN="/opt/python/${abi%t}-${abi}/bin"
           if [ ! -x "$PYBIN/python" ]; then
             echo "Interpreter not found at $PYBIN — available interpreters:" >&2
             ls /opt/python >&2
@@ -173,9 +185,8 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
-          PYTHON_VERSION: ${{ matrix.python }}
         run: |
-          uv run --no-project --isolated --python "${UV_PYTHON:-$PYTHON_VERSION}" \
+          uv run --no-project --isolated --python "$UV_PYTHON" \
             python -I scripts/stamp_workspace_version.py "$RELEASE_VERSION" --check
 
       - name: Build wheel
@@ -207,11 +218,10 @@ jobs:
         shell: bash
         env:
           RELEASE_VERSION: ${{ github.ref_name }}
-          PYTHON_VERSION: ${{ matrix.python }}
         # Install the repaired artifact, not the checkout. -I also excludes
         # PYTHONPATH and the script directory from Python's import search path.
         run: |
-          uv run --no-project --isolated --python "${UV_PYTHON:-$PYTHON_VERSION}" \
+          uv run --no-project --isolated --python "$UV_PYTHON" \
             --with packaging --with ./dist/*.whl \
             python -I scripts/check_release_versions.py "$RELEASE_VERSION"
 

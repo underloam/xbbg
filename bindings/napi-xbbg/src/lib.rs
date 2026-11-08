@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use arrow::ipc::writer::StreamWriter;
 use arrow::record_batch::RecordBatch;
-use arrow_zero_copy::NativeArrowBatch;
+use arrow_zero_copy::{NativeArrowBatch, NativeArrowIpcFile};
 use napi::bindgen_prelude::{
     Buffer, Either, Env, Error, FromNapiValue, FunctionRef, JavaScriptClassExt, JsObjectValue,
     JsValue, Object, Status, ToNapiValue, TypeName, Uint8Array, Unknown, ValidateNapiValue,
@@ -439,25 +439,13 @@ pub struct NativeSubscriptionLayout {
     pub kinds: Vec<String>,
 }
 
-#[napi(object)]
-pub struct NativeSubscriptionRow {
-    pub topic: String,
-    pub topic_id: u32,
-    pub timestamp_us: i64,
-    pub layout_version: u32,
-    pub field_indices: Vec<u32>,
-    pub bool_values: Vec<Option<bool>>,
-    pub i32_values: Vec<Option<i32>>,
-    pub f64_values: Vec<Option<f64>>,
-    pub string_values: Vec<Option<String>>,
-    pub i64_values: Vec<Option<String>>,
-}
-
-#[napi(object)]
+/// One layout-homogeneous batch of scalar rows. `ToNapiValue` writes it to JS
+/// as columns straight from the engine updates: no per-row Rust allocation, no
+/// padding for absent value kinds, and no decimal round trip for 64-bit values.
 pub struct NativeSubscriptionUpdateBatch {
-    pub kind: String,
-    pub layout: Option<NativeSubscriptionLayout>,
-    pub updates: Vec<NativeSubscriptionRow>,
+    layout: Option<NativeSubscriptionLayout>,
+    layout_version: u32,
+    updates: Vec<SubscriptionUpdate>,
 }
 
 #[napi(object)]
@@ -879,91 +867,210 @@ fn to_native_layout(update: &SubscriptionUpdate) -> NativeSubscriptionLayout {
     }
 }
 
-fn to_native_row(update: SubscriptionUpdate) -> NativeSubscriptionRow {
-    let len = update.values.len();
-    let mut field_indices = Vec::with_capacity(len);
-    let mut bool_values = Vec::with_capacity(len);
-    let mut i32_values = Vec::with_capacity(len);
-    let mut f64_values = Vec::with_capacity(len);
-    let mut string_values = Vec::with_capacity(len);
-    let mut i64_values = Vec::with_capacity(len);
+/// One present scalar value as JavaScript receives it under its layout kind,
+/// resolved once in Rust. Date32 stays a day count (JS builds the `Date`
+/// lazily) and 64-bit kinds become BigInt without a decimal round trip.
+#[derive(Debug, PartialEq)]
+enum TickValue<'a> {
+    Null,
+    Bool(bool),
+    I32(i32),
+    F64(f64),
+    Str(&'a str),
+    /// Compatibility rendering of a non-string payload in a promoted string field.
+    Text(String),
+    BigInt(i64),
+}
 
-    for field in update.values.iter() {
-        field_indices.push(u32::from(field.index));
-        let effective_kind = update
-            .layout
-            .fields
-            .get(usize::from(field.index))
-            .map_or(FieldKind::Unknown, |meta| meta.kind);
-        if matches!(effective_kind, FieldKind::Unknown | FieldKind::Str)
-            && !matches!(field.value, UpdateValue::Null)
-        {
-            bool_values.push(None);
-            i32_values.push(None);
-            f64_values.push(None);
-            string_values.push(field.value.as_string_lossy());
-            i64_values.push(None);
-            continue;
+impl<'a> TickValue<'a> {
+    /// A payload that does not match its layout kind reads as an explicit null,
+    /// exactly as the former per-kind value slots did.
+    fn resolve(kind: FieldKind, value: &'a UpdateValue) -> Self {
+        match (kind, value) {
+            (_, UpdateValue::Null) => Self::Null,
+            (FieldKind::Unknown | FieldKind::Str, UpdateValue::Str(text)) => Self::Str(text),
+            (FieldKind::Unknown | FieldKind::Str, other) => {
+                other.as_string_lossy().map_or(Self::Null, Self::Text)
+            }
+            (FieldKind::Bool, UpdateValue::Bool(flag)) => Self::Bool(*flag),
+            (
+                FieldKind::I32 | FieldKind::Date32,
+                UpdateValue::I32(number) | UpdateValue::Date32(number),
+            ) => Self::I32(*number),
+            (FieldKind::F64, UpdateValue::F64(number)) => Self::F64(*number),
+            (
+                FieldKind::I64 | FieldKind::Time64Micros | FieldKind::TimestampMicros,
+                UpdateValue::I64(number)
+                | UpdateValue::Time64Micros(number)
+                | UpdateValue::TimestampMicros(number),
+            ) => Self::BigInt(*number),
+            _ => Self::Null,
         }
-        match &field.value {
-            UpdateValue::Null => {
-                bool_values.push(None);
-                i32_values.push(None);
-                f64_values.push(None);
-                string_values.push(None);
-                i64_values.push(None);
-            }
-            UpdateValue::Bool(v) => {
-                bool_values.push(Some(*v));
-                i32_values.push(None);
-                f64_values.push(None);
-                string_values.push(None);
-                i64_values.push(None);
-            }
-            UpdateValue::I32(v) | UpdateValue::Date32(v) => {
-                bool_values.push(None);
-                i32_values.push(Some(*v));
-                f64_values.push(None);
-                string_values.push(None);
-                i64_values.push(None);
-            }
-            UpdateValue::I64(v)
-            | UpdateValue::Time64Micros(v)
-            | UpdateValue::TimestampMicros(v) => {
-                bool_values.push(None);
-                i32_values.push(None);
-                f64_values.push(None);
-                string_values.push(None);
-                i64_values.push(Some(v.to_string()));
-            }
-            UpdateValue::F64(v) => {
-                bool_values.push(None);
-                i32_values.push(None);
-                f64_values.push(Some(*v));
-                string_values.push(None);
-                i64_values.push(None);
-            }
-            UpdateValue::Str(v) => {
-                bool_values.push(None);
-                i32_values.push(None);
-                f64_values.push(None);
-                string_values.push(Some(v.to_string()));
-                i64_values.push(None);
+    }
+}
+
+impl ToNapiValue for TickValue<'_> {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        use napi::bindgen_prelude::{Null as JsNull, i64n};
+
+        // SAFETY: every variant forwards the caller's ToNapiValue contract.
+        unsafe {
+            match value {
+                Self::Null => JsNull::to_napi_value(env, JsNull),
+                Self::Bool(flag) => <bool as ToNapiValue>::to_napi_value(env, flag),
+                Self::I32(number) => <i32 as ToNapiValue>::to_napi_value(env, number),
+                Self::F64(number) => <f64 as ToNapiValue>::to_napi_value(env, number),
+                Self::Str(text) => <&str as ToNapiValue>::to_napi_value(env, text),
+                Self::Text(text) => <String as ToNapiValue>::to_napi_value(env, text),
+                Self::BigInt(number) => i64n::to_napi_value(env, i64n(number)),
             }
         }
     }
+}
 
-    NativeSubscriptionRow {
-        topic: update.topic.to_string(),
-        topic_id: update.topic_id,
-        timestamp_us: update.timestamp_us,
-        layout_version: update.layout.version,
-        field_indices,
-        bool_values,
-        i32_values,
-        f64_values,
-        string_values,
-        i64_values,
+/// Element type of a numeric batch column exported as a JS typed array.
+trait TypedArrayElement: Copy {
+    const KIND: napi::sys::napi_typedarray_type;
+}
+
+impl TypedArrayElement for u16 {
+    const KIND: napi::sys::napi_typedarray_type = napi::sys::TypedarrayType::uint16_array;
+}
+
+impl TypedArrayElement for u32 {
+    const KIND: napi::sys::napi_typedarray_type = napi::sys::TypedarrayType::uint32_array;
+}
+
+impl TypedArrayElement for f64 {
+    const KIND: napi::sys::napi_typedarray_type = napi::sys::TypedarrayType::float64_array;
+}
+
+fn napi_created(status: napi::sys::napi_status, what: &str) -> napi::Result<()> {
+    if status == napi::sys::Status::napi_ok {
+        Ok(())
+    } else {
+        Err(Error::new(
+            Status::from(status),
+            format!("failed to create {what}"),
+        ))
+    }
+}
+
+/// Copy one numeric column into a V8-owned typed array: one allocation and one
+/// copy instead of a JS value per element. Per-batch columns are small, so a
+/// copy is cheaper than an external buffer with a GC finalizer.
+///
+/// Call only from `ToNapiValue`, on the owning JS thread.
+fn copied_typed_array<T: TypedArrayElement>(
+    env: napi::sys::napi_env,
+    elements: &[T],
+) -> napi::Result<napi::sys::napi_value> {
+    let byte_length = std::mem::size_of_val(elements);
+    let mut data = std::ptr::null_mut();
+    let mut buffer = std::ptr::null_mut();
+    // SAFETY: `env` is the live environment of the calling ToNapiValue.
+    let status =
+        unsafe { napi::sys::napi_create_arraybuffer(env, byte_length, &mut data, &mut buffer) };
+    napi_created(status, "subscription batch ArrayBuffer")?;
+    if byte_length != 0 {
+        // SAFETY: V8 just allocated `byte_length` writable bytes at `data`, which
+        // cannot overlap the Rust-owned source slice.
+        unsafe {
+            std::ptr::copy_nonoverlapping(
+                elements.as_ptr().cast::<u8>(),
+                data.cast::<u8>(),
+                byte_length,
+            );
+        }
+    }
+    let mut array = std::ptr::null_mut();
+    // SAFETY: `buffer` holds exactly `elements.len()` values of `T::KIND`.
+    let status = unsafe {
+        napi::sys::napi_create_typedarray(env, T::KIND, elements.len(), buffer, 0, &mut array)
+    };
+    napi_created(status, "subscription batch typed array")?;
+    Ok(array)
+}
+
+fn js_array_length(label: &str, length: usize) -> napi::Result<u32> {
+    u32::try_from(length).map_err(|_| {
+        Error::new(
+            Status::InvalidArg,
+            format!("subscription batch {label} {length} exceeds the JavaScript array limit"),
+        )
+    })
+}
+
+/// Columns: per row `topics`, `timestampsUs`, and `rowOffsets` (plus one end
+/// offset); per present value `fieldIndices` and `values`, in update order.
+/// Absent fields have no position and an explicit clear is `null`.
+impl ToNapiValue for NativeSubscriptionUpdateBatch {
+    unsafe fn to_napi_value(
+        raw_env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        let Self {
+            layout,
+            layout_version,
+            updates,
+        } = value;
+        let env = Env::from_raw(raw_env);
+        let cell_count = updates
+            .iter()
+            .map(|update| update.values.len())
+            .sum::<usize>();
+        let mut topics = env.create_array(js_array_length("rows", updates.len())?)?;
+        let mut values = env.create_array(js_array_length("values", cell_count)?)?;
+        let mut timestamps_us = Vec::with_capacity(updates.len());
+        let mut row_offsets = Vec::with_capacity(updates.len() + 1);
+        let mut field_indices = Vec::with_capacity(cell_count);
+        row_offsets.push(0_u32);
+        let mut cell = 0_u32;
+        // Bursts usually repeat one topic; reuse its JS string handle.
+        let mut previous_topic: Option<(&str, napi::sys::napi_value)> = None;
+        for (row, update) in (0_u32..).zip(&updates) {
+            let topic = match previous_topic {
+                Some((name, handle)) if *name == *update.topic => handle,
+                // SAFETY: this ToNapiValue runs on the owning JS thread.
+                _ => unsafe { <&str as ToNapiValue>::to_napi_value(raw_env, &update.topic)? },
+            };
+            previous_topic = Some((update.topic.as_ref(), topic));
+            topics.set(row, topic)?;
+            timestamps_us.push(update.timestamp_us as f64);
+            for field in &update.values {
+                let kind = update
+                    .layout
+                    .fields
+                    .get(usize::from(field.index))
+                    .map_or(FieldKind::Unknown, |meta| meta.kind);
+                values.set(cell, TickValue::resolve(kind, &field.value))?;
+                field_indices.push(field.index);
+                cell += 1;
+            }
+            row_offsets.push(cell);
+        }
+
+        let mut batch = Object::new(&env)?;
+        batch.set_c_named_property(c"kind", "batch")?;
+        if let Some(layout) = layout {
+            batch.set_c_named_property(c"layout", layout)?;
+        }
+        batch.set_c_named_property(c"layoutVersion", layout_version)?;
+        batch.set_c_named_property(c"topics", topics)?;
+        batch.set_c_named_property(
+            c"timestampsUs",
+            copied_typed_array(raw_env, &timestamps_us)?,
+        )?;
+        batch.set_c_named_property(c"rowOffsets", copied_typed_array(raw_env, &row_offsets)?)?;
+        batch.set_c_named_property(
+            c"fieldIndices",
+            copied_typed_array(raw_env, &field_indices)?,
+        )?;
+        batch.set_c_named_property(c"values", values)?;
+        Ok(batch.raw())
     }
 }
 
@@ -971,8 +1078,9 @@ fn to_native_update_batch(
     updates: Vec<SubscriptionUpdate>,
     last_layout_sent: &mut Option<Arc<FieldLayout>>,
 ) -> Option<NativeSubscriptionUpdateBatch> {
-    let mut iter = updates.into_iter();
-    let first = iter.next()?;
+    let first = updates.first()?;
+    // Batches never span a layout change, so the first row's layout is the batch's.
+    let layout_version = first.layout.version;
     let layout = if last_layout_sent
         .as_ref()
         .is_some_and(|current| subscription_layouts_match(current, &first.layout))
@@ -980,15 +1088,12 @@ fn to_native_update_batch(
         None
     } else {
         *last_layout_sent = Some(first.layout.clone());
-        Some(to_native_layout(&first))
+        Some(to_native_layout(first))
     };
-    let mut rows = Vec::with_capacity(iter.size_hint().0 + 1);
-    rows.push(to_native_row(first));
-    rows.extend(iter.map(to_native_row));
     Some(NativeSubscriptionUpdateBatch {
-        kind: "batch".to_string(),
         layout,
-        updates: rows,
+        layout_version,
+        updates,
     })
 }
 
@@ -1338,6 +1443,20 @@ impl JsEngine {
             .await
             .map_err(blp_async_error_to_napi)?;
         to_ipc_buffer(batch)
+    }
+
+    /// Run a request and encode the result once, off the JS thread, as an Arrow
+    /// IPC file with its schema metadata. nodejs-polars `readIPC` reads only the
+    /// file format; `request_raw` keeps returning the stream format.
+    #[napi]
+    pub async fn request_ipc_file(&self, params: RequestInput) -> napi::Result<NativeArrowIpcFile> {
+        let rust_params: RequestParams = params.try_into()?;
+        let batch = self
+            .engine
+            .request(rust_params)
+            .await
+            .map_err(blp_async_error_to_napi)?;
+        NativeArrowIpcFile::from_record_batch(&batch)
     }
 
     /// Return the Bloomberg identity seat type: "BPS", "NONBPS", or "INVALID".
@@ -2344,22 +2463,63 @@ pub struct NativeSubscriptionDeliveryRead {
     lease: SubscriptionDeliveryLease,
     project: Option<SubscriptionDeliveryProjector>,
     close_signal: watch::Receiver<bool>,
+    format: DeliveryDataFormat,
 }
 
 type SubscriptionDeliveryProjector =
     FunctionRef<NativeSubscriptionDeliveryOutput, Unknown<'static>>;
 
+/// Arrow representation a delivery read hands to JavaScript.
+#[derive(Clone, Copy)]
+enum DeliveryDataFormat {
+    /// Zero-copy column descriptors.
+    ZeroCopy,
+    /// One Arrow IPC file, which nodejs-polars reads without JS re-encoding.
+    IpcFile,
+}
+
+enum NativeDeliveryData {
+    ZeroCopy(NativeArrowBatch),
+    IpcFile(NativeArrowIpcFile),
+}
+
+impl ToNapiValue for NativeDeliveryData {
+    unsafe fn to_napi_value(
+        env: napi::sys::napi_env,
+        value: Self,
+    ) -> napi::Result<napi::sys::napi_value> {
+        // SAFETY: both variants forward the caller's ToNapiValue contract.
+        unsafe {
+            match value {
+                Self::ZeroCopy(batch) => NativeArrowBatch::to_napi_value(env, batch),
+                Self::IpcFile(file) => NativeArrowIpcFile::to_napi_value(env, file),
+            }
+        }
+    }
+}
+
 pub struct NativeSubscriptionDeliveryOutput {
     kind: SubscriptionDeliveryMode,
-    data: NativeArrowBatch,
+    data: NativeDeliveryData,
     gap_before: Option<SubscriptionGap>,
 }
 
 impl NativeSubscriptionDeliveryOutput {
-    fn from_delivery(delivery: SubscriptionDelivery) -> napi::Result<Self> {
+    fn from_delivery(
+        delivery: SubscriptionDelivery,
+        format: DeliveryDataFormat,
+    ) -> napi::Result<Self> {
+        let data = match format {
+            DeliveryDataFormat::ZeroCopy => {
+                NativeDeliveryData::ZeroCopy(to_native_record_batch(delivery.data)?)
+            }
+            DeliveryDataFormat::IpcFile => {
+                NativeDeliveryData::IpcFile(NativeArrowIpcFile::from_record_batch(&delivery.data)?)
+            }
+        };
         Ok(Self {
             kind: delivery.kind,
-            data: to_native_record_batch(delivery.data)?,
+            data,
             gap_before: delivery.gap_before,
         })
     }
@@ -2462,6 +2622,7 @@ impl ToNapiValue for NativeSubscriptionDeliveryRead {
             lease,
             project,
             close_signal,
+            format,
         } = value;
         if *close_signal.borrow() {
             // Expected close/abort handoff: dropping the lease restores the
@@ -2481,9 +2642,10 @@ impl ToNapiValue for NativeSubscriptionDeliveryRead {
             }
         };
         let env_wrapper = Env::from_raw(env);
-        let output = NativeSubscriptionDeliveryOutput::from_delivery(delivery).and_then(|output| {
-            project_subscription_delivery(&env_wrapper, output, project.as_ref())
-        });
+        let output =
+            NativeSubscriptionDeliveryOutput::from_delivery(delivery, format).and_then(|output| {
+                project_subscription_delivery(&env_wrapper, output, project.as_ref())
+            });
         if *close_signal.borrow() {
             return unsafe { Option::<()>::to_napi_value(env, None) };
         }
@@ -2503,6 +2665,7 @@ impl ToNapiValue for NativeSubscriptionDeliveryRead {
 pub struct NativeSubscriptionDeliveryDrain {
     lease: SubscriptionDeliveryDrainLease,
     project: Option<SubscriptionDeliveryProjector>,
+    format: DeliveryDataFormat,
 }
 
 impl ToNapiValue for NativeSubscriptionDeliveryDrain {
@@ -2522,7 +2685,7 @@ impl ToNapiValue for NativeSubscriptionDeliveryDrain {
         };
         let mut output = Vec::with_capacity(deliveries.len());
         for delivery in deliveries {
-            let item = NativeSubscriptionDeliveryOutput::from_delivery(delivery)
+            let item = NativeSubscriptionDeliveryOutput::from_delivery(delivery, value.format)
                 .map_err(|error| delivery_conversion_error(env, error))?;
             let raw = project_subscription_delivery(&env_wrapper, item, value.project.as_ref())
                 .map_err(|error| delivery_conversion_error(env, error))?;
@@ -2784,32 +2947,21 @@ impl JsSubscription {
         max_wait_ms: Option<u32>,
         project: Option<SubscriptionDeliveryProjector>,
     ) -> napi::Result<Option<NativeSubscriptionDeliveryRead>> {
-        self.require_delivery_rows()?;
-        let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
-        let close_signal = self.consumer.close_signal.subscribe();
-        let read = self.consumer.next_delivery(limit);
-        let lease = match max_wait_ms {
-            Some(wait_ms) => tokio::time::timeout(Duration::from_millis(u64::from(wait_ms)), read)
-                .await
-                .unwrap_or(None),
-            None => read.await,
-        };
-        #[cfg(feature = "test-support")]
-        if lease.is_some() {
-            let pause = self
-                .publication_pause
-                .lock()
-                .expect("subscription publication pause poisoned")
-                .take();
-            if let Some(pause) = pause {
-                pause.hold().await;
-            }
-        }
-        Ok(lease.map(|lease| NativeSubscriptionDeliveryRead {
-            lease,
-            project,
-            close_signal,
-        }))
+        self.read_delivery(max_rows, max_wait_ms, project, DeliveryDataFormat::ZeroCopy)
+            .await
+    }
+
+    /// `next_delivery` whose `data` is one Arrow IPC file instead of zero-copy
+    /// descriptors, so nodejs-polars reads it without JS decoding or re-encoding.
+    #[napi]
+    pub async fn next_ipc_file_delivery(
+        &self,
+        max_rows: Option<u32>,
+        max_wait_ms: Option<u32>,
+        project: Option<SubscriptionDeliveryProjector>,
+    ) -> napi::Result<Option<NativeSubscriptionDeliveryRead>> {
+        self.read_delivery(max_rows, max_wait_ms, project, DeliveryDataFormat::IpcFile)
+            .await
     }
 
     #[napi]
@@ -3133,6 +3285,69 @@ impl JsSubscription {
         drain: Option<bool>,
         project: Option<SubscriptionDeliveryProjector>,
     ) -> napi::Result<Option<NativeSubscriptionDeliveryDrain>> {
+        Ok(Some(
+            self.drain_deliveries(drain, project, DeliveryDataFormat::ZeroCopy)
+                .await,
+        ))
+    }
+
+    /// `unsubscribe_deliveries` whose drained `data` values are Arrow IPC files.
+    #[napi]
+    pub async fn unsubscribe_ipc_file_deliveries(
+        &self,
+        drain: Option<bool>,
+        project: Option<SubscriptionDeliveryProjector>,
+    ) -> napi::Result<Option<NativeSubscriptionDeliveryDrain>> {
+        Ok(Some(
+            self.drain_deliveries(drain, project, DeliveryDataFormat::IpcFile)
+                .await,
+        ))
+    }
+}
+
+impl JsSubscription {
+    async fn read_delivery(
+        &self,
+        max_rows: Option<u32>,
+        max_wait_ms: Option<u32>,
+        project: Option<SubscriptionDeliveryProjector>,
+        format: DeliveryDataFormat,
+    ) -> napi::Result<Option<NativeSubscriptionDeliveryRead>> {
+        self.require_delivery_rows()?;
+        let limit = subscription_limit(max_rows, "maxRows", self.batch_items)?;
+        let close_signal = self.consumer.close_signal.subscribe();
+        let read = self.consumer.next_delivery(limit);
+        let lease = match max_wait_ms {
+            Some(wait_ms) => tokio::time::timeout(Duration::from_millis(u64::from(wait_ms)), read)
+                .await
+                .unwrap_or(None),
+            None => read.await,
+        };
+        #[cfg(feature = "test-support")]
+        if lease.is_some() {
+            let pause = self
+                .publication_pause
+                .lock()
+                .expect("subscription publication pause poisoned")
+                .take();
+            if let Some(pause) = pause {
+                pause.hold().await;
+            }
+        }
+        Ok(lease.map(|lease| NativeSubscriptionDeliveryRead {
+            lease,
+            project,
+            close_signal,
+            format,
+        }))
+    }
+
+    async fn drain_deliveries(
+        &self,
+        drain: Option<bool>,
+        project: Option<SubscriptionDeliveryProjector>,
+        format: DeliveryDataFormat,
+    ) -> NativeSubscriptionDeliveryDrain {
         let lease = self
             .consumer
             .prepare_unsubscribe_deliveries(drain.unwrap_or(false), None)
@@ -3141,11 +3356,13 @@ impl JsSubscription {
             .lock()
             .expect("subscription Arrow output queue poisoned")
             .clear();
-        Ok(Some(NativeSubscriptionDeliveryDrain { lease, project }))
+        NativeSubscriptionDeliveryDrain {
+            lease,
+            project,
+            format,
+        }
     }
-}
 
-impl JsSubscription {
     fn require_rows(&self) -> napi::Result<()> {
         self.require_delivery_rows()?;
         self.consumer
@@ -3190,7 +3407,7 @@ mod tests {
     use super::*;
     use std::future::Future;
     use xbbg_async::engine::state::{
-        FieldLayout, FieldMeta, UpdateField, subscription_channel, subscription_channel_with_policy,
+        FieldLayout, FieldMeta, subscription_channel, subscription_channel_with_policy,
     };
     use xbbg_async::services::ExtractorType;
     use xbbg_core::AuthConfig;
@@ -3927,64 +4144,81 @@ mod tests {
     }
 
     #[test]
-    fn promoted_string_layout_serializes_every_concrete_scalar_into_the_string_slot() {
-        let layout = Arc::new(FieldLayout::new(
-            7,
-            vec![
-                FieldMeta::new("BOOL", 0, FieldKind::Str),
-                FieldMeta::new("I32", 1, FieldKind::Str),
-                FieldMeta::new("I64", 2, FieldKind::Str),
-                FieldMeta::new("F64", 3, FieldKind::Str),
-                FieldMeta::new("DATE", 4, FieldKind::Str),
-            ],
-        ));
-        let update = SubscriptionUpdate {
-            timestamp_us: 1,
-            topic_id: 1,
-            topic: Arc::from("IBM US Equity"),
-            layout,
-            values: [
-                UpdateField {
-                    index: 0,
-                    value: UpdateValue::Bool(true),
-                },
-                UpdateField {
-                    index: 1,
-                    value: UpdateValue::I32(42),
-                },
-                UpdateField {
-                    index: 2,
-                    value: UpdateValue::I64(4_000_000_000),
-                },
-                UpdateField {
-                    index: 3,
-                    value: UpdateValue::F64(1.25),
-                },
-                UpdateField {
-                    index: 4,
-                    value: UpdateValue::Date32(20_000),
-                },
-            ]
-            .into_iter()
-            .collect(),
-        };
+    fn tick_values_resolve_like_the_former_kind_selected_slots() {
+        use super::TickValue::{BigInt, Bool, F64, I32, Null, Str, Text};
 
-        let row = to_native_row(update);
+        // JS used to read the typed slot selected by the layout kind: a payload in
+        // another slot read as null, and promoted string layouts read every
+        // concrete payload as its text rendering.
+        let payloads = [
+            UpdateValue::Null,
+            UpdateValue::Bool(true),
+            UpdateValue::I32(42),
+            UpdateValue::I64(-9_007_199_254_740_993),
+            UpdateValue::F64(1.25),
+            UpdateValue::Str(Arc::from("text")),
+            UpdateValue::Date32(7),
+            UpdateValue::Time64Micros(3_600_000_000),
+            UpdateValue::TimestampMicros(1_700_000_000_000_000),
+        ];
+        let resolve = |kind| {
+            payloads
+                .iter()
+                .map(|payload| TickValue::resolve(kind, payload))
+                .collect::<Vec<_>>()
+        };
+        let text = |value: &str| Text(value.to_string());
 
         assert_eq!(
-            row.string_values,
-            vec![
-                Some("true".to_string()),
-                Some("42".to_string()),
-                Some("4000000000".to_string()),
-                Some("1.25".to_string()),
-                Some("20000".to_string()),
-            ]
+            resolve(FieldKind::Bool),
+            [Null, Bool(true), Null, Null, Null, Null, Null, Null, Null]
         );
-        assert_eq!(row.bool_values, vec![None; 5]);
-        assert_eq!(row.i32_values, vec![None; 5]);
-        assert_eq!(row.i64_values, vec![None; 5]);
-        assert_eq!(row.f64_values, vec![None; 5]);
+        for kind in [FieldKind::I32, FieldKind::Date32] {
+            assert_eq!(
+                resolve(kind),
+                [Null, Null, I32(42), Null, Null, Null, I32(7), Null, Null]
+            );
+        }
+        assert_eq!(
+            resolve(FieldKind::F64),
+            [Null, Null, Null, Null, F64(1.25), Null, Null, Null, Null]
+        );
+        for kind in [
+            FieldKind::I64,
+            FieldKind::Time64Micros,
+            FieldKind::TimestampMicros,
+        ] {
+            assert_eq!(
+                resolve(kind),
+                [
+                    Null,
+                    Null,
+                    Null,
+                    BigInt(-9_007_199_254_740_993),
+                    Null,
+                    Null,
+                    Null,
+                    BigInt(3_600_000_000),
+                    BigInt(1_700_000_000_000_000),
+                ]
+            );
+        }
+        for kind in [FieldKind::Str, FieldKind::Unknown] {
+            assert_eq!(
+                resolve(kind),
+                [
+                    Null,
+                    text("true"),
+                    text("42"),
+                    text("-9007199254740993"),
+                    text("1.25"),
+                    Str("text"),
+                    text("7"),
+                    text("3600000000"),
+                    text("1700000000000000"),
+                ]
+            );
+        }
     }
 
     #[test]

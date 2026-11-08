@@ -7,8 +7,7 @@ powered by a high-performance Rust backend.
 from __future__ import annotations
 
 import importlib
-from importlib.metadata import PackageNotFoundError, version
-import logging
+import threading
 from typing import TYPE_CHECKING
 
 from . import _core_guard
@@ -25,39 +24,28 @@ from ._exports import (
     SERVICE_EXPORTS,
 )
 
-logger = logging.getLogger(__name__)
-
-# Version from git tags via setuptools_scm (same mechanism as release/0.x)
+# Version from git tags via setuptools-scm, written into _version.py at build
+# time. Reading it avoids importlib.metadata, which costs ~80 ms per import.
 try:
-    _distribution_version: str | None = version("xbbg")
-except PackageNotFoundError:
+    from ._version import version as _distribution_version
+except ImportError:  # sources that were never built or installed
     _distribution_version = None
 __version__ = _distribution_version or "0+unknown"
 
 # Every import of the native extension, including `from xbbg._core import X`
-# (which bypasses __getattr__), checks that it was built for this xbbg.
+# (which bypasses __getattr__), checks that it was built for this xbbg and
+# first prepares the Bloomberg SDK library it links against.
 _core_guard.install(_distribution_version)
 
 # Lazy import of the Rust module to avoid import errors when it's not built
 if TYPE_CHECKING:
     from . import _core
 
-# Prepare SDK for native extension (_core) import on all platforms.
-# MUST run at module level, not inside __getattr__. When Python resolves
-# `from xbbg._core import X`, it imports `xbbg` first (here) then loads
-# the native extension as a submodule — bypassing __getattr__ entirely.
-#
-# Windows adds SDK dirs to the DLL search path; macOS/Linux preload libblpapi
-# via ctypes so dyld/ld.so satisfies _core's `@rpath/libblpapi3_64.so`
-# dependency via install-name / already-loaded image matching.
-try:
-    from . import _sdk
-
-    _sdk._prepare_sdk_for_core_import()
-except Exception:
-    logger.debug("Failed to prepare Bloomberg SDK for package import", exc_info=True)
-
-_importing_core = False
+# Same-thread re-entry detection only. Other threads importing concurrently wait
+# on importlib's per-module lock instead of tripping the recursion check.
+_core_import_state = threading.local()
+# Published only after a successful import: importlib inserts the module into
+# sys.modules before its exec (and the build guard) has finished.
 _core_module = None
 
 __all__ = list(PACKAGE_EXPORTS)
@@ -65,17 +53,16 @@ __all__ = list(PACKAGE_EXPORTS)
 
 def _import_core():
     """Import and cache the native extension with a friendlier DLL error."""
-    global _importing_core, _core_module
-    if _core_module is not None:
-        return _core_module
-    if _importing_core:
+    global _core_module
+    core = _core_module
+    if core is not None:
+        return core
+    if getattr(_core_import_state, "active", False):
         raise ImportError("Recursive import of _core detected")
 
-    _importing_core = True
+    _core_import_state.active = True
     try:
-        mod = importlib.import_module("xbbg._core")
-        _core_module = mod
-        return mod
+        core = importlib.import_module("xbbg._core")
     except ImportError as e:
         msg = str(e)
         if (
@@ -97,7 +84,9 @@ def _import_core():
             ) from e
         raise
     finally:
-        _importing_core = False
+        _core_import_state.active = False
+    _core_module = core
+    return core
 
 
 def _build_lazy_attr_exports() -> dict[str, tuple[str, str]]:

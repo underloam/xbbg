@@ -13,16 +13,38 @@ use serde::{
     de::{self, MapAccess, SeqAccess, Visitor},
 };
 use serde_json::Value as JsonValue;
-use std::{borrow::Cow, collections::BTreeMap, marker::PhantomData};
+use std::{
+    borrow::Cow,
+    collections::{BTreeMap, HashMap},
+    marker::PhantomData,
+    sync::LazyLock,
+};
 use tokio::sync::oneshot;
 
-use super::typed_builder::ColumnSet;
-use super::value_utils::top_level_response_error;
-use xbbg_core::{BlpError, Message};
+use super::typed_builder::{ColumnSet, ColumnSlot};
+use super::value_utils::{get_value_with_datatype, top_level_response_error};
+use xbbg_core::{BlpError, Element, Message, Name, Value};
 
 mod materialize;
 
 const BQL_TYPED_JSON_MAX_BYTES: usize = 32 * 1024;
+
+struct BqlElementNames {
+    beql_data: Name,
+    results: Name,
+}
+
+static BQL_NAMES: LazyLock<BqlElementNames> = LazyLock::new(|| BqlElementNames {
+    beql_data: Name::get_or_intern("beqlData"),
+    results: Name::get_or_intern("results"),
+});
+
+/// `ColumnSet` slots of the flattened `[path, value]` fallback rows.
+#[derive(Clone, Copy)]
+struct FlattenSlots {
+    path: ColumnSlot,
+    value: ColumnSlot,
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -173,6 +195,8 @@ where
 pub struct BqlState {
     /// Column set for building the output
     columns: ColumnSet,
+    /// Element-API fallback column slot per interned element name
+    element_slots: HashMap<usize, ColumnSlot>,
     /// Reply channel
     pub reply: oneshot::Sender<Result<RecordBatch, BlpError>>,
     /// Accumulated JSON string (for JSON-encoded responses)
@@ -184,6 +208,7 @@ impl BqlState {
     pub fn new(reply: oneshot::Sender<Result<RecordBatch, BlpError>>) -> Self {
         Self {
             columns: ColumnSet::new(),
+            element_slots: HashMap::new(),
             reply,
             json_buffer: None,
         }
@@ -231,12 +256,13 @@ impl BqlState {
     /// }
     /// ```
     fn process_message(&mut self, msg: &Message) {
+        let names = &*BQL_NAMES;
         let root = msg.elements();
 
         // Try different BQL response structures
         // Structure 1: beqlData -> results
-        if let Some(beql_data) = root.get_by_str("beqlData") {
-            if let Some(results) = beql_data.get_by_str("results") {
+        if let Some(beql_data) = root.get(&names.beql_data) {
+            if let Some(results) = beql_data.get(&names.results) {
                 // Check if first result is a JSON string
                 if !results.is_empty()
                     && let Some(first) = results.get_element(0)
@@ -262,7 +288,7 @@ impl BqlState {
         }
 
         // Structure 2: Direct results array
-        if let Some(results) = root.get_by_str("results") {
+        if let Some(results) = root.get(&names.results) {
             self.extract_results(&results);
             return;
         }
@@ -276,7 +302,11 @@ impl BqlState {
         }
 
         // Structure 4: Flatten the entire response (fallback)
-        self.flatten_element("", &root);
+        let slots = FlattenSlots {
+            path: self.columns.slot("path"),
+            value: self.columns.slot("value"),
+        };
+        self.flatten_element(slots, "", &root);
     }
 
     /// Parse BQL JSON response into a proper table.
@@ -334,7 +364,7 @@ impl BqlState {
     /// Extract results from a BQL results element (legacy Element-API fallback).
     /// Note: secondaryColumns (DATE, CURRENCY) are only available in the JSON
     /// path — this path does not support them.
-    fn extract_results(&mut self, results: &xbbg_core::Element) {
+    fn extract_results(&mut self, results: &Element) {
         xbbg_log::warn!(
             "BQL response routed to Element-API path — secondaryColumns will be missing"
         );
@@ -345,11 +375,11 @@ impl BqlState {
                 let num_children = row.num_children();
                 for j in 0..num_children {
                     if let Some(child) = row.get_at(j) {
-                        let name_str = child.name_str();
-                        if let Some(value) = child.get_value(0) {
-                            self.columns.append(name_str, value);
+                        let slot = self.element_slot(&child);
+                        if let Some(value) = get_value_with_datatype(&child, child.datatype()) {
+                            self.columns.append_slot(slot, value);
                         } else {
-                            self.columns.append_null(name_str);
+                            self.columns.append_null_slot(slot);
                         }
                     }
                 }
@@ -358,8 +388,19 @@ impl BqlState {
         }
     }
 
+    /// Column slot for an element's name, resolved once per interned name.
+    fn element_slot(&mut self, element: &Element<'_>) -> ColumnSlot {
+        let key = element.name_key();
+        if let Some(&slot) = self.element_slots.get(&key) {
+            return slot;
+        }
+        let slot = self.columns.slot(element.name_str());
+        self.element_slots.insert(key, slot);
+        slot
+    }
+
     /// Flatten an element into path-value pairs (fallback for complex structures).
-    fn flatten_element(&mut self, path: &str, element: &xbbg_core::Element) {
+    fn flatten_element(&mut self, slots: FlattenSlots, path: &str, element: &Element) {
         let datatype = element.datatype();
 
         // For complex types, recurse into children
@@ -374,7 +415,7 @@ impl BqlState {
                         } else {
                             format!("{path}[{i}]")
                         };
-                        self.flatten_element(&child_path, &child);
+                        self.flatten_element(slots, &child_path, &child);
                     }
                 }
             } else {
@@ -388,26 +429,26 @@ impl BqlState {
                         } else {
                             format!("{}.{}", path, name)
                         };
-                        self.flatten_element(&child_path, &child);
+                        self.flatten_element(slots, &child_path, &child);
                     }
                 }
             }
         } else {
             // Leaf value - add to columns
-            if let Some(value) = element.get_value(0) {
-                self.columns.append_str("path", path);
+            if let Some(value) = get_value_with_datatype(element, datatype) {
+                self.columns.append_str_slot(slots.path, path);
 
                 // Convert value to string for generic representation
-                let value_str = match &value {
-                    xbbg_core::Value::String(s) | xbbg_core::Value::Enum(s) => s.to_string(),
-                    xbbg_core::Value::Float64(f) => f.to_string(),
-                    xbbg_core::Value::Int64(i) => i.to_string(),
-                    xbbg_core::Value::Int32(i) => i.to_string(),
-                    xbbg_core::Value::Bool(b) => b.to_string(),
-                    xbbg_core::Value::Null => String::new(),
-                    _ => format!("{:?}", value),
+                let value_str: Cow<'_, str> = match &value {
+                    Value::String(s) | Value::Enum(s) => Cow::Borrowed(*s),
+                    Value::Float64(f) => Cow::Owned(f.to_string()),
+                    Value::Int64(i) => Cow::Owned(i.to_string()),
+                    Value::Int32(i) => Cow::Owned(i.to_string()),
+                    Value::Bool(b) => Cow::Borrowed(if *b { "true" } else { "false" }),
+                    Value::Null => Cow::Borrowed(""),
+                    _ => Cow::Owned(format!("{:?}", value)),
                 };
-                self.columns.append_str("value", &value_str);
+                self.columns.append_str_slot(slots.value, &value_str);
                 self.columns.end_row();
             }
         }
