@@ -89,7 +89,7 @@ pub(super) fn test_feed(hub: &SharedSubscriptions, topic: &str) -> (Arc<TestSess
         .unwrap();
     (
         feed.session.test.clone().unwrap(),
-        feed.upstream_key.load(Ordering::Acquire),
+        feed.upstream_key().expect("feed holds its worker slot"),
     )
 }
 
@@ -137,7 +137,7 @@ impl SubscriptionFixture {
     pub fn publish_json(&self, topic: &str, json: &str) -> Result<(), BlpAsyncError> {
         let feed = self.lookup_feed(topic)?;
         let session = feed.session.test.as_ref().expect("synthetic session");
-        session.publish_json(feed.upstream_key.load(Ordering::Acquire), json)
+        session.publish_json(feed.upstream_key()?, json)
     }
 
     /// Obtain a direct decoded-input handle for production shared-feed timings.

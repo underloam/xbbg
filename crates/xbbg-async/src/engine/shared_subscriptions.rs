@@ -252,7 +252,40 @@ impl MetadataSlotCache {
     }
 }
 
+/// Ownership of a feed's slot on its subscription worker.
+///
+/// Worker slab keys are recycled. Once Bloomberg ends a topic, the worker
+/// frees its slot and may hand it to another feed on the same session, so a
+/// released feed must never address that key again.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UpstreamSlot {
+    /// Subscribe has not yet returned the worker key.
+    Unassigned,
+    /// The worker slot holds this feed's upstream subscription.
+    Assigned(SlabKey),
+    /// The worker freed the slot (topic failure/termination or session end).
+    Released,
+}
+
+impl UpstreamSlot {
+    /// Record the key returned by subscribe, unless the worker already
+    /// released the slot while subscribe was returning.
+    fn assign(&mut self, key: SlabKey) {
+        if *self == Self::Unassigned {
+            *self = Self::Assigned(key);
+        }
+    }
+
+    fn key(self) -> Option<SlabKey> {
+        match self {
+            Self::Assigned(key) => Some(key),
+            Self::Unassigned | Self::Released => None,
+        }
+    }
+}
+
 struct FeedState {
+    upstream: UpstreamSlot,
     fields: Vec<String>,
     capture_all_fields: bool,
     consumers: Vec<ConsumerTopic>,
@@ -280,7 +313,6 @@ struct Feed {
     mktdata: bool,
     status_topic: String,
     session: Arc<FeedSession>,
-    upstream_key: AtomicUsize,
     state: Mutex<FeedState>,
     hub: Weak<SharedSubscriptions>,
 }
@@ -295,6 +327,7 @@ impl Feed {
         id: usize,
     ) -> Arc<Self> {
         let mut state = FeedState {
+            upstream: UpstreamSlot::Unassigned,
             fields,
             consumers: Vec::new(),
             layout: None,
@@ -319,11 +352,19 @@ impl Feed {
             mktdata: identity.service == MKTDATA,
             identity,
             session,
-            upstream_key: AtomicUsize::new(usize::MAX),
             hub,
             status_topic: format!("feed-{id}"),
             state: Mutex::new(state),
         })
+    }
+
+    /// Worker key this feed currently owns; an error once it was released.
+    fn upstream_key(&self) -> Result<SlabKey, BlpAsyncError> {
+        self.state
+            .lock()
+            .upstream
+            .key()
+            .ok_or_else(|| config_error("subscription feed no longer exists"))
     }
 
     fn sink(self: &Arc<Self>) -> SubscriptionSender {
@@ -754,6 +795,9 @@ impl Feed {
             state.field_errors.clone_from(errors);
         }
         if terminal || session_end.is_some() {
+            // The worker freed this feed's slot under the same lock that
+            // delivered this status, before any other subscribe can reuse it.
+            state.upstream = UpstreamSlot::Released;
             state.lifecycle = "failed";
         }
         let availability =
@@ -2117,8 +2161,8 @@ impl SubscriptionHandle {
                 resubscribe.push(feed);
             } else if !kinds.is_empty()
                 && let Err(error) = feed
-                    .session
-                    .seed_kinds(feed.upstream_key.load(Ordering::Acquire), &kinds)
+                    .upstream_key()
+                    .and_then(|key| feed.session.seed_kinds(key, &kinds))
             {
                 feed.on_error(BlpError::Internal {
                     detail: error.to_string(),
@@ -2763,13 +2807,11 @@ impl SharedSubscriptions {
                     }
                 };
                 if !created && !kinds.is_empty() {
-                    feed.session
-                        .seed_kinds(feed.upstream_key.load(Ordering::Acquire), &kinds)?;
+                    feed.session.seed_kinds(feed.upstream_key()?, &kinds)?;
                 }
                 if consumer.request.all_fields && !feed.state.lock().capture_all_fields {
                     if !created {
-                        feed.session
-                            .enable_all_fields(feed.upstream_key.load(Ordering::Acquire))?;
+                        feed.session.enable_all_fields(feed.upstream_key()?)?;
                     }
                     feed.state.lock().capture_all_fields = true;
                 }
@@ -2856,7 +2898,7 @@ impl SharedSubscriptions {
                 {
                     Ok(keys) => {
                         for (feed, key) in creations.iter().zip(keys) {
-                            feed.upstream_key.store(key, Ordering::Release);
+                            feed.state.lock().upstream.assign(key);
                         }
                     }
                     Err(error) => {
@@ -2877,18 +2919,22 @@ impl SharedSubscriptions {
     }
 
     fn resubscribe(&self, feed: &Arc<Feed>) -> Result<(), BlpAsyncError> {
-        let (fields, kinds) = {
+        let (key, fields, kinds) = {
             let mut state = feed.state.lock();
             state.repainting = feed.mktdata || state.recovery.is_some();
             state.repaint_started = false;
-            (state.fields.clone(), state.kinds.clone())
+            (
+                state.upstream.key(),
+                state.fields.clone(),
+                state.kinds.clone(),
+            )
         };
-        let result = feed.session.resubscribe(
-            feed.upstream_key.load(Ordering::Acquire),
-            &fields,
-            &kinds,
-            &feed.identity.options,
-        );
+        let result = match key {
+            Some(key) => feed
+                .session
+                .resubscribe(key, &fields, &kinds, &feed.identity.options),
+            None => Err(config_error("subscription feed no longer exists")),
+        };
         if let Err(error) = &result {
             feed.on_error(BlpError::Internal {
                 detail: error.to_string(),
@@ -2931,14 +2977,13 @@ impl SharedSubscriptions {
         if !removed {
             return Ok(());
         }
-        feed.state.lock().lifecycle = "closed";
-        feed.session.feeds.lock().remove(&feed.status_topic);
-        let key = feed.upstream_key.load(Ordering::Acquire);
-        let result = if key == usize::MAX {
-            Ok(())
-        } else {
-            feed.session.unsubscribe(key)
+        let key = {
+            let mut state = feed.state.lock();
+            state.lifecycle = "closed";
+            state.upstream.key()
         };
+        feed.session.feeds.lock().remove(&feed.status_topic);
+        let result = key.map_or(Ok(()), |key| feed.session.unsubscribe(key));
         let session = feed.session.clone();
         drop(feed);
         if session.live_feeds.fetch_sub(1, Ordering::AcqRel) == 1 {

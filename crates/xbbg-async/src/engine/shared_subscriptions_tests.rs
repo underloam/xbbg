@@ -328,6 +328,35 @@ async fn subscription_failure_is_per_topic_and_session_termination_is_per_sessio
 }
 
 #[tokio::test]
+async fn retiring_a_failed_feed_cannot_unsubscribe_the_feed_that_reused_its_key() {
+    let (hub, _) = hub();
+    let mut stream = hub
+        .subscribe(request(&["IBM US Equity", "AAPL US Equity"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, failed_key) = test_feed(&hub, "IBM US Equity");
+    // Bloomberg ends IBM; its worker slot is freed before cleanup retires the feed.
+    session.status(failed_key, "SubscriptionFailure");
+    stream
+        .add(vec!["MSFT US Equity".into()], vec![])
+        .await
+        .unwrap();
+    let (msft_session, msft_key) = test_feed(&hub, "MSFT US Equity");
+    assert!(Arc::ptr_eq(&session, &msft_session));
+    assert_eq!(
+        msft_key, failed_key,
+        "precondition: the worker reused the slot"
+    );
+    cleanup(&hub).await;
+    assert_eq!(session.unsubscribes.load(Ordering::Relaxed), 0);
+    data(&session, msft_key, r#"{"BID":5}"#);
+    assert!(matches!(
+        value(&next(&mut stream), "BID"),
+        Some(UpdateValue::F64(5.0))
+    ));
+}
+
+#[tokio::test]
 async fn delayed_policies_and_known_delayed_attach_are_consumer_local() {
     let (hub, _) = hub();
     let mut warn = hub
@@ -626,7 +655,7 @@ async fn options_normalize_but_isolated_and_other_services_never_share() {
         .cloned()
         .unwrap();
     let session = feed.session.test.clone().unwrap();
-    let key = feed.upstream_key.load(Ordering::Acquire);
+    let key = feed.upstream_key().unwrap();
     data(&session, key, r#"{"BID":2}"#);
     next(&mut first);
     let mut second = hub.subscribe(non_market).await.unwrap();
@@ -1065,7 +1094,7 @@ async fn isolated_and_non_market_aliases_create_independent_upstreams_on_the_sam
         let mut stream = hub.subscribe(req).await.unwrap();
         let first = feed_for_label(&stream, "first");
         let session = first.session.test.clone().unwrap();
-        let first_key = first.upstream_key.load(Ordering::Acquire);
+        let first_key = first.upstream_key().unwrap();
         data(&session, first_key, r#"{"BID":1}"#);
         assert_eq!(next(&mut stream).topic.as_ref(), "first");
         stream
@@ -1073,7 +1102,7 @@ async fn isolated_and_non_market_aliases_create_independent_upstreams_on_the_sam
             .await
             .unwrap();
         let second = feed_for_label(&stream, "second");
-        let second_key = second.upstream_key.load(Ordering::Acquire);
+        let second_key = second.upstream_key().unwrap();
         assert_ne!(first_key, second_key);
         assert!(Arc::ptr_eq(&first.session, &second.session));
         assert_eq!(factory.sessions.lock().len(), 1);
@@ -1298,9 +1327,7 @@ async fn batched_topic_failures_keep_wire_order_kind_and_reason_with_linear_rout
         .enumerate()
         .rev()
         .map(|(index, topic)| {
-            let key = feed_for_label(&stream, topic)
-                .upstream_key
-                .load(Ordering::Acquire);
+            let key = feed_for_label(&stream, topic).upstream_key().unwrap();
             (
                 key,
                 if index % 2 == 0 {
