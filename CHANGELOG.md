@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **Python `ticker` key-column deprecation warns at most once per process (#371).** Results using `key_column="ticker"` now emit `FutureWarning` on the first result in a process rather than at every request call site, matching Node's one-time `DeprecationWarning` and MCP's startup log.
 
+### Fixed
+
+- **Requests no longer hang after about a billion requests on one worker.** Each request's correlation ID carries a 30-bit generation, but the worker kept the full 32-bit counter beside the slot. From the 2^30th request on a worker, every response, cancel and timeout was dropped as stale, so requests hung and their slots leaked. Generations now cycle within the 30 bits the correlation ID carries.
+
 ## [1.8.1] - 2026-11-04
 
 ### Added

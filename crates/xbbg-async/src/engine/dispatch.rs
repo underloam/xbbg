@@ -21,6 +21,10 @@ pub(super) const IDENTITY_TOKEN_CID: i64 = 0b11_i64 << 60;
 const SLOT_BITS: u32 = 32;
 const SLOT_MASK: i64 = (1_i64 << SLOT_BITS) - 1;
 const GENERATION_MASK: i64 = (1_i64 << 30) - 1;
+/// Largest generation a dispatch CID can carry. Request generations must stay
+/// within `1..=MAX_GENERATION` so the value stored beside a slot equals the
+/// value decoded from its CID.
+pub(super) const MAX_GENERATION: u32 = GENERATION_MASK as u32;
 
 /// Internal dispatch token encoded into Bloomberg integer correlation IDs.
 ///

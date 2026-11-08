@@ -48,7 +48,7 @@ const APIAUTH_SERVICE: &str = "//blp/apiauth";
 const SLOW_REQUEST_WARN_THRESHOLD: Duration = Duration::from_secs(30);
 
 use super::delayed;
-use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID};
+use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID, MAX_GENERATION};
 use super::session_lifecycle::{
     PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
 };
@@ -441,11 +441,11 @@ impl WorkerShared {
         }
     }
 
-    /// Next wrapping generation tag for request dispatch CIDs.
+    /// Next generation tag for request dispatch CIDs, cycling through
+    /// `1..=MAX_GENERATION` so the stored generation always equals the one
+    /// decoded from the CID (0 stays reserved for untagged keys).
     fn next_generation(&self) -> u32 {
-        self.next_generation
-            .fetch_add(1, Ordering::Relaxed)
-            .wrapping_add(1)
+        self.next_generation.fetch_add(1, Ordering::Relaxed) % MAX_GENERATION + 1
     }
 
     fn insert_slot(&self, generation: u32, state: UnifiedRequestState) -> SlabKey {
@@ -2130,6 +2130,30 @@ mod tests {
         // The old ticket no longer addresses the slot.
         assert!(shared.take_slot(first_key).is_none());
         assert_eq!(shared.requests.lock().len(), 1);
+    }
+
+    #[test]
+    fn generations_past_the_cid_tag_width_still_address_their_slots() {
+        let shared = shared();
+        // Start just below the 30-bit CID tag limit so the next requests
+        // cross it.
+        shared
+            .next_generation
+            .store(MAX_GENERATION - 2, Ordering::Relaxed);
+        let mut seen = Vec::new();
+        for _ in 0..4 {
+            let (state, _rx) = generic_state();
+            let generation = shared.next_generation();
+            assert_ne!(generation, 0, "0 is reserved for untagged keys");
+            let key = shared.insert_slot(generation, state);
+            let dispatch_key = DispatchKey::with_generation(key, generation);
+            assert!(
+                shared.take_slot(dispatch_key).is_some(),
+                "generation {generation} must still match its CID",
+            );
+            seen.push(generation);
+        }
+        assert_eq!(seen, [MAX_GENERATION - 1, MAX_GENERATION, 1, 2]);
     }
 
     #[test]
