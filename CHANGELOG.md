@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **Requests no longer hang after about a billion requests on one worker.** Each request's correlation ID carries a 30-bit generation, but the worker kept the full 32-bit counter beside the slot. From the 2^30th request on a worker, every response, cancel and timeout was dropped as stale, so requests hung and their slots leaked. Generations now cycle within the 30 bits the correlation ID carries.
 - **A failed subscription topic can no longer unsubscribe another topic.** When Bloomberg failed or terminated a topic, its worker slot was freed and could be reused by the next topic added on the same session, but the failed feed kept the old key. Its cleanup then unsubscribed, re-fielded or re-typed whichever topic held that key. The feed now gives up the key in the same step the worker frees the slot.
+- **Java: a mismatched drain always closes the subscription.** `unsubscribe(true)` on a view whose read format another view claimed at the same moment could fail without closing the subscription. The format check and claim now happen under one lock, so the drain closes the subscription and then fails, as documented.
 
 ## [1.8.1] - 2026-11-04
 

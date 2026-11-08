@@ -315,43 +315,52 @@ final class ViewIterator<B, V> {
         final RuntimeException formatError = deliveryError;
         return startClose(true, true).thenCompose(ignored -> Futures.<List<V>>failed(formatError));
       }
-      RuntimeException mismatch = coordinator.readModeMismatch(readMode);
-      if (mismatch != null) {
-        CompletableFuture<List<V>> cleanup =
-            coordinator.canClose() ? startClose(false, false) : waitForSharedClose();
-        return rejectAfterCleanup(mismatch, cleanup);
-      }
     }
     final CompletableFuture<List<V>> closePromise = new CompletableFuture<List<V>>();
-    final CompletableFuture<Void> readBarrier;
+    CompletableFuture<Void> barrier = null;
+    IllegalStateException mismatch = null;
+    boolean canCloseAfterMismatch = false;
     synchronized (lock) {
       if (drain && !markedGuard) {
-        try {
-          coordinator.claimReadMode(readMode);
-        } catch (RuntimeException error) {
-          return Futures.failed(error);
+        // Check and claim under one lock hold: a format claimed by another view in between
+        // must still close the subscription before the drain fails.
+        mismatch = coordinator.readModeMismatch(readMode);
+        if (mismatch == null) {
+          try {
+            coordinator.claimReadMode(readMode);
+          } catch (RuntimeException error) {
+            return Futures.failed(error);
+          }
+        } else {
+          canCloseAfterMismatch = coordinator.canClose();
         }
       }
-      if (closeInFlight != null) {
-        return closeInFlight;
-      }
-      BeginClose begin = null;
-      if (coordinator.canClose()) {
-        phase = Phase.CLOSING;
-        closeDrain = drain;
-        if (drain) {
-          closingPending.addAll(pending);
+      if (mismatch == null) {
+        if (closeInFlight != null) {
+          return closeInFlight;
         }
-        pending.clear();
-        begin = coordinator.beginClose(owner);
-      }
-      if (begin == null || !begin.started) {
-        readBarrier = null;
-      } else {
-        readBarrier = begin.barrier;
-        closeInFlight = closePromise;
+        BeginClose begin = null;
+        if (coordinator.canClose()) {
+          phase = Phase.CLOSING;
+          closeDrain = drain;
+          if (drain) {
+            closingPending.addAll(pending);
+          }
+          pending.clear();
+          begin = coordinator.beginClose(owner);
+        }
+        if (begin != null && begin.started) {
+          barrier = begin.barrier;
+          closeInFlight = closePromise;
+        }
       }
     }
+    if (mismatch != null) {
+      CompletableFuture<List<V>> cleanup =
+          canCloseAfterMismatch ? startClose(false, false) : waitForSharedClose();
+      return rejectAfterCleanup(mismatch, cleanup);
+    }
+    final CompletableFuture<Void> readBarrier = barrier;
     if (readBarrier == null) {
       return waitForSharedClose();
     }
