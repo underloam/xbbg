@@ -137,7 +137,14 @@ impl SubscriptionFixture {
     pub fn publish_json(&self, topic: &str, json: &str) -> Result<(), BlpAsyncError> {
         let feed = self.lookup_feed(topic)?;
         let session = feed.session.test.as_ref().expect("synthetic session");
-        session.publish_json(feed.upstream_key()?, json)
+        // A feed whose subscribe has not returned, or whose topic ended, has no
+        // worker slot; report it like a slot the worker already removed.
+        let key = feed
+            .upstream_key()
+            .map_err(|_| BlpAsyncError::ConfigError {
+                detail: "synthetic subscription is no longer registered".into(),
+            })?;
+        session.publish_json(key, json)
     }
 
     /// Obtain a direct decoded-input handle for production shared-feed timings.
