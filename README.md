@@ -3,7 +3,7 @@
 
 <p>
   <a href="https://xbbg.org/python/quickstart">
-    <img src=".github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
+    <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
   </a>
 </p>
 
@@ -68,7 +68,7 @@ Core scope:
 - Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
 
 <p align="center">
-  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
+  <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
 </p>
 
 ## Why xbbg?
@@ -90,7 +90,7 @@ The short version: if all you need is a tiny one-off `bdp()` wrapper, several pa
 | Typed errors, diagnostics, field cache, testing helpers | yes | application-owned | limited | limited | limited |
 
 <p align="center">
-  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
+  <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
 </p>
 
 ## Installation
