@@ -33,6 +33,7 @@ tracing::warn!("...")
 ```
 
 - Emitting threads never wait for queue capacity: a full queue drops the record and counts it (`bridge::dropped_total()`).
+- Emitting threads take no lock: the queue is a lock-free bounded `crossbeam_queue::ArrayQueue` published through an `arc_swap::ArcSwapOption`, so enabling, disabling and re-enabling at another capacity never block them. The only other work a push can cause is waking the consumer, and only when it is asleep (or about to sleep): the emitter then briefly takes the consumer's wake-up mutex and notifies. A consumer that is busy draining costs emitters nothing. The queue's memory is reserved when the bridge is enabled (one slot per record of capacity).
 - Each `LogRecord` owns its message (formatted like the message part of the stderr line, fields as ` name=value`) and carries level, target, file, line, emission timestamp and emitting thread name. Target and file come from static callsite metadata.
 - The crate stays language-neutral: it never touches Python. xbbg's Python package runs the consumer (`xbbg.enable_python_logging()`) and turns records into `logging.LogRecord`s.
 

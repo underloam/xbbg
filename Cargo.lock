@@ -8123,6 +8123,8 @@ dependencies = [
 name = "xbbg-log"
 version = "1.8.1"
 dependencies = [
+ "arc-swap",
+ "crossbeam-queue",
  "tracing",
  "tracing-core",
  "tracing-subscriber",

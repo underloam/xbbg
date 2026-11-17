@@ -149,7 +149,8 @@ def enable_python_logging(*, queue_size: int = _DEFAULT_QUEUE_SIZE) -> None:
     that raises does not stop the forwarder.
 
     Args:
-        queue_size: Capacity of the native queue, in records (at least 1).
+        queue_size: Capacity of the native queue, in records (at least 1). Its
+            memory (roughly 100 bytes per record) is reserved up front.
 
     Calling this while forwarding is already on does nothing when ``queue_size``
     matches. A different ``queue_size`` raises ``RuntimeError`` rather than
