@@ -82,17 +82,19 @@ xbbg-host = { path = "crates/xbbg-host", default-features = false }
 xbbg-sdk = { path = "crates/xbbg-sdk" }
 
 # ── Arrow columnar carriers ───────────────────────────────────────────────────
-arrow = { version = "59.2.0", default-features = false }
-arrow-arith = "59.2.0"
+# 59.3.2 is the patched floor for RUSTSEC-2026-0442: published crates must not
+# let a downstream lockfile keep an affected 59.3.0 or 59.3.1.
+arrow = { version = "59.3.2", default-features = false }
+arrow-arith = "59.3.2"
 # arrow-array declares no `default` feature, so disabling defaults is a no-op
 # and simply keeps every member's inherit line uniform.
-arrow-array = { version = "59.2.0", default-features = false }
-arrow-buffer = "59.2.0"
-arrow-cast = "59.2.0"
-arrow-data = "59.2.0"
-arrow-ord = "59.2.0"
-arrow-schema = "59.2.0"
-arrow-select = "59.2.0"
+arrow-array = { version = "59.3.2", default-features = false }
+arrow-buffer = "59.3.2"
+arrow-cast = "59.3.2"
+arrow-data = "59.3.2"
+arrow-ord = "59.3.2"
+arrow-schema = "59.3.2"
+arrow-select = "59.3.2"
 
 # ── Async runtime and concurrency ─────────────────────────────────────────────
 arc-swap = "1.9.2"

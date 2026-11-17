@@ -42,6 +42,10 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 - **Java: a mismatched drain always closes the subscription.** `unsubscribe(true)` on a view whose read format another view claimed at the same moment could fail without closing the subscription. The format check and claim now happen under one lock, so the drain closes the subscription and then fails, as documented.
 - **`xbbg-mcp` builds with rmcp 3.10.0.** This clears RUSTSEC-2026-0457, RUSTSEC-2026-0461 and RUSTSEC-2026-0462. They are in rmcp's Streamable HTTP transports and OAuth client, which `xbbg-mcp` does not enable: it serves over stdio. `deny.toml` also records, with reasons, the new unmaintained advisories for `chrono` (RUSTSEC-2026-0543) and `chrono-tz` (RUSTSEC-2026-0555), which Arrow and the bindings build on, and for `humantime` (RUSTSEC-2026-0542), used by the Bloomberg runtime downloader. None of them has a fixed release or a drop-in replacement.
 
+### Security
+
+- **The Rust crates require Arrow 59.3.2 or newer (RUSTSEC-2026-0442).** The workspace lockfile already built with 59.3.2, but the published `xbbg-async`, `xbbg-ext` and `xbbg-recipes` crates accepted any Arrow `^59.2.0`, so a downstream lockfile could keep the affected 59.3.0 or 59.3.1: `RunEndEncoded` `ArrayData::validate_values` read out of bounds. Every Arrow requirement is now `^59.3.2`.
+
 ## [1.8.1] - 2026-11-04
 
 ### Added
