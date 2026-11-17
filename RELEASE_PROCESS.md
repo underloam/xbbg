@@ -1,6 +1,6 @@
 # xbbg Release Process
 
-This document explains the release process for xbbg, intended for AI agents and maintainers.
+This document explains the release process for xbbg, intended for AI agents and maintainers. Every release starts with [RELEASE_RULES.md](RELEASE_RULES.md) (Step 0).
 
 ## Overview
 
@@ -32,6 +32,15 @@ Dev builds (untagged commits) automatically get versions like `0.12.1.dev268+g84
 | Build tool | `uv` | Fast package manager and build frontend |
 
 ## Release Workflow
+
+### Step 0: Apply the release rules
+
+Read [RELEASE_RULES.md](RELEASE_RULES.md) and apply it to the release:
+
+1. Run `python scripts/check_release_privacy.py` (commits since the latest `v*` tag) and resolve every finding as the rules describe.
+2. Read the `[Unreleased]` section against the `BREAKING` rule: Arrow type, `xbbg.*` metadata, result-shape, return/raise and Rust API changes are marked, fixes included.
+
+Do not continue to Step 1 with an unresolved finding or an unmarked breaking change.
 
 ### Step 1: Update CHANGELOG.md
 
@@ -428,15 +437,16 @@ PyPI rejects duplicate versions. To fix:
 
 When asked to create a release:
 
-1. **Review pending changes**: Read `CHANGELOG.md` `[Unreleased]` section
-2. **Check for uncommitted changes**: Run `git status`
-3. **Determine version bump**:
+1. **Apply the release rules**: Read `RELEASE_RULES.md`, run `python scripts/check_release_privacy.py`, and stop and report any finding or unmarked breaking change instead of continuing
+2. **Review pending changes**: Read `CHANGELOG.md` `[Unreleased]` section
+3. **Check for uncommitted changes**: Run `git status`
+4. **Determine version bump**:
    - Breaking changes → `major`
    - New features → `minor`
    - Bug fixes only → `patch`
    - Pre-release → add `alpha`/`beta`/`rc`
-4. **Guide user to GitHub Actions** to trigger the `semantic_version.yml` workflow for the canonical `vX.Y.Z` release
-5. **For GitHub-only JS package assets**, guide the user to `js_github_release.yml` with an explicit version; it builds the supported `@xbbg/core` JS tarballs and tags `js-vX.Y.Z`
+5. **Guide user to GitHub Actions** to trigger the `semantic_version.yml` workflow for the canonical `vX.Y.Z` release
+6. **For GitHub-only JS package assets**, guide the user to `js_github_release.yml` with an explicit version; it builds the supported `@xbbg/core` JS tarballs and tags `js-vX.Y.Z`
 
 **Do NOT manually:**
 - Edit version numbers in code for Python releases (managed by `setuptools_scm` from git tags)
@@ -556,5 +566,6 @@ Before triggering a release, ensure:
 - [ ] Changes are categorized correctly (Added, Changed, Deprecated, Removed, Fixed, Security)
 - [ ] No placeholder text (TODO, FIXME, WIP, TBD) remains
 - [ ] Issue/PR numbers are referenced where applicable
-- [ ] Breaking changes are clearly marked
+- [ ] `RELEASE_RULES.md` has been read for this release, and `python scripts/check_release_privacy.py` reports no unresolved findings
+- [ ] Breaking changes are marked `BREAKING (<area>)` as `RELEASE_RULES.md` defines them, including fixes that change an Arrow type, `xbbg.*` metadata, a result shape or what a call raises
 - [ ] `py-xbbg-langgraph/pyproject.toml` requires an `xbbg` floor that contains every `xbbg` API its tools call (raise it to the version being released when new tools depend on new APIs, for example `xbbg.ext.resolve_venues`). The JS adapter's `@xbbg/core` dependency is stamped to the release version by `js-xbbg/scripts/stamp-version.ts`, so it needs no manual change.

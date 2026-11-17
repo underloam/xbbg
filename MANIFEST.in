@@ -87,4 +87,5 @@ exclude pixi.lock
 exclude CONTRIBUTING.md
 exclude CODE_OF_CONDUCT.md
 exclude RELEASE_PROCESS.md
+exclude RELEASE_RULES.md
 exclude CHANGELOG.md
