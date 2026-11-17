@@ -1,10 +1,15 @@
 //! Versioned response diagnostics shared by the engine and native consumers.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
+use arrow_array::RecordBatch;
+use arrow_schema::Schema;
 use indexmap::{Equivalent, IndexSet};
 use serde::ser::{SerializeMap, SerializeSeq, SerializeStruct};
 use serde::{Deserialize, Serialize, Serializer};
+
+use crate::engine::state::{DelayedMeta, ResponseMetadata, SecurityErrorMeta};
 
 /// Dictionary-encoded per-security field exceptions in Arrow schema metadata.
 pub const METADATA_KEY_FIELD_EXCEPTIONS: &str = "xbbg.field_exceptions";
@@ -231,6 +236,73 @@ impl FieldExceptions {
     pub fn expanded_json(&self) -> serde_json::Value {
         serde_json::to_value(Expanded(self))
             .expect("field-exception strings and integers serialize")
+    }
+}
+
+/// Encode FieldInfo refusals as the `xbbg.field_errors` metadata value.
+///
+/// `None` when there are no refusals: the key is then absent, as in engine
+/// results. FieldInfo batches and [`ResultDiagnostics`] both use this writer.
+pub fn encode_field_errors(
+    errors: &BTreeMap<String, FieldErrorMeta>,
+) -> Result<Option<String>, serde_json::Error> {
+    if errors.is_empty() {
+        return Ok(None);
+    }
+    serde_json::to_string(errors).map(Some)
+}
+
+/// Result diagnostics held as values, in the shapes the result accessors
+/// return (`security_errors`, `field_exceptions`, `delayed`, `type_misses`,
+/// `field_errors`, `eid_data`, `bloomberg_request_id`).
+///
+/// [`ResultDiagnostics::into_schema_metadata`] encodes them with the code the
+/// engine attaches to its own results, so a result built from values carries
+/// byte-identical `xbbg.*` schema metadata to one built from a response.
+/// Empty maps leave their key absent.
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct ResultDiagnostics {
+    /// Entitlement IDs per security (`xbbg.eid_data`).
+    pub eid_data: BTreeMap<String, Vec<i64>>,
+    /// `securityError` per security (`xbbg.security_errors`).
+    pub security_errors: BTreeMap<String, SecurityErrorMeta>,
+    /// Ordered field exceptions per security (`xbbg.field_exceptions`). A
+    /// security with no exceptions is not represented, as in engine results.
+    pub field_exceptions: BTreeMap<String, Vec<FieldExceptionMeta>>,
+    /// Delayed-data status per security (`xbbg.delayed`).
+    pub delayed: BTreeMap<String, DelayedMeta>,
+    /// Conversion misses per field (`xbbg.type_misses`).
+    pub type_misses: BTreeMap<String, u64>,
+    /// FieldInfo refusals per requested id (`xbbg.field_errors`).
+    pub field_errors: BTreeMap<String, FieldErrorMeta>,
+    /// SDK-assigned request ID (`xbbg.bloomberg_request_id`).
+    pub bloomberg_request_id: Option<String>,
+}
+
+impl ResultDiagnostics {
+    /// The schema-metadata map the engine would attach for these diagnostics.
+    pub fn into_schema_metadata(self) -> Result<HashMap<String, String>, serde_json::Error> {
+        let mut field_exceptions = FieldExceptions::default();
+        for (security, exceptions) in self.field_exceptions {
+            for exception in exceptions {
+                field_exceptions.record(&security, exception);
+            }
+        }
+        let carrier = ResponseMetadata::from_diagnostics(
+            self.eid_data,
+            self.security_errors,
+            field_exceptions,
+            self.delayed,
+            self.type_misses,
+            self.bloomberg_request_id.map(Arc::from),
+        )
+        .attach(RecordBatch::new_empty(Arc::new(Schema::empty())));
+        let mut metadata = carrier.schema_ref().metadata().clone();
+        if let Some(errors) = encode_field_errors(&self.field_errors)? {
+            metadata.insert(METADATA_KEY_FIELD_ERRORS.to_owned(), errors);
+        }
+        Ok(metadata)
     }
 }
 
@@ -497,5 +569,143 @@ mod tests {
             );
             assert!(!message.contains("did not match any variant"), "{message}");
         }
+    }
+
+    fn engine_metadata(metadata: ResponseMetadata) -> HashMap<String, String> {
+        metadata
+            .attach(RecordBatch::new_empty(Arc::new(Schema::empty())))
+            .schema_ref()
+            .metadata()
+            .clone()
+    }
+
+    fn security_error() -> SecurityErrorMeta {
+        SecurityErrorMeta {
+            category: "BAD_SEC".into(),
+            code: 15,
+            subcategory: "INVALID_SECURITY".into(),
+            message: "Synthetic unknown security".into(),
+        }
+    }
+
+    fn field_error() -> FieldErrorMeta {
+        FieldErrorMeta {
+            category: "NO_AUTH".into(),
+            code: -4,
+            subcategory: "NOT_ENTITLED".into(),
+            message: "Synthetic refusal".into(),
+            source: Some("apiflds@synthetic".into()),
+        }
+    }
+
+    #[test]
+    fn result_diagnostics_encode_each_key_like_the_engine() {
+        use crate::engine::state::{
+            METADATA_KEY_BLOOMBERG_REQUEST_ID, METADATA_KEY_DELAYED, METADATA_KEY_EID_DATA,
+            METADATA_KEY_SECURITY_ERRORS, METADATA_KEY_TYPE_MISSES,
+        };
+
+        let occurrences = vec![
+            exception("FIELD_B", 9),
+            exception("FIELD_A", 9),
+            exception("FIELD_B", 9),
+        ];
+        let mut diagnostics = ResultDiagnostics::default();
+        diagnostics
+            .eid_data
+            .insert("TEST Equity".into(), vec![14001, 14002]);
+        diagnostics
+            .security_errors
+            .insert("NOTASECURITY1 Curncy".into(), security_error());
+        diagnostics
+            .field_exceptions
+            .insert("TEST Equity".into(), occurrences.clone());
+        diagnostics.delayed.insert(
+            "TEST Equity".into(),
+            DelayedMeta {
+                delayed: true,
+                delay_minutes: Some(15),
+            },
+        );
+        diagnostics.type_misses.insert("FIELD_A".into(), 2);
+        diagnostics
+            .field_errors
+            .insert("REFUSED_ALIAS".into(), field_error());
+        diagnostics.bloomberg_request_id = Some("sdk-synthetic-1".into());
+        let delayed = diagnostics.delayed.clone();
+        let eid_json = serde_json::to_string(&diagnostics.eid_data).unwrap();
+        let field_errors = diagnostics.field_errors.clone();
+        let encoded = diagnostics.into_schema_metadata().unwrap();
+
+        let mut errors = ResponseMetadata::default();
+        errors.record_security_error("NOTASECURITY1 Curncy", security_error());
+        let mut misses = ResponseMetadata::default();
+        misses.record_type_miss("FIELD_A");
+        misses.record_type_miss("FIELD_A");
+        let id = ResponseMetadata::attach_bloomberg_request_id(
+            RecordBatch::new_empty(Arc::new(Schema::empty())),
+            "sdk-synthetic-1",
+        );
+        let mut exceptions = FieldExceptions::default();
+        for occurrence in occurrences {
+            exceptions.record("TEST Equity", occurrence);
+        }
+
+        let expected = HashMap::from([
+            (METADATA_KEY_EID_DATA.to_owned(), eid_json),
+            (
+                METADATA_KEY_SECURITY_ERRORS.to_owned(),
+                engine_metadata(errors)[METADATA_KEY_SECURITY_ERRORS].clone(),
+            ),
+            (
+                METADATA_KEY_FIELD_EXCEPTIONS.to_owned(),
+                exceptions.to_json().unwrap(),
+            ),
+            (
+                METADATA_KEY_DELAYED.to_owned(),
+                engine_metadata(ResponseMetadata::with_delayed(delayed))[METADATA_KEY_DELAYED]
+                    .clone(),
+            ),
+            (
+                METADATA_KEY_TYPE_MISSES.to_owned(),
+                engine_metadata(misses)[METADATA_KEY_TYPE_MISSES].clone(),
+            ),
+            (
+                METADATA_KEY_FIELD_ERRORS.to_owned(),
+                encode_field_errors(&field_errors).unwrap().unwrap(),
+            ),
+            (
+                METADATA_KEY_BLOOMBERG_REQUEST_ID.to_owned(),
+                id.schema_ref().metadata()[METADATA_KEY_BLOOMBERG_REQUEST_ID].clone(),
+            ),
+        ]);
+        assert_eq!(encoded, expected);
+    }
+
+    #[test]
+    fn result_diagnostics_keep_field_exception_occurrences_across_a_round_trip() {
+        let occurrences = vec![
+            exception("FIELD_B", 9),
+            exception("FIELD_A", 9),
+            exception("FIELD_B", 9),
+        ];
+        let mut diagnostics = ResultDiagnostics::default();
+        diagnostics
+            .field_exceptions
+            .insert("TEST Equity".into(), occurrences.clone());
+        let metadata = diagnostics.into_schema_metadata().unwrap();
+        let restored =
+            FieldExceptions::from_json(&metadata[METADATA_KEY_FIELD_EXCEPTIONS]).unwrap();
+        assert_eq!(restored.expanded()["TEST Equity"], occurrences);
+    }
+
+    #[test]
+    fn empty_result_diagnostics_attach_no_keys() {
+        assert!(
+            ResultDiagnostics::default()
+                .into_schema_metadata()
+                .unwrap()
+                .is_empty()
+        );
     }
 }

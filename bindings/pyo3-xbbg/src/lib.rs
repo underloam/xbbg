@@ -105,6 +105,7 @@ mod markets;
 mod native_arrow;
 mod recipes;
 mod request;
+mod result_diagnostics;
 mod shaping;
 #[cfg(feature = "test-support")]
 mod subscription_fixture;
@@ -2601,6 +2602,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     teardown::register(m)?;
     native_arrow::register(m)?;
     shaping::register(m)?;
+    result_diagnostics::register(m)?;
     m.add_class::<EntitlementReport>()?;
     m.add_class::<PyEngineConfig>()?;
     m.add_class::<PySubscription>()?;

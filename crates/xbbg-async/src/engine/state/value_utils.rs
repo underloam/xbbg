@@ -381,6 +381,25 @@ impl ResponseMetadata {
         }
     }
 
+    /// Metadata built from already-collected diagnostics, for callers that
+    /// hold the values rather than a wire response.
+    pub(crate) fn from_diagnostics(
+        eid_data: BTreeMap<String, Vec<i64>>,
+        security_errors: BTreeMap<String, SecurityErrorMeta>,
+        field_exceptions: FieldExceptions,
+        delayed: BTreeMap<String, DelayedMeta>,
+        type_misses: BTreeMap<String, u64>,
+        bloomberg_request_id: Option<Arc<str>>,
+    ) -> Self {
+        let mut metadata = Self::with_bloomberg_request_ids(bloomberg_request_id);
+        metadata.eid_data = eid_data;
+        metadata.security_errors = security_errors;
+        metadata.field_exceptions = field_exceptions;
+        metadata.delayed = delayed;
+        metadata.type_misses = type_misses;
+        metadata
+    }
+
     /// Collect all diagnostics before callers decide whether to skip a security.
     /// This also preserves field exceptions accompanying a security error.
     pub(super) fn record_security<'a>(
