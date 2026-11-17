@@ -171,7 +171,7 @@ url = "2"
 zip = { version = "9.3", default-features = false }
 
 # ── MCP server ────────────────────────────────────────────────────────────────
-rmcp = "3.5.1"
+rmcp = "3.10.0"
 
 # ── Build-time and dev-only ───────────────────────────────────────────────────
 bindgen = { version = "0.73.2", default-features = false }
