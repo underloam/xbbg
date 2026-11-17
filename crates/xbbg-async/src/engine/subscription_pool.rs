@@ -2669,7 +2669,18 @@ impl TestSubscriptionSession {
         }
     }
 
-    pub(super) fn publish_json(&self, key: SlabKey, json: &str) -> Result<(), BlpAsyncError> {
+    /// Dispatch a scalar JSON update to the worker slot `key`.
+    ///
+    /// Worker keys are recycled, so `registered` names the registration the
+    /// caller meant. It is evaluated under the worker lock at dispatch, the lock
+    /// under which a slot is freed and reused, so a slot that no longer belongs
+    /// to the caller is rejected instead of delivered to its new owner.
+    pub(super) fn publish_json(
+        &self,
+        key: SlabKey,
+        json: &str,
+        registered: &dyn Fn() -> bool,
+    ) -> Result<(), BlpAsyncError> {
         use std::fmt::Write;
 
         let value: serde_json::Value =
@@ -2681,16 +2692,17 @@ impl TestSubscriptionSession {
             .ok_or_else(|| BlpAsyncError::ConfigError {
                 detail: "synthetic update must be a JSON object".into(),
             })?;
-        let layout = self
-            .shared
-            .state
-            .lock()
-            .subs
-            .get(key)
-            .map(SubscriptionState::layout)
-            .ok_or_else(|| BlpAsyncError::ConfigError {
-                detail: "synthetic subscription is no longer registered".into(),
-            })?;
+        let layout = {
+            let worker = self.shared.state.lock();
+            if !registered() {
+                return Err(Self::unregistered());
+            }
+            worker
+                .subs
+                .get(key)
+                .map(SubscriptionState::layout)
+                .ok_or_else(Self::unregistered)?
+        };
         let mut fields = String::new();
         for (name, value) in values {
             if name.chars().any(|character| {
@@ -2758,16 +2770,28 @@ impl TestSubscriptionSession {
             write!(&mut fields, r#"" type="{kind}" minOccurs="0"/>"#)
                 .expect("writing synthetic schema to a String");
         }
-        self.try_data(key, &fields, json)
+        self.try_data(key, &fields, json, registered)
+    }
+
+    fn unregistered() -> BlpAsyncError {
+        BlpAsyncError::ConfigError {
+            detail: "synthetic subscription is no longer registered".into(),
+        }
     }
 
     #[cfg(test)]
     pub(super) fn data(&self, key: SlabKey, fields: &str, json: &str) {
-        self.try_data(key, fields, json)
+        self.try_data(key, fields, json, &|| true)
             .expect("valid synthetic SDK data");
     }
 
-    fn try_data(&self, key: SlabKey, fields: &str, json: &str) -> Result<(), BlpAsyncError> {
+    fn try_data(
+        &self,
+        key: SlabKey,
+        fields: &str,
+        json: &str,
+        registered: &dyn Fn() -> bool,
+    ) -> Result<(), BlpAsyncError> {
         let schema = format!(
             r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
             <service name="//xbbg/test" version="1.0.0.0">
@@ -2782,10 +2806,11 @@ impl TestSubscriptionSession {
             &[Self::cid(key)],
             |formatter| formatter.try_json(json),
         )?;
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
+        let mut worker = self.shared.state.lock();
+        if !registered() {
+            return Err(Self::unregistered());
+        }
+        worker.dispatch_event(event.event(), &self.shared);
         Ok(())
     }
 

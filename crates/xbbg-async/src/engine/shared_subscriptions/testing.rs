@@ -96,7 +96,7 @@ pub(super) fn test_feed(hub: &SharedSubscriptions, topic: &str) -> (Arc<TestSess
 #[cfg(test)]
 pub(super) fn data(session: &TestSession, key: SlabKey, json: &str) {
     session
-        .publish_json(key, json)
+        .publish_json(key, json, &|| true)
         .expect("valid synthetic scalar update");
 }
 
@@ -136,7 +136,6 @@ impl SubscriptionFixture {
     /// the SDK; construction/formatting failures return errors rather than panic.
     pub fn publish_json(&self, topic: &str, json: &str) -> Result<(), BlpAsyncError> {
         let feed = self.lookup_feed(topic)?;
-        let session = feed.session.test.as_ref().expect("synthetic session");
         // A feed whose subscribe has not returned, or whose topic ended, has no
         // worker slot; report it like a slot the worker already removed.
         let key = feed
@@ -144,7 +143,18 @@ impl SubscriptionFixture {
             .map_err(|_| BlpAsyncError::ConfigError {
                 detail: "synthetic subscription is no longer registered".into(),
             })?;
-        session.publish_json(key, json)
+        Self::dispatch(&feed, key, json)
+    }
+
+    /// Dispatch to the worker slot `feed` held when it was looked up.
+    ///
+    /// Another thread may end the feed and let a new topic reuse the slot
+    /// between that lookup and this call. The worker therefore checks under its
+    /// lock, at dispatch, that `key` is still `feed`'s slot; a feed ended or
+    /// retired in between has released it, and its late publish is an error.
+    fn dispatch(feed: &Feed, key: SlabKey, json: &str) -> Result<(), BlpAsyncError> {
+        let session = feed.session.test.as_ref().expect("synthetic session");
+        session.publish_json(key, json, &|| feed.state.lock().upstream.key() == Some(key))
     }
 
     /// Obtain a direct decoded-input handle for production shared-feed timings.
@@ -497,5 +507,51 @@ mod fixture_tests {
         drop(handle);
         fixture.settle().await;
         assert!(fixture.feed("SYNTH DROP").is_err());
+    }
+
+    #[tokio::test]
+    async fn publish_dispatch_rejects_a_feed_whose_slot_another_topic_reused() {
+        let fixture = SubscriptionFixture::new(EngineConfig::default());
+        let mut stream = fixture
+            .subscribe(SubscribeRequest {
+                topics: vec!["REVIEW OLD".into(), "REVIEW KEEP".into()],
+                ..request(SubscriptionDeliveryMode::Deltas)
+            })
+            .await
+            .unwrap();
+        // The state `publish_json` captured before another thread ended the feed.
+        let old = fixture.lookup_feed("REVIEW OLD").unwrap();
+        let key = old.upstream_key().unwrap();
+        let session = fixture.sessions.sessions.lock()[0].clone();
+        session.status(key, "SubscriptionFailure");
+        stream.add(vec!["REVIEW NEW".into()], vec![]).await.unwrap();
+        assert_eq!(
+            fixture
+                .lookup_feed("REVIEW NEW")
+                .unwrap()
+                .upstream_key()
+                .unwrap(),
+            key,
+            "precondition: the worker reused the slot"
+        );
+        let result = SubscriptionFixture::dispatch(&old, key, r#"{"NUMBER":1}"#);
+        assert!(
+            matches!(result, Err(BlpAsyncError::ConfigError { ref detail })
+                if detail.contains("no longer registered")),
+            "a publish for REVIEW OLD must not be delivered: {result:?}"
+        );
+        assert!(
+            stream.try_next().is_none(),
+            "REVIEW NEW received REVIEW OLD's update"
+        );
+        fixture
+            .publish_json("REVIEW NEW", r#"{"NUMBER":2}"#)
+            .unwrap();
+        let update = stream.try_next().unwrap().unwrap();
+        assert_eq!(update.topic.as_ref(), "REVIEW NEW");
+        assert!(matches!(
+            value(&update, "NUMBER"),
+            Some(UpdateValue::F64(2.0))
+        ));
     }
 }
