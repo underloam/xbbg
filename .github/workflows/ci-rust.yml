@@ -1314,7 +1314,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py tests/test_python_logging.py -q
           )
 
       # xbbg-langgraph stays below 3.15 until its dependency chain publishes 3.15
@@ -1464,7 +1464,7 @@ jobs:
           cp target/debug/lib_core.so "$CORE_TARGET"
           (
             cd "$RUNNER_TEMP/test-run"
-            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py -q
+            XBBG_REQUIRE_TEST_SUPPORT=1 python -m pytest tests/test_subscription_delivery_native.py tests/test_native_bridge.py tests/test_native_teardown.py tests/test_free_threading_stress.py tests/test_python_logging.py -q
           )
 
   # ════════════════════════════════════════════════════════════════════════════

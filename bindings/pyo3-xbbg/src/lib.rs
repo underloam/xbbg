@@ -57,6 +57,12 @@
 //! ```bash
 //! RUST_LOG=xbbg_core=trace,xbbg_async=debug python my_script.py
 //! ```
+//!
+//! `xbbg.enable_python_logging()` opts in to forwarding these events to
+//! Python's `logging` module instead of stderr (`log_bridge`). Emitting
+//! threads still never touch Python: they push owned records into a bounded
+//! native queue (dropping and counting on overflow), and a Python daemon thread
+//! drains it.
 
 // Proving `Send` for the futures handed to pyo3-async-runtimes walks every
 // nested async layer (bridge future, completion gate, `select!`, request); the
@@ -101,6 +107,7 @@ use xbbg_ext::MarketTiming;
 
 mod completion;
 mod ext;
+mod log_bridge;
 mod markets;
 mod native_arrow;
 mod recipes;
@@ -2628,6 +2635,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(sdk_version, m)?)?;
     m.add_function(wrap_pyfunction!(_signal_interpreter_shutdown, m)?)?;
     teardown::register(m)?;
+    log_bridge::register(m)?;
     native_arrow::register(m)?;
     shaping::register(m)?;
     result_diagnostics::register(m)?;
@@ -3796,9 +3804,20 @@ mod tests {
                 "set_log_level",
                 "get_log_level",
                 "enable_sdk_logging",
+                "_log_bridge_enable",
+                "_log_bridge_disable",
+                "_log_bridge_next_batch",
+                "_log_bridge_discard",
+                "_log_bridge_count_dropped",
+                "_log_bridge_dropped",
             ] {
                 assert!(module.hasattr(name).expect("hasattr"), "missing {name}");
             }
+            assert_eq!(
+                module.hasattr("_test_log_fixture").expect("hasattr"),
+                cfg!(feature = "test-support"),
+                "the log probe exists only in test-support builds"
+            );
         });
     }
     #[test]

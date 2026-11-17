@@ -19,6 +19,7 @@ from ._exports import (
     MODULE_EXPORTS,
     PACKAGE_BLP_EXPORTS,
     PACKAGE_EXPORTS,
+    PYTHON_LOGGING_EXPORTS,
     SCHEMA_LOOKUP_EXPORTS,
     SDK_EXPORTS,
     SERVICE_EXPORTS,
@@ -97,6 +98,7 @@ def _build_lazy_attr_exports() -> dict[str, tuple[str, str]]:
     module_groups = (
         ("_sdk", SDK_EXPORTS),
         ("_core", CORE_EXPORTS),
+        ("_python_logging", PYTHON_LOGGING_EXPORTS),
         ("blp", PACKAGE_BLP_EXPORTS),
         ("backend", BACKEND_EXPORTS),
         ("field_cache", FIELD_CACHE_EXPORTS),

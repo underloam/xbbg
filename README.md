@@ -551,6 +551,7 @@ Field-cache snapshots are published atomically. On Windows this uses `FileRename
 | Generic requests | `request`, `Service`, `Operation`, `RequestParams`, `OutputMode` |
 | Entitlements and delayed data | `delay_status`, `check_entitlements`, `seat_type`, `identity_is_authorized` |
 | Schema and diagnostics | `bops`, `bschema`, `get_sdk_info`, `enable_sdk_logging`, `print_backend_status` |
+| Logging | `set_log_level`, `get_log_level`, `enable_python_logging`, `disable_python_logging`, `python_logging_dropped` |
 | Testing helpers | `xbbg.testing.create_mock_response`, `xbbg.testing.mock_engine` |
 
 Most sync helpers have async counterparts with an `a` prefix: `bdp` → `abdp`, `bdh` → `abdh`, `bdib` → `abdib`, `request` → `arequest`.
@@ -838,6 +839,7 @@ Connection failures:
 - confirm the host, port, auth method, TLS files, and entitlements for SAPI/B-PIPE/ZFP environments
 - run `print(xbbg.get_sdk_info())` to see how the SDK/runtime was detected
 - enable SDK logging before the first session when debugging low-level connection problems
+- send native and SDK log lines to Python `logging` instead of stderr (see [Logging](#logging))
 
 Timeouts and large responses:
 
@@ -845,6 +847,29 @@ Timeouts and large responses:
 - split large historical/tick requests into smaller date ranges
 - enable opt-in sharding for wide multi-security `bdp`/`bdh` requests with `shard_requests=True`
 - tune `request_pool_size`, `subscription_pool_size`, queue sizes, and keep-alive settings for managed infrastructure
+
+### Logging
+
+The native layer logs to stderr at `warn` by default; `xbbg.set_log_level("debug")` (or `RUST_LOG=debug`) changes what it emits. To have those lines, including Bloomberg SDK lines enabled with `enable_sdk_logging`, arrive through your application's `logging` handlers instead, opt in:
+
+```python
+import logging
+import xbbg
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+xbbg.set_log_level("info")
+xbbg.enable_python_logging(queue_size=10_000)
+
+# Records arrive on loggers named after the Rust target (xbbg_async.engine, ...);
+# SDK lines use xbbg.sdk. They keep the time they were logged, the emitting
+# thread's name, and the Rust file and line.
+logging.getLogger("xbbg_async").setLevel(logging.WARNING)  # ordinary logger filtering
+
+xbbg.python_logging_dropped()   # records lost to a full queue, so far
+xbbg.disable_python_logging()   # drain for up to `timeout` seconds; stderr resumes
+```
+
+Forwarding is automatic and best effort. Native threads never touch Python or wait: they push records into a bounded queue that a daemon thread drains, and when it is full they drop the record. The forwarder then logs a `dropped N xbbg log records: queue full` warning on the `xbbg.logging` logger. Size the queue for the largest burst you expect, such as one warning per refused security in a single request. Calling `enable_python_logging` again with the same `queue_size` does nothing; a different one raises until you call `disable_python_logging()`. Forwarding stops at interpreter exit.
 
 When reporting issues, include:
 

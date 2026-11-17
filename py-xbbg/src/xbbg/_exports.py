@@ -16,6 +16,12 @@ CORE_EXPORTS = (
     "enable_sdk_logging",
 )
 
+PYTHON_LOGGING_EXPORTS = (
+    "enable_python_logging",
+    "disable_python_logging",
+    "python_logging_dropped",
+)
+
 SERVICE_EXPORTS = (
     "Service",
     "Operation",
@@ -228,6 +234,7 @@ PACKAGE_EXPORTS = (
     *PACKAGE_MIDDLEWARE_EXPORTS,
     *PACKAGE_LIFECYCLE_EXPORTS,
     *CORE_EXPORTS,
+    *PYTHON_LOGGING_EXPORTS,
     *PACKAGE_BLP_SCHEMA_EXPORTS,
     *SDK_EXPORTS,
     *FIELD_CACHE_EXPORTS,

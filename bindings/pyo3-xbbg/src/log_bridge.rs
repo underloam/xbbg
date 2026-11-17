@@ -120,14 +120,15 @@ fn _log_bridge_count_dropped(count: u64) {
 
 /// Emit one native log event, as the engine's own events are emitted.
 ///
-/// A diagnostic probe: it goes through the same level filter and destination
-/// (stderr, or the bridge queue) as every other native event, so it shows
-/// whether forwarding is wired up without a Bloomberg session. `level` is one
-/// of `trace`, `debug`, `info`, `warn`, `error`; the event's target is this
-/// module (`_core::log_bridge`, after the extension's library name).
-#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+/// Private offline driver, compiled only with `test-support`: it goes through
+/// the same level filter and destination (stderr, or the bridge queue) as every
+/// other native event, so tests can exercise forwarding without a Bloomberg
+/// session. `level` is one of `trace`, `debug`, `info`, `warn`, `error`; the
+/// event's target is this module (`_core::log_bridge`, after the extension's
+/// library name).
+#[cfg(feature = "test-support")]
 #[pyfunction]
-fn _log_bridge_probe(level: &str, message: &str) -> PyResult<()> {
+fn _test_log_fixture(level: &str, message: &str) -> PyResult<()> {
     match xbbg_log::parse_level(level) {
         Some(Level::TRACE) => xbbg_log::trace!("{message}"),
         Some(Level::DEBUG) => xbbg_log::debug!("{message}"),
@@ -156,7 +157,8 @@ pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_log_bridge_next_batch, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_discard, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_count_dropped, m)?)?;
-    m.add_function(wrap_pyfunction!(_log_bridge_probe, m)?)?;
+    #[cfg(feature = "test-support")]
+    m.add_function(wrap_pyfunction!(_test_log_fixture, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_dropped, m)?)?;
     Ok(())
 }
@@ -175,11 +177,12 @@ mod tests {
         assert_eq!(python_level(Level::ERROR), 40);
     }
 
+    #[cfg(feature = "test-support")]
     #[test]
     fn probe_rejects_unknown_levels() {
         Python::initialize();
         Python::attach(|py| {
-            let error = _log_bridge_probe("loud", "message").expect_err("invalid level");
+            let error = _test_log_fixture("loud", "message").expect_err("invalid level");
             assert!(error.is_instance_of::<PyValueError>(py));
         });
     }
