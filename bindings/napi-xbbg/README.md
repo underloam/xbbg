@@ -59,6 +59,10 @@ request and wait for subscription-session capacity like any other subscription.
 - `subscriptionFeeds()` returns engine diagnostics for currently retained feeds:
   service, topic, options, field union, consumer count, delay/lifecycle state,
   isolation, and field errors. It exposes no identity or transport configuration.
+- `connections()` returns one `{ pool, worker, servers }` entry per Bloomberg session
+  (request workers first, then subscription workers). `pool` is `'request'` or
+  `'subscription'`; `servers` lists the `host:port` of each connected server in the
+  order the connections came up. It carries no credentials.
 
 ### Auction utilities and recipes
 

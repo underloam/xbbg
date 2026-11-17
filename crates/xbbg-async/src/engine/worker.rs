@@ -53,8 +53,8 @@ const CONNECTION_LOST_REASON: &str = "Bloomberg session connection lost (transie
 use super::delayed;
 use super::dispatch::{DispatchKey, IDENTITY_CID, IDENTITY_TOKEN_CID, MAX_GENERATION};
 use super::session_lifecycle::{
-    ConnectionSet, PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch,
-    connection_server, start_concurrently,
+    ConnectionSet, PendingServiceOpen, PendingServiceOpens, PendingWaiter, SessionConnections,
+    SessionPool, StartupLatch, connection_server, start_concurrently,
 };
 use super::state::{
     BqlState, BsrchState, BulkDataState, FieldInfoState, GenericState, HistDataState,
@@ -573,6 +573,15 @@ impl WorkerShared {
         }
         self.drain_in_flight(CONNECTION_LOST_REASON);
         true
+    }
+
+    /// This session's connected servers, in the order they connected.
+    fn connections(&self) -> SessionConnections {
+        SessionConnections {
+            pool: SessionPool::Request,
+            worker_id: self.id,
+            servers: self.connectivity.lock().up.servers(),
+        }
     }
 
     fn prune_pending_identity_waiters(&self) {
@@ -1748,6 +1757,11 @@ impl AsyncRequestWorker {
         );
     }
 
+    /// This session's connected servers, in the order they connected.
+    pub(crate) fn connections(&self) -> SessionConnections {
+        self.shared.connections()
+    }
+
     /// Mark slow requests and return hard-timeout candidates for
     /// [`AsyncRequestWorker::timeout_request`].
     pub(crate) fn scan_timeouts(&self, hard_timeout: Option<Duration>) -> Vec<RequestTicket> {
@@ -2557,6 +2571,22 @@ mod tests {
 
         session_status(&shared, "SessionConnectionDown", None);
         assert_eq!(shared.health.load(Ordering::Acquire), 1);
+    }
+
+    #[test]
+    fn connections_report_the_request_pool_worker_and_connected_servers() {
+        let shared = WorkerShared::new(3, Arc::new(AtomicU8::new(0)), Duration::from_secs(10));
+        let connections = shared.connections();
+        assert_eq!(connections.pool, SessionPool::Request);
+        assert_eq!(connections.worker_id, 3);
+        assert!(connections.servers.is_empty());
+
+        session_status(&shared, "SessionConnectionUp", Some(SERVER_B));
+        session_status(&shared, "SessionConnectionUp", Some(SERVER_A));
+        assert_eq!(shared.connections().servers, [SERVER_B, SERVER_A]);
+
+        session_status(&shared, "SessionConnectionDown", Some(SERVER_B));
+        assert_eq!(shared.connections().servers, [SERVER_A]);
     }
 
     #[test]

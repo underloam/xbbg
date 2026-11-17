@@ -18,8 +18,8 @@ use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionLi
 
 use super::dispatch::DispatchKey;
 use super::session_lifecycle::{
-    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
-    worker_start_error,
+    ConnectionSet, PendingServiceOpen, PendingServiceOpens, PendingWaiter, SessionConnections,
+    SessionPool, StartupLatch, connection_server, start_concurrently, worker_start_error,
 };
 use super::state::{
     FieldKind, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics, SubscriptionSender,
@@ -280,6 +280,9 @@ struct SubscriptionWorkerState {
     status: Option<SharedSubscriptionStatus>,
     last_streams_warn_us: HashMap<SlabKey, i64>,
     pending_service_opens: PendingServiceOpens,
+    /// Servers the session reports connected. Informational: reported through
+    /// `Engine::connections`, never used to fail or resubscribe anything.
+    connections: ConnectionSet,
 }
 
 struct SubscriptionWorkerShared {
@@ -316,6 +319,15 @@ impl SubscriptionWorkerShared {
 
     fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// This session's connected servers, in the order they connected.
+    fn connections(&self) -> SessionConnections {
+        SessionConnections {
+            pool: SessionPool::Subscription,
+            worker_id: self.id,
+            servers: self.state.lock().connections.servers(),
+        }
     }
 
     fn ensure_running(&self) -> Result<(), BlpAsyncError> {
@@ -523,6 +535,7 @@ impl SubscriptionWorkerState {
             status: None,
             last_streams_warn_us: HashMap::new(),
             pending_service_opens: PendingServiceOpens::default(),
+            connections: ConnectionSet::default(),
         }
     }
 
@@ -1108,6 +1121,7 @@ impl SubscriptionWorkerState {
                 // We just record state for diagnostics; do NOT drain subscriptions and
                 // do NOT resubscribe on the subsequent Up.
                 let reason = extract_reason_description(msg);
+                self.connections.down(connection_server(msg).as_deref());
                 let context = SubscriptionSessionEvent::ConnectionDown
                     .log_context(shared.shutdown_requested());
                 log_subscription_session_event(
@@ -1185,6 +1199,7 @@ impl SubscriptionWorkerState {
             }
             "SessionTerminated" => {
                 let reason = extract_reason_description(msg);
+                self.connections.clear();
                 let context =
                     SubscriptionSessionEvent::Terminated.log_context(shared.shutdown_requested());
                 shared.startup.resolve(Err(session_start_error(
@@ -1231,6 +1246,7 @@ impl SubscriptionWorkerState {
                 // SubscriptionStreams{Activated,Deactivated} events report whether
                 // individual subscriptions become active again.
                 let reason = extract_reason_description(msg);
+                self.connections.up(connection_server(msg).as_deref());
                 xbbg_log::info!(
                     worker_id = self.id,
                     active_subs = self.subs.len(),
@@ -2425,6 +2441,18 @@ impl SubscriptionSessionPool {
         workers
     }
 
+    /// Servers each registered subscription session is connected to, one
+    /// entry per session in id order.
+    pub(crate) fn connections(&self) -> Vec<SessionConnections> {
+        let mut connections: Vec<_> = self
+            .registered_workers()
+            .iter()
+            .map(|worker| worker.shared.connections())
+            .collect();
+        connections.sort_by_key(|entry| entry.worker_id);
+        connections
+    }
+
     fn drain_available(&self) {
         let available = {
             let mut locked = self.available.lock();
@@ -2833,6 +2861,11 @@ impl TestSubscriptionSession {
     }
 
     pub(super) fn session_event(&self, message_type: &str) {
+        self.session_event_from(message_type, None);
+    }
+
+    /// A session status message naming the `server` it concerns.
+    pub(super) fn session_event_from(&self, message_type: &str, server: Option<&str>) {
         let event = if message_type == "AuthorizationRevoked" {
             // TestUtil has no built-in authorization schema.
             let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
@@ -2851,7 +2884,11 @@ impl TestSubscriptionSession {
                 EventType::SessionStatus,
                 message_type,
                 &[],
-                |_| {},
+                |formatter| {
+                    if let Some(server) = server {
+                        formatter.json(&format!(r#"{{"server":"{server}"}}"#));
+                    }
+                },
             )
         };
         self.shared
@@ -3113,6 +3150,66 @@ mod tests {
             old_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn connection_status_is_recorded_per_server_without_touching_health_or_subscriptions() {
+        let shared = SubscriptionWorkerShared::new(
+            7,
+            Arc::new(EngineConfig::default()),
+            Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        shared.state.lock().stream_terminator = Some(tx.terminator());
+        let status = |message_type: &str, server: Option<&str>| {
+            let event =
+                TestEvent::admin(EventType::SessionStatus, message_type, &[], |formatter| {
+                    match server {
+                        Some(server) => formatter.json(&format!(r#"{{"server":"{server}"}}"#)),
+                        None => formatter.json("{}"),
+                    }
+                });
+            shared.state.lock().dispatch_event(event.event(), &shared);
+        };
+        let connections = || shared.connections();
+
+        assert_eq!(connections().pool, SessionPool::Subscription);
+        assert_eq!(connections().worker_id, 7);
+        assert!(connections().servers.is_empty());
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        status("SessionConnectionUp", Some("b.example.com:8194"));
+        assert_eq!(
+            connections().servers,
+            ["a.example.com:8194", "b.example.com:8194"]
+        );
+
+        status("SessionConnectionDown", Some("a.example.com:8194"));
+        assert_eq!(connections().servers, ["b.example.com:8194"]);
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        assert_eq!(
+            connections().servers,
+            ["b.example.com:8194", "a.example.com:8194"]
+        );
+
+        // Unnamed connections are not reported, and Down stays informational.
+        status("SessionConnectionUp", None);
+        status("SessionConnectionDown", Some("a.example.com:8194"));
+        status("SessionConnectionDown", Some("b.example.com:8194"));
+        status("SessionConnectionDown", None);
+        assert!(connections().servers.is_empty());
+        assert_eq!(
+            shared.health.load(Ordering::Acquire),
+            WorkerHealth::Healthy as u8
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        status("SessionTerminated", None);
+        assert!(connections().servers.is_empty());
     }
 
     #[test]

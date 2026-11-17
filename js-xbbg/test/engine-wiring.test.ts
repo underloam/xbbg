@@ -356,6 +356,13 @@ describe('shared subscription controls', () => {
     expect(engineWithNative({ subscriptionFeeds: () => feeds }).subscriptionFeeds()).toStrictEqual(
       feeds,
     );
+    const connections: api.SessionConnections[] = [
+      { pool: 'request', worker: 0, servers: ['a.example.com:8194', 'b.example.com:8194'] },
+      { pool: 'subscription', worker: 0, servers: [] },
+    ];
+    expect(engineWithNative({ connections: () => connections }).connections()).toStrictEqual(
+      connections,
+    );
   });
 
   it('keeps image-only subscriptions usable after scalar, Arrow, and delivery read attempts', async () => {

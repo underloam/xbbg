@@ -540,6 +540,16 @@ export interface FeedInfo {
   fieldErrors: Record<string, string>;
 }
 
+/** The servers one Bloomberg session is currently connected to. */
+export interface SessionConnections {
+  /** Pool the session belongs to. */
+  pool: 'request' | 'subscription';
+  /** Worker id within its pool. */
+  worker: number;
+  /** `host:port` of every connected server, in the order they connected. */
+  servers: string[];
+}
+
 export interface ResolveVenuesOptions extends RecipeBackendOptions {
   pcsOverrides?: Record<string, string>;
 }

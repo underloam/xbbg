@@ -237,6 +237,43 @@ impl<F: Fn()> Drop for PendingWaiter<F> {
     }
 }
 
+/// Which pool a session belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionPool {
+    /// A request worker session.
+    Request,
+    /// A subscription worker session.
+    Subscription,
+}
+
+impl SessionPool {
+    /// Stable lowercase name: `"request"` or `"subscription"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Subscription => "subscription",
+        }
+    }
+}
+
+/// The servers one Bloomberg session currently holds a connection to.
+///
+/// Contains no credentials. A session started with several servers can hold a
+/// connection to each of them at once; `servers` lists the connected ones in
+/// the order their connections came up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionConnections {
+    /// Pool the session belongs to.
+    pub pool: SessionPool,
+    /// Worker id within its pool.
+    pub worker_id: usize,
+    /// `host:port` of every connected server, in the order they connected.
+    /// A connection whose status message named no server is not listed.
+    pub servers: Vec<String>,
+}
+
 /// Connections of one session, fed by its `SessionConnectionUp` /
 /// `SessionConnectionDown` messages.
 ///
@@ -332,6 +369,12 @@ mod tests {
         assert_eq!(set.len(), 1);
         set.clear();
         assert!(set.is_empty());
+    }
+
+    #[test]
+    fn session_pool_names_are_stable() {
+        assert_eq!(SessionPool::Request.as_str(), "request");
+        assert_eq!(SessionPool::Subscription.as_str(), "subscription");
     }
 
     #[test]

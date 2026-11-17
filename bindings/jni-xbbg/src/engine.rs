@@ -39,6 +39,7 @@
 //! | `clearSchemaCache` (sync) | `{}` | VOID |
 //! | `listCachedSchemas` (sync) | `{}` | JSON string array |
 //! | `subscriptionFeeds` (sync) | `{}` | JSON array of `{service, topic, options, fields, consumers, delayed?, state, isolated, fieldErrors}` |
+//! | `connections` (sync) | `{}` | JSON array of `{pool, worker, servers}`, request workers first |
 //! | `signalShutdown` (sync) | `{}` | VOID |
 //! | `isAvailable` (sync) | `{}` | BOOL |
 //! | `keyColumn` (sync) | `{}` | STRING `ticker` / `security` |
@@ -326,6 +327,7 @@ const CORE_SYNC: &[&str] = &[
     "clearSchemaCache",
     "listCachedSchemas",
     "subscriptionFeeds",
+    "connections",
     "signalShutdown",
     "isAvailable",
     "keyColumn",
@@ -499,6 +501,13 @@ struct FeedInfoOutput<'a> {
     state: &'a str,
     isolated: bool,
     field_errors: BTreeMap<&'a str, &'a str>,
+}
+
+#[derive(Serialize)]
+struct SessionConnectionsOutput<'a> {
+    pool: &'static str,
+    worker: usize,
+    servers: &'a [String],
 }
 
 /// A JSON text result, or `null` when absent.
@@ -704,6 +713,20 @@ fn core_call_sync(
                 .collect();
             Payload::json(&output)
         }
+        "connections" => {
+            kind.expect(ResultKind::Json, method)?;
+            parse_args::<NoArgs>(args)?;
+            let sessions = engine.connections();
+            let output: Vec<SessionConnectionsOutput<'_>> = sessions
+                .iter()
+                .map(|session| SessionConnectionsOutput {
+                    pool: session.pool.as_str(),
+                    worker: session.worker_id,
+                    servers: &session.servers,
+                })
+                .collect();
+            Payload::json(&output)
+        }
         "isAvailable" => {
             kind.expect(ResultKind::Bool, method)?;
             parse_args::<NoArgs>(args)?;
@@ -721,6 +744,8 @@ fn core_call_sync(
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
+
+    use xbbg_async::engine::SessionPool;
 
     use super::*;
 
@@ -872,6 +897,31 @@ mod tests {
             parse_args(r#"{"fields":["PX_LAST"],"overrides":{"PX_LAST":"float64"}}"#).unwrap();
         assert_eq!(args.overrides.unwrap()["PX_LAST"], "float64");
         assert_eq!(args.default_type, None);
+    }
+
+    #[test]
+    fn connections_output_names_pool_worker_and_servers() {
+        let servers = [
+            "a.example.com:8194".to_string(),
+            "b.example.com:8194".to_string(),
+        ];
+        let json = serde_json::to_string(&[
+            SessionConnectionsOutput {
+                pool: SessionPool::Request.as_str(),
+                worker: 0,
+                servers: &servers,
+            },
+            SessionConnectionsOutput {
+                pool: SessionPool::Subscription.as_str(),
+                worker: 1,
+                servers: &[],
+            },
+        ])
+        .unwrap();
+        assert_eq!(
+            json,
+            r#"[{"pool":"request","worker":0,"servers":["a.example.com:8194","b.example.com:8194"]},{"pool":"subscription","worker":1,"servers":[]}]"#
+        );
     }
 
     #[test]

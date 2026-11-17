@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use xbbg_core::BlpError;
 
 use super::key_column::{self, KeyColumn};
-use super::session_lifecycle::{start_concurrently, worker_start_error};
+use super::session_lifecycle::{SessionConnections, start_concurrently, worker_start_error};
 use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
@@ -671,6 +671,15 @@ impl RequestWorkerPool {
         self.workers
             .iter()
             .map(|worker| (worker.id, worker.health()))
+            .collect()
+    }
+
+    /// Servers each request worker's session is connected to, one entry per
+    /// worker in id order.
+    pub fn connections(&self) -> Vec<SessionConnections> {
+        self.workers
+            .iter()
+            .map(|worker| worker.connections())
             .collect()
     }
 

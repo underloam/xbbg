@@ -19,9 +19,9 @@ pub use errors::BlpAsyncError;
 // Worker-pool Engine — the primary API
 pub use engine::{
     DelayedPolicy, Engine, EngineConfig, FeedInfo, FieldErrorPolicy, KeyColumn, OverflowPolicy,
-    RequestStream, SlabKey, SubscribeRequest, SubscriptionDeliveries, SubscriptionDelivery,
-    SubscriptionDeliveryMode, SubscriptionGap, SubscriptionHandle, SubscriptionStream,
-    ValidationMode,
+    RequestStream, SessionConnections, SessionPool, SlabKey, SubscribeRequest,
+    SubscriptionDeliveries, SubscriptionDelivery, SubscriptionDeliveryMode, SubscriptionGap,
+    SubscriptionHandle, SubscriptionStream, ValidationMode,
 };
 
 #[cfg(feature = "test-support")]

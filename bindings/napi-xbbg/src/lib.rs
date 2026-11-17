@@ -37,8 +37,8 @@ use xbbg_async::engine::{
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, KeyColumn, SubscribeRequest,
-    SubscriptionHandle, ValidationMode,
+    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, KeyColumn, SessionConnections,
+    SubscribeRequest, SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
 
@@ -434,6 +434,13 @@ pub struct FeedInfoOutput {
 }
 
 #[napi(object)]
+pub struct SessionConnectionsOutput {
+    pub pool: String,
+    pub worker: i64,
+    pub servers: Vec<String>,
+}
+
+#[napi(object)]
 pub struct NativeSubscriptionLayout {
     pub version: u32,
     pub fields: Vec<String>,
@@ -575,6 +582,16 @@ impl From<FeedInfo> for FeedInfoOutput {
             state: feed.state,
             isolated: feed.isolated,
             field_errors: feed.field_errors,
+        }
+    }
+}
+
+impl From<SessionConnections> for SessionConnectionsOutput {
+    fn from(session: SessionConnections) -> Self {
+        Self {
+            pool: session.pool.as_str().to_string(),
+            worker: to_i64_saturating(session.worker_id as u64),
+            servers: session.servers,
         }
     }
 }
@@ -1847,6 +1864,17 @@ impl JsEngine {
     pub fn subscription_feeds(&self) -> Vec<FeedInfoOutput> {
         self.engine
             .subscription_feeds()
+            .into_iter()
+            .map(Into::into)
+            .collect()
+    }
+
+    /// Servers each Bloomberg session is connected to: one entry per session,
+    /// request workers first, then subscription workers. No credentials.
+    #[napi]
+    pub fn connections(&self) -> Vec<SessionConnectionsOutput> {
+        self.engine
+            .connections()
             .into_iter()
             .map(Into::into)
             .collect()

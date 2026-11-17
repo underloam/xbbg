@@ -132,6 +132,17 @@ class Engine:
         """Return request-worker IDs and their current native health status."""
         return _native_engine(self).worker_health()
 
+    def connections(self) -> list[dict[str, Any]]:
+        """Return the servers each Bloomberg session is connected to, without credentials.
+
+        One dict per session, request workers first and then subscription
+        workers, with ``pool`` (``"request"`` or ``"subscription"``), ``worker``
+        (the worker id within its pool) and ``servers`` (the ``host:port`` of
+        every server whose connection is up, in the order they connected).
+        ``servers`` is empty while the session has no connection.
+        """
+        return self._py_engine.connections()
+
 
 # =============================================================================
 # Engine Lifecycle Management

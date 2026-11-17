@@ -113,6 +113,7 @@ import type {
   ServerAddress,
   SecurityOverrideSpec,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
   Socks5Config,
@@ -1596,6 +1597,14 @@ export class Engine {
     return this.inner.subscriptionFeeds();
   }
 
+  /**
+   * Servers each Bloomberg session is connected to: one entry per session,
+   * request workers first, then subscription workers. Contains no credentials.
+   */
+  public connections(): SessionConnections[] {
+    return this.inner.connections();
+  }
+
   public signalShutdown(): void {
     this.inner.signalShutdown();
   }
@@ -2516,6 +2525,7 @@ export type {
   ServerAddress,
   SecurityOverrideSpec,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
   Socks5Config,

@@ -53,6 +53,7 @@ pub use key_column::KeyColumn;
 pub(crate) use request_plan::{PlannedRequestShape, PreparedRequest, PreparedRequestBuilder};
 pub use request_pool::{RequestStream, RequestWorkerPool};
 use request_sharding::sharded_requests;
+pub use session_lifecycle::{SessionConnections, SessionPool};
 use shared_subscriptions::SharedSubscriptions;
 pub use shared_subscriptions::{FeedInfo, FieldErrorPolicy, SubscribeRequest, SubscriptionHandle};
 #[cfg(test)]
@@ -1484,6 +1485,19 @@ impl Engine {
 
     pub fn request_pool_health(&self) -> Vec<(usize, WorkerHealth)> {
         self.request_pool.worker_health()
+    }
+
+    /// Servers each Bloomberg session is currently connected to.
+    ///
+    /// One entry per session: request workers in id order, then subscription
+    /// workers in id order. `servers` lists the `host:port` of every server
+    /// whose connection is up, in the order the connections came up, taken
+    /// from the SDK's `SessionConnectionUp` / `SessionConnectionDown`
+    /// messages. Contains no credentials.
+    pub fn connections(&self) -> Vec<SessionConnections> {
+        let mut connections = self.request_pool.connections();
+        connections.extend(self.subscription_pool.connections());
+        connections
     }
 
     /// Seat type of the session's authorized identity (`BPS` / `NONBPS` /

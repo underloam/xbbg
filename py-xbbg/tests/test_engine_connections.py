@@ -38,3 +38,19 @@ def test_reconnect_grace_is_a_valid_configure_key():
     from xbbg._engine import _normalize_config_kwargs
 
     assert _normalize_config_kwargs({"reconnect_grace_ms": 5000}) == {"reconnect_grace_ms": 5000}
+
+
+def test_connections_returns_native_session_servers(monkeypatch):
+    sessions = [
+        {"pool": "request", "worker": 0, "servers": ["a.example.com:8194", "b.example.com:8194"]},
+        {"pool": "subscription", "worker": 0, "servers": []},
+    ]
+
+    class FakeEngine:
+        def connections(self):
+            return sessions
+
+    monkeypatch.setattr(_core, "PyEngine", SimpleNamespace(with_config=lambda config: FakeEngine()))
+    engine = xbbg.Engine()
+
+    assert engine.connections() is sessions

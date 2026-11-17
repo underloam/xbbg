@@ -14,6 +14,7 @@ import type {
   RequestInput,
   SeatType,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
   StreamOptions,
@@ -245,6 +246,7 @@ export interface NativeEngine {
     delivery?: StreamOptions['delivery'],
   ): Promise<NativeSubscription>;
   subscriptionFeeds(): FeedInfo[];
+  connections(): SessionConnections[];
   signalShutdown(): void;
   isAvailable(): boolean;
 

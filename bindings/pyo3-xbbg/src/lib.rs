@@ -1722,6 +1722,24 @@ impl PyEngine {
             .collect())
     }
 
+    /// Servers each Bloomberg session is connected to, without credentials.
+    ///
+    /// One dict per session (`pool`, `worker`, `servers`): request workers
+    /// first, then subscription workers.
+    fn connections(&self, py: Python<'_>) -> PyResult<Vec<Py<PyDict>>> {
+        let sessions = py.detach(|| self.engine.connections());
+        sessions
+            .into_iter()
+            .map(|session| {
+                let row = PyDict::new(py);
+                row.set_item("pool", session.pool.as_str())?;
+                row.set_item("worker", session.worker_id)?;
+                row.set_item("servers", session.servers)?;
+                Ok(row.unbind())
+            })
+            .collect()
+    }
+
     /// Check if the Bloomberg connection is healthy.
     ///
     /// Returns True if at least one worker has a live Bloomberg session.
