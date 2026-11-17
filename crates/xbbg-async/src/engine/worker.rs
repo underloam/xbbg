@@ -467,8 +467,18 @@ impl WorkerShared {
     /// Next generation tag for request dispatch CIDs, cycling through
     /// `1..=MAX_GENERATION` so the stored generation always equals the one
     /// decoded from the CID (0 stays reserved for untagged keys).
+    ///
+    /// The counter's low 30 bits are the tag. `u32` wraps on a multiple of
+    /// 2^30, so masking continues the cycle across the wrap; a modulo by
+    /// `MAX_GENERATION` would not (2^32 is 4 mod 2^30 - 1), and repeated tags
+    /// four requests apart there.
     fn next_generation(&self) -> u32 {
-        self.next_generation.fetch_add(1, Ordering::Relaxed) % MAX_GENERATION + 1
+        loop {
+            let generation = self.next_generation.fetch_add(1, Ordering::Relaxed) & MAX_GENERATION;
+            if generation != 0 {
+                return generation;
+            }
+        }
     }
 
     fn insert_slot(&self, generation: u32, state: UnifiedRequestState) -> SlabKey {
@@ -2233,28 +2243,57 @@ mod tests {
         assert_eq!(shared.requests.lock().len(), 1);
     }
 
+    /// Draw `count` generations starting from counter value `start`, checking
+    /// that each one still addresses the slot it was stored with.
+    fn generations_from(start: u32, count: usize) -> Vec<u32> {
+        let shared = shared();
+        shared.next_generation.store(start, Ordering::Relaxed);
+        (0..count)
+            .map(|_| {
+                let (state, _rx) = generic_state();
+                let generation = shared.next_generation();
+                assert_ne!(generation, 0, "0 is reserved for untagged keys");
+                let key = shared.insert_slot(generation, state);
+                let dispatch_key = DispatchKey::with_generation(key, generation);
+                assert!(
+                    shared.take_slot(dispatch_key).is_some(),
+                    "generation {generation} must still match its CID",
+                );
+                generation
+            })
+            .collect()
+    }
+
     #[test]
     fn generations_past_the_cid_tag_width_still_address_their_slots() {
-        let shared = shared();
-        // Start just below the 30-bit CID tag limit so the next requests
-        // cross it.
-        shared
-            .next_generation
-            .store(MAX_GENERATION - 2, Ordering::Relaxed);
-        let mut seen = Vec::new();
-        for _ in 0..4 {
-            let (state, _rx) = generic_state();
-            let generation = shared.next_generation();
-            assert_ne!(generation, 0, "0 is reserved for untagged keys");
-            let key = shared.insert_slot(generation, state);
-            let dispatch_key = DispatchKey::with_generation(key, generation);
-            assert!(
-                shared.take_slot(dispatch_key).is_some(),
-                "generation {generation} must still match its CID",
-            );
-            seen.push(generation);
-        }
-        assert_eq!(seen, [MAX_GENERATION - 1, MAX_GENERATION, 1, 2]);
+        // Crossing the 30-bit CID tag limit skips the reserved 0.
+        assert_eq!(
+            generations_from(MAX_GENERATION - 1, 4),
+            [MAX_GENERATION - 1, MAX_GENERATION, 1, 2]
+        );
+    }
+
+    #[test]
+    fn generations_continue_their_cycle_across_the_counter_wrap() {
+        // The u32 counter wraps on a multiple of 2^30, so the tags carry on
+        // instead of restarting a short cycle (a modulo by MAX_GENERATION
+        // repeated 1, 2, 3, 4 there).
+        let seen = generations_from(u32::MAX - 3, 8);
+        assert_eq!(
+            seen,
+            [
+                MAX_GENERATION - 3,
+                MAX_GENERATION - 2,
+                MAX_GENERATION - 1,
+                MAX_GENERATION,
+                1,
+                2,
+                3,
+                4
+            ]
+        );
+        let unique: std::collections::BTreeSet<u32> = seen.iter().copied().collect();
+        assert_eq!(unique.len(), seen.len(), "no tag repeats across the wrap");
     }
 
     #[test]
