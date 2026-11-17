@@ -925,7 +925,7 @@ assert result.bloomberg_request_id == "sdk-request-1"
 assert mock.requests[0].params["securities"] == ["TEST Equity"]
 ```
 
-An `Engine` constructed while any `mock_engine` is active makes no connection, so code scoped with `with engine:` runs offline: mocked requests resolve and `shutdown()` is a no-op. What needs Bloomberg (a request no mock response matches in non-strict mode, `worker_health()`, `subscription_feeds()`, subscriptions) raises a `RuntimeError` that names `mock_engine`. Such an engine stays offline after the mock exits, so construct connected engines outside it.
+An `Engine` constructed while any `mock_engine` is active makes no connection, so code scoped with `with engine:` runs offline: mocked requests resolve and `shutdown()` is a no-op. What needs Bloomberg (a request no mock response matches in non-strict mode, `worker_health()`, `subscription_feeds()`, `connections()`, subscriptions) raises a `RuntimeError` that names `mock_engine`. Such an engine stays offline after the mock exits, so construct connected engines outside it.
 
 Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 

@@ -347,7 +347,7 @@ class mock_engine:
     makes no connection: ``with engine:`` scopes, mocked requests and
     ``shutdown()`` work offline. What needs Bloomberg (an unmatched request in
     non-strict mode, ``worker_health()``, ``subscription_feeds()``,
-    subscriptions) raises ``RuntimeError`` naming ``mock_engine``. Such an
+    ``connections()``, subscriptions) raises ``RuntimeError`` naming ``mock_engine``. Such an
     Engine stays offline after the mock exits; construct connected engines
     outside it. The state is process-wide, like the middleware, and nests.
     """

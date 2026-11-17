@@ -419,7 +419,7 @@ def test_offline_engine_scopes_async_and_reports_what_needs_bloomberg(monkeypatc
             blp.subscription_feeds()
 
     assert result.to_pylist() == [{"ticker": "TEST Equity", "field": "PX_LAST", "value": "1.5"}]
-    for call in (engine.worker_health, engine.subscription_feeds):
+    for call in (engine.worker_health, engine.subscription_feeds, engine.connections):
         with pytest.raises(RuntimeError, match="mock_engine"):
             call()
     # No-op, before or after the mock exits.

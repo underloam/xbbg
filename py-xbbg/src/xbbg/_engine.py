@@ -39,7 +39,7 @@ _mock_engine_lock = threading.Lock()
 _OFFLINE_ENGINE_MESSAGE = (
     "This Engine was created while xbbg.testing.mock_engine was active, so it has no Bloomberg connection. "
     "Mocked requests resolve without one; anything that needs Bloomberg (a request no mock response matches "
-    "in non-strict mode, subscriptions, worker_health(), subscription_feeds()) needs an Engine "
+    "in non-strict mode, subscriptions, worker_health(), subscription_feeds(), connections()) needs an Engine "
     "constructed outside mock_engine."
 )
 
@@ -141,7 +141,7 @@ class Engine:
         every server whose connection is up, in the order they connected).
         ``servers`` is empty while the session has no connection.
         """
-        return self._py_engine.connections()
+        return _native_engine(self).connections()
 
 
 # =============================================================================
