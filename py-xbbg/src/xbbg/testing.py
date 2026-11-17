@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
+import copy
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from . import _engine, blp
@@ -207,13 +209,62 @@ def create_mock_response(
     event_type: int | None = None,
     correlation_ids: Sequence[Any] | None = None,
     request_id: str | None = None,
+    security_errors: Mapping[str, Mapping[str, Any]] | None = None,
+    field_exceptions: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
+    delayed: Mapping[str, Mapping[str, Any]] | None = None,
+    type_misses: Mapping[str, int] | None = None,
+    field_errors: Mapping[str, Mapping[str, Any]] | None = None,
+    eid_data: Mapping[str, Sequence[int]] | None = None,
 ) -> MockResponse:
+    """Build a canned response from rows and, optionally, the diagnostics a result carries.
+
+    ``data`` is the response payload: a mapping in the shape of the operation's
+    response (reference and historical data) or an explicit list of row mappings.
+
+    The diagnostics arguments take the values the result accessors return, so a
+    result read from the mocked table matches what was passed in:
+
+    - ``security_errors``: ``{security: {"category", "code", "subcategory", "message"}}``
+      (``table.security_errors``).
+    - ``field_exceptions``: ``{security: [{"field", "category", "code", "subcategory",
+      "message"}, ...]}``, in occurrence order (``table.field_exceptions``).
+    - ``delayed``: ``{security: {"delayed": bool, "delay_minutes": int | None}}``
+      (``table.delayed``).
+    - ``type_misses``: ``{field: count}`` (``table.type_misses``).
+    - ``field_errors``: ``{field id: {"category", "code", "subcategory", "message",
+      "source"?}}``, the refusals of a FieldInfo request (``table.field_errors``).
+    - ``eid_data``: ``{security: [eid, ...]}`` (``table.eid_data``).
+    - ``request_id``: the SDK request ID (``table.bloomberg_request_id``). With a
+      Bloomberg service definition it is also set as the SDK message property.
+
+    The ``xbbg.*`` schema metadata is written by the native code that attaches it
+    to engine results, so the table carries it for every output format: native
+    accessors, ``to_pyarrow().schema.metadata``, and pandas ``DataFrame.attrs``.
+    Empty or omitted diagnostics leave their keys absent. Shapes the encoder
+    does not accept raise ``ValueError`` here, not when a test reads the result.
+
+    ``service_xml`` (or a ``blpapi.Service`` passed as ``service``) also builds a
+    TestUtil ``blpapi`` event in ``MockResponse.event``; that requires ``blpapi``.
+    """
+    from xbbg import _core
+
     if isinstance(service, str):
         service_name = service
     else:
         service_name = service.name()
     rows = _rows_from_operation(operation, data)
+    schema_metadata = _core._encode_result_diagnostics(
+        eid_data=eid_data,
+        security_errors=security_errors,
+        field_exceptions=field_exceptions,
+        delayed=delayed,
+        type_misses=type_misses,
+        field_errors=field_errors,
+        bloomberg_request_id=request_id,
+    )
     table = _table_from_rows(rows)
+    if schema_metadata:
+        table = _core._with_schema_metadata(table, schema_metadata)
 
     event = None
     service_obj: Any | None = None
@@ -256,8 +307,50 @@ def _coerce_mock_table(value: MockResponse | Any | Sequence[Mapping[str, Any]]) 
     raise TypeError("Unsupported mock response value")
 
 
+@dataclass(frozen=True, slots=True)
+class MockRequest:
+    """A request seen by :class:`mock_engine`, as the engine would have received it.
+
+    ``params`` is a snapshot of the dispatch dictionary (``RequestContext.to_dispatch_dict()``):
+    ``service``, ``operation``, ``request_operation``, ``securities``, ``fields``,
+    ``overrides``, ``start_date`` and the other request parameters, plus the
+    per-request ``request_id``. ``served`` is ``True`` when a mock response
+    answered the request and ``False`` when a non-strict mock passed it through.
+    """
+
+    service: str
+    operation: str
+    params: Mapping[str, Any]
+    served: bool
+
+
 class mock_engine:
-    """Middleware context manager that serves canned responses."""
+    """Middleware context manager that serves canned responses.
+
+    ``responses`` are matched in order, each answering one request: a
+    :class:`MockResponse` answers the first request for its service and
+    operation, and a bare table or list of rows answers the next request
+    whatever it is. In strict mode (the default) a request nothing matches
+    raises ``LookupError``; with ``strict=False`` it passes through to the
+    engine, which needs a Bloomberg connection.
+
+    ``requests`` lists, in order, every request the mock saw: those it served
+    and, in non-strict mode, those it passed through (:class:`MockRequest`).
+    It accumulates across re-entry and is not cleared on exit, so assert on it
+    after the ``with`` block::
+
+        with mock_engine([response]) as mock:
+            blp.bdp("TEST Equity", "PX_LAST")
+        assert mock.requests[0].params["securities"] == ["TEST Equity"]
+
+    While any ``mock_engine`` is active, a ``blp.Engine(...)`` constructed
+    makes no connection: ``with engine:`` scopes, mocked requests and
+    ``shutdown()`` work offline. What needs Bloomberg (an unmatched request in
+    non-strict mode, ``worker_health()``, ``subscription_feeds()``,
+    subscriptions) raises ``RuntimeError`` naming ``mock_engine``. Such an
+    Engine stays offline after the mock exits; construct connected engines
+    outside it. The state is process-wide, like the middleware, and nests.
+    """
 
     def __init__(
         self,
@@ -268,6 +361,22 @@ class mock_engine:
         self._responses = list(responses)
         self._strict = strict
         self._middleware = None
+        self._requests: list[MockRequest] = []
+
+    @property
+    def requests(self) -> list[MockRequest]:
+        """Requests seen so far, in arrival order: served, and passed through when not strict."""
+        return list(self._requests)
+
+    def _record(self, params_dict: Mapping[str, Any], *, served: bool) -> None:
+        self._requests.append(
+            MockRequest(
+                service=params_dict.get("service"),
+                operation=params_dict.get("operation"),
+                params=MappingProxyType(copy.deepcopy(dict(params_dict))),
+                served=served,
+            )
+        )
 
     def _pop_match(self, params_dict: Mapping[str, Any]):
         for index, candidate in enumerate(self._responses):
@@ -280,11 +389,14 @@ class mock_engine:
         return None
 
     async def _handle(self, context: blp.RequestContext, call_next):
-        match = self._pop_match(context.to_dispatch_dict())
+        params_dict = context.to_dispatch_dict()
+        match = self._pop_match(params_dict)
         if match is None:
             if self._strict:
                 raise LookupError(f"No mock response matched {context.params.service}::{context.params.operation}")
+            self._record(params_dict, served=False)
             return await call_next(context)
+        self._record(params_dict, served=True)
 
         table = _coerce_mock_table(match)
         batch = next(iter(table.to_batches()), None)
@@ -311,6 +423,7 @@ class mock_engine:
 
         self._middleware = middleware
         blp.add_middleware(middleware)
+        _engine._mock_engine_entered()
         return self
 
     def __exit__(self, _exc_type, _exc, _tb) -> None:
@@ -319,9 +432,11 @@ class mock_engine:
                 blp.remove_middleware(self._middleware)
             finally:
                 self._middleware = None
+                _engine._mock_engine_exited()
 
 
 __all__ = [
+    "MockRequest",
     "MockResponse",
     "append_message_dict",
     "create_mock_event",

@@ -31,6 +31,43 @@ _engine_lock = threading.Lock()
 # Scoped engine for multi-engine routing (async-safe via contextvars)
 _active_engine: contextvars.ContextVar[Engine | None] = contextvars.ContextVar("_active_engine", default=None)
 
+# Number of active ``xbbg.testing.mock_engine`` contexts. Its middleware is
+# process-global, so this is too: an Engine built while it is nonzero is offline.
+_mock_engine_depth = 0
+_mock_engine_lock = threading.Lock()
+
+_OFFLINE_ENGINE_MESSAGE = (
+    "This Engine was created while xbbg.testing.mock_engine was active, so it has no Bloomberg connection. "
+    "Mocked requests resolve without one; anything that needs Bloomberg (a request no mock response matches "
+    "in non-strict mode, subscriptions, worker_health(), subscription_feeds()) needs an Engine "
+    "constructed outside mock_engine."
+)
+
+
+def _mock_engine_entered() -> None:
+    global _mock_engine_depth
+    with _mock_engine_lock:
+        _mock_engine_depth += 1
+
+
+def _mock_engine_exited() -> None:
+    global _mock_engine_depth
+    with _mock_engine_lock:
+        _mock_engine_depth -= 1
+
+
+def _mock_engine_active() -> bool:
+    with _mock_engine_lock:
+        return _mock_engine_depth > 0
+
+
+def _native_engine(engine: Engine) -> Any:
+    """Return an Engine's native engine, or explain that it was built offline."""
+    native = engine._py_engine
+    if native is None:
+        raise RuntimeError(_OFFLINE_ENGINE_MESSAGE)
+    return native
+
 
 class Engine:
     """Non-global Bloomberg engine for multi-source routing.
@@ -58,7 +95,9 @@ class Engine:
         normalized = _normalize_config_kwargs(kwargs)
         config = _core.PyEngineConfig(**normalized)
         self._config_snapshot = config
-        self._py_engine = _core.PyEngine.with_config(config)
+        # An Engine built under mock_engine never connects: its mocked requests are
+        # answered by middleware, and `_native_engine` explains what else it cannot do.
+        self._py_engine = None if _mock_engine_active() else _core.PyEngine.with_config(config)
         self._scope_tokens: contextvars.ContextVar[tuple[contextvars.Token, ...]] = contextvars.ContextVar(
             f"xbbg_engine_scope_tokens_{id(self)}",
             default=(),
@@ -82,15 +121,16 @@ class Engine:
         self.__exit__(*exc)
 
     def shutdown(self) -> None:
-        self._py_engine.signal_shutdown()
+        if self._py_engine is not None:
+            self._py_engine.signal_shutdown()
 
     def subscription_feeds(self) -> list[dict[str, Any]]:
         """Return shared-feed diagnostics for this engine, without identity data."""
-        return self._py_engine.subscription_feeds()
+        return _native_engine(self).subscription_feeds()
 
     def worker_health(self) -> list[tuple[int, str]]:
         """Return request-worker IDs and their current native health status."""
-        return self._py_engine.worker_health()
+        return _native_engine(self).worker_health()
 
 
 # =============================================================================
@@ -428,11 +468,11 @@ def configure(
 def _get_engine(*, engine: Engine | None = None):
     """Get the active engine: explicit arg > contextvar scope > global singleton."""
     if engine is not None:
-        return engine._py_engine
+        return _native_engine(engine)
 
     scoped = _active_engine.get()
     if scoped is not None:
-        return scoped._py_engine
+        return _native_engine(scoped)
 
     global _engine
     with _engine_lock:

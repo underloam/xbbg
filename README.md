@@ -891,6 +891,40 @@ with mock_engine([response]):
     df = blp.bdp("AAPL US Equity", "PX_LAST")
 ```
 
+`create_mock_response` also takes the diagnostics a result carries, as the values the result accessors return: `security_errors`, `field_exceptions`, `delayed`, `type_misses`, `field_errors` (FieldInfo refusals), `eid_data` and `request_id`. They are written as the same `xbbg.*` schema metadata the engine attaches, by the same native code, so the result explains itself through `result.security_errors`, the pyarrow schema metadata and pandas `DataFrame.attrs` exactly as a live one does, and a change to an encoding reaches tests built this way. Shapes the encoder does not accept raise `ValueError` when the response is created.
+
+```python
+response = create_mock_response(
+    service="//blp/refdata",
+    operation="ReferenceDataRequest",
+    data={"TEST Equity": {"PX_LAST": 101.23}},
+    security_errors={
+        "NOTASECURITY1 Curncy": {
+            "category": "BAD_SEC",
+            "code": 15,
+            "subcategory": "INVALID_SECURITY",
+            "message": "Unknown/Invalid Security",
+        }
+    },
+    delayed={"TEST Equity": {"delayed": True, "delay_minutes": 15}},
+    request_id="sdk-request-1",
+)
+
+with mock_engine([response]) as mock:
+    result = blp.bdp("TEST Equity", "PX_LAST", backend="native")
+
+assert result.security_errors["NOTASECURITY1 Curncy"]["code"] == 15
+assert result.bloomberg_request_id == "sdk-request-1"
+```
+
+`mock_engine` records what it served: `mock.requests` lists, in order, a `MockRequest(service, operation, params, served)` for each request it answered and, with `strict=False`, each it passed through (`served=False`). `params` is the dispatch dictionary the engine would have received (`securities`, `fields`, `start_date`, ...).
+
+```python
+assert mock.requests[0].params["securities"] == ["TEST Equity"]
+```
+
+An `Engine` constructed while any `mock_engine` is active makes no connection, so code scoped with `with engine:` runs offline: mocked requests resolve and `shutdown()` is a no-op. What needs Bloomberg (a request no mock response matches in non-strict mode, `worker_health()`, `subscription_feeds()`, subscriptions) raises a `RuntimeError` that names `mock_engine`. Such an engine stays offline after the mock exits, so construct connected engines outside it.
+
 Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 
 ## Project links
