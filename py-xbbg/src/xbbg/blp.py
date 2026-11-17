@@ -761,8 +761,14 @@ async def arequest(
             data fields. If None, auto-detected from operation.
         format: Output format: ``Format.LONG`` (default), ``Format.LONG_TYPED``,
             ``Format.LONG_WITH_METADATA``, or ``Format.SEMI_LONG``.
-        include_security_errors: Include ``__SECURITY_ERROR__`` rows for
-            failed securities on ReferenceData requests.
+        include_security_errors: Report the securities Bloomberg refused on
+            ReferenceData requests. The long formats add one
+            ``__SECURITY_ERROR__`` row per refused security;
+            ``Format.SEMI_LONG`` leaves refused securities out of its rows. Every
+            format carries each refusal's details in ``xbbg.security_errors``
+            result metadata. With this option a request in which every security
+            is refused returns (the long rows, or an empty table in
+            ``SEMI_LONG``) instead of raising ``BlpRequestError``.
         return_eids: Request EID entitlement metadata for ReferenceDataRequest
             (including BDS bulk data), HistoricalDataRequest, IntradayBarRequest,
             and IntradayTickRequest.

@@ -388,7 +388,9 @@ pub struct RequestParams {
     pub options: Option<Vec<(String, String)>>,
     /// Manual field type overrides (for future type resolution)
     pub field_types: Option<HashMap<String, String>>,
-    /// Include security error rows in RefData long output when present.
+    /// Report refused securities in RefData results: long output adds one
+    /// `__SECURITY_ERROR__` row per refused security, and a request whose every
+    /// security is refused returns instead of raising (an empty table in wide output).
     pub include_security_errors: bool,
     /// Request entitlement IDs (`returnEids`) on reference, historical,
     /// intraday bar, and intraday tick requests; per-security EIDs surface in
