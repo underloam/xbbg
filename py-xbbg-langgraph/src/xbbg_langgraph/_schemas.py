@@ -90,6 +90,7 @@ _RESERVED_REQUEST_KEYS = frozenset(
         "timeout",
         "timeout_ms",
         "streams_deactivated_warn_ms",
+        "reconnect_grace_ms",
         "keep_alive_enabled",
         "keep_alive_inactivity_ms",
         "keep_alive_response_timeout_ms",

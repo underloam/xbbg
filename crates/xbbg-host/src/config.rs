@@ -66,6 +66,7 @@ pub struct EngineConfigSpec {
     pub retry_policy: Option<RetryPolicySpec>,
     pub request_timeout_ms: Option<i64>,
     pub streams_deactivated_warn_ms: Option<i64>,
+    pub reconnect_grace_ms: Option<i64>,
     pub keep_alive_enabled: Option<bool>,
     pub keep_alive_inactivity_ms: Option<i32>,
     pub keep_alive_response_timeout_ms: Option<i32>,
@@ -351,6 +352,9 @@ impl EngineConfigSpec {
             config.streams_deactivated_warn_ms =
                 non_negative_duration(warn, "streamsDeactivatedWarnMs")?;
         }
+        if let Some(grace) = self.reconnect_grace_ms {
+            config.reconnect_grace_ms = non_negative_duration(grace, "reconnectGraceMs")?;
+        }
         if let Some(enabled) = self.keep_alive_enabled {
             config.keep_alive_enabled = enabled;
         }
@@ -485,6 +489,7 @@ mod tests {
         assert_eq!(config.retry_policy.max_delay_ms, 30_000);
         assert_eq!(config.request_timeout_ms, 0);
         assert_eq!(config.streams_deactivated_warn_ms, 30_000);
+        assert_eq!(config.reconnect_grace_ms, 10_000);
         assert!(config.keep_alive_enabled);
         assert!(config.auto_restart_on_disconnection);
         assert_eq!(config.num_start_attempts, 3);
@@ -510,7 +515,7 @@ mod tests {
                 "bqlAppName": "bql-app", "numStartAttempts": 5,
                 "autoRestartOnDisconnection": false,
                 "retryPolicy": {"maxRetries": 2, "backoffFactor": 1.5},
-                "requestTimeoutMs": 9000, "streamsDeactivatedWarnMs": 0,
+                "requestTimeoutMs": 9000, "streamsDeactivatedWarnMs": 0, "reconnectGraceMs": 2500,
                 "keepAliveEnabled": false, "keepAliveInactivityMs": 40000,
                 "keepAliveResponseTimeoutMs": 15000, "slowConsumerHiWaterMark": 0.9,
                 "slowConsumerLoWaterMark": 0.25, "sdkLogLevel": "warning",
@@ -548,6 +553,7 @@ mod tests {
         assert_eq!(config.retry_policy.max_delay_ms, 30_000);
         assert_eq!(config.request_timeout_ms, 9000);
         assert_eq!(config.streams_deactivated_warn_ms, 0);
+        assert_eq!(config.reconnect_grace_ms, 2500);
         assert!(!config.keep_alive_enabled);
         assert_eq!(config.keep_alive_inactivity_ms, Some(40_000));
         assert_eq!(config.keep_alive_response_timeout_ms, Some(15_000));
@@ -779,6 +785,11 @@ mod tests {
                 r#"{"streamsDeactivatedWarnMs": -1}"#,
                 "streamsDeactivatedWarnMs must be a non-negative integer number of milliseconds",
                 "streamsDeactivatedWarnMs",
+            ),
+            (
+                r#"{"reconnectGraceMs": -1}"#,
+                "reconnectGraceMs must be a non-negative integer number of milliseconds",
+                "reconnectGraceMs",
             ),
             (
                 r#"{"sdkLogLevel": "verbose"}"#,

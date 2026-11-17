@@ -180,6 +180,15 @@ export interface EngineConfig {
   requestTimeoutMs?: number;
   /** Warn threshold for streams staying deactivated, in ms. 0 disables. Default 30000. */
   streamsDeactivatedWarnMs?: number;
+  /**
+   * How long a request session may stay without a connection to any server
+   * before its in-flight requests fail with a transient error, in ms. One
+   * dropped connection fails nothing: the SDK carries requests over another
+   * connection or finishes them after it reconnects. 0 fails them as soon as
+   * the last connection drops. `requestTimeoutMs` still applies independently.
+   * Default 10000.
+   */
+  reconnectGraceMs?: number;
   /** Enable BLPAPI keep-alive pings. SDK default: true. */
   keepAliveEnabled?: boolean;
   /** Milliseconds of inactivity before keep-alive ping. SDK default: 20000. */

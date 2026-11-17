@@ -315,6 +315,7 @@ _VALID_CONFIG_KEYS: frozenset[str] = frozenset(
         "retry_max_delay_ms",
         "request_timeout_ms",
         "streams_deactivated_warn_ms",
+        "reconnect_grace_ms",
         "keep_alive_enabled",
         "keep_alive_inactivity_ms",
         "keep_alive_response_timeout_ms",
@@ -381,6 +382,13 @@ def configure(
             paths as ``str`` or in-memory DER material as ``bytes`` (PKCS#12
             credentials and PKCS#7 trust). Supply both, using the same
             representation; byte material is never written to temporary files.
+            ``reconnect_grace_ms`` (default 10000) bounds how long a request
+            session may have no connection to any server before its in-flight
+            requests fail with a transient error; a single dropped connection
+            fails nothing, because the SDK carries requests over another
+            connection or finishes them after it reconnects. ``0`` fails them
+            as soon as the last connection drops, and ``request_timeout_ms``
+            still applies independently.
 
     Raises:
         TypeError: If an unknown keyword argument is passed.

@@ -714,6 +714,18 @@ pub struct EngineConfig {
     /// to callers who poll status that their data is quiet, not dead. Set to
     /// 0 to disable. Default: 30_000 (30s).
     pub streams_deactivated_warn_ms: u64,
+    /// How long a request worker's session may stay without any connection to
+    /// a server before its in-flight requests are failed with a transient
+    /// error. A connection that drops does not fail requests by itself: the
+    /// SDK carries them over another connection or finishes them after it
+    /// reconnects. This bounds the case where it does not reconnect, which
+    /// `request_timeout_ms` (off by default) would otherwise leave unbounded.
+    /// Requests submitted while the session stays disconnected fail on the
+    /// next 1 s scan once the grace has elapsed. Set to 0 to fail in-flight
+    /// requests as soon as the last connection drops (requests submitted
+    /// afterwards then wait for the reconnect or `request_timeout_ms`).
+    /// `request_timeout_ms` still applies independently. Default: 10_000 (10s).
+    pub reconnect_grace_ms: u64,
     /// Bloomberg SDK internal log level. Bridges SDK logs into xbbg tracing.
     /// Must be set before first session starts. Default: Off.
     pub sdk_log_level: crate::sdk_logging::SdkLogLevel,
@@ -833,6 +845,7 @@ impl Default for EngineConfig {
             retry_policy: RetryPolicy::default(),
             request_timeout_ms: 0,
             streams_deactivated_warn_ms: 30_000,
+            reconnect_grace_ms: 10_000,
             keep_alive_enabled: true,
             keep_alive_inactivity_ms: None,
             keep_alive_response_timeout_ms: None,

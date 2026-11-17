@@ -502,6 +502,7 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 - `zfpRemote` (`'8194'` or `'8196'`) for Bloomberg-assigned ZFP endpoints in an entitled environment; do not combine it with `host`/`port`/`servers`/`socks5`
 - `socks5` for proxied access to already-provisioned direct Bloomberg endpoints
 - `retryPolicy`, `numStartAttempts`, and recovery settings for reconnect behavior
+- `reconnectGraceMs`: how long a request session may stay without a connection to any server before its in-flight requests fail with a transient error, default **10000**; `0` fails them as soon as the last connection drops. One dropped connection fails nothing, because the SDK carries requests over another connection or finishes them after it reconnects. `requestTimeoutMs` still applies independently
 - `shardRequests`, `shardThreshold`, `shardChunkSize`, and `shardMaxConcurrent` for opt-in sharding of wide multi-security `bdp`/`bdh` requests
 - `runtimeWorkerThreads`: shared Tokio runtime threads, default **2**, minimum **1**; this is not the total process thread count
 - `subscriptionPoolSize`: pre-warmed subscription sessions, default **1**, minimum **0**

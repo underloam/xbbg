@@ -345,7 +345,8 @@ impl Stream for RequestStream {
     }
 }
 
-/// Background thread enforcing slow-request warnings and hard timeouts.
+/// Background thread enforcing slow-request warnings, hard timeouts and the
+/// reconnect grace (`EngineConfig::reconnect_grace_ms`).
 struct TimeoutScanner {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -379,6 +380,7 @@ impl TimeoutScanner {
                         for ticket in worker.scan_timeouts(hard_timeout) {
                             worker.timeout_request(ticket, request_timeout_ms);
                         }
+                        worker.fail_if_disconnected_past_grace();
                     }
                 }
             })

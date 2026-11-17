@@ -289,6 +289,7 @@ pub struct EngineConfigInput {
     pub retry_policy: Option<RetryPolicyInput>,
     pub request_timeout_ms: Option<i64>,
     pub streams_deactivated_warn_ms: Option<i64>,
+    pub reconnect_grace_ms: Option<i64>,
     pub keep_alive_enabled: Option<bool>,
     pub keep_alive_inactivity_ms: Option<i32>,
     pub keep_alive_response_timeout_ms: Option<i32>,
@@ -721,6 +722,10 @@ impl TryFrom<EngineConfigInput> for EngineConfig {
                 streams_deactivated_warn_ms,
                 "streamsDeactivatedWarnMs",
             )?;
+        }
+        if let Some(reconnect_grace_ms) = input.reconnect_grace_ms {
+            config.reconnect_grace_ms =
+                require_non_negative_duration(reconnect_grace_ms, "reconnectGraceMs")?;
         }
         if let Some(keep_alive_enabled) = input.keep_alive_enabled {
             config.keep_alive_enabled = keep_alive_enabled;
@@ -3443,6 +3448,7 @@ mod tests {
             retry_policy: None,
             request_timeout_ms: None,
             streams_deactivated_warn_ms: None,
+            reconnect_grace_ms: None,
             keep_alive_enabled: None,
             keep_alive_inactivity_ms: None,
             keep_alive_response_timeout_ms: None,
@@ -4497,6 +4503,7 @@ mod tests {
             }),
             request_timeout_ms: Some(12_000),
             streams_deactivated_warn_ms: Some(45_000),
+            reconnect_grace_ms: Some(2_500),
             keep_alive_enabled: Some(false),
             keep_alive_inactivity_ms: Some(25_000),
             keep_alive_response_timeout_ms: Some(11_000),
@@ -4548,6 +4555,7 @@ mod tests {
         assert_eq!(config.retry_policy.max_delay_ms, 5_000);
         assert_eq!(config.request_timeout_ms, 12_000);
         assert_eq!(config.streams_deactivated_warn_ms, 45_000);
+        assert_eq!(config.reconnect_grace_ms, 2_500);
     }
 
     #[test]
@@ -4851,6 +4859,25 @@ mod tests {
         .err()
         .expect("negative unsigned duration");
         assert!(err.to_string().contains("requestTimeoutMs"));
+        let err = EngineConfig::try_from(EngineConfigInput {
+            reconnect_grace_ms: Some(-1),
+            ..minimal_input()
+        })
+        .err()
+        .expect("negative reconnect grace");
+        assert!(err.to_string().contains("reconnectGraceMs"));
+    }
+
+    #[test]
+    fn engine_config_input_defaults_reconnect_grace() {
+        let config = EngineConfig::try_from(minimal_input()).expect("minimal config");
+        assert_eq!(config.reconnect_grace_ms, 10_000);
+        let config = EngineConfig::try_from(EngineConfigInput {
+            reconnect_grace_ms: Some(0),
+            ..minimal_input()
+        })
+        .expect("zero grace restores fail-fast");
+        assert_eq!(config.reconnect_grace_ms, 0);
     }
 
     #[test]

@@ -577,6 +577,11 @@ pub struct PyEngineConfig {
     /// 0 disables. Default: 30_000.
     #[pyo3(get, set)]
     pub streams_deactivated_warn_ms: u64,
+    /// How long a request session may stay without any server connection before
+    /// its in-flight requests are failed, in ms; 0 fails them as soon as the
+    /// last connection drops. Default: 10_000.
+    #[pyo3(get, set)]
+    pub reconnect_grace_ms: u64,
     /// Enable BLPAPI keep-alive pings. SDK default: True.
     #[pyo3(get, set)]
     pub keep_alive_enabled: bool,
@@ -657,6 +662,7 @@ impl PyEngineConfig {
             retry_max_delay_ms: 30_000,
             request_timeout_ms: defaults.request_timeout_ms,
             streams_deactivated_warn_ms: defaults.streams_deactivated_warn_ms,
+            reconnect_grace_ms: defaults.reconnect_grace_ms,
             keep_alive_enabled: defaults.keep_alive_enabled,
             keep_alive_inactivity_ms: defaults.keep_alive_inactivity_ms,
             keep_alive_response_timeout_ms: defaults.keep_alive_response_timeout_ms,
@@ -791,6 +797,9 @@ impl PyEngineConfig {
             if let Some(v) = kw.get_item("streams_deactivated_warn_ms")? {
                 config.streams_deactivated_warn_ms = v.extract()?;
             }
+            if let Some(v) = kw.get_item("reconnect_grace_ms")? {
+                config.reconnect_grace_ms = v.extract()?;
+            }
             if let Some(v) = kw.get_item("keep_alive_enabled")? {
                 config.keep_alive_enabled = v.extract()?;
             }
@@ -916,6 +925,7 @@ impl TryFrom<&PyEngineConfig> for EngineConfig {
             },
             request_timeout_ms: py_config.request_timeout_ms,
             streams_deactivated_warn_ms: py_config.streams_deactivated_warn_ms,
+            reconnect_grace_ms: py_config.reconnect_grace_ms,
             keep_alive_enabled: py_config.keep_alive_enabled,
             keep_alive_inactivity_ms: py_config.keep_alive_inactivity_ms,
             keep_alive_response_timeout_ms: py_config.keep_alive_response_timeout_ms,
