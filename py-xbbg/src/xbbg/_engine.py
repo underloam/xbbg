@@ -545,7 +545,12 @@ _ticker_key_column_warned = False
 
 
 def _warn_ticker_key_column(table: Any) -> None:
-    """Emit at most one ``FutureWarning`` per process for a result keyed by ``ticker``."""
+    """Emit at most one ``FutureWarning`` per process for a result keyed by ``ticker``.
+
+    The warning counts as emitted only once ``warnings`` has issued it. Under a
+    filter that turns ``FutureWarning`` into an error, every such result raises,
+    so whether a call raises never depends on which call came first.
+    """
     global _ticker_key_column_warned
     if _ticker_key_column_warned or _active_key_column() != "ticker" or "ticker" not in table.column_names:
         return
@@ -555,7 +560,12 @@ def _warn_ticker_key_column(table: Any) -> None:
         _ticker_key_column_warned = True
     from .exceptions import _warn_at_user_frame
 
-    _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
+    try:
+        _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
+    except BaseException:
+        with _engine_lock:
+            _ticker_key_column_warned = False
+        raise
 
 
 def _normalize_engine_exception(exc: Exception) -> Exception:
