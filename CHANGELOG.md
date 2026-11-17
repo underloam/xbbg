@@ -32,6 +32,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 
 - **BREAKING (errors): a dropped Bloomberg connection no longer fails the requests in flight (#382).** On any `SessionConnectionDown`, the request worker failed every in-flight request with "Bloomberg session connection lost (transient)". The SDK, however, carries a request over another of the session's connections, or finishes it once it reconnects.
   - A `SessionConnectionDown` now only changes health: a request worker reports `degraded` while none of its connections is up.
+  - New requests go to a request worker with a connection up whenever one exists; a degraded worker serves only when no worker has a connection. Before, round-robin routing skipped only dead workers.
   - Backstop, since `request_timeout_ms` is off by default: a worker that stays without any connection for `reconnect_grace_ms` fails its in-flight requests with the same transient error, and requests submitted while it stays disconnected fail at the next check. The option is `reconnectGraceMs` in Node, Java and the host JSON; the default is 10,000 ms, checked every second.
   - `0` fails them as soon as the last connection drops.
   - `request_timeout_ms`, `SessionTerminated` and `RequestFailure` handling are unchanged.

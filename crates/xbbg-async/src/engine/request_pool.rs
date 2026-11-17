@@ -482,6 +482,8 @@ impl RequestWorkerPool {
         })
     }
 
+    /// Round-robin worker selection that prefers a worker with a connection
+    /// up; see [`select_worker`].
     fn next_healthy_worker(&self) -> Result<&Arc<AsyncRequestWorker>, BlpAsyncError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(BlpAsyncError::ConfigError {
@@ -491,15 +493,9 @@ impl RequestWorkerPool {
         let len = self.workers.len();
         let start = self.next_worker.fetch_add(1, Ordering::Relaxed) % len;
 
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            let worker = &self.workers[idx];
-            if worker.health() != WorkerHealth::Dead {
-                return Ok(worker);
-            }
-        }
-
-        Err(BlpAsyncError::AllWorkersDown { pool_size: len })
+        select_worker(len, start, |idx| self.workers[idx].health())
+            .map(|idx| &self.workers[idx])
+            .ok_or(BlpAsyncError::AllWorkersDown { pool_size: len })
     }
 
     /// A healthy worker for out-of-band session operations (identity /
@@ -732,6 +728,32 @@ impl RequestWorkerPool {
             worker.shutdown_blocking();
         }
     }
+}
+
+/// Pick a worker index, scanning round-robin from `start`: the first healthy
+/// worker, else the first degraded one, never a dead one.
+///
+/// A degraded worker has no Bloomberg connection up. Its session may still
+/// reconnect within `reconnect_grace_ms`, so it serves only when no worker has
+/// a connection; otherwise a request sent there would wait for the reconnect
+/// while a connected worker sits idle.
+fn select_worker(
+    len: usize,
+    start: usize,
+    health: impl Fn(usize) -> WorkerHealth,
+) -> Option<usize> {
+    let mut degraded = None;
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        match health(idx) {
+            WorkerHealth::Healthy => return Some(idx),
+            WorkerHealth::Degraded => {
+                degraded.get_or_insert(idx);
+            }
+            WorkerHealth::Dead => {}
+        }
+    }
+    degraded
 }
 
 impl Drop for RequestWorkerPool {
@@ -1396,5 +1418,22 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("pool is shut down"));
+    }
+
+    #[test]
+    fn selection_prefers_connected_workers_and_falls_back_to_degraded() {
+        use WorkerHealth::{Dead, Degraded, Healthy};
+        let pick = |healths: &[WorkerHealth], start: usize| {
+            select_worker(healths.len(), start, |idx| healths[idx])
+        };
+
+        // A healthy worker wins over a degraded one earlier in the rotation.
+        assert_eq!(pick(&[Degraded, Healthy, Dead], 0), Some(1));
+        // Round-robin among healthy workers follows the start position.
+        assert_eq!(pick(&[Healthy, Healthy], 0), Some(0));
+        assert_eq!(pick(&[Healthy, Healthy], 1), Some(1));
+        // Without a connected worker, the first degraded one in rotation serves.
+        assert_eq!(pick(&[Degraded, Dead, Degraded], 1), Some(2));
+        assert_eq!(pick(&[Dead, Dead], 0), None);
     }
 }
