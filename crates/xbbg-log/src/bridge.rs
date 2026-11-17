@@ -464,8 +464,26 @@ mod tests {
     struct SharedBuf(Arc<Mutex<Vec<u8>>>);
 
     impl SharedBuf {
+        /// The text written, without ANSI styling. The fmt layer colours its
+        /// output when tracing-subscriber's `ansi` feature is on (other crates'
+        /// dev-dependencies enable it in workspace builds) and `NO_COLOR` is unset.
         fn contents(&self) -> String {
-            String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+            let raw = String::from_utf8(self.0.lock().unwrap().clone()).unwrap();
+            let mut text = String::with_capacity(raw.len());
+            let mut chars = raw.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    // Skip a CSI sequence: ESC '[', parameters, final letter.
+                    for next in chars.by_ref() {
+                        if next.is_ascii_alphabetic() {
+                            break;
+                        }
+                    }
+                } else {
+                    text.push(c);
+                }
+            }
+            text
         }
     }
 
