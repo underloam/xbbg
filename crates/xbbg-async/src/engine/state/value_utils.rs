@@ -629,6 +629,12 @@ fn parse_flag_text(text: &str) -> Option<bool> {
 /// syntactically valid `RESPONSE` event. Without this guard the state machines
 /// simply find no `securityData`/payload and return an empty batch, hiding the
 /// actual vendor error.
+///
+/// `service` is the operation's default service, not necessarily the one the
+/// request was sent to (`ReferenceDataRequest` also runs on
+/// `//blp/staticmktdata`): the response state cannot know it. The request layer
+/// replaces it with the service the request was sent to when it enriches the
+/// error, so callers never see this literal for a request sent elsewhere.
 pub(crate) fn top_level_response_error(
     msg: &Message<'_>,
     service: &'static str,

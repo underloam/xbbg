@@ -125,6 +125,8 @@ impl HistDataState {
         }
         self.on_partial(msg);
         if self.response.row_count() == 0 && !self.failed_securities.is_empty() {
+            // `//blp/refdata` is the operation's default service; the request layer
+            // replaces it with the service the request was sent to.
             let _ = self.reply.send(Err(BlpError::RequestFailure {
                 service: "//blp/refdata".to_string(),
                 operation: Some("HistoricalDataRequest".to_string()),
