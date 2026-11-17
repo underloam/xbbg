@@ -35,6 +35,11 @@ from ._engine import (
     reset as reset,
     shutdown as shutdown,
 )
+from ._python_logging import (
+    disable_python_logging as disable_python_logging,
+    enable_python_logging as enable_python_logging,
+    python_logging_dropped as python_logging_dropped,
+)
 from ._request_options import OverrideSpec as OverrideSpec, ovr as ovr
 from ._sdk import clear_sdk_path as clear_sdk_path, get_sdk_info as get_sdk_info, set_sdk_path as set_sdk_path
 from ._services_gen import (
@@ -257,6 +262,9 @@ __all__ = [
     "set_log_level",
     "get_log_level",
     "enable_sdk_logging",
+    "enable_python_logging",
+    "disable_python_logging",
+    "python_logging_dropped",
     "bops",
     "abops",
     "bschema",

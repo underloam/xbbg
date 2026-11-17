@@ -603,6 +603,13 @@ class PyEngine:
         it runs.
         """
     def worker_health(self) -> builtins.list[tuple[builtins.int, builtins.str]]: ...
+    def connections(self) -> builtins.list[dict]:
+        r"""
+        Servers each Bloomberg session is connected to, without credentials.
+        
+        One dict per session (`pool`, `worker`, `servers`): request workers
+        first, then subscription workers.
+        """
     def is_connected(self) -> builtins.bool:
         r"""
         Check if the Bloomberg connection is healthy.
@@ -1003,6 +1010,20 @@ class PyEngineConfig:
         0 disables. Default: 30_000.
         """
     @property
+    def reconnect_grace_ms(self) -> builtins.int:
+        r"""
+        How long a request session may stay without any server connection before
+        its in-flight requests are failed, in ms; 0 fails them as soon as the
+        last connection drops. Default: 10_000.
+        """
+    @reconnect_grace_ms.setter
+    def reconnect_grace_ms(self, value: builtins.int) -> None:
+        r"""
+        How long a request session may stay without any server connection before
+        its in-flight requests are failed, in ms; 0 fails them as soon as the
+        last connection drops. Default: 10_000.
+        """
+    @property
     def keep_alive_enabled(self) -> builtins.bool:
         r"""
         Enable BLPAPI keep-alive pings. SDK default: True.
@@ -1257,6 +1278,66 @@ class PySubscription:
 
 def _decode_field_exceptions(raw: builtins.str) -> typing.Any: ...
 
+def _encode_result_diagnostics(*, eid_data: typing.Optional[typing.Any] = None, security_errors: typing.Optional[typing.Any] = None, field_exceptions: typing.Optional[typing.Any] = None, delayed: typing.Optional[typing.Any] = None, type_misses: typing.Optional[typing.Any] = None, field_errors: typing.Optional[typing.Any] = None, bloomberg_request_id: typing.Optional[builtins.str] = None) -> builtins.dict[builtins.str, builtins.str]:
+    r"""
+    Encode result diagnostics as the `xbbg.*` schema metadata the engine attaches.
+    
+    Every argument is optional and takes the shape its `ArrowTable` accessor
+    returns: `security_errors` (`{security: {category, code, subcategory,
+    message}}`), `field_exceptions` (`{security: [{field, category, code,
+    subcategory, message}, ...]}`), `delayed` (`{security: {delayed,
+    delay_minutes}}`), `type_misses` (`{field: count}`), `field_errors` (`{id:
+    {category, code, subcategory, message, source?}}`), `eid_data` (`{security:
+    [eid, ...]}`) and `bloomberg_request_id`. Empty or `None` arguments leave
+    their key absent.
+    
+    Returns:
+        The schema-metadata map, key to value, exactly as engine results carry it.
+    """
+
+def _log_bridge_count_dropped(count: builtins.int) -> None:
+    r"""
+    Count `count` records the consumer took from a batch but did not deliver.
+    """
+
+def _log_bridge_disable() -> None:
+    r"""
+    Stop capturing and wake the waiting consumer; events go to stderr again.
+    
+    Records already queued stay available to `_log_bridge_next_batch`, whose
+    last batch then reports `closed`.
+    """
+
+def _log_bridge_discard() -> builtins.int:
+    r"""
+    Drop whatever is still queued, count it as dropped, and return how many.
+    """
+
+def _log_bridge_dropped() -> builtins.int:
+    r"""
+    Total log records dropped by the bridge since the process started.
+    """
+
+def _log_bridge_enable(capacity: builtins.int) -> builtins.bool:
+    r"""
+    Start capturing log events into a native queue of `capacity` records.
+    
+    While capture is on, events go to the queue instead of stderr. Returns
+    `True` if capture started and `False` if it was already on (the queue and
+    its capacity are left as they were).
+    """
+
+def _log_bridge_next_batch(timeout: builtins.float, max_records: builtins.int) -> tuple[builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, builtins.int, builtins.float, builtins.str]], builtins.int, builtins.bool]:
+    r"""
+    Wait up to `timeout` seconds for queued records and take at most `max_records`.
+    
+    Releases the interpreter while waiting. Returns `(records, dropped, closed)`:
+    `records` are `(levelno, logger_name, message, pathname, lineno, created,
+    thread_name)` tuples in emission order (empty on timeout); `dropped` counts
+    the records lost since the previous batch; `closed` means capture is off and
+    the queue is empty.
+    """
+
 def _signal_interpreter_shutdown() -> None: ...
 
 def _wait_native_teardown() -> None:
@@ -1266,6 +1347,14 @@ def _wait_native_teardown() -> None:
     
     Returns at once when nothing is pending and releases the interpreter while
     waiting. Interpreter exit already waits; other callers rarely need this.
+    """
+
+def _with_schema_metadata(table: ArrowTable, metadata: typing.Mapping[builtins.str, builtins.str]) -> ArrowTable:
+    r"""
+    Return `table` with `metadata` added to its schema metadata.
+    
+    Keys already present are replaced; rows are shared, not copied. An
+    empty table gains an empty batch to carry the metadata.
     """
 
 def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> typing.Any:
