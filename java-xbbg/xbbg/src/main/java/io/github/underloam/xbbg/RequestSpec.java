@@ -833,11 +833,11 @@ public final class RequestSpec {
     }
 
     /**
-     * Reports the securities Bloomberg refused. The long formats add one {@code
-     * __SECURITY_ERROR__} row per refused security; {@link Format#SEMI_LONG} leaves them out of
-     * its rows. Every format carries each refusal's details in the {@code xbbg.security_errors}
-     * result metadata. When set, a request in which every security is refused returns (an empty
-     * table in {@code SEMI_LONG}) instead of throwing {@link BlpRequestException}.
+     * Reports the securities Bloomberg refused. The long formats add one {@code __SECURITY_ERROR__}
+     * row per refused security; {@link Format#SEMI_LONG} leaves them out of its rows. Every format
+     * carries each refusal's details in the {@code xbbg.security_errors} result metadata. When set,
+     * a request in which every security is refused returns (an empty table in {@code SEMI_LONG})
+     * instead of throwing {@link BlpRequestException}.
      *
      * @param value the flag
      * @return this builder
