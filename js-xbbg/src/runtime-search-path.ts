@@ -1,6 +1,8 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
+import type { RuntimeAddon } from './native/runtime-addon';
+
 const BLPAPI_RUNTIME_NAMES = Object.freeze([
   'blpapi3_64.dll',
   'blpapi3_32.dll',
@@ -247,4 +249,91 @@ export function configureRuntimeSearchPath(options: RuntimeSearchPathOptions = {
   }
 
   return null;
+}
+
+export interface CacheRuleOptions {
+  readonly env?: NodeJS.ProcessEnv;
+  readonly platform?: NodeJS.Platform;
+  /**
+   * Loads the resolver addon, returning null when this install has none or it cannot load (the
+   * rule is then skipped). Called only if the rule runs.
+   */
+  readonly loadRuntimeAddon: () => RuntimeAddon | null;
+}
+
+export interface CacheRuleResult {
+  /** The cached library that was loaded into the process, or null. */
+  readonly libPath: string | null;
+  /** One line per cached runtime that was refused or could not be loaded. */
+  readonly problems: readonly string[];
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * The last rule of the search order: the verified Bloomberg runtime in the xbbg cache.
+ *
+ * Loads the best verified library into the process (`preloadLibrary`) so the engine addon's
+ * link to it is already satisfied, and on Windows also prepends its directory to `PATH`.
+ * Skipped silently when the resolver addon is missing or the cache cannot be scanned.
+ * Cache installs that fail verification are reported in `problems`, never loaded.
+ */
+export function applyCacheRule(options: CacheRuleOptions): CacheRuleResult {
+  const runtimeAddon = options.loadRuntimeAddon();
+  const env = options.env ?? process.env;
+  const platform = options.platform ?? process.platform;
+  const problems: string[] = [];
+  if (runtimeAddon === null) {
+    return { libPath: null, problems };
+  }
+
+  let scan: ReturnType<RuntimeAddon['scanCache']>;
+  try {
+    scan = runtimeAddon.scanCache();
+  } catch {
+    return { libPath: null, problems };
+  }
+  for (const rejected of scan.rejected) {
+    problems.push(`cached Bloomberg runtime ${rejected.installDir} rejected: ${rejected.reason}`);
+  }
+  for (const runtime of scan.runtimes) {
+    try {
+      runtimeAddon.preloadLibrary(runtime.libPath);
+    } catch (error) {
+      problems.push(
+        `cached Bloomberg runtime ${runtime.installDir} could not be loaded: ${errorText(error)}`,
+      );
+      continue;
+    }
+    if (platform === 'win32') {
+      prependWindowsPath(env, path.win32.dirname(runtime.libPath));
+    }
+    return { libPath: runtime.libPath, problems };
+  }
+  return { libPath: null, problems };
+}
+
+/**
+ * Run `load`; if it fails, try the xbbg cache rule and, when a cached runtime was loaded, run
+ * `load` again. Every earlier rule keeps precedence because the cache is consulted only after
+ * the load found no other runtime. When the cache offers nothing usable but had entries that
+ * were refused, the error names them instead of only the loader's own message.
+ */
+export function loadWithCacheFallback<T>(load: () => T, options: CacheRuleOptions): T {
+  try {
+    return load();
+  } catch (error) {
+    const { libPath, problems } = applyCacheRule(options);
+    if (libPath !== null) {
+      return load();
+    }
+    if (problems.length > 0) {
+      throw new Error(`${problems.join('; ')} (loader error: ${errorText(error)})`, {
+        cause: error,
+      });
+    }
+    throw error;
+  }
 }

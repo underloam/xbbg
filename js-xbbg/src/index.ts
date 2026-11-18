@@ -40,8 +40,9 @@ import {
 } from './errors';
 import type { NativeAddon, NativeArrowZeroCopyBatch, NativeEngine } from './napi';
 import { resolveNativeAddon } from './native/resolve-native';
+import { loadRuntimeAddon } from './native/runtime-addon';
 import { isPlainObject } from './objects';
-import { configureRuntimeSearchPath } from './runtime-search-path';
+import { configureRuntimeSearchPath, loadWithCacheFallback } from './runtime-search-path';
 import {
   createSubscription,
   MKTDATA_SERVICE,
@@ -165,7 +166,10 @@ function isNativeAddon(value: unknown): value is NativeAddon {
 }
 
 function requireNativeAddon(modulePath: string): NativeAddon {
-  const loaded: unknown = nodeRequire(modulePath);
+  // The xbbg cache is the last rule: it is tried only when the engine addon cannot load without it.
+  const loaded = loadWithCacheFallback((): unknown => nodeRequire(modulePath), {
+    loadRuntimeAddon: () => loadRuntimeAddon(__dirname),
+  });
   if (isNativeAddon(loaded)) {
     return loaded;
   }

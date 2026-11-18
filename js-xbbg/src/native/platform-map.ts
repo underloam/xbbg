@@ -1,4 +1,6 @@
 export const nativeBinaryName = 'napi_xbbg.node';
+/** Resolver addon: finds and preloads the Bloomberg runtime; it never links Bloomberg. */
+export const runtimeBinaryName = 'napi_xbbg_runtime.node';
 
 const nativePackageFiles = Object.freeze([
   'index.js',
@@ -7,6 +9,7 @@ const nativePackageFiles = Object.freeze([
   'LICENSE',
   'package.json',
   nativeBinaryName,
+  runtimeBinaryName,
 ] as const);
 
 const nativePackageDescriptors = Object.freeze({
@@ -18,6 +21,7 @@ const nativePackageDescriptors = Object.freeze({
     os: 'darwin',
     packageDir: 'packages/xbbg-core-darwin-arm64',
     packageName: '@xbbg/core-darwin-arm64',
+    runtimeBinaryName,
   }),
   'linux-x64': Object.freeze({
     binaryName: nativeBinaryName,
@@ -27,6 +31,7 @@ const nativePackageDescriptors = Object.freeze({
     os: 'linux',
     packageDir: 'packages/xbbg-core-linux-x64',
     packageName: '@xbbg/core-linux-x64',
+    runtimeBinaryName,
   }),
   'win32-x64': Object.freeze({
     binaryName: nativeBinaryName,
@@ -36,6 +41,7 @@ const nativePackageDescriptors = Object.freeze({
     os: 'win32',
     packageDir: 'packages/xbbg-core-win32-x64',
     packageName: '@xbbg/core-win32-x64',
+    runtimeBinaryName,
   }),
 } as const);
 

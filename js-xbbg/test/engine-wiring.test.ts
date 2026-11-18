@@ -82,6 +82,7 @@ vi.mock(import('../src/native/resolve-native.js'), () => ({
     binaryPath: 'napi_xbbg.node',
     key: 'test',
     packageName: '@xbbg/core-test',
+    runtimeBinaryPath: null,
   }),
 }));
 

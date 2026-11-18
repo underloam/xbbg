@@ -3,7 +3,12 @@ import path from 'node:path';
 import { nativePackageForKey, platformPackages } from '../src/native/platform-map';
 import type { NativePackageDescriptor } from '../src/native/platform-map';
 
-export { nativeBinaryName, platformKey, platformPackages } from '../src/native/platform-map';
+export {
+  nativeBinaryName,
+  platformKey,
+  platformPackages,
+  runtimeBinaryName,
+} from '../src/native/platform-map';
 
 export type NativePackageSpec = NativePackageDescriptor & {
   readonly dirName: string;

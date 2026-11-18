@@ -14,6 +14,10 @@ If no packaged addon is available for your platform, build from source locally i
 
 On Windows, `@xbbg/core` prepends the first detected Bloomberg runtime DLL directory before loading the native addon. Explicit `BLPAPI_LIB_DIR` / `BLPAPI_ROOT` values win; otherwise it probes local SDK roots plus standard Terminal DAPI installs including `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI`.
 
+### The xbbg cache (last rule)
+
+If the engine addon cannot load because no other rule produced a Bloomberg runtime, `@xbbg/core` consults the xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. A small resolver addon, `napi_xbbg_runtime.node` (shipped beside the engine addon, never linked to Bloomberg), picks the best install whose library matches the SHA-256 in its `provenance.json`, loads that library into the process (`dlopen` with `RTLD_NOW | RTLD_GLOBAL` on Linux and macOS, `LoadLibraryExW` with the full path on Windows, where its directory is also prepended to `PATH`), and then loads the engine addon again. Installs that fail verification are never loaded; when only such installs exist, the load error says so: `cached Bloomberg runtime <dir> rejected: <reason>`. A package without the resolver addon skips this rule.
+
 ## Local Development
 
 ```bash

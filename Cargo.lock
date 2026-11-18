@@ -3318,6 +3318,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "napi-xbbg-runtime"
+version = "1.8.1"
+dependencies = [
+ "libc",
+ "napi",
+ "napi-build",
+ "napi-derive",
+ "tempfile",
+ "windows-sys 0.61.2",
+ "xbbg-runtime",
+]
+
+[[package]]
 name = "ndarray"
 version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

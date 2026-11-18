@@ -119,9 +119,9 @@ deny = [
     { name = "pyo3-macros", wrappers = ["pyo3"] },
     { name = "pyo3-macros-backend", wrappers = ["pyo3-macros"] },
     # Node.js and MCP frameworks never belong in shared engine crates.
-    { name = "napi", wrappers = ["napi-xbbg"] },
-    { name = "napi-build", wrappers = ["napi-xbbg", "napi"] },
-    { name = "napi-derive", wrappers = ["napi-xbbg"] },
+    { name = "napi", wrappers = ["napi-xbbg", "napi-xbbg-runtime"] },
+    { name = "napi-build", wrappers = ["napi-xbbg", "napi-xbbg-runtime", "napi"] },
+    { name = "napi-derive", wrappers = ["napi-xbbg", "napi-xbbg-runtime"] },
     { name = "napi-derive-backend", wrappers = ["napi-derive"] },
     { name = "napi-sys", wrappers = ["napi"] },
     { name = "rmcp", wrappers = ["xbbg-mcp"] },
