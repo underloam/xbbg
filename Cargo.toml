@@ -14,7 +14,6 @@ members = [
     "crates/xbbg-sdk",
     # Language bindings
     "bindings/pyo3-xbbg",
-    "bindings/pyo3-xbbg-runtime",
     "bindings/napi-xbbg",
     "bindings/jni-xbbg",
     "bindings/jni-xbbg-sdk",

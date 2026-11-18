@@ -213,15 +213,15 @@ jobs:
           mkdir -p dist
           cp build-wheel/*.whl dist/
 
-      # The repaired wheel must ship xbbg._runtime with no Bloomberg link, and it
-      # must import without loading the engine (it runs before the runtime exists).
-      - name: Check xbbg._runtime in the wheel
+      # The repaired wheel's extension must link no Bloomberg library (xbbg loads the runtime at
+      # run time), and must import where none exists while xbbg names the places it looked.
+      - name: Check xbbg._core in the wheel
         shell: bash
         run: |
-          "$UV_PYTHON" scripts/check_wheel_runtime_module.py dist/*.whl
+          "$UV_PYTHON" scripts/check_wheel_core_links.py dist/*.whl
           uv run --no-project --isolated --python "$UV_PYTHON" \
             --with ./dist/*.whl \
-            python -I -c "import sys, tempfile; from xbbg import _runtime; assert 'xbbg._core' not in sys.modules; assert _runtime.scan_cache(tempfile.gettempdir() + '/xbbg-no-cache')['runtimes'] == []"
+            python scripts/smoke_core_without_runtime.py
 
       - name: Check installed wheel release versions
         if: startsWith(github.ref, 'refs/tags/')

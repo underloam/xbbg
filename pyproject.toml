@@ -120,14 +120,6 @@ target = "xbbg._core"
 path = "bindings/pyo3-xbbg/Cargo.toml"
 binding = "PyO3"
 
-# The resolver that finds the Bloomberg runtime before xbbg._core loads. _core
-# links the runtime at import, so nothing inside it can run first; this module
-# never links Bloomberg code and always imports (see xbbg._sdk).
-[[tool.setuptools-rust.ext-modules]]
-target = "xbbg._runtime"
-path = "bindings/pyo3-xbbg-runtime/Cargo.toml"
-binding = "PyO3"
-
 [tool.setuptools.packages.find]
 where = ["py-xbbg/src"]
 include = ["xbbg*"]

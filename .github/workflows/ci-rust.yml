@@ -295,26 +295,15 @@ jobs:
           cargo clippy -p xbbg-sdk --all-targets --features provision -- -D warnings
           cargo test -p xbbg-sdk --features provision
 
-      # The resolver binding must see only xbbg-sdk's default features.
-      - name: Resolver binding does not pull in the provisioner
+      # Every binding reaches xbbg-sdk through xbbg-host, which uses its default features (the
+      # resolver). The bindings depend on tokio themselves, so only the downloader's entry points
+      # are forbidden.
+      - name: Bindings do not pull in the provisioner
         run: |
-          crates=$(cargo tree -p pyo3-xbbg-runtime -e normal --prefix none | awk '{print $1}' | sort -u)
-          for forbidden in reqwest tokio uv-client rattler_repodata_gateway; do
-            if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
-              echo "a resolver binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
-              exit 1
-            fi
-          done
-          cargo clippy -p pyo3-xbbg-runtime --all-targets -- -D warnings
-
-      # The Node addon loads the runtime through xbbg-host, which uses xbbg-sdk's default features.
-      # (It depends on tokio itself, so only the downloader's own entry points are checked.)
-      - name: Node addon does not pull in the provisioner
-        run: |
-          crates=$(cargo tree -p napi-xbbg -e normal --prefix none | awk '{print $1}' | sort -u)
+          crates=$(cargo tree -p pyo3-xbbg -p napi-xbbg -p jni-xbbg -p xbbg-mcp -e normal --prefix none | awk '{print $1}' | sort -u)
           for forbidden in reqwest uv-client rattler_repodata_gateway; do
             if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
-              echo "the Node addon pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
+              echo "a binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
               exit 1
             fi
           done
@@ -457,7 +446,7 @@ jobs:
 
       # The resolver alone (default features), as the base packages build it.
       - name: Cargo check the resolver at the MSRV
-        run: cargo check --locked -p xbbg-sdk -p pyo3-xbbg-runtime --all-targets
+        run: cargo check --locked -p xbbg-sdk --all-targets
 
   # ════════════════════════════════════════════════════════════════════════════
   # NAPI core packaging validation
@@ -1231,11 +1220,11 @@ jobs:
           UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: uv build --wheel --out-dir dist/
 
-      # The resolver module must stay free of Bloomberg links: it is what finds
-      # the runtime before xbbg._core, which links it, can load.
-      - name: Check xbbg._runtime links no Bloomberg runtime
+      # xbbg loads the Bloomberg runtime at run time: the extension must not link it, or it
+      # would fail to import on exactly the machines where xbbg has to explain what is missing.
+      - name: Check xbbg._core links no Bloomberg runtime
         shell: bash
-        run: python scripts/check_wheel_runtime_module.py dist/*.whl
+        run: python scripts/check_wheel_core_links.py dist/*.whl
 
       - name: Upload wheel
         uses: actions/upload-artifact@v7
@@ -1331,7 +1320,7 @@ jobs:
         working-directory: ${{ runner.temp }}/test-run
         run: |
           python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
-          python -c "import sys, tempfile; from xbbg import _runtime; assert 'xbbg._core' not in sys.modules, 'the resolver must not load the engine'; assert _runtime.scan_cache(tempfile.gettempdir() + '/xbbg-no-cache')['runtimes'] == []"
+          python "${{ github.workspace }}/scripts/smoke_core_without_runtime.py"
           pytest tests -v -m "not live"
 
       - name: Run tests with coverage
@@ -1484,7 +1473,7 @@ jobs:
         shell: bash
         run: |
           python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED'), 'setup-python selected a GIL build'"
-          python -W error::RuntimeWarning -c "import sys, xbbg, xbbg._runtime, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
+          python -W error::RuntimeWarning -c "import sys, xbbg, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
           python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
           pytest tests -v -m "not live"
 
