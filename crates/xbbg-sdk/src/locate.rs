@@ -7,7 +7,10 @@
 //!
 //! # The order
 //!
-//! 1. [`LocateRequest::explicit`]: a library file, or a directory that holds one.
+//! 1. [`LocateRequest::explicit`]: a library file, or a directory that holds one. [`locate`]
+//!    still lists the other rules after it, but a loader treats the explicit path as
+//!    authoritative: `xbbg_host::sdk::locate_and_load` tries only these candidates and fails,
+//!    naming the path and the reason, rather than load a runtime the caller did not name.
 //! 2. `BLPAPI_LIB_DIR`: the directory that holds the library.
 //! 3. `BLPAPI_ROOT`: a Bloomberg C++ SDK root (see below).
 //! 4. `XBBG_DEV_SDK_ROOT`: an SDK root; a relative value is relative to

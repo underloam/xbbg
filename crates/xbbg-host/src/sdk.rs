@@ -70,6 +70,11 @@ static LOADED: Mutex<Option<LoadedSdk>> = Mutex::new(None);
 
 /// Searches for the runtime as `request` says and loads the first candidate that opens.
 ///
+/// An explicit path ([`LocateRequest::explicit`]) is authoritative: only the candidates it yields
+/// are tried, and when none loads the call fails, naming that path and why, instead of falling
+/// through to the other rules and loading a runtime the caller did not name. A directory that
+/// holds no library is that failure too. Without an explicit path every rule is tried in order.
+///
 /// A second call, with any request, returns the runtime the first one loaded. A runtime loaded by
 /// other means (`xbbg_core::load`) is returned too, with the rule that would have found it if the
 /// search lists it.
@@ -83,12 +88,24 @@ pub fn locate_and_load(request: &LocateRequest) -> Result<LoadedSdk, SdkNotFound
         return Ok(loaded.clone());
     }
 
+    // An explicit path is authoritative: when the host names one, no other rule may substitute a
+    // different runtime for it.
+    let explicit_only = request.explicit.is_some();
+    let keep = |source: SourceKind| !explicit_only || source == SourceKind::Explicit;
     let located = locate(request);
-    let mut rejected = located.rejected;
+    let candidates: Vec<Candidate> = located
+        .candidates
+        .into_iter()
+        .filter(|candidate| keep(candidate.source))
+        .collect();
+    let mut rejected: Vec<Rejected> = located
+        .rejected
+        .into_iter()
+        .filter(|refused| keep(refused.source))
+        .collect();
 
     if let Some(path) = xbbg_core::loaded_sdk_path() {
-        let found = located
-            .candidates
+        let found = candidates
             .iter()
             .find(|candidate| same_file(&candidate.path, path));
         let loaded = LoadedSdk {
@@ -105,7 +122,7 @@ pub fn locate_and_load(request: &LocateRequest) -> Result<LoadedSdk, SdkNotFound
         return Ok(loaded);
     }
 
-    for candidate in located.candidates {
+    for candidate in candidates {
         match xbbg_core::load(&candidate.path) {
             Ok(()) => {
                 let loaded = LoadedSdk {
