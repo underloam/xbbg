@@ -11,7 +11,7 @@ use std::str::FromStr;
 
 use napi::{Error, Result, Status};
 use napi_derive::napi;
-use xbbg_runtime::Platform;
+use xbbg_sdk::Platform;
 
 /// A verified runtime install in the xbbg cache.
 #[napi(object)]
@@ -46,7 +46,7 @@ fn text(path: &Path) -> String {
 /// directory is known.
 #[napi]
 pub fn default_cache_root() -> Option<String> {
-    xbbg_runtime::default_cache_root().map(|root| text(&root))
+    xbbg_sdk::default_cache_root().map(|root| text(&root))
 }
 
 /// Scan `cacheRoot` (default: the xbbg cache root) for `platform` (default: this host).
@@ -63,7 +63,7 @@ pub fn scan_cache(cache_root: Option<String>, platform: Option<String>) -> Resul
     };
     let root = match cache_root {
         Some(root) => Some(PathBuf::from(root)),
-        None => xbbg_runtime::default_cache_root(),
+        None => xbbg_sdk::default_cache_root(),
     };
     let (Some(root), Some(platform)) = (root, platform) else {
         return Ok(CacheScan {
@@ -71,7 +71,7 @@ pub fn scan_cache(cache_root: Option<String>, platform: Option<String>) -> Resul
             rejected: Vec::new(),
         });
     };
-    let scan = xbbg_runtime::scan_cache(&root, platform).map_err(|error| {
+    let scan = xbbg_sdk::scan_cache(&root, platform).map_err(|error| {
         Error::new(
             Status::GenericFailure,
             format!("cannot scan the xbbg cache {}: {error}", root.display()),

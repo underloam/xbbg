@@ -14,7 +14,8 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { workspace = true }
-xbbg-runtime = { workspace = true }
+# Default features only: the resolver. Never enable `provision` here (see the wheel size budget).
+xbbg-sdk = { workspace = true }
 
 [lints]
 workspace = true

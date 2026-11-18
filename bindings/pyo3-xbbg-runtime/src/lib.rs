@@ -2,7 +2,7 @@
 //!
 //! `xbbg._core` links the Bloomberg runtime when the interpreter loads it, so nothing inside it
 //! can look for that runtime first. This module is the small native step before it: it reads the
-//! xbbg install cache through `xbbg-runtime` (hash-verified, no networking) and never links
+//! xbbg install cache through `xbbg-sdk`'s resolver (hash-verified, no networking) and never links
 //! Bloomberg code, so it always imports. `xbbg._sdk` preloads the library it names.
 
 use std::ffi::OsString;
@@ -12,13 +12,13 @@ use std::str::FromStr;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
-use xbbg_runtime::{CacheScan, Platform};
+use xbbg_sdk::{CacheScan, Platform};
 
 /// The xbbg cache root (`XBBG_CACHE_DIR`, else the platform default), or `None` without a home
 /// directory.
 #[pyfunction]
 fn default_cache_root() -> Option<OsString> {
-    xbbg_runtime::default_cache_root().map(PathBuf::into_os_string)
+    xbbg_sdk::default_cache_root().map(PathBuf::into_os_string)
 }
 
 /// Verified runtimes and rejected installs under `cache_root` for `platform`.
@@ -47,11 +47,14 @@ fn scan_cache<'py>(
 
 /// Reads the cache; an unknown root or platform (no home directory, unsupported host) holds
 /// nothing.
-fn read_cache(cache_root: Option<PathBuf>, platform: Option<Platform>) -> std::io::Result<CacheScan> {
-    let root = cache_root.or_else(xbbg_runtime::default_cache_root);
+fn read_cache(
+    cache_root: Option<PathBuf>,
+    platform: Option<Platform>,
+) -> std::io::Result<CacheScan> {
+    let root = cache_root.or_else(xbbg_sdk::default_cache_root);
     let platform = platform.or_else(Platform::host);
     match (root, platform) {
-        (Some(root), Some(platform)) => xbbg_runtime::scan_cache(&root, platform),
+        (Some(root), Some(platform)) => xbbg_sdk::scan_cache(&root, platform),
         _ => Ok(CacheScan::default()),
     }
 }

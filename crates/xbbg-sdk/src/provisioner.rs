@@ -19,12 +19,11 @@ use crate::install::{
     self, Layout, Provisioned, add_source, commit, existing_install, find_by_archive,
     find_by_source,
 };
-use crate::options::{Credential, ProvisionOptions};
-use crate::platform::VersionSpec;
+use crate::options::{Credential, ProvisionOptions, VersionSpec};
 use crate::pypi::{UvIndex, UvSettings};
 use crate::source::{DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, Source, SourceKind};
 use crate::wheel::{self, Extracted};
-use xbbg_runtime::{Platform, Provenance};
+use crate::{Platform, Provenance};
 
 /// Downloads older than this in `<cache>/tmp` belong to crashed runs.
 const STALE_TEMPORARIES: Duration = Duration::from_secs(24 * 60 * 60);

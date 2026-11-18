@@ -30,7 +30,7 @@ ignore = [
     "RUSTSEC-2025-0090",  # unic-emoji-char
     "RUSTSEC-2025-0098",  # unic-ucd-version
     "RUSTSEC-2025-0100",  # unic-ucd-ident
-    # Bloomberg runtime downloader (crates/xbbg-sdk, JVM only). uv-client depends on uv-auth
+    # Bloomberg runtime downloader (crates/xbbg-sdk, feature `provision`). uv-client depends on uv-auth
     # unconditionally (no feature drops it); xbbg-sdk builds uv's client with
     # AuthIntegration::NoAuthMiddleware, so uv's credential code never runs. Keep
     # .cargo/audit.toml in sync.
@@ -40,7 +40,7 @@ ignore = [
     { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained, Linux only, via uv-client -> uv-auth -> uv-keyring -> secret-service -> zbus: the keyring is never used" },
     { id = "RUSTSEC-2024-0449", reason = "unsafe-libyaml unmaintained, via rattler_conda_types -> serde_yaml (unconditional): xbbg-sdk parses no YAML" },
     { id = "RUSTSEC-2026-0440", reason = "astral-tokio-tar unmaintained (no upstream upgrade yet), via uv-client -> uv-extract and rattler_package_streaming: xbbg-sdk checks an archive from a package index or conda channel against its sha256 before extraction (a direct artifact need not carry an expected hash), and checks the extracted library against the wheel RECORD or the conda info/paths.json before installing it" },
-    { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained (no fixed release), via rattler_repodata_gateway in xbbg-sdk (JVM-only runtime downloader), which only formats cache ages for log messages with it; no vulnerability is reported" },
+    { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained (no fixed release), via rattler_repodata_gateway in xbbg-sdk's `provision` feature (the runtime downloader), which only formats cache ages for log messages with it; no vulnerability is reported" },
     { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained (no fixed release): Arrow's temporal arrays, pyo3's datetime conversions and xbbg's date handling are built on it, with no maintained drop-in replacement; no vulnerability is reported" },
     { id = "RUSTSEC-2026-0555", reason = "chrono-tz unmaintained (no fixed release), via arrow-array's timezone support: Arrow resolves timestamp zones through it; no vulnerability is reported" },
 ]
@@ -90,8 +90,8 @@ highlight = "all"
 
 deny = [
     # Only the core owns the Bloomberg SDK seam, including test fixtures. Nothing on the
-    # downloader side (xbbg-runtime, xbbg-sdk, jni-xbbg-sdk) may appear in these lists: that keeps
-    # xbbg_sdk_jni free of blpapi.
+    # downloader side (xbbg-sdk, jni-xbbg-sdk) may appear in these lists: that keeps xbbg_sdk_jni
+    # and the resolver modules free of blpapi.
     { name = "xbbg-blpapi-sys", wrappers = ["xbbg_core"] },
     # Internal engine layers may only be imported by their intended dependents.
     { name = "xbbg_core", wrappers = ["xbbg-async", "xbbg-bench", "xbbg-host", "pyo3-xbbg", "napi-xbbg", "jni-xbbg", "xbbg-mcp"] },
@@ -102,9 +102,12 @@ deny = [
     { name = "xbbg-recipes", wrappers = ["xbbg-host", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
     # Host-neutral binding glue, shared by language bindings only.
     { name = "xbbg-host", wrappers = ["jni-xbbg"] },
-    # The Bloomberg runtime downloader and its stack stay behind the provisioning binding. Only
-    # the entry points can be confined: the other uv/rattler crates depend on each other.
-    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk"] },
+    # The Bloomberg runtime resolver and downloader live in xbbg-sdk, the downloader behind its
+    # `provision` feature. The resolver bindings use the default features; cargo-deny cannot tell
+    # features apart, so the wheel and addon size budgets (scripts/check_*.py) are what stops one
+    # of them enabling `provision`. Only the entry points of the downloader stack can be
+    # confined: the other uv/rattler crates depend on each other.
+    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk", "pyo3-xbbg-runtime", "napi-xbbg-runtime"] },
     { name = "uv-client", wrappers = ["xbbg-sdk"] },
     { name = "rattler_repodata_gateway", wrappers = ["xbbg-sdk"] },
     # Python frameworks stay in the Python binding or their own ecosystem.

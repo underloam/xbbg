@@ -1,5 +1,6 @@
 //! Cache layout, cross-process install locks and atomic commits. Reading and verifying the
-//! installs (the provenance record, the library hash, the listing order) is `xbbg-runtime`.
+//! installs (the provenance record, the library hash, the listing order) is the crate's resolver
+//! (`cache.rs`), which this module builds on.
 //!
 //! ```text
 //! <cache>/
@@ -21,13 +22,12 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use xbbg_runtime::{
+use crate::error::{Error, Result};
+use crate::source::SourceKind;
+use crate::{
     CachedRuntime, INSTALLS_DIR, PROVENANCE_FILE, Platform, Provenance, scan_cache, scan_cache_all,
     verify_install,
 };
-
-use crate::error::{Error, Result};
-use crate::source::SourceKind;
 
 /// A JSON array of the source labels besides the provenance's own that resolved to an install's
 /// archive (the same wheel on a mirror and on Bloomberg's index, say). Lookups by source match

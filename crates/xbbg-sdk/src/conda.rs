@@ -15,11 +15,11 @@ use rattler_repodata_gateway::{
     ChannelConfig as GatewayChannelConfig, ChannelRelationsMode, Gateway, SourceConfig,
 };
 
+use crate::Platform;
 use crate::error::{Error, Result, chain};
 use crate::http::Http;
 use crate::install::rename;
 use crate::wheel::{Extracted, safe_relative};
-use xbbg_runtime::Platform;
 
 /// The conda subdir that holds `platform`'s packages.
 pub(crate) fn subdir(platform: Platform) -> Subdir {

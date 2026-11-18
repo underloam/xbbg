@@ -22,9 +22,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use xbbg_runtime::CacheScan;
 use xbbg_sdk::{
-    Credential, Platform, ProvisionOptions, Provisioned, ProxyConfig, Source, TlsConfig,
+    CacheScan, Credential, Platform, ProvisionOptions, Provisioned, ProxyConfig, Source, TlsConfig,
     VersionSpec,
 };
 
@@ -453,7 +452,7 @@ mod tests {
         write_install("pypi-good", b"synthetic runtime", b"synthetic runtime");
         write_install("pypi-bad", b"tampered runtime", b"synthetic runtime");
 
-        let scan = xbbg_runtime::scan_cache(cache.path(), Platform::LinuxX86_64).unwrap();
+        let scan = xbbg_sdk::scan_cache(cache.path(), Platform::LinuxX86_64).unwrap();
         let value: serde_json::Value = serde_json::from_str(&scan_json(&scan)).unwrap();
         assert_eq!(value["runtimes"].as_array().unwrap().len(), 1);
         let runtime = &value["runtimes"][0];

@@ -95,3 +95,48 @@ def test_main_exit_status(tmp_path, capsys):
     assert check.main([str(good)]) == 0
     assert check.main([str(good), str(bad)]) == 1
     assert "bad.whl" in capsys.readouterr().err
+
+
+def test_runtime_module_over_the_size_budget_is_rejected(tmp_path):
+    core = "xbbg/_core.cpython-313-x86_64-linux-gnu.so"
+    runtime = "xbbg/_runtime.cpython-313-x86_64-linux-gnu.so"
+    resolver = make_elf(["libc.so.6"], payload=b"\0" * 4096)
+    # Stored incompressible bytes: the budget counts the module's size in the wheel, not its zip entry.
+    bloated = make_elf(["libc.so.6"], payload=bytes(range(256)) * 16 * 1024)
+    small = make_wheel(tmp_path / "small.whl", {core: CORE_ELF, runtime: resolver})
+    large = make_wheel(tmp_path / "large.whl", {core: CORE_ELF, runtime: bloated})
+
+    assert check.check_wheel(small) == []
+    assert check.check_wheel(large, max_bytes=len(bloated)) == []
+    [problem] = check.check_wheel(large)
+    assert f"is {len(bloated)} bytes" in problem
+    assert f"over the {check.DEFAULT_MAX_BYTES} byte budget" in problem
+    assert "must not enable xbbg-sdk's `provision` feature" in problem
+    [problem] = check.check_wheel(small, max_bytes=len(resolver) - 1)
+    assert "over the" in problem
+
+
+def test_size_budget_is_two_mebibytes_by_default_and_set_by_max_bytes(tmp_path, capsys):
+    core = "xbbg/_core.cpython-313-x86_64-linux-gnu.so"
+    runtime = "xbbg/_runtime.cpython-313-x86_64-linux-gnu.so"
+    module = make_elf(["libc.so.6"], payload=b"\x01" * 10_000)
+    wheel = make_wheel(tmp_path / "w.whl", {core: CORE_ELF, runtime: module})
+
+    assert check.DEFAULT_MAX_BYTES == 2 * 1024 * 1024
+    assert check.main([str(wheel)]) == 0
+    assert check.main(["--max-bytes", str(len(module)), str(wheel)]) == 0
+    assert check.main(["--max-bytes", str(len(module) - 1), str(wheel)]) == 1
+    assert "`provision` feature" in capsys.readouterr().err
+
+
+def test_linked_and_oversized_module_reports_both_problems(tmp_path):
+    core = "xbbg/_core.cpython-313-x86_64-linux-gnu.so"
+    runtime = "xbbg/_runtime.cpython-313-x86_64-linux-gnu.so"
+    wheel = make_wheel(
+        tmp_path / "both.whl", {core: CORE_ELF, runtime: make_elf(["libblpapi3_64.so"], payload=b"\0" * 64)}
+    )
+
+    problems = check.check_wheel(wheel, max_bytes=16)
+    assert len(problems) == 2
+    assert "must never link" in problems[0]
+    assert "byte budget" in problems[1]

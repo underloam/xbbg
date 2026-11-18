@@ -30,7 +30,7 @@ recursive-include crates/xbbg-async *.rs *.toml
 recursive-include crates/xbbg-ext *.rs *.toml
 recursive-include crates/xbbg-recipes *.rs *.toml
 recursive-include crates/xbbg-log *.rs *.toml
-recursive-include crates/xbbg-runtime *.rs *.toml
+recursive-include crates/xbbg-sdk *.rs *.toml
 recursive-include crates/xbbg-bench *.rs *.toml
 
 # Cargo workspace members outside crates/. Cargo metadata resolves the whole active

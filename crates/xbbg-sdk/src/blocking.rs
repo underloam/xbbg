@@ -1,12 +1,11 @@
 //! A synchronous [`Provisioner`](crate::Provisioner) for callers without an async runtime.
 
+use crate::Platform;
 use crate::error::{Error, Result};
 use crate::install::Provisioned;
-use crate::options::ProvisionOptions;
-use crate::platform::VersionSpec;
+use crate::options::{ProvisionOptions, VersionSpec};
 use crate::provisioner::Resolved;
 use crate::source::Source;
-use xbbg_runtime::Platform;
 
 /// Blocking facade over [`crate::Provisioner`] with its own current-thread runtime.
 ///

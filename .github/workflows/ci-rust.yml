@@ -282,6 +282,31 @@ jobs:
       - name: Offline Rust workspace tests
         run: cargo test --workspace
 
+      # Workspace-wide runs unify features, and jni-xbbg-sdk turns on xbbg-sdk's `provision`.
+      # Selecting only xbbg-sdk builds each feature set on its own: the resolver the base
+      # packages ship (default features), then the downloader.
+      - name: xbbg-sdk resolver only (default features)
+        run: |
+          cargo clippy -p xbbg-sdk --all-targets -- -D warnings
+          cargo test -p xbbg-sdk
+
+      - name: xbbg-sdk with the provisioner (feature provision)
+        run: |
+          cargo clippy -p xbbg-sdk --all-targets --features provision -- -D warnings
+          cargo test -p xbbg-sdk --features provision
+
+      # The two resolver bindings must see only xbbg-sdk's default features.
+      - name: Resolver bindings do not pull in the provisioner
+        run: |
+          crates=$(cargo tree -p pyo3-xbbg-runtime -p napi-xbbg-runtime -e normal --prefix none | awk '{print $1}' | sort -u)
+          for forbidden in reqwest tokio uv-client rattler_repodata_gateway; do
+            if grep -qx "$forbidden" <<< "$crates"; then
+              echo "a resolver binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
+              exit 1
+            fi
+          done
+          cargo clippy -p pyo3-xbbg-runtime -p napi-xbbg-runtime --all-targets -- -D warnings
+
   check-windows:
     name: Check (Windows)
     needs: [sdk-version, generate-bindings]
@@ -323,6 +348,10 @@ jobs:
         shell: bash
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      - name: Cargo clippy xbbg-sdk resolver only
+        shell: bash
+        run: cargo clippy -p xbbg-sdk --all-targets -- -D warnings
+
   check-macos:
     name: Check (macOS)
     needs: [sdk-version, generate-bindings]
@@ -359,6 +388,9 @@ jobs:
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Cargo clippy xbbg-sdk resolver only
+        run: cargo clippy -p xbbg-sdk --all-targets -- -D warnings
 
   # ════════════════════════════════════════════════════════════════════════════
   # MSRV - every workspace member builds with the declared rust-version
@@ -410,6 +442,10 @@ jobs:
 
       - name: Cargo check at the MSRV
         run: cargo check --locked --workspace --all-targets
+
+      # The resolver alone (default features), as the base packages build it.
+      - name: Cargo check the resolver at the MSRV
+        run: cargo check --locked -p xbbg-sdk -p pyo3-xbbg-runtime -p napi-xbbg-runtime --all-targets
 
   # ════════════════════════════════════════════════════════════════════════════
   # NAPI core packaging validation

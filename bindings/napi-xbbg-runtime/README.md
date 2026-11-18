@@ -2,8 +2,10 @@
 
 Resolver addon (`napi_xbbg_runtime.node`) for the `@xbbg/core` Node package. It never links
 Bloomberg's runtime, so Node loads it before the engine addon (`napi-xbbg`), which cannot load
-until the runtime is found. It depends only on `xbbg-runtime` (the shared cache resolver), `napi`
-and the platform loader (`libc` / `windows-sys`).
+until the runtime is found. It depends only on `xbbg-sdk` with its default features (the cache
+resolver: no networking, no downloader), `napi` and the platform loader (`libc` / `windows-sys`).
+It must never enable `xbbg-sdk`'s `provision` feature: that adds the whole downloader (13-18 MB
+against about 0.4 MB), and `scripts/check_runtime_addon_links.py` fails an addon over 2 MiB.
 
 ## Native API
 

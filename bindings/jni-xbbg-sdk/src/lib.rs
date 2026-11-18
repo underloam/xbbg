@@ -7,7 +7,7 @@
 //! `abiVersion()`, `provision(optionsJson, token)` (async: completes the token through
 //! `NativeBridge` with the result JSON, see [`request`]), `installed(cacheDir, platform)` (sync:
 //! a JSON array of the verified installs, newest version first), `scanCache(cacheDir, platform)`
-//! (sync: `{runtimes, rejected}` of `xbbg_runtime::scan_cache`, see [`request::scan_json`]), `defaultCacheRoot0()` (sync: the
+//! (sync: `{runtimes, rejected}` of `xbbg_sdk::scan_cache`, see [`request::scan_json`]), `defaultCacheRoot0()` (sync: the
 //! xbbg cache root, or `null` when no home directory is known) and `cancel(token)`.
 
 mod bridge;
@@ -20,8 +20,7 @@ use jni::objects::{JClass, JString};
 use jni::strings::JNIString;
 use jni::sys::{JNI_ERR, JNI_OK, JNI_VERSION_1_8, jint, jlong};
 use jni::{Env, EnvUnowned, JavaVM, jni_str};
-use xbbg_runtime::Platform;
-use xbbg_sdk::Provisioner;
+use xbbg_sdk::{Platform, Provisioner};
 
 use crate::bridge::{NativeError, SdkError, ThrowSdk, spawn_call};
 
@@ -155,7 +154,7 @@ pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_scanCach
         let platform = string_arg(env, &platform, "platform")?
             .parse::<Platform>()
             .map_err(|err| SdkError::from(xbbg_sdk::Error::from(err)))?;
-        let scan = xbbg_runtime::scan_cache(&cache_dir, platform).map_err(|source| {
+        let scan = xbbg_sdk::scan_cache(&cache_dir, platform).map_err(|source| {
             SdkError::from(xbbg_sdk::Error::Io {
                 context: format!("scanning {}", cache_dir.display()),
                 source,
@@ -174,7 +173,7 @@ pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_defaultC
     _class: JClass<'local>,
 ) -> JString<'local> {
     env.with_env(|env| -> Result<_, NativeError> {
-        match xbbg_runtime::default_cache_root() {
+        match xbbg_sdk::default_cache_root() {
             Some(root) => Ok(JString::new(env, root.to_string_lossy())?),
             None => Ok(JString::null()),
         }

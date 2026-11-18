@@ -9,9 +9,8 @@ members = [
     "crates/xbbg-recipes",
     "crates/xbbg-log",
     "crates/xbbg-bench",
-    # Host-neutral binding glue and Bloomberg SDK provisioning (no blpapi link)
+    # Host-neutral binding glue and the Bloomberg runtime resolver/provisioner (no blpapi link)
     "crates/xbbg-host",
-    "crates/xbbg-runtime",
     "crates/xbbg-sdk",
     # Language bindings
     "bindings/pyo3-xbbg",
@@ -82,7 +81,6 @@ xbbg-recipes = { path = "crates/xbbg-recipes", version = "1.8.1", default-featur
 # Unpublished crates: only unpublished bindings depend on them, so they carry no
 # version and stay out of `scripts/stamp_workspace_version.py`.
 xbbg-host = { path = "crates/xbbg-host", default-features = false }
-xbbg-runtime = { path = "crates/xbbg-runtime" }
 xbbg-sdk = { path = "crates/xbbg-sdk" }
 
 # ── Arrow columnar carriers ───────────────────────────────────────────────────

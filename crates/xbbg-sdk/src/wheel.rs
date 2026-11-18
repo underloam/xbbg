@@ -14,9 +14,9 @@ use uv_normalize::PackageName;
 use uv_pep440::Version;
 use uv_platform_tags::{AbiTag, Arch, BinaryFormat, LanguageTag, PlatformTag};
 
+use crate::Platform;
 use crate::error::{Error, Result};
 use crate::pypi::IndexFile;
-use xbbg_runtime::Platform;
 
 /// Platform rank of a wheel (lower is better); `None` if it does not run on `platform`.
 pub(crate) fn platform_rank(wheel: &WheelFilename, platform: Platform) -> Option<u32> {
@@ -332,9 +332,9 @@ fn extract_verified(
 }
 
 /// A member-derived relative path as `/`-separated plain segments (zip-slip guard); see
-/// [`xbbg_runtime::safe_relative`] for the rule.
+/// [`crate::safe_relative`] for the rule.
 pub(crate) fn safe_relative(relative: &str) -> Result<String> {
-    xbbg_runtime::safe_relative(relative)
+    crate::safe_relative(relative)
         .ok_or_else(|| Error::InvalidArtifact(format!("unsafe archive path {relative}")))
 }
 

@@ -55,8 +55,8 @@ pub enum Error {
     Internal(String),
 }
 
-impl From<xbbg_runtime::ParsePlatformError> for Error {
-    fn from(err: xbbg_runtime::ParsePlatformError) -> Self {
+impl From<crate::ParsePlatformError> for Error {
+    fn from(err: crate::ParsePlatformError) -> Self {
         Self::UnsupportedPlatform(err.name().to_string())
     }
 }
