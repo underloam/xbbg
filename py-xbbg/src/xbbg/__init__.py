@@ -52,6 +52,19 @@ _core_module = None
 __all__ = list(PACKAGE_EXPORTS)
 
 
+def _cache_rejection_help() -> str:
+    """List the xbbg cache installs that failed verification, for the missing-SDK message."""
+    try:
+        from . import _sdk
+
+        notes = _sdk.cache_rejection_notes()
+    except Exception:  # never hide the import error this text is attached to
+        return ""
+    if not notes:
+        return ""
+    return "\n\nThese xbbg cache installs were skipped:\n" + "\n".join(f"  - {note}" for note in notes)
+
+
 def _import_core():
     """Import and cache the native extension with a friendlier DLL error."""
     global _core_module
@@ -81,7 +94,10 @@ def _import_core():
                 "https://blpapi.bloomberg.com/repository/releases/python/simple/\n"
                 "  2. Bloomberg Terminal (DAPI) - automatically detected if installed\n"
                 "  3. Bloomberg C++ SDK: set BLPAPI_ROOT environment variable\n"
-                "  4. xbbg.set_sdk_path('/path/to/sdk') - manually set SDK path"
+                "  4. xbbg.set_sdk_path('/path/to/sdk') - manually set SDK path\n"
+                "  5. xbbg runtime cache: a Bloomberg runtime provisioned into XBBG_CACHE_DIR "
+                "(default: the per-user xbbg cache directory) is used last, after its hash is verified"
+                f"{_cache_rejection_help()}"
             ) from e
         raise
     finally:

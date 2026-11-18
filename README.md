@@ -122,6 +122,7 @@ Requirements and notes:
 - If you build from source, stage the Bloomberg C++ SDK with `bash ./scripts/sdktool.sh` on macOS/Linux or `.\\scripts\\sdktool.ps1` on Windows PowerShell.
 - If you manage the SDK yourself, set `BLPAPI_ROOT` or use `xbbg.set_sdk_path(...)`.
 - On Windows Terminal installs, xbbg automatically probes DAPI runtime roots such as `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` before requiring manual configuration.
+- Last, xbbg uses a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. `xbbg.get_sdk_info()` lists it as the `xbbg_cache` source, together with any cached install it skipped and why.
 - Linux wheels are `manylinux_2_28` (x86_64): any distro with glibc ≥ 2.28 works — RHEL/Alma/Rocky 8+, Debian 10+, Ubuntu 20.04+, Amazon Linux 2023.
 - Optional dataframe conversions are installed separately: `xbbg[pyarrow]`, `xbbg[pandas]`, `xbbg[polars]`, or `xbbg[duckdb]`.
 

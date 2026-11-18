@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
 from pathlib import Path
 import threading
@@ -148,9 +149,60 @@ def _blpapi_package_location() -> tuple[Path, str | None] | None:
     return package_init, package_version
 
 
+def _scan_xbbg_cache() -> dict | None:
+    """Return the xbbg cache scan (``runtimes``, ``rejected``), or ``None`` when it cannot be read.
+
+    ``xbbg._runtime`` is a small native module that links no Bloomberg code: it hashes each
+    cached library against its provenance record, best version first. A checkout without the
+    built module (pure Python) has no cache rule.
+    """
+    try:
+        runtime = importlib.import_module("._runtime", __package__)
+    except ImportError:
+        return None
+    try:
+        return runtime.scan_cache()
+    except Exception:
+        logger.debug("Could not scan the xbbg runtime cache", exc_info=True)
+        return None
+
+
+def cache_rejection_notes() -> list[str]:
+    """Describe each xbbg cache install that was skipped, as ``<install dir>: <reason>``."""
+    scan = _scan_xbbg_cache()
+    if scan is None:
+        return []
+    return [f"{entry['install_dir']}: {entry['reason']}" for entry in scan["rejected"]]
+
+
+def _xbbg_cache_source() -> dict | None:
+    """The ``xbbg_cache`` entry of ``get_sdk_info``, or ``None`` when the cache holds nothing."""
+    scan = _scan_xbbg_cache()
+    if scan is None or not (scan["runtimes"] or scan["rejected"]):
+        return None
+    best = scan["runtimes"][0] if scan["runtimes"] else None
+    return {
+        "name": "xbbg_cache",
+        "version": best["version"] if best else None,
+        "path": Path(best["lib_path"]) if best else None,
+        "install_dir": Path(best["install_dir"]) if best else None,
+        "rejected": [
+            {"install_dir": Path(entry["install_dir"]), "reason": entry["reason"]} for entry in scan["rejected"]
+        ],
+    }
+
+
+def _copy_source(source: dict) -> dict:
+    """Return a caller-owned copy of one source entry, including its ``rejected`` list."""
+    copied = dict(source)
+    if "rejected" in copied:
+        copied["rejected"] = [dict(entry) for entry in copied["rejected"]]
+    return copied
+
+
 def _copy_sdk_info(info: dict) -> dict:
     """Return a caller-owned copy of an SDK info dict."""
-    return {**info, "sources": [dict(source) for source in info["sources"]]}
+    return {**info, "sources": [_copy_source(source) for source in info["sources"]]}
 
 
 def get_sdk_info() -> dict:
@@ -158,12 +210,18 @@ def get_sdk_info() -> dict:
 
     Returns a dict with:
         - sources: list of all detected SDK sources
-        - active: the source that will be used (first available)
+        - active: the source that will be used (first available; an ``xbbg_cache`` entry
+          that holds only rejected installs is never active)
 
     Each source entry contains:
-        - name: "blpapi_python", "dapi", or "sdk_env"
+        - name: "manual", "blpapi_python", "dapi", "sdk_env", or "xbbg_cache"
         - version: version string if detectable
-        - path: Path to the SDK
+        - path: Path to the SDK (for "xbbg_cache": the verified library; ``None`` if none verified)
+
+    The "xbbg_cache" entry, last in the list, also carries ``install_dir`` (``None`` if no
+    install verified) and ``rejected``: the installs skipped because they failed verification,
+    as dicts with ``install_dir`` and ``reason``. It is present only when the cache holds an
+    install.
 
     The returned dict is a copy; mutating it does not affect later calls.
 
@@ -270,6 +328,11 @@ def _detect_sdk_info(manual_sdk_path: Path | None) -> dict:
                 }
             )
 
+    # Check 4: the xbbg cache (always last)
+    cache_source = _xbbg_cache_source()
+    if cache_source is not None:
+        sources.append(cache_source)
+
     runtime_version = None
     try:
         from . import _core
@@ -281,7 +344,10 @@ def _detect_sdk_info(manual_sdk_path: Path | None) -> dict:
 
     return {
         "sources": sources,
-        "active": sources[0]["name"] if sources else None,
+        "active": next(
+            (source["name"] for source in sources if source["name"] != "xbbg_cache" or source["path"] is not None),
+            None,
+        ),
         "runtime_version": runtime_version,
     }
 
@@ -289,7 +355,7 @@ def _detect_sdk_info(manual_sdk_path: Path | None) -> dict:
 def set_sdk_path(path: str | Path) -> None:
     """Manually set the Bloomberg SDK path.
 
-    This takes precedence over all auto-detected sources (blpapi_python, dapi, sdk_env).
+    This takes precedence over all auto-detected sources (blpapi_python, dapi, sdk_env, xbbg_cache).
     The path should point to a directory containing the Bloomberg SDK shared library.
 
     Args:
@@ -338,7 +404,9 @@ def clear_sdk_path() -> None:
 def _collect_sdk_candidate_dirs() -> list[Path]:
     """Walk all SDK sources in priority order and return existing directories.
 
-    Priority: manual path → blpapi Python package → DAPI → BLPAPI_ROOT.
+    Priority: manual path → blpapi Python package → DAPI → BLPAPI_ROOT. The xbbg cache
+    comes after these, but it names one exact library rather than a directory, so
+    :func:`_preload_cached_library` handles it.
     Duplicates (by resolved path) are removed.
     """
     import os
@@ -418,26 +486,56 @@ def _preload_sdk_library() -> bool:
       modules, avoiding a second DT_NEEDED search (which may fail if
       `site-packages/blpapi` isn't on `LD_LIBRARY_PATH`).
 
-    Returns True on first successful preload, False if nothing could be
+    Falls through to the xbbg cache (:func:`_preload_cached_library`) when no other
+    source loads. Returns True on first successful preload, False if nothing could be
     loaded. Failure is non-fatal — `_import_core` still surfaces the
     friendly error message if the C extension can't open the library.
     """
-    import ctypes
-    import sys
-
     for sdk_dir in _collect_sdk_candidate_dirs():
         lib_path = _find_sdk_lib(sdk_dir)
         if lib_path is None:
             continue
         try:
-            if sys.platform == "win32":
-                _preloaded_libraries.append(ctypes.WinDLL(str(lib_path)))
-            else:
-                _preloaded_libraries.append(ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL))
+            _load_library(lib_path)
             return True
         except OSError:
             continue
-    return False
+    return _preload_cached_library()
+
+
+def _load_library(lib_path: Path) -> None:
+    """Load ``lib_path`` into the process by full path and keep the handle."""
+    import ctypes
+    import sys
+
+    if sys.platform == "win32":
+        _preloaded_libraries.append(ctypes.WinDLL(str(lib_path)))
+    else:
+        _preloaded_libraries.append(ctypes.CDLL(str(lib_path), mode=ctypes.RTLD_GLOBAL))
+
+
+def _preload_cached_library() -> bool:
+    """Last rule: load the best verified runtime of the xbbg cache by its exact library path.
+
+    The cache scan hashes the library, so it runs only when no earlier source loaded. The
+    scan names the library (a provisioned install may keep it in a subdirectory), so no
+    directory search is involved. On Windows the library's directory joins the DLL search path.
+    """
+    import os
+    import sys
+
+    scan = _scan_xbbg_cache()
+    if scan is None or not scan["runtimes"]:
+        return False
+    lib_path = Path(scan["runtimes"][0]["lib_path"])
+    try:
+        if sys.platform == "win32":
+            _dll_directory_handles.append(os.add_dll_directory(str(lib_path.parent)))  # type: ignore[unresolved-attribute]
+        _load_library(lib_path)
+    except (OSError, ValueError):
+        logger.debug("Could not load the cached Bloomberg runtime %s", lib_path, exc_info=True)
+        return False
+    return True
 
 
 def _prepare_sdk_for_core_import() -> None:
@@ -451,6 +549,7 @@ def _prepare_sdk_for_core_import() -> None:
     - macOS/Linux: preload libblpapi so _core's `@rpath/libblpapi3_64.so`
       dependency resolves via dyld's install-name match (macOS) or is
       already in the process's loaded image list (Linux).
+      When none of those loads, the xbbg cache supplies the last candidate.
 
     All errors are swallowed; `_import_core()` surfaces the friendly error
     message if no SDK can be found at the point the native extension is
