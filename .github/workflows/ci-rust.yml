@@ -1177,6 +1177,12 @@ jobs:
           UV_PYTHON: ${{ steps.setup-python.outputs.python-path }}
         run: uv build --wheel --out-dir dist/
 
+      # The resolver module must stay free of Bloomberg links: it is what finds
+      # the runtime before xbbg._core, which links it, can load.
+      - name: Check xbbg._runtime links no Bloomberg runtime
+        shell: bash
+        run: python scripts/check_wheel_runtime_module.py dist/*.whl
+
       - name: Upload wheel
         uses: actions/upload-artifact@v7
         with:
@@ -1271,6 +1277,7 @@ jobs:
         working-directory: ${{ runner.temp }}/test-run
         run: |
           python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
+          python -c "import sys, tempfile; from xbbg import _runtime; assert 'xbbg._core' not in sys.modules, 'the resolver must not load the engine'; assert _runtime.scan_cache(tempfile.gettempdir() + '/xbbg-no-cache')['runtimes'] == []"
           pytest tests -v -m "not live"
 
       - name: Run tests with coverage
@@ -1423,7 +1430,7 @@ jobs:
         shell: bash
         run: |
           python -c "import sysconfig; assert sysconfig.get_config_var('Py_GIL_DISABLED'), 'setup-python selected a GIL build'"
-          python -W error::RuntimeWarning -c "import sys, xbbg, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
+          python -W error::RuntimeWarning -c "import sys, xbbg, xbbg._runtime, pyarrow, pandas; xbbg.get_log_level(); xbbg.get_sdk_info(); assert not sys._is_gil_enabled(), 'an import re-enabled the GIL'"
           python -c "from xbbg import _core; assert not any('fixture' in name.lower() for name in vars(_core)), 'test driver leaked into production extension'"
           pytest tests -v -m "not live"
 

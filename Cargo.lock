@@ -4190,6 +4190,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "pyo3-xbbg-runtime"
+version = "1.8.1"
+dependencies = [
+ "pyo3",
+ "xbbg-runtime",
+]
+
+[[package]]
 name = "quick-xml"
 version = "0.42.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

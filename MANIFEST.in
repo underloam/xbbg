@@ -30,11 +30,14 @@ recursive-include crates/xbbg-async *.rs *.toml
 recursive-include crates/xbbg-ext *.rs *.toml
 recursive-include crates/xbbg-recipes *.rs *.toml
 recursive-include crates/xbbg-log *.rs *.toml
+recursive-include crates/xbbg-runtime *.rs *.toml
 recursive-include crates/xbbg-bench *.rs *.toml
 
 # Cargo workspace members outside crates/. Cargo metadata resolves the whole active
-# workspace even though only pyo3-xbbg is compiled for the Python wheel.
+# workspace even though only pyo3-xbbg and pyo3-xbbg-runtime are compiled for the
+# Python wheel.
 recursive-include bindings/pyo3-xbbg *.rs *.toml
+recursive-include bindings/pyo3-xbbg-runtime *.rs *.toml
 recursive-include bindings/napi-xbbg *.rs *.toml
 recursive-include apps/xbbg-mcp *.rs *.toml
 

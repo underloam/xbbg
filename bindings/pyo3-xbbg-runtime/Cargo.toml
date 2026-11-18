@@ -1,0 +1,20 @@
+[package]
+name = "pyo3-xbbg-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "PyO3 module xbbg._runtime: finds the Bloomberg runtime in the xbbg cache; never links blpapi"
+publish = false
+
+[lib]
+name = "_runtime"
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { workspace = true }
+xbbg-runtime = { workspace = true }
+
+[lints]
+workspace = true

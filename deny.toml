@@ -108,7 +108,7 @@ deny = [
     { name = "uv-client", wrappers = ["xbbg-sdk"] },
     { name = "rattler_repodata_gateway", wrappers = ["xbbg-sdk"] },
     # Python frameworks stay in the Python binding or their own ecosystem.
-    { name = "pyo3", wrappers = ["pyo3-xbbg", "numpy", "pyo3-arrow", "pyo3-async-runtimes", "pyo3-stub-gen"] },
+    { name = "pyo3", wrappers = ["pyo3-xbbg", "pyo3-xbbg-runtime", "numpy", "pyo3-arrow", "pyo3-async-runtimes", "pyo3-stub-gen"] },
     { name = "numpy", wrappers = ["pyo3-arrow"] },
     { name = "pyo3-arrow", wrappers = ["pyo3-xbbg"] },
     { name = "pyo3-async-runtimes", wrappers = ["pyo3-xbbg"] },
