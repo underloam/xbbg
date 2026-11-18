@@ -3,9 +3,10 @@
 
 ``stage`` builds ``jni-xbbg`` (``xbbg_jni``) and ``jni-xbbg-sdk`` (``xbbg_sdk_jni``) with Cargo,
 copies both libraries into ``<out>/<platform>/`` under their ``System.mapLibraryName`` names,
-makes the macOS libraries relocatable, checks what each library links against, and writes
-``natives.properties`` (ABI version, SHA-256 per library, build provenance). ``verify`` checks
-staged natives or built jars before they are packaged or published.
+makes the macOS libraries relocatable, checks that neither library links the Bloomberg runtime (the
+engine loads it at run time through the shared locator), and writes ``natives.properties`` (ABI
+version, SHA-256 per library, build provenance). ``verify`` checks staged natives or built jars
+before they are packaged or published.
 
 Examples, from the repository root::
 
@@ -50,7 +51,6 @@ PORTABLE_CPUS = frozenset({"default", "generic", "x86-64"})
 ENGINE_CRATE = "jni-xbbg"
 
 _BLPAPI_RUNTIME = re.compile(r"^(?:lib)?blpapi3(?:_(?:32|64))?(?:[-.][^/\\]*)?$", re.IGNORECASE)
-_SDK_LINK = re.compile(r"^(?P<kind>dylib|static)=(?P<stem>blpapi3(?:_(?:32|64))?)$")
 _ABI_CONSTANT = re.compile(
     r"^\s*(?:pub(?:\([^)]*\))?\s+)?const\s+ABI_VERSION\s*:\s*(?:jni::sys::)?(?:jint|i32)\s*=\s*(\d+)\s*;",
     re.MULTILINE,
@@ -79,10 +79,6 @@ class Platform:
     target: str
     engine: str
     sdk: str
-    # The single Bloomberg runtime reference xbbg_jni must carry after staging. The Java loader
-    # loads that runtime first; the OS then binds this reference to the loaded module (Windows
-    # module name, Linux SONAME, macOS install name).
-    blpapi: str
 
     @property
     def libraries(self) -> tuple[str, str]:
@@ -90,15 +86,9 @@ class Platform:
 
 
 PLATFORMS = (
-    Platform("windows-x86_64", "x86_64-pc-windows-msvc", "xbbg_jni.dll", "xbbg_sdk_jni.dll", "blpapi3_64.dll"),
-    Platform("linux-x86_64", "x86_64-unknown-linux-gnu", "libxbbg_jni.so", "libxbbg_sdk_jni.so", "libblpapi3_64.so"),
-    Platform(
-        "macos-aarch64",
-        "aarch64-apple-darwin",
-        "libxbbg_jni.dylib",
-        "libxbbg_sdk_jni.dylib",
-        "@rpath/libblpapi3_64.so",
-    ),
+    Platform("windows-x86_64", "x86_64-pc-windows-msvc", "xbbg_jni.dll", "xbbg_sdk_jni.dll"),
+    Platform("linux-x86_64", "x86_64-unknown-linux-gnu", "libxbbg_jni.so", "libxbbg_sdk_jni.so"),
+    Platform("macos-aarch64", "aarch64-apple-darwin", "libxbbg_jni.dylib", "libxbbg_sdk_jni.dylib"),
 )
 PLATFORM_BY_NAME = {platform.name: platform for platform in PLATFORMS}
 PLATFORM_BY_TARGET = {platform.target: platform for platform in PLATFORMS}
@@ -282,19 +272,15 @@ def _is_non_portable_darwin_path(value: str) -> bool:
 
 
 def check_links(platform: Platform, engine: bytes, sdk: bytes) -> None:
-    """Fail unless xbbg_jni references exactly the expected Bloomberg runtime and xbbg_sdk_jni none."""
-    engine_deps = runtime_dependencies(platform, engine)
-    blpapi = [dep for dep in engine_deps if is_blpapi_runtime(dep)]
-    expected = platform.blpapi.lower() if platform.name.startswith("windows-") else platform.blpapi
-    found = [dep.lower() for dep in blpapi] if platform.name.startswith("windows-") else blpapi
-    if found != [expected]:
-        raise StageError(
-            f"{platform.engine} must reference the Bloomberg runtime exactly once as {platform.blpapi!r} "
-            f"(dynamic link); it references {blpapi or 'none'} among {engine_deps}"
-        )
-    sdk_blpapi = [dep for dep in runtime_dependencies(platform, sdk) if is_blpapi_runtime(dep)]
-    if sdk_blpapi:
-        raise StageError(f"{platform.sdk} must never link the Bloomberg runtime; it references {sdk_blpapi}")
+    """Fail if a staged library links the Bloomberg runtime or carries build-machine paths.
+
+    Neither library links Bloomberg: the engine loads the runtime at run time through the shared
+    locator, so nothing is rewritten and nothing may be left to resolve at load.
+    """
+    for name, data in ((platform.engine, engine), (platform.sdk, sdk)):
+        blpapi = [dep for dep in runtime_dependencies(platform, data) if is_blpapi_runtime(dep)]
+        if blpapi:
+            raise StageError(f"{name} must never link the Bloomberg runtime; it references {blpapi}")
     if platform.name.startswith("macos-"):
         for name, data in ((platform.engine, engine), (platform.sdk, sdk)):
             image = macho_load_commands(data)
@@ -553,16 +539,15 @@ def build_script_env(events: Sequence[Mapping[str, object]], package_id: str) ->
     return {str(key): str(value) for key, value in scripts[0].get("env", [])}
 
 
-def _sdk_link(events: Sequence[Mapping[str, object]]) -> tuple[str, str, dict[str, str]]:
+def _sdk_include_dir(events: Sequence[Mapping[str, object]]) -> str:
+    """The Bloomberg headers the bindings were generated from (the xbbg-blpapi-sys build script)."""
     for event in events:
         if event.get("reason") != "build-script-executed":
             continue
-        for library in event.get("linked_libs", []):
-            match = _SDK_LINK.match(str(library))
-            if match is not None:
-                env = {str(key): str(value) for key, value in event.get("env", [])}
-                return match["kind"], match["stem"], env
-    raise StageError("Cargo did not report the Bloomberg SDK link input (xbbg-blpapi-sys build script)")
+        for key, value in event.get("env", []):
+            if key == "XBBG_SDK_INCLUDE_DIR" and value:
+                return str(value)
+    raise StageError("Cargo did not report the Bloomberg SDK headers used by the build")
 
 
 def inspect_build(events: Sequence[Mapping[str, object]], platform: Platform, profile: str) -> BuildFacts:
@@ -588,12 +573,7 @@ def inspect_build(events: Sequence[Mapping[str, object]], platform: Platform, pr
     if fact("TARGET") != platform.target:
         raise StageError(f"Cargo built for {fact('TARGET')}, expected {platform.target}")
     portable, target_cpu = inspect_rust_codegen([flag for flag in fact("RUSTFLAGS").split("\x1f") if flag])
-    kind, stem, sdk_env = _sdk_link(events)
-    if (kind, stem) != ("dylib", "blpapi3_64"):
-        raise StageError(f"xbbg_jni must link blpapi3_64 dynamically; Cargo reported {kind}={stem}")
-    include_dir = sdk_env.get("XBBG_SDK_INCLUDE_DIR", "")
-    if not include_dir:
-        raise StageError("Cargo did not report the Bloomberg SDK headers used by the build")
+    include_dir = _sdk_include_dir(events)
     engine_version = package_name_version(engine.package_id)[1]
     sdk_version = package_name_version(sdk.package_id)[1]
     if engine_version != sdk_version:
@@ -725,18 +705,9 @@ def run_cargo(cargo: str, args: Sequence[str]) -> list[dict[str, object]]:
     return events
 
 
-def make_relocatable(path: Path, *, engine: bool) -> None:
-    """Rewrite Mach-O load commands so the library carries no build-machine paths."""
-    image = macho_load_commands(path.read_bytes())
-    command = ["install_name_tool", "-id", f"@rpath/{path.name}"]
-    if engine:
-        for dylib in image.dylibs:
-            if is_blpapi_runtime(dylib) and dylib != "@rpath/libblpapi3_64.so":
-                command += ["-change", dylib, "@rpath/libblpapi3_64.so"]
-    for rpath in image.rpaths:
-        if _is_non_portable_darwin_path(rpath):
-            command += ["-delete_rpath", rpath]
-    _run_tool([*command, str(path)])
+def make_relocatable(path: Path) -> None:
+    """Give a macOS library an ``@rpath`` install name so it carries no build-machine path."""
+    _run_tool(["install_name_tool", "-id", f"@rpath/{path.name}", str(path)])
     # install_name_tool invalidates the linker's ad-hoc signature; arm64 refuses unsigned code.
     _run_tool(["codesign", "--force", "--sign", "-", str(path)])
     _run_tool(["codesign", "--verify", str(path)])
@@ -857,7 +828,7 @@ def stage(options: StageOptions) -> Path:
             shutil.copyfile(artifact.path, staging / name)
             (staging / name).chmod(0o755)
             if platform.name.startswith("macos-"):
-                make_relocatable(staging / name, engine=name == platform.engine)
+                make_relocatable(staging / name)
         engine = (staging / platform.engine).read_bytes()
         sdk = (staging / platform.sdk).read_bytes()
         check_links(platform, engine, sdk)

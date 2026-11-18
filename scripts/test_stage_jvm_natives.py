@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from pathlib import Path
+import re
 import struct
 import zipfile
 
@@ -111,12 +112,10 @@ def make_macho(install_name: str | None, dylibs: list[str], rpaths: list[str] = 
 def engine_image(platform: natives.Platform, *, marker: bool = False) -> bytes:
     payload = MARKER if marker else b"xbbg engine"
     if platform is WINDOWS:
-        return make_pe(["blpapi3_64.dll", "KERNEL32.dll"], payload=payload)
+        return make_pe(["KERNEL32.dll", "bcrypt.dll"], payload=payload)
     if platform is LINUX:
-        return make_elf(["libblpapi3_64.so", "libc.so.6"], soname="libxbbg_jni.so", payload=payload)
-    return make_macho(
-        "@rpath/libxbbg_jni.dylib", ["@rpath/libblpapi3_64.so", "/usr/lib/libSystem.B.dylib"], payload=payload
-    )
+        return make_elf(["libc.so.6"], soname="libxbbg_jni.so", payload=payload)
+    return make_macho("@rpath/libxbbg_jni.dylib", ["/usr/lib/libSystem.B.dylib"], payload=payload)
 
 
 def sdk_image(platform: natives.Platform) -> bytes:
@@ -190,29 +189,36 @@ def test_is_blpapi_runtime(reference: str, expected: bool) -> None:
 
 
 @pytest.mark.parametrize("platform", [WINDOWS, LINUX, MACOS], ids=lambda platform: platform.name)
-def test_check_links_accepts_engine_with_one_runtime_reference_and_clean_sdk(platform: natives.Platform) -> None:
+def test_check_links_accepts_libraries_that_do_not_link_bloomberg(platform: natives.Platform) -> None:
     natives.check_links(platform, engine_image(platform), sdk_image(platform))
 
 
-def test_check_links_requires_the_dynamic_runtime_reference() -> None:
-    with pytest.raises(StageError, match="exactly once"):
-        natives.check_links(LINUX, make_elf(["libc.so.6"]), sdk_image(LINUX))
-    with pytest.raises(StageError, match="exactly once"):
-        natives.check_links(LINUX, make_elf(["libblpapi3_64.so.3"]), sdk_image(LINUX))
-
-
-def test_check_links_rejects_an_sdk_library_that_links_blpapi() -> None:
-    with pytest.raises(StageError, match="must never link"):
-        natives.check_links(WINDOWS, engine_image(WINDOWS), make_pe(["blpapi3_64.dll"]))
+@pytest.mark.parametrize(
+    ("platform", "linking"),
+    [
+        (WINDOWS, make_pe(["blpapi3_64.dll", "KERNEL32.dll"])),
+        (LINUX, make_elf(["libblpapi3_64.so", "libc.so.6"])),
+        (LINUX, make_elf(["libblpapi3_64.so.3"])),
+        (MACOS, make_macho("@rpath/libx.dylib", ["@rpath/libblpapi3_64.so", "/usr/lib/libSystem.B.dylib"])),
+    ],
+    ids=["windows", "linux", "linux-versioned", "macos"],
+)
+def test_check_links_rejects_any_staged_library_that_links_bloomberg(
+    platform: natives.Platform, linking: bytes
+) -> None:
+    with pytest.raises(StageError, match=rf"{re.escape(platform.engine)} must never link"):
+        natives.check_links(platform, linking, sdk_image(platform))
+    with pytest.raises(StageError, match=rf"{re.escape(platform.sdk)} must never link"):
+        natives.check_links(platform, engine_image(platform), linking)
 
 
 def test_check_links_requires_relocatable_macos_libraries() -> None:
-    absolute_sdk = make_macho("@rpath/libxbbg_jni.dylib", ["/runner/vendor/blpapi-sdk/Darwin/libblpapi3_64.so"])
-    with pytest.raises(StageError, match="exactly once"):
-        natives.check_links(MACOS, absolute_sdk, sdk_image(MACOS))
-    build_rpath = make_macho("@rpath/libxbbg_jni.dylib", ["@rpath/libblpapi3_64.so"], ["/Users/runner/sdk"])
+    build_rpath = make_macho("@rpath/libxbbg_jni.dylib", ["/usr/lib/libSystem.B.dylib"], ["/Users/runner/sdk"])
     with pytest.raises(StageError, match="non-portable build paths"):
         natives.check_links(MACOS, build_rpath, sdk_image(MACOS))
+    absolute_dependency = make_macho("@rpath/libxbbg_jni.dylib", ["/Users/runner/target/libother.dylib"])
+    with pytest.raises(StageError, match="non-portable build paths"):
+        natives.check_links(MACOS, absolute_dependency, sdk_image(MACOS))
     absolute_id = make_macho("/Users/runner/target/libxbbg_sdk_jni.dylib", [])
     with pytest.raises(StageError, match="install name"):
         natives.check_links(MACOS, engine_image(MACOS), absolute_id)
@@ -346,7 +352,7 @@ def cargo_events(
     engine_features: tuple[str, ...] = ("default", "live"),
     other_test_support: bool = False,
     rustflags: str = "",
-    link: str = "dylib=blpapi3_64",
+    include_dir: bool = True,
     marker: bool = False,
     git_commit: str = COMMIT,
 ) -> list[dict[str, object]]:
@@ -380,9 +386,9 @@ def cargo_events(
         {
             "reason": "build-script-executed",
             "package_id": "path+file:///work/crates/blpapi-sys#xbbg-blpapi-sys@1.7.0",
-            "linked_libs": [link],
-            "linked_paths": [f"native={root / 'sdk' / 'lib'}"],
-            "env": [["XBBG_SDK_INCLUDE_DIR", str(write_sdk_headers(root / "sdk" / "include"))]],
+            "linked_libs": [],
+            "linked_paths": [],
+            "env": [["XBBG_SDK_INCLUDE_DIR", str(write_sdk_headers(root / "sdk" / "include"))]] if include_dir else [],
         },
         {
             "reason": "compiler-artifact",
@@ -419,8 +425,7 @@ def test_inspect_build_collects_provenance(tmp_path: Path) -> None:
     ("change", "message"),
     [
         ({"build_profile": "release"}, "built profile 'release'"),
-        ({"link": "static=blpapi3_64"}, "dynamically"),
-        ({"link": "dylib=other"}, "SDK link input"),
+        ({"include_dir": False}, "SDK headers"),
     ],
 )
 def test_inspect_build_rejects_inconsistent_events(tmp_path: Path, change: dict[str, str], message: str) -> None:
@@ -641,32 +646,15 @@ def test_stage_refuses_test_support_build_without_fixture_exports(tmp_path: Path
     assert list(out.iterdir()) == []
 
 
-def test_make_relocatable_rewrites_build_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_make_relocatable_sets_the_install_name_and_resigns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     commands: list[list[str]] = []
     monkeypatch.setattr(natives, "_run_tool", lambda command: commands.append(list(command)) or "")
     library = tmp_path / "libxbbg_jni.dylib"
-    library.write_bytes(
-        make_macho(
-            "/Users/runner/work/target/release-jni/deps/libxbbg_jni.dylib",
-            ["/Users/runner/work/vendor/blpapi-sdk/3.26/Darwin/libblpapi3_64.so", "/usr/lib/libSystem.B.dylib"],
-            ["/Users/runner/work/vendor/blpapi-sdk/3.26/Darwin", "@loader_path"],
-        )
-    )
 
-    natives.make_relocatable(library, engine=True)
+    natives.make_relocatable(library)
 
     assert commands == [
-        [
-            "install_name_tool",
-            "-id",
-            "@rpath/libxbbg_jni.dylib",
-            "-change",
-            "/Users/runner/work/vendor/blpapi-sdk/3.26/Darwin/libblpapi3_64.so",
-            "@rpath/libblpapi3_64.so",
-            "-delete_rpath",
-            "/Users/runner/work/vendor/blpapi-sdk/3.26/Darwin",
-            str(library),
-        ],
+        ["install_name_tool", "-id", "@rpath/libxbbg_jni.dylib", str(library)],
         ["codesign", "--force", "--sign", "-", str(library)],
         ["codesign", "--verify", str(library)],
     ]

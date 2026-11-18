@@ -2836,12 +2836,9 @@ dependencies = [
 name = "jni-xbbg-sdk"
 version = "1.8.1"
 dependencies = [
- "hex",
  "jni",
  "serde",
  "serde_json",
- "sha2 0.11.1",
- "tempfile",
  "tokio",
  "xbbg-sdk",
 ]

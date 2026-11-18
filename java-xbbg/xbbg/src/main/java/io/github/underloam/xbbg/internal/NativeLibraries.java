@@ -18,6 +18,9 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.security.MessageDigest;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Properties;
 import java.util.concurrent.CompletableFuture;
@@ -26,14 +29,15 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Loads {@code xbbg_jni} and the Bloomberg runtime it links against, once per JVM.
+ * Loads {@code xbbg_jni} and the Bloomberg runtime it uses at run time, once per JVM.
  *
- * <p>{@link #ensureLoaded()} detects the platform, finds blpapi ({@link BlpapiLocator}, then
- * provisioning when a source is configured), extracts the bundled natives into {@code
- * <cache>/jvm/<version>-<sha12>/<platform>/}, loads blpapi and then {@code xbbg_jni} by absolute
- * path, checks the ABI handshake and registers a shutdown hook. A failure is not cached: a later
- * call (for example after {@code Xbbg.setSdkPath}) tries again, unless a library was already loaded
- * into the process, which only a JVM restart undoes.
+ * <p>{@link #ensureLoaded()} detects the platform, extracts the bundled natives into {@code
+ * <cache>/jvm/<version>-<sha12>/<platform>/}, loads {@code xbbg_jni} by absolute path (it does not
+ * link Bloomberg, so it loads on any machine) and checks the ABI handshake. It then asks {@code
+ * xbbg_jni} to find and load blpapi ({@code NativeXbbg.loadSdk}: the one search order every xbbg
+ * host shares, see {@link BlpapiLocator}) and, when that finds nothing and a source is configured,
+ * provisions a runtime and asks again. Finally it registers a shutdown hook. A failure is not
+ * cached: a later call (for example after {@code Xbbg.setSdkPath}) tries again.
  *
  * <p>A provisioning download runs without the load lock and completes on the default callback
  * executor, so neither the settings nor a busy user callback executor wait for it, and concurrent
@@ -43,19 +47,17 @@ import java.util.logging.Logger;
  */
 public final class NativeLibraries {
   /** The ABI version shared with {@code xbbg_jni}. */
-  public static final int ABI = 1;
+  public static final int ABI = 2;
 
   private static final Logger LOG = Logger.getLogger("io.github.underloam.xbbg");
   private static final String RESOURCE_ROOT = "/io/github/underloam/xbbg/native/";
   private static final long SHUTDOWN_TIMEOUT_MILLIS = 10_000L;
-  private static final String RESTART_HINT =
-      "; the runtime stays loaded in this JVM, so restart the JVM after pointing xbbg at"
-          + " Bloomberg API 3.20.0 or newer";
 
   /** Guards extraction; separate from the load lock so provisioning never waits on it. */
   private static final Object EXTRACT_LOCK = new Object();
 
   private static volatile boolean loaded;
+  private static boolean engineLoaded;
   private static volatile Path sdkPath;
   private static volatile BlpapiSource sdkSource;
   private static volatile Path loadedBlpapi;
@@ -88,13 +90,15 @@ public final class NativeLibraries {
         }
         Path cache = cacheRoot();
         bundled();
+        loadEngine();
         BlpapiLocator locator = BlpapiLocator.forCurrentProcess(sdkPath, cache);
-        Path blpapi = locator.findLocal();
+        List<BlpapiLocator.Rejection> rejected = new ArrayList<BlpapiLocator.Rejection>();
+        Path blpapi = loadRuntime(locator, rejected);
         if (blpapi != null) {
-          load(blpapi);
+          finishLoad(blpapi);
           return;
         }
-        download = download(locator, cache);
+        download = download(locator, cache, rejected);
       }
       Path provisioned = null;
       try {
@@ -109,7 +113,14 @@ public final class NativeLibraries {
           return;
         }
         if (download.startedWith(sdkPath, sdkSource)) {
-          load(provisioned);
+          // The download installed into the xbbg cache, the last place the search looks.
+          BlpapiLocator locator = BlpapiLocator.forCurrentProcess(sdkPath, cacheRoot());
+          List<BlpapiLocator.Rejection> rejected = new ArrayList<BlpapiLocator.Rejection>();
+          Path blpapi = loadRuntime(locator, rejected);
+          if (blpapi == null) {
+            throw locator.notFound(rejected);
+          }
+          finishLoad(blpapi);
           return;
         }
       }
@@ -419,43 +430,50 @@ public final class NativeLibraries {
     return new BundledNatives(platform, properties, directory);
   }
 
-  /** Loads a found or provisioned runtime and then {@code xbbg_jni}; call with the lock held. */
-  private static void load(Path blpapi) {
-    Platform platform = Platform.current();
-    Path xbbgJni = extractBundled("xbbg_jni");
-    try {
-      System.load(blpapi.toString());
-    } catch (UnsatisfiedLinkError e) {
-      throw loadFailure(
-          e,
-          "cannot load the Bloomberg runtime "
-              + blpapi
-              + " on "
-              + platform.id()
-              + ": "
-              + e.getMessage()
-              + " (xbbg needs Bloomberg API 3.20.0 or newer)");
+  /**
+   * Loads {@code xbbg_jni} and checks its ABI, once; call with the lock held. The library does not
+   * link Bloomberg, so this needs no runtime.
+   */
+  private static void loadEngine() {
+    if (engineLoaded) {
+      return;
     }
+    Path xbbgJni = extractBundled("xbbg_jni");
     try {
       System.load(xbbgJni.toString());
     } catch (UnsatisfiedLinkError e) {
       throw loadFailure(
-          e,
-          "cannot load "
-              + xbbgJni
-              + " against the Bloomberg runtime "
-              + blpapi
-              + ": "
-              + e.getMessage()
-              + " (the runtime may be older than the minimum, Bloomberg API 3.20.0"
-              + RESTART_HINT
-              + ")");
+          e, "cannot load " + xbbgJni + " on " + Platform.current().id() + ": " + e.getMessage());
     }
     int abi = NativeXbbg.abiVersion();
     if (abi != ABI) {
       throw new UnsatisfiedLinkError(
           "stale xbbg_jni at " + xbbgJni + ": native ABI " + abi + ", this jar needs ABI " + ABI);
     }
+    engineLoaded = true;
+  }
+
+  /**
+   * Asks {@code xbbg_jni} to find and load the Bloomberg runtime; call with the lock held.
+   *
+   * @param rejected receives every candidate the search refused when none loaded
+   * @return the loaded runtime library, or {@code null} when none loaded
+   */
+  private static Path loadRuntime(BlpapiLocator locator, List<BlpapiLocator.Rejection> rejected) {
+    String what = "Bloomberg runtime load";
+    Map<String, Object> outcome =
+        JsonFields.object(JsonFields.parse(NativeXbbg.loadSdk(locator.requestJson()), what), what);
+    Map<String, Object> loadedSdk = JsonFields.optObj(outcome, "loaded");
+    if (loadedSdk != null) {
+      return Paths.get(JsonFields.string(loadedSdk, "path"));
+    }
+    Map<String, Object> error = JsonFields.obj(outcome, "error");
+    rejected.addAll(BlpapiLocator.parseRejected(JsonFields.list(error, "rejected")));
+    return null;
+  }
+
+  /** Records the loaded runtime and registers the shutdown hook; call with the lock held. */
+  private static void finishLoad(Path blpapi) {
     loadedBlpapi = blpapi;
     provisioning = null;
     Runtime.getRuntime()
@@ -499,12 +517,13 @@ public final class NativeLibraries {
    *
    * @throws BlpapiNotFoundException if no source is configured
    */
-  private static Provisioning download(BlpapiLocator locator, Path cache) {
+  private static Provisioning download(
+      BlpapiLocator locator, Path cache, List<BlpapiLocator.Rejection> rejected) {
     BlpapiSource source = sdkSource;
     if (source == null) {
       String spec = locator.configuredSourceSpec();
       if (spec == null) {
-        throw locator.notFound();
+        throw locator.notFound(rejected);
       }
       source = parseSource(spec);
     }

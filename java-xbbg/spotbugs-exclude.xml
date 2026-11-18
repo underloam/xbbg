@@ -62,14 +62,6 @@
     <Bug pattern="NM_CLASS_NOT_EXCEPTION"/>
   </Match>
 
-  <!-- /opt/bloomberg/DAPI is where the Bloomberg Terminal installs its runtime on Linux and macOS,
-       one of the locations the runtime search must try (contract §3.3). -->
-  <Match>
-    <Class name="io.github.underloam.xbbg.internal.BlpapiLocator"/>
-    <Method name="candidates"/>
-    <Bug pattern="DMI_HARDCODED_ABSOLUTE_FILENAME"/>
-  </Match>
-
   <!-- The cache root must match Rust's xbbg_sdk::default_cache_root, which reads $HOME. The JVM's
        user.home comes from the account database and differs where HOME is overridden (containers,
        sudo), which would hide runtimes provisioned by Python or the CLI; user.home is the fallback

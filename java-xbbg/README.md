@@ -192,16 +192,27 @@ try (Subscription sub = Xbbg.await(Blp.subscribe("AAPL US Equity", "LAST_PRICE",
 
 ## The Bloomberg runtime
 
-xbbg loads the Bloomberg runtime library (`blpapi3_64.dll`, or `libblpapi3_64.so` on Linux and
-macOS) before its own native library and never bundles it. The first match wins:
+xbbg never bundles the Bloomberg runtime library (`blpapi3_64.dll`, or `libblpapi3_64.so` on Linux
+and macOS). Its own native library (`xbbg_jni`) does not link it either: it loads first, then finds
+and loads the runtime at run time (`NativeXbbg.loadSdk`) with the one search order every xbbg host
+shares. The first runtime that opens wins; one that cannot be opened or is too old (it lacks a
+function xbbg calls) is skipped and the next candidate is tried:
 
 1. `Xbbg.setSdkPath(path)`, or the `xbbg.blpapi.path` system property (a directory or the file);
-2. `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`;
-3. a Bloomberg Terminal install (`C:\blp\DAPI` and the other Terminal locations; `~/blp/DAPI`
-   and `/opt/bloomberg/DAPI` elsewhere), then the Windows `PATH`;
-4. a runtime xbbg provisioned earlier into its cache (`xbbg.cache.dir`, `XBBG_CACHE_DIR`, or the
+2. `BLPAPI_LIB_DIR`;
+3. `BLPAPI_ROOT`;
+4. `XBBG_DEV_SDK_ROOT`;
+5. a Bloomberg Terminal install (`C:\blp\DAPI` and the other Terminal locations; `~/blp/DAPI`
+   and `/opt/bloomberg/DAPI` elsewhere);
+6. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on
+   Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
+7. a runtime xbbg provisioned earlier into its cache (`xbbg.cache.dir`, `XBBG_CACHE_DIR`, or the
    platform cache directory);
-5. provisioning from a configured source.
+8. provisioning from a configured source, then step 7 again.
+
+An explicit path that holds no usable runtime no longer stops the search: it is listed among the
+rejected candidates and the search goes on. When nothing loads, `BlpapiNotFoundException` lists
+every candidate that was refused and why.
 
 Provisioning only happens when a source is configured, and only when nothing local was found. A
 source is a Python package index, a conda channel, or one package file:
@@ -262,8 +273,8 @@ built jar the way an application consumes it, and publishing it to Maven Central
 | `consumers/` | Maven and Gradle projects that consume a built jar (smoke tests, not modules of the build). |
 
 The jar bundles two libraries per platform (`windows-x86_64`, `linux-x86_64`, `macos-aarch64`):
-`xbbg_jni` (the engine; links the Bloomberg runtime, which is never bundled) and `xbbg_sdk_jni`
-(Bloomberg runtime provisioning; never links it). Each platform directory also holds
+`xbbg_jni` (the engine; loads the Bloomberg runtime at run time, which is never bundled) and
+`xbbg_sdk_jni` (Bloomberg runtime provisioning). Neither links the Bloomberg runtime. Each platform directory also holds
 `natives.properties`: the JNI ABI version, the SHA-256 of each library, and build provenance
 (Rust target, Cargo profile and features, `testSupport`, git commit, rustc, Bloomberg headers).
 
@@ -290,9 +301,8 @@ python scripts/stage_jvm_natives.py stage --release                # distributab
 Rust panic becomes a Java exception instead of aborting the JVM) with `--locked`, and refuses
 test-support features, host-tuned code generation (a `target-cpu` other than the default, or
 `target-feature`/`llvm-args` in `RUSTFLAGS`) and an unknown git commit. Every build is checked:
-`xbbg_jni` must reference the Bloomberg runtime exactly once (`blpapi3_64.dll`,
-`libblpapi3_64.so`, or on macOS `@rpath/libblpapi3_64.so` after the install names are rewritten
-and the library re-signed), `xbbg_sdk_jni` must not reference it at all, test-support builds must
+neither `xbbg_jni` nor `xbbg_sdk_jni` may reference the Bloomberg runtime (on macOS the install
+names are set to `@rpath/<library>` and the libraries re-signed), test-support builds must
 export the `NativeTestSupport` fixtures and other builds must not contain them, and on Linux the
 libraries must not need glibc newer than 2.28 (fatal with `--release`; release builds run in the
 manylinux_2_28 image). Only a `stage --release` that passed all of this records `release=true`

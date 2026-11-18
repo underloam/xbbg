@@ -23,7 +23,7 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use xbbg_sdk::{
-    CacheScan, Credential, Platform, ProvisionOptions, Provisioned, ProxyConfig, Source, TlsConfig,
+    Credential, Platform, ProvisionOptions, Provisioned, ProxyConfig, Source, TlsConfig,
     VersionSpec,
 };
 
@@ -228,61 +228,6 @@ pub(crate) fn results_json(installed: &[Provisioned]) -> String {
     serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ScanJson<'a> {
-    runtimes: Vec<RuntimeJson<'a>>,
-    rejected: Vec<RejectedJson<'a>>,
-}
-
-/// A verified install of a cache scan.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeJson<'a> {
-    version: &'a str,
-    platform: &'static str,
-    library_path: String,
-    lib_sha256: &'a str,
-    source: &'a str,
-    install_dir: String,
-}
-
-/// An install the scan refused, with the human-readable reason.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RejectedJson<'a> {
-    install_dir: String,
-    reason: &'a str,
-}
-
-/// A cache scan as `{"runtimes": [<install>...], "rejected": [{"installDir", "reason"}...]}`;
-/// runtimes are the verified installs, best first.
-pub(crate) fn scan_json(scan: &CacheScan) -> String {
-    serde_json::to_string(&ScanJson {
-        runtimes: scan
-            .runtimes
-            .iter()
-            .map(|runtime| RuntimeJson {
-                version: &runtime.version,
-                platform: runtime.platform.as_str(),
-                library_path: runtime.lib_path.to_string_lossy().into_owned(),
-                lib_sha256: &runtime.lib_sha256,
-                source: &runtime.source,
-                install_dir: runtime.install_dir.to_string_lossy().into_owned(),
-            })
-            .collect(),
-        rejected: scan
-            .rejected
-            .iter()
-            .map(|rejected| RejectedJson {
-                install_dir: rejected.install_dir.to_string_lossy().into_owned(),
-                reason: &rejected.reason,
-            })
-            .collect(),
-    })
-    .unwrap_or_else(|_| r#"{"runtimes":[],"rejected":[]}"#.into())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,62 +366,5 @@ mod tests {
         assert_eq!(value["libSha256"], "b".repeat(64));
         let array: serde_json::Value = serde_json::from_str(&results_json(&[installed])).unwrap();
         assert_eq!(array.as_array().unwrap().len(), 1);
-    }
-
-    #[test]
-    fn scans_carry_runtimes_and_rejections() {
-        use sha2::{Digest, Sha256};
-
-        let cache = tempfile::tempdir().unwrap();
-        let platform_dir = cache
-            .path()
-            .join("sdk")
-            .join("3.26.9.1")
-            .join("linux-x86_64");
-        let write_install = |name: &str, content: &[u8], recorded: &[u8]| {
-            let install = platform_dir.join(name);
-            std::fs::create_dir_all(install.join("lib")).unwrap();
-            std::fs::write(install.join("lib").join("libblpapi3_64.so"), content).unwrap();
-            let provenance = serde_json::json!({
-                "version": "3.26.9.1",
-                "platform": "linux-x86_64",
-                "source": "pypi:https://idx/simple/",
-                "artifactUrl": "https://idx/x.whl",
-                "artifactSha256": "d".repeat(64),
-                "lib": "lib/libblpapi3_64.so",
-                "libSha256": hex::encode(Sha256::digest(recorded)),
-                "licenses": [],
-            });
-            std::fs::write(install.join("provenance.json"), provenance.to_string()).unwrap();
-        };
-        write_install("pypi-good", b"synthetic runtime", b"synthetic runtime");
-        write_install("pypi-bad", b"tampered runtime", b"synthetic runtime");
-
-        let scan = xbbg_sdk::scan_cache(cache.path(), Platform::LinuxX86_64).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&scan_json(&scan)).unwrap();
-        assert_eq!(value["runtimes"].as_array().unwrap().len(), 1);
-        let runtime = &value["runtimes"][0];
-        assert_eq!(runtime["version"], "3.26.9.1");
-        assert_eq!(runtime["platform"], "linux-x86_64");
-        assert_eq!(runtime["source"], "pypi:https://idx/simple/");
-        assert!(
-            runtime["libraryPath"]
-                .as_str()
-                .unwrap()
-                .ends_with("libblpapi3_64.so")
-        );
-        assert_eq!(
-            runtime["libSha256"],
-            hex::encode(Sha256::digest(b"synthetic runtime"))
-        );
-        assert_eq!(value["rejected"].as_array().unwrap().len(), 1);
-        let rejected = &value["rejected"][0];
-        assert!(
-            rejected["installDir"]
-                .as_str()
-                .unwrap()
-                .ends_with("pypi-bad")
-        );
-        assert!(rejected["reason"].as_str().unwrap().contains("sha256"));
     }
 }

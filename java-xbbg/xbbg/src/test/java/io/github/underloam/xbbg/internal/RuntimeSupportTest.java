@@ -24,8 +24,6 @@ class RuntimeSupportTest {
             + " supported platforms: windows-x86_64, linux-x86_64, macos-aarch64",
         error.getMessage());
     assertThrows(UnsatisfiedLinkError.class, () -> Platform.detect("FreeBSD", "amd64"));
-    assertEquals("blpapi3_64.dll", Platform.WINDOWS_X86_64.blpapiLibraryNames().get(0));
-    assertEquals("libblpapi3_64.so", Platform.MACOS_AARCH64.blpapiLibraryNames().get(0));
   }
 
   @Test

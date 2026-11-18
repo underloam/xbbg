@@ -9,11 +9,12 @@ import java.util.concurrent.CompletableFuture;
  *
  * <p>The library never links blpapi, so it loads on machines without any Bloomberg runtime. It is
  * extracted from the jar and loaded on first use only; a failed load is not remembered, so a later
- * call can succeed.
+ * call can succeed. It downloads and verifies runtimes; finding and loading one is {@code
+ * xbbg_jni}'s job ({@code NativeXbbg.loadSdk}).
  */
 public final class NativeSdk {
   /** ABI version this class expects from {@code xbbg_sdk_jni}. */
-  public static final int ABI = 2;
+  public static final int ABI = 3;
 
   private static final String LIBRARY = "xbbg_sdk_jni";
   private static volatile boolean loaded;
@@ -25,8 +26,6 @@ public final class NativeSdk {
   static native void provision(String optionsJson, long token);
 
   static native String installed(String cacheDir, String platform);
-
-  static native String scanCache(String cacheDir, String platform);
 
   static native String defaultCacheRoot0();
 
@@ -91,21 +90,6 @@ public final class NativeSdk {
   public static String installedJson(Path cacheDir, String platform) {
     ensureLoaded();
     return installed(cacheDir.toAbsolutePath().toString(), platform);
-  }
-
-  /**
-   * Scans a cache root with the native resolver: every install is verified (provenance, path
-   * containment, sha256 re-hash, platform).
-   *
-   * @param cacheDir the cache root
-   * @param platform the platform id
-   * @return a JSON object: {@code runtimes}, the verified installs best first (newest version, then
-   *     newest provenance), and {@code rejected}, objects with {@code installDir} and {@code
-   *     reason}
-   */
-  public static String scanCacheJson(Path cacheDir, String platform) {
-    ensureLoaded();
-    return scanCache(cacheDir.toAbsolutePath().toString(), platform);
   }
 
   /**
