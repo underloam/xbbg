@@ -7,6 +7,7 @@ mod sdk;
 pub mod subscription_fixture;
 pub use ext::*;
 use request::pairs_to_map;
+pub use request::plan_request;
 pub use sdk::*;
 
 use std::collections::{HashMap, VecDeque};
@@ -3422,6 +3423,22 @@ mod tests {
         }
     }
 
+    /// Split a coded napi error into its `[XBBG:<CODE>` prefix, context JSON and message.
+    fn decode_coded(error: &Error) -> (String, serde_json::Value, String) {
+        let (code, rest) = error.reason.split_once("] ").expect("code prefix");
+        match rest
+            .strip_prefix("[XBBG_CONTEXT]")
+            .and_then(|rest| rest.split_once('\n'))
+        {
+            Some((context, message)) => (
+                code.to_string(),
+                serde_json::from_str(context).expect("context json"),
+                message.to_string(),
+            ),
+            None => (code.to_string(), serde_json::Value::Null, rest.to_string()),
+        }
+    }
+
     #[test]
     fn delayed_policy_input_normalizes_valid_values_and_rejects_unknown_values() {
         assert_eq!(
@@ -4266,6 +4283,144 @@ mod tests {
             Some(&["PX_LAST".to_string()][..])
         );
         assert_eq!(params.format.as_deref(), Some("long_typed"));
+    }
+
+    fn bare_request(operation: &str) -> RequestInput {
+        RequestInput {
+            service: "//blp/refdata".to_string(),
+            operation: operation.to_string(),
+            request_operation: None,
+            request_id: None,
+            extractor: None,
+            securities: None,
+            security: None,
+            fields: None,
+            overrides: None,
+            security_overrides: None,
+            elements: None,
+            kwargs: None,
+            json_elements: None,
+            start_date: None,
+            end_date: None,
+            start_datetime: None,
+            end_datetime: None,
+            request_tz: None,
+            output_tz: None,
+            event_type: None,
+            event_types: None,
+            interval: None,
+            options: None,
+            field_types: None,
+            include_security_errors: None,
+            return_eids: None,
+            on_delayed: None,
+            validate_fields: None,
+            search_spec: None,
+            field_ids: None,
+            format: None,
+        }
+    }
+
+    #[test]
+    fn request_input_flattens_json_elements_in_key_order_after_elements() {
+        let params = RequestParams::try_from(RequestInput {
+            elements: Some(vec![pair("first", "1")]),
+            json_elements: Some(
+                r#"{"z":{"b":2,"a":[1,{"x":null}]},"list":["s",3,true,null,[1]],"flag":false}"#
+                    .to_string(),
+            ),
+            ..bare_request("ReferenceDataRequest")
+        })
+        .expect("json elements");
+        let expected: Vec<(String, String)> = [
+            ("first", "1"),
+            ("flag", "false"),
+            ("list", "s"),
+            ("list", "3"),
+            ("list", "true"),
+            ("list", "null"),
+            ("list", "[1]"),
+            ("z.a", r#"[1,{"x":null}]"#),
+            ("z.b", "2"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_string(), value.to_string()))
+        .collect();
+        assert_eq!(params.elements, Some(expected));
+    }
+
+    #[test]
+    fn request_input_errors_are_coded_validation_errors() {
+        for (json, message) in [
+            ("{", "invalid jsonElements payload: "),
+            ("[1]", "jsonElements must be a JSON object at the top level"),
+            ("3", "jsonElements must be a JSON object at the top level"),
+        ] {
+            let error = RequestParams::try_from(RequestInput {
+                json_elements: Some(json.to_string()),
+                ..bare_request("ReferenceDataRequest")
+            })
+            .expect_err("bad jsonElements");
+            assert_eq!(error.status, Status::InvalidArg, "{json}");
+            let (code, context, text) = decode_coded(&error);
+            assert_eq!(code, "[XBBG:VALIDATION", "{json}");
+            assert_eq!(context["element"], "jsonElements", "{json}");
+            assert!(text.starts_with(message), "{json}: {text}");
+        }
+
+        let error = RequestParams::try_from(RequestInput {
+            on_delayed: Some("WARN".to_string()),
+            ..bare_request("ReferenceDataRequest")
+        })
+        .expect_err("unknown onDelayed policy");
+        let (code, context, text) = decode_coded(&error);
+        assert_eq!(code, "[XBBG:VALIDATION");
+        assert_eq!(context["element"], "onDelayed");
+        assert_eq!(text, "onDelayed must be warn, raise, or ignore");
+
+        let error = RequestParams::try_from(RequestInput {
+            extractor: Some("nope".to_string()),
+            ..bare_request("ReferenceDataRequest")
+        })
+        .expect_err("unknown extractor");
+        assert_eq!(decode_coded(&error).2, "invalid extractor type: nope");
+    }
+
+    #[test]
+    fn plan_request_returns_the_planned_request_as_json() {
+        let planned: serde_json::Value = serde_json::from_str(
+            &request::plan_request(
+                "bdp".to_string(),
+                r#"{"tickers":["IBM US Equity"],"fields":["PX_LAST"],"kwargs":{"b":2,"a":true}}"#
+                    .to_string(),
+            )
+            .expect("bdp plan"),
+        )
+        .expect("plan json");
+        assert_eq!(planned["service"], "//blp/refdata");
+        assert_eq!(planned["operation"], "ReferenceDataRequest");
+        assert_eq!(planned["extractor"], "refdata");
+        assert_eq!(planned["includeSecurityErrors"], false);
+        assert_eq!(
+            planned["kwargs"],
+            serde_json::json!([{"key": "b", "value": "2"}, {"key": "a", "value": "true"}])
+        );
+
+        let unknown = request::plan_request("bogus".to_string(), "{}".to_string())
+            .expect_err("unknown method");
+        assert_eq!(unknown.status, Status::GenericFailure);
+        assert_eq!(
+            unknown.reason,
+            "[XBBG:INTERNAL] unknown engine method 'bogus'"
+        );
+
+        let malformed = request::plan_request(
+            "bdp".to_string(),
+            r#"{"tickers":["A"],"fields":["F"],"extra":1}"#.to_string(),
+        )
+        .expect_err("unknown key");
+        assert_eq!(malformed.status, Status::InvalidArg);
+        assert_eq!(malformed.reason, "[XBBG:ARGUMENT] unknown field 'extra'");
     }
 
     #[test]

@@ -107,17 +107,17 @@ async function expectValidationError(promise: Promise<unknown>, message: string)
   expect(validation.element).toBe('tickers');
 }
 
+/** An engine whose native `request` records the params the wrappers send (after host planning). */
 function captureRequests(): api.Engine & { readonly calls: RequestInput[] } {
   const calls: RequestInput[] = [];
-  const engine = Object.create(api.Engine.prototype) as api.Engine & {
-    calls: RequestInput[];
-    request(params: RequestInput): Promise<unknown>;
-  };
+  const engine = Object.create(api.Engine.prototype) as api.Engine & { calls: RequestInput[] };
   engine.calls = calls;
-  engine.request = async (params: RequestInput): Promise<unknown> => {
-    calls.push(params);
-    return Promise.resolve(params);
-  };
+  Reflect.set(engine, 'inner', {
+    request: async (params: RequestInput): Promise<NativeArrowZeroCopyBatch> => {
+      calls.push(params);
+      return Promise.resolve(metadataBatch({}));
+    },
+  });
   return engine;
 }
 
@@ -892,17 +892,8 @@ describe('engine wrapper request plumbing', () => {
       start: '2024-01-01',
     });
 
-    const bdpOverrides = engine.calls[0]?.overrides;
-    const bdhOverrides = engine.calls[1]?.overrides;
-
-    expect(bdpOverrides).toBeInstanceOf(api.OverrideSpec);
-    expect((bdpOverrides as api.OverrideSpec).toPairs()).toStrictEqual([
-      { key: 'EQY_FUND_CRNCY', value: 'EUR' },
-    ]);
-    expect(bdhOverrides).toBeInstanceOf(api.OverrideSpec);
-    expect((bdhOverrides as api.OverrideSpec).toPairs()).toStrictEqual([
-      { key: 'EQY_FUND_CRNCY', value: 'USD' },
-    ]);
+    expect(engine.calls[0]?.overrides).toStrictEqual([{ key: 'EQY_FUND_CRNCY', value: 'EUR' }]);
+    expect(engine.calls[1]?.overrides).toStrictEqual([{ key: 'EQY_FUND_CRNCY', value: 'USD' }]);
   });
 
   it('carries per-security overrides inside JavaScript override specs', async () => {
@@ -926,38 +917,36 @@ describe('engine wrapper request plumbing', () => {
       start: '2024-01-01',
     });
 
-    const refOverrides = engine.calls[0]?.overrides;
-    const bulkOverrides = engine.calls[1]?.overrides;
-    const histOverrides = engine.calls[2]?.overrides;
-
-    expect(refOverrides).toBeInstanceOf(api.OverrideSpec);
-    expect((refOverrides as api.OverrideSpec).toPairs()).toStrictEqual([
-      { key: 'EQY_FUND_CRNCY', value: 'USD' },
-    ]);
-    expect((refOverrides as api.OverrideSpec).toSecurityOverrides()).toStrictEqual([
-      {
-        overrides: [{ key: 'EQY_FUND_CRNCY', value: 'EUR' }],
-        security: 'IBM US Equity',
-      },
-      {
-        overrides: [{ key: 'USER_LOCAL_TRADE_DATE', value: '20240102' }],
-        security: 'MSFT US Equity',
-      },
-    ]);
-    expect(bulkOverrides).toBeInstanceOf(api.OverrideSpec);
-    expect((bulkOverrides as api.OverrideSpec).toSecurityOverrides()).toStrictEqual([
-      {
-        overrides: [{ key: 'DVD_Start_Dt', value: '20240101' }],
-        security: 'IBM US Equity',
-      },
-    ]);
-    expect(histOverrides).toBeInstanceOf(api.OverrideSpec);
-    expect((histOverrides as api.OverrideSpec).toSecurityOverrides()).toStrictEqual([
-      {
-        overrides: [{ key: 'CRNCY', value: 'EUR' }],
-        security: 'IBM US Equity',
-      },
-    ]);
+    expect(engine.calls[0]).toMatchObject({
+      overrides: [{ key: 'EQY_FUND_CRNCY', value: 'USD' }],
+      securityOverrides: [
+        {
+          overrides: [{ key: 'EQY_FUND_CRNCY', value: 'EUR' }],
+          security: 'IBM US Equity',
+        },
+        {
+          overrides: [{ key: 'USER_LOCAL_TRADE_DATE', value: '20240102' }],
+          security: 'MSFT US Equity',
+        },
+      ],
+    });
+    expect(engine.calls[1]).toMatchObject({
+      securityOverrides: [
+        {
+          overrides: [{ key: 'DVD_Start_Dt', value: '20240101' }],
+          security: 'IBM US Equity',
+        },
+      ],
+    });
+    expect(engine.calls[1]).not.toHaveProperty('overrides');
+    expect(engine.calls[2]).toMatchObject({
+      securityOverrides: [
+        {
+          overrides: [{ key: 'CRNCY', value: 'EUR' }],
+          security: 'IBM US Equity',
+        },
+      ],
+    });
   });
 
   it('splits OverrideSpec security overrides at the native request boundary', async () => {

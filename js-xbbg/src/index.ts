@@ -7,8 +7,6 @@ import {
   CDX_INFO_FIELDS as GENERATED_CDX_INFO_FIELDS,
   CDX_PRICING_FIELDS as GENERATED_CDX_PRICING_FIELDS,
   CDX_RISK_FIELDS as GENERATED_CDX_RISK_FIELDS,
-  TA_DEFAULTS,
-  TA_STUDIES,
 } from './_defs_gen';
 import {
   Backend,
@@ -263,8 +261,6 @@ export const CDX_PRICING_FIELDS = Object.freeze([...GENERATED_CDX_PRICING_FIELDS
 
 export const CDX_RISK_FIELDS = Object.freeze([...GENERATED_CDX_RISK_FIELDS]);
 
-type StudyParams = Record<string, PrimitiveValue | undefined>;
-
 // ── Helpers ─────────────────────────────────────────────────────────────
 
 /**
@@ -301,6 +297,12 @@ function preflightStreamOptions(options: object): Record<string, unknown> {
 
 function toRequestString(value: unknown): string {
   return String(value);
+}
+
+function isPlannedRequest(value: unknown): value is RequestInput {
+  return (
+    isPlainObject(value) && typeof value.service === 'string' && typeof value.operation === 'string'
+  );
 }
 
 function getLegacySecurityOverrides(params: RequestInput): unknown {
@@ -537,17 +539,6 @@ export function ovr(...sources: OverrideSource[]): OverrideSpec {
   );
 }
 
-function mapOverridesToPairs(input: OverridesInput | undefined): StringPair[] | undefined {
-  if (input === undefined) {
-    return undefined;
-  }
-  const spec = ovr(input);
-  if (spec.toSecurityOverrides().length > 0) {
-    throw new TypeError('Per-security overrides are only supported by bdp(), bdh(), and bds()');
-  }
-  return spec.toPairs();
-}
-
 interface RequestOverrideParts {
   readonly overrides?: StringPair[];
   readonly securityOverrides?: SecurityOverrideSpec[];
@@ -564,45 +555,6 @@ function mapOverridesToRequestParts(input: OverridesInput | undefined): RequestO
     ...(overrides.length === 0 ? {} : { overrides }),
     ...(securityOverrides.length === 0 ? {} : { securityOverrides }),
   };
-}
-
-type BdtickBooleanOption =
-  | 'includeConditionCodes'
-  | 'includeExchangeCodes'
-  | 'includeBrokerCodes'
-  | 'includeRpsCodes'
-  | 'includeBicMicCodes'
-  | 'includeNonPlottableEvents'
-  | 'includeBloombergStandardConditionCodes';
-
-const BDTICK_BOOLEAN_KWARGS: readonly [BdtickBooleanOption, string][] = Object.freeze([
-  ['includeConditionCodes', 'includeConditionCodes'],
-  ['includeExchangeCodes', 'includeExchangeCodes'],
-  ['includeBrokerCodes', 'includeBrokerCodes'],
-  ['includeRpsCodes', 'includeRpsCodes'],
-  ['includeBicMicCodes', 'includeBicMicCodes'],
-  ['includeNonPlottableEvents', 'includeNonPlottableEvents'],
-  ['includeBloombergStandardConditionCodes', 'includeBloombergStandardConditionCodes'],
-]);
-
-function upsertStringPair(pairs: StringPair[], key: string, value: string): void {
-  const existing = pairs.find((pair) => pair.key === key);
-  if (existing === undefined) {
-    pairs.push({ key, value });
-    return;
-  }
-  existing.value = value;
-}
-
-function buildBdtickKwargs(options: BdtickOptions): StringPair[] | undefined {
-  const pairs = mapObjectToPairs(options.kwargs) ?? [];
-  for (const [optionName, requestName] of BDTICK_BOOLEAN_KWARGS) {
-    const typedValue = options[optionName];
-    if (typedValue !== undefined) {
-      upsertStringPair(pairs, requestName, typedValue ? 'true' : 'false');
-    }
-  }
-  return pairs.length > 0 ? pairs : undefined;
 }
 
 function toStringArray(value: string | readonly string[] | null | undefined): string[] {
@@ -704,22 +656,6 @@ function fullDayRange(dt: DateTimeLike): TimeRange {
   };
 }
 
-function normalizeDate(value: DateLike | undefined): string | undefined {
-  return formatDate(value);
-}
-
-function getStudyAttrName(study: string): string {
-  const normalized = study.toLowerCase().replaceAll(/-/gu, '_').replaceAll(/ /gu, '_');
-  const mapped = TA_STUDIES[normalized];
-  if (mapped !== undefined) {
-    return mapped;
-  }
-  if (normalized.endsWith('studyattributes')) {
-    return normalized;
-  }
-  return `${normalized}StudyAttributes`;
-}
-
 interface RawStudy {
   studyType?: string;
   study?: string;
@@ -730,111 +666,26 @@ interface RawStudy {
   [key: string]: PrimitiveValue | undefined;
 }
 
-function buildTaRequest(
-  ticker: string,
-  study: string | RawStudy,
-  options: BtaOptions = {},
-): StringPair[] {
-  const rawStudy: RawStudy = typeof study === 'string' ? { studyType: study } : { ...study };
-  const studyType =
-    rawStudy.studyType ?? rawStudy.study ?? (typeof study === 'string' ? study : '');
-  const attrName = getStudyAttrName(toRequestString(studyType));
+const BTA_DATE_KWARGS = ['startDate', 'start_date', 'endDate', 'end_date'] as const;
 
-  const kwargs: Record<string, PrimitiveValue> = { ...options.kwargs };
-  const startDate = normalizeDate(
-    stringOrUndef(kwargs.startDate) ??
-      stringOrUndef(kwargs.start_date) ??
-      options.startDate ??
-      options.start_date,
-  );
-  const endDate = normalizeDate(
-    stringOrUndef(kwargs.endDate) ??
-      stringOrUndef(kwargs.end_date) ??
-      options.endDate ??
-      options.end_date,
-  );
-  const periodicity = toRequestString(
-    stringOrUndef(kwargs.periodicitySelection) ??
-      stringOrUndef(kwargs.periodicity) ??
-      rawStudy.calcInterval ??
-      options.periodicity ??
-      'DAILY',
-  ).toUpperCase();
-  const interval = kwargs.interval ?? rawStudy.interval ?? options.interval;
-
-  delete kwargs.startDate;
-  delete kwargs.start_date;
-  delete kwargs.endDate;
-  delete kwargs.end_date;
-  delete kwargs.periodicitySelection;
-  delete kwargs.periodicity;
-  delete rawStudy.studyType;
-  delete rawStudy.study;
-  delete rawStudy.calcInterval;
-
-  if (rawStudy.length !== undefined && rawStudy.period === undefined) {
-    rawStudy.period = rawStudy.length;
+/** `bta` kwargs with their date members host-formatted, as the native planner expects. */
+function btaPlanKwargs(kwargs: OverridesMap | undefined): OverridesMap | undefined {
+  if (kwargs === undefined) {
+    return undefined;
   }
-  delete rawStudy.length;
-
-  const params: StudyParams = {
-    ...TA_DEFAULTS[attrName],
-    ...options.studyParams,
-    ...(rawStudy as StudyParams),
-  };
-
-  if (params.length !== undefined && params.period === undefined) {
-    params.period = params.length;
+  const formatted: OverridesMap = { ...kwargs };
+  for (const key of BTA_DATE_KWARGS) {
+    const value = formatted[key];
+    if (typeof value === 'string') {
+      formatted[key] = formatDate(value) ?? '';
+    }
   }
-  delete params.length;
-  delete params.calcInterval;
-
-  const elements: StringPair[] = [
-    { key: 'priceSource.securityName', value: toRequestString(ticker) },
-  ];
-
-  if (periodicity === 'INTRADAY') {
-    const prefix = 'priceSource.dataRange.intraday';
-    if (startDate !== undefined) {
-      elements.push({ key: `${prefix}.startDate`, value: startDate });
-    }
-    if (endDate !== undefined) {
-      elements.push({ key: `${prefix}.endDate`, value: endDate });
-    }
-    elements.push({ key: `${prefix}.eventType`, value: 'TRADE' });
-    if (interval !== undefined) {
-      elements.push({ key: `${prefix}.interval`, value: toRequestString(interval) });
-    }
-  } else {
-    const prefix = 'priceSource.dataRange.historical';
-    if (startDate !== undefined) {
-      elements.push({ key: `${prefix}.startDate`, value: startDate });
-    }
-    if (endDate !== undefined) {
-      elements.push({ key: `${prefix}.endDate`, value: endDate });
-    }
-    elements.push({ key: `${prefix}.periodicitySelection`, value: periodicity });
-  }
-
-  for (const [key, value] of Object.entries(params)) {
-    if (value === undefined) {
-      continue;
-    }
-    elements.push({
-      key: `studyAttributes.${attrName}.${key}`,
-      value: toRequestString(value),
-    });
-  }
-
-  for (const [key, value] of Object.entries(kwargs)) {
-    elements.push({ key: toRequestString(key), value: toRequestString(value) });
-  }
-
-  return elements;
+  return formatted;
 }
 
-function stringOrUndef(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+/** JSON drops `undefined`, yet an `undefined` study parameter unsets its default: send `null`. */
+function undefinedAsNull(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, value ?? null]));
 }
 
 // ── Configured engine state ─────────────────────────────────────────────
@@ -986,7 +837,6 @@ export class Engine {
 
   public async request(params: RequestInput): Promise<unknown> {
     const backend = normalizeBackend(params.backend);
-    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { backend: _discarded, overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -994,7 +844,12 @@ export class Engine {
         'Use overrides: ovr({ "<SECURITY>": { ... } }) for per-security overrides',
       );
     }
-    const nativeParams = { ...rest, ...mapOverridesToRequestParts(overrides) };
+    return await this.execute(backend, { ...rest, ...mapOverridesToRequestParts(overrides) });
+  }
+
+  /** Run a native request and convert the result for `backend`. */
+  private async execute(backend: BackendKind, nativeParams: RequestInput): Promise<unknown> {
+    const warnDelayed = warnsOnDelayedData(nativeParams.onDelayed);
     try {
       if (backend === Backend.POLARS) {
         const file = await this.inner.requestIpcFile(nativeParams);
@@ -1013,6 +868,25 @@ export class Engine {
     } catch (error) {
       throw wrapError(error);
     }
+  }
+
+  /** Plan a typed request with the host planner (`args` is its JSON argument object), then run it. */
+  private async plannedRequest(
+    method: string,
+    backend: BackendKind | undefined,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    const normalized = normalizeBackend(backend);
+    let nativeParams: unknown;
+    try {
+      nativeParams = JSON.parse(native.planRequest(method, JSON.stringify(args)));
+    } catch (error) {
+      throw wrapError(error);
+    }
+    if (!isPlannedRequest(nativeParams)) {
+      throw new TypeError(`native planner returned an invalid ${method} request`);
+    }
+    return await this.execute(normalized, nativeParams);
   }
 
   public async requestRaw(params: RequestInput): Promise<Buffer> {
@@ -1044,19 +918,15 @@ export class Engine {
     fields: readonly string[],
     options: BdpOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      extractor: 'refdata',
+    return await this.plannedRequest('bdp', options.backend, {
+      tickers,
       fields,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       includeSecurityErrors: Boolean(options.includeSecurityErrors),
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'ReferenceDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
       validateFields: options.validateFields,
     });
   }
@@ -1066,17 +936,13 @@ export class Engine {
     fields: readonly string[],
     options: Omit<BdpOptions, 'onDelayed'> = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      extractor: 'bulk',
+    return await this.plannedRequest('bds', options.backend, {
+      tickers,
       fields,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       returnEids: options.returnEids,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'ReferenceDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
       validateFields: options.validateFields,
     });
   }
@@ -1086,115 +952,83 @@ export class Engine {
     fields: readonly string[],
     options: BdhOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDate: formatDate(options.end),
-      extractor: 'histdata',
+    return await this.plannedRequest('bdh', options.backend, {
+      tickers,
       fields,
+      start: formatDate(options.start),
+      end: formatDate(options.end),
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'HistoricalDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
-      startDate: formatDate(options.start),
       validateFields: options.validateFields,
     });
   }
 
   public async bdib(ticker: string, options: BdibOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDatetime: formatDateTime(options.end),
-      eventType: options.eventType ?? 'TRADE',
-      extractor: 'intraday_bar',
-      interval: options.interval ?? 1,
+    return await this.plannedRequest('bdib', options.backend, {
+      ticker,
+      start: formatDateTime(options.start),
+      end: formatDateTime(options.end),
+      requestTz: options.requestTz,
+      outputTz: options.outputTz,
+      eventType: options.eventType,
+      interval: options.interval,
+      kwargs: options.kwargs,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'IntradayBarRequest',
-      outputTz: options.outputTz,
-      requestTz: options.requestTz,
-      security: ticker,
-      service: '//blp/refdata',
-      startDatetime: formatDateTime(options.start),
     });
   }
 
   public async bdtick(ticker: string, options: BdtickOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDatetime: formatDateTime(options.end),
-      eventTypes: options.eventTypes ?? ['TRADE'],
-      extractor: 'intraday_tick',
-      kwargs: buildBdtickKwargs(options),
+    return await this.plannedRequest('bdtick', options.backend, {
+      ticker,
+      start: formatDateTime(options.start),
+      end: formatDateTime(options.end),
+      requestTz: options.requestTz,
+      outputTz: options.outputTz,
+      eventTypes: options.eventTypes,
+      includeConditionCodes: options.includeConditionCodes,
+      includeExchangeCodes: options.includeExchangeCodes,
+      includeBrokerCodes: options.includeBrokerCodes,
+      includeRpsCodes: options.includeRpsCodes,
+      includeBicMicCodes: options.includeBicMicCodes,
+      includeNonPlottableEvents: options.includeNonPlottableEvents,
+      includeBloombergStandardConditionCodes: options.includeBloombergStandardConditionCodes,
+      kwargs: options.kwargs,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      operation: 'IntradayTickRequest',
-      outputTz: options.outputTz,
-      requestTz: options.requestTz,
-      security: ticker,
-      service: '//blp/refdata',
-      startDatetime: formatDateTime(options.start),
     });
   }
 
   public async bql(query: string, options: BqlOptions = {}): Promise<unknown> {
-    let kwargs = mapObjectToPairs(options.kwargs);
-    if (options.appName !== undefined) {
-      kwargs ??= [];
-      upsertStringPair(kwargs, 'clientContext.appName', options.appName);
-    }
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'expression', value: toRequestString(query) }],
-      extractor: 'bql',
+    return await this.plannedRequest('bql', options.backend, {
+      query: toRequestString(query),
+      appName: options.appName,
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs,
-      operation: 'sendQuery',
-      service: '//blp/bqlsvc',
     });
   }
 
   public async beqs(screen: string, options: BeqsOptions = {}): Promise<unknown> {
-    const elements: StringPair[] = [
-      { key: 'screenName', value: toRequestString(screen) },
-      { key: 'screenType', value: toRequestString(options.screenType ?? 'PRIVATE') },
-      { key: 'Group', value: toRequestString(options.group ?? 'General') },
-    ];
-    if (options.asof !== undefined) {
-      const asofFormatted = formatDate(options.asof);
-      if (asofFormatted !== undefined) {
-        elements.push({ key: 'asOfDate', value: asofFormatted });
-      }
-    }
-    return await this.request({
-      backend: options.backend,
-      elements,
-      extractor: 'generic',
+    return await this.plannedRequest('beqs', options.backend, {
+      screen: toRequestString(screen),
+      asof: formatDate(options.asof),
+      screenType: options.screenType,
+      group: options.group,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'BeqsRequest',
-      overrides: mapOverridesToPairs(options.overrides),
-      service: '//blp/refdata',
     });
   }
 
   public async bsrch(searchSpec: string, options: BsrchOptions = {}): Promise<unknown> {
-    const elements: StringPair[] = [
-      { key: 'Domain', value: toRequestString(searchSpec) },
-      ...(mapOverridesToPairs(options.overrides) ?? []),
-      ...(mapObjectToPairs(options.kwargs) ?? []),
-    ];
-    return await this.request({
-      backend: options.backend,
-      elements,
-      extractor: 'bsrch',
+    return await this.plannedRequest('bsrch', options.backend, {
+      searchSpec: toRequestString(searchSpec),
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      operation: 'ExcelGetGridRequest',
-      service: '//blp/exrsvc',
     });
   }
 
@@ -1203,46 +1037,35 @@ export class Engine {
     study: string | RawStudy,
     options: BtaOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: buildTaRequest(ticker, study, options),
-      extractor: 'generic',
+    return await this.plannedRequest('bta', options.backend, {
+      ticker: toRequestString(ticker),
+      study: typeof study === 'string' ? study : undefinedAsNull(study),
+      studyParams:
+        options.studyParams === undefined ? undefined : undefinedAsNull(options.studyParams),
+      kwargs: btaPlanKwargs(options.kwargs),
+      startDate: formatDate(options.startDate ?? options.start_date),
+      endDate: formatDate(options.endDate ?? options.end_date),
+      periodicity: options.periodicity,
+      interval: options.interval,
       format: options.format,
-      operation: 'studyRequest',
-      service: '//blp/tasvc',
     });
   }
 
   public async bflds(options: BfldsOptions = {}): Promise<unknown> {
-    if (options.searchSpec !== undefined) {
-      return await this.request({
-        backend: options.backend,
-        format: options.format,
-        kwargs: mapObjectToPairs(options.kwargs),
-        operation: 'FieldSearchRequest',
-        searchSpec: toRequestString(options.searchSpec),
-        service: '//blp/apiflds',
-      });
-    }
-    const fields = toStringArray(options.fields);
-    return await this.request({
-      backend: options.backend,
-      fieldIds: fields,
+    return await this.plannedRequest('bflds', options.backend, {
+      fields: options.fields === undefined ? undefined : toStringArray(options.fields),
+      searchSpec:
+        options.searchSpec === undefined ? undefined : toRequestString(options.searchSpec),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'FieldInfoRequest',
-      service: '//blp/apiflds',
     });
   }
 
   public async blkp(query: string, options: BlkpOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(query) }],
+    return await this.plannedRequest('blkp', options.backend, {
+      query: toRequestString(query),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'instrumentListRequest',
-      service: '//blp/instruments',
     });
   }
 
@@ -1251,37 +1074,30 @@ export class Engine {
     fields: string | readonly string[],
     options: RequestOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
+    return await this.plannedRequest('bport', options.backend, {
+      portfolio: toRequestString(portfolio),
       fields: Array.isArray(fields) ? fields : [toRequestString(fields)],
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'PortfolioDataRequest',
-      overrides: mapOverridesToPairs(options.overrides),
-      security: toRequestString(portfolio),
-      service: '//blp/refdata',
     });
   }
 
+  // The host planners reject overrides for bcurves/bgovts.
+  // This API has always ignored them, so they are deliberately not forwarded.
   public async bcurves(ticker: string, options: RequestOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(ticker) }],
+    return await this.plannedRequest('bcurves', options.backend, {
+      ticker: toRequestString(ticker),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'curveListRequest',
-      service: '//blp/instruments',
     });
   }
 
   public async bgovts(ticker: string, options: RequestOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(ticker) }],
+    return await this.plannedRequest('bgovts', options.backend, {
+      ticker: toRequestString(ticker),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'govtListRequest',
-      service: '//blp/instruments',
     });
   }
 

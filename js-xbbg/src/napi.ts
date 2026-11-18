@@ -462,6 +462,12 @@ export interface NativeAddon {
   /** The loaded runtime's `major.minor.patch.build`, or null before one is loaded. */
   sdkVersion: () => string | null;
 
+  /**
+   * Plan a typed request (`bdp`, `bdh`, `bta`, ...) with the host planner. `args` is the
+   * planner's JSON argument object; returns the planned `RequestInput` as JSON.
+   */
+  planRequest: (method: string, args: string) => string;
+
   // Auction utilities
   extAuctionFieldGroup: (name: string) => string[] | null;
   extAuctionZeroPriceFields: () => string[];
