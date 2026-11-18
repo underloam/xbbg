@@ -8174,6 +8174,7 @@ dependencies = [
  "tokio",
  "xbbg-async",
  "xbbg-ext",
+ "xbbg-host",
  "xbbg-log",
  "xbbg-recipes",
  "xbbg_core",

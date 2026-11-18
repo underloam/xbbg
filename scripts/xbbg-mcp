@@ -1,6 +1,17 @@
 #!/usr/bin/env sh
 set -eu
 
+# The launcher does not search for the Bloomberg runtime. xbbg-mcp finds and loads it itself
+# (explicit XBBG_MCP_LIB_DIR, BLPAPI_LIB_DIR, BLPAPI_ROOT, XBBG_DEV_SDK_ROOT, the vendored SDK of a
+# checkout, hint directories, a Bloomberg Terminal install, the library search path variables, the
+# xbbg cache). It only passes what the binary cannot know:
+#
+#   XBBG_MCP_HINT_DIRS  the directory of the Python `blpapi` package, when one is installed
+#   XBBG_MCP_REPO_ROOT  this checkout, when the launcher runs from one
+#
+# Neither overrides a value already set in the environment, and nothing here touches
+# DYLD_LIBRARY_PATH, LD_LIBRARY_PATH or PATH.
+
 warn() {
     printf 'xbbg-mcp: %s\n' "$1" >&2
 }
@@ -32,181 +43,26 @@ script_dir() {
     CDPATH= cd -- "$(dirname -- "$0")" && pwd
 }
 
-contains_blpapi_lib() {
-    dir=$1
-    [ -d "$dir" ] || return 1
-
-    for name in \
-        libblpapi3.dylib \
-        libblpapi3.so \
-        libblpapi3_64.so \
-        blpapi3_64.dll \
-        blpapi3_32.dll
-    do
-        if [ -f "$dir/$name" ]; then
-            return 0
-        fi
-    done
-
-    return 1
-}
-
-resolve_sdk_root_layout() {
-    sdk_root=$1
-    [ -d "$sdk_root" ] || return 1
-
-    if contains_blpapi_lib "$sdk_root"; then
-        printf '%s\n' "$sdk_root"
-        return 0
-    fi
-
-    os_name=$(uname -s 2>/dev/null || printf 'unknown')
-    case "$os_name" in
-        Darwin)
-            for candidate in "$sdk_root/Darwin" "$sdk_root/lib" "$sdk_root/lib64"; do
-                if contains_blpapi_lib "$candidate"; then
-                    printf '%s\n' "$candidate"
-                    return 0
-                fi
-            done
-            ;;
-        Linux)
-            for candidate in "$sdk_root/Linux" "$sdk_root/lib64" "$sdk_root/lib"; do
-                if contains_blpapi_lib "$candidate"; then
-                    printf '%s\n' "$candidate"
-                    return 0
-                fi
-            done
-            ;;
-        MINGW*|MSYS*|CYGWIN*)
-            for candidate in "$sdk_root/bin" "$sdk_root/lib"; do
-                if contains_blpapi_lib "$candidate"; then
-                    printf '%s\n' "$candidate"
-                    return 0
-                fi
-            done
-            ;;
-        *)
-            for candidate in "$sdk_root/lib" "$sdk_root/lib64"; do
-                if contains_blpapi_lib "$candidate"; then
-                    printf '%s\n' "$candidate"
-                    return 0
-                fi
-            done
-            ;;
-    esac
-
-    latest_version_dir=$(find_latest_version_dir "$sdk_root") || latest_version_dir=
-    if [ -n "$latest_version_dir" ]; then
-        resolve_sdk_root_layout "$latest_version_dir" && return 0
-    fi
-
-    return 1
-}
-
-find_latest_version_dir() {
-    root=$1
-    [ -d "$root" ] || return 1
-
-    py=$(choose_python) || return 1
-    ROOT="$root" "$py" - <<'PY'
-import os
-from pathlib import Path
-import re
-
-root = Path(os.environ["ROOT"])
-pattern = re.compile(r"\d+\.\d+\.\d+(?:\.\d+)?$")
-candidates = [path for path in root.iterdir() if path.is_dir() and pattern.fullmatch(path.name)]
-if not candidates:
-    raise SystemExit(1)
-
-def key(path: Path) -> tuple[int, ...]:
-    parts = [int(part) for part in path.name.split(".")]
-    while len(parts) < 4:
-        parts.append(0)
-    return tuple(parts)
-
-print(max(candidates, key=key))
-PY
-}
-
+# The directory of the Python `blpapi` package, found without importing it.
 find_python_blpapi_dir() {
     py=$(choose_python) || return 1
     "$py" - <<'PY'
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 try:
-    import blpapi  # type: ignore
-except Exception as exc:
-    raise SystemExit(1) from exc
-
-module_path = getattr(blpapi, "__file__", None)
-if not module_path:
+    spec = importlib.util.find_spec("blpapi")
+except (ImportError, ValueError):
     raise SystemExit(1)
 
-path = Path(module_path).resolve().parent
-for candidate in (path, path / "lib"):
-    if any((candidate / name).is_file() for name in (
-        "libblpapi3.dylib",
-        "libblpapi3.so",
-        "libblpapi3_64.so",
-        "blpapi3_64.dll",
-        "blpapi3_32.dll",
-    )):
-        print(candidate)
-        raise SystemExit(0)
+origin = getattr(spec, "origin", None)
+if not origin or origin in ("built-in", "frozen"):
+    raise SystemExit(1)
 
-raise SystemExit(1)
+print(Path(origin).resolve().parent)
 PY
-}
-
-find_vendored_sdk_dir() {
-    base_dir=$1
-    vendor_root="$base_dir/vendor/blpapi-sdk"
-    [ -d "$vendor_root" ] || return 1
-
-    latest_version_dir=$(find_latest_version_dir "$vendor_root") || return 1
-    resolve_sdk_root_layout "$latest_version_dir"
-}
-
-find_runtime_lib_dir() {
-    if [ "${XBBG_MCP_LIB_DIR:-}" ] && contains_blpapi_lib "$XBBG_MCP_LIB_DIR"; then
-        printf '%s\n' "$XBBG_MCP_LIB_DIR"
-        return 0
-    fi
-
-    if [ "${BLPAPI_LIB_DIR:-}" ] && contains_blpapi_lib "$BLPAPI_LIB_DIR"; then
-        printf '%s\n' "$BLPAPI_LIB_DIR"
-        return 0
-    fi
-
-    if [ "${BLPAPI_ROOT:-}" ]; then
-        lib_dir=$(resolve_sdk_root_layout "$BLPAPI_ROOT") || lib_dir=
-        if [ -n "$lib_dir" ]; then
-            printf '%s\n' "$lib_dir"
-            return 0
-        fi
-    fi
-
-    script_home=$(script_dir)
-    repo_root=$(CDPATH= cd -- "$script_home/.." 2>/dev/null && pwd || true)
-    if [ -n "$repo_root" ]; then
-        lib_dir=$(find_vendored_sdk_dir "$repo_root") || lib_dir=
-        if [ -n "$lib_dir" ]; then
-            printf '%s\n' "$lib_dir"
-            return 0
-        fi
-    fi
-
-    lib_dir=$(find_python_blpapi_dir) || lib_dir=
-    if [ -n "$lib_dir" ]; then
-        printf '%s\n' "$lib_dir"
-        return 0
-    fi
-
-    return 1
 }
 
 find_real_binary() {
@@ -232,27 +88,23 @@ find_real_binary() {
     return 1
 }
 
-append_loader_path() {
-    lib_dir=$1
-    os_name=$(uname -s 2>/dev/null || printf 'unknown')
-    case "$os_name" in
-        Darwin)
-            export DYLD_LIBRARY_PATH="$lib_dir${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}"
-            ;;
-        Linux)
-            export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            ;;
-        MINGW*|MSYS*|CYGWIN*)
-            export PATH="$lib_dir${PATH:+:$PATH}"
-            ;;
-        *)
-            export LD_LIBRARY_PATH="$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-            ;;
-    esac
+export_runtime_hints() {
+    if [ -z "${XBBG_MCP_HINT_DIRS:-}" ]; then
+        hint_dir=$(find_python_blpapi_dir 2>/dev/null) || hint_dir=
+        if [ -n "$hint_dir" ]; then
+            export XBBG_MCP_HINT_DIRS="$hint_dir"
+        fi
+    fi
+
+    if [ -z "${XBBG_MCP_REPO_ROOT:-}" ]; then
+        repo_root=$(CDPATH= cd -- "$(script_dir)/.." 2>/dev/null && pwd || true)
+        if [ -n "$repo_root" ] && [ -f "$repo_root/Cargo.toml" ] && [ -d "$repo_root/apps/xbbg-mcp" ]; then
+            export XBBG_MCP_REPO_ROOT="$repo_root"
+        fi
+    fi
 }
 
 REAL_BIN=$(find_real_binary) || die "could not locate the real xbbg-mcp binary. Reinstall it or set XBBG_MCP_REAL_BIN."
-LIB_DIR=$(find_runtime_lib_dir) || die "could not locate the Bloomberg runtime library. Set XBBG_MCP_LIB_DIR, BLPAPI_LIB_DIR, or BLPAPI_ROOT, or install Bloomberg's blpapi package."
 
-append_loader_path "$LIB_DIR"
+export_runtime_hints
 exec "$REAL_BIN" "$@"

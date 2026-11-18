@@ -163,13 +163,19 @@ GitHub release assets include only the launcher wrapper and compiled xbbg binary
 
 GitHub Release tar/zip assets remain the raw binary channel. The MCPB asset is the directory and one-click local connector channel for MCPB-aware clients and registries.
 
-The wrapper locates the Bloomberg runtime in this order:
+The `xbbg-mcp` binary finds and loads the Bloomberg runtime itself, at startup, before it serves anything; the launcher script only passes what the binary cannot know (the directory of the Python `blpapi` package, and the checkout it runs from). The search order is the one every xbbg host shares:
 
-1. `XBBG_MCP_LIB_DIR`
+1. `XBBG_MCP_LIB_DIR` (a runtime directory or library file)
 2. `BLPAPI_LIB_DIR`
 3. `BLPAPI_ROOT`
-4. locally staged authorized SDK under `vendor/blpapi-sdk/`
-5. the official Python `blpapi` package
+4. `XBBG_DEV_SDK_ROOT` (relative to the checkout when the launcher runs from one)
+5. locally staged authorized SDK under `vendor/blpapi-sdk/` (checkout only)
+6. hint directories: `XBBG_MCP_HINT_DIRS`, an OS path list the launcher sets to the official Python `blpapi` package directory
+7. a Bloomberg Terminal install (`~/blp/DAPI`, `/opt/bloomberg/DAPI`; the usual `DAPI` directories on Windows)
+8. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS)
+9. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`)
+
+A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried. If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
 
 If you install Bloomberg's Python package, the wrapper can usually run without any extra shell configuration:
 
@@ -185,7 +191,7 @@ Claude Desktop and MCPB-aware registries can use the `xbbg-mcp-v<VERSION>.mcpb` 
 
 The MCPB does not include Bloomberg SDK files, Bloomberg runtime libraries, credentials, or market data. Configure `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, or install Bloomberg's official Python `blpapi` package so the launcher can find the authorized Bloomberg runtime locally.
 
-On Windows the MCPB PowerShell launcher follows the same order, then also scans `PATH` (a Bloomberg Terminal install puts `C:\blp\DAPI` there) before falling back to the Python package. `xbbg-mcp.exe` is 64-bit and needs `blpapi3_64.dll`; a runtime whose version cannot be read, or which is too old to export the entry points the binary imports, is skipped with a diagnostic. The minimum, currently Bloomberg API 3.20.0, is derived from imported symbol versions when the bundle is packaged; packaging fails rather than silently disabling the gate if derivation is impossible. The launcher makes the validated directory both the child's working directory and the first `PATH` entry, and refuses a higher-priority DLL beside the executable or in a Windows system directory that would shadow it. It starts `xbbg-mcp.exe` with inherited standard handles, so the MCP host talks to the binary directly rather than through PowerShell. Loader-status diagnostics name the selected Bloomberg runtime without claiming that it caused every direct or transitive loader failure.
+On Windows the MCPB PowerShell launcher passes the same hint (the Python `blpapi` package directory) and starts `xbbg-mcp.exe` with the standard handles inherited; the binary runs the search above, including `PATH` (a Bloomberg Terminal install puts `C:\blp\DAPI` there). `xbbg-mcp.exe` is 64-bit and needs `blpapi3_64.dll`. It is loaded by absolute path, so no DLL version gate, working-directory or `PATH` rewriting is needed: a runtime that is too old fails to provide a required function and is skipped with that reason in the startup error.
 
 ## Troubleshooting
 

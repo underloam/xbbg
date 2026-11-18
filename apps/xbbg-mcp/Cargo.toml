@@ -24,6 +24,8 @@ tokio = { workspace = true, features = ["io-std", "io-util", "macros", "rt-multi
 # explicitly here: this binary previously inherited it via default features.
 xbbg-async = { workspace = true, features = ["live"] }
 xbbg-ext = { workspace = true }
+# Finds and loads the Bloomberg runtime at startup (`xbbg_host::sdk`).
+xbbg-host = { workspace = true, features = ["live"] }
 xbbg-recipes = { workspace = true }
 xbbg_core = { workspace = true, features = ["live"] }
 xbbg-log = { workspace = true }

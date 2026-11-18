@@ -21,6 +21,7 @@ use xbbg_recipes::{
 };
 
 mod request_adapter;
+mod runtime;
 mod serialization;
 mod stdin;
 
@@ -933,6 +934,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Warnings and errors from rmcp and the engine go to stderr (RUST_LOG raises the level).
     // Without a subscriber a transport failure ends the process silently with status 0.
     xbbg_log::init();
+    // The runtime must be loaded before anything touches the engine: nothing links Bloomberg.
+    let sdk = match runtime::load() {
+        Ok(sdk) => sdk,
+        Err(error) => {
+            // Printed, not returned: `main`'s error is shown with `Debug`, which would flatten the
+            // rejection list onto one line.
+            eprintln!("{}", runtime::startup_error(&error));
+            std::process::exit(1);
+        }
+    };
+    xbbg_log::info!(
+        path = %sdk.path.display(),
+        source = %sdk.source,
+        detail = %sdk.detail,
+        version = %sdk.version,
+        "loaded the Bloomberg runtime"
+    );
     let server = XbbgMcpServer::new_from_env()?;
     let (stdin, stdin_monitor) = stdin::stdin()?;
     let quit_reason = server

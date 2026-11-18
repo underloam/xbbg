@@ -120,8 +120,9 @@ note ""
 note "Release assets do not bundle Bloomberg SDK files or the Bloomberg runtime."
 note "Install Bloomberg's Python blpapi package or provide your own SDK/runtime locally."
 note ""
-note "The launcher will try XBBG_MCP_LIB_DIR / BLPAPI_LIB_DIR / BLPAPI_ROOT first,"
-note "then fall back to a vendored SDK or the Python blpapi package at runtime."
+note "xbbg-mcp finds the runtime itself: XBBG_MCP_LIB_DIR / BLPAPI_LIB_DIR / BLPAPI_ROOT first,"
+note "then the Python blpapi package, a Bloomberg Terminal install, the library search path"
+note "variables and the xbbg cache."
 
 case ":$PATH:" in
     *":$INSTALL_DIR:"*)

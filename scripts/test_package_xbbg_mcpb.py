@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 import subprocess
 import sys
@@ -12,61 +11,54 @@ import pytest
 from scripts import package_xbbg_mcpb, render_mcp_registry_server
 
 
-@pytest.mark.parametrize(
-    ("value", "expected"),
-    [
-        ("3.20.0", "3.20.0"),
-        ("3.26.4.2", "3.26.4.2"),
-        ("03.020.000.0002", "3.20.0.2"),
-    ],
-)
-def test_parse_blpapi_version_canonicalizes_numeric_versions(value: str, expected: str) -> None:
-    assert package_xbbg_mcpb.parse_blpapi_version(value) == expected
+def test_windows_launcher_leaves_the_runtime_search_to_the_binary() -> None:
+    launcher = package_xbbg_mcpb.render_windows_launcher()
+
+    assert "@UNSUPPORTED_PLATFORM_MESSAGE@" not in launcher and "@MISSING_REAL_BINARY_MESSAGE@" not in launcher
+    assert package_xbbg_mcpb.MISSING_REAL_BINARY_MESSAGE in launcher
+    assert 'EnvironmentVariables["XBBG_MCP_HINT_DIRS"] = $hintDir' in launcher
+    assert "find_spec" in launcher
+    for removed in (
+        "requiredBlpapiVersion",
+        "FileVersionInfo",
+        "Assert-ValidatedDllWins",
+        "WorkingDirectory",
+        'EnvironmentVariables["PATH"]',
+        "Find-RuntimeLibDir",
+        "blpapi3_64.dll",
+    ):
+        assert removed not in launcher
 
 
-@pytest.mark.parametrize(
-    "value",
-    [
-        "3.20",
-        "3.20.0.1.2",
-        "3.20.-1",
-        "3.20.65536",
-        '3.20.0"; Write-Output injected; #',
-    ],
-)
-def test_parse_blpapi_version_rejects_invalid_or_unsafe_values(value: str) -> None:
-    with pytest.raises(argparse.ArgumentTypeError):
-        package_xbbg_mcpb.parse_blpapi_version(value)
+def test_posix_launcher_passes_hints_and_never_touches_the_loader_path() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    for launcher in (
+        (repo_root / "scripts" / "xbbg-mcp").read_text(encoding="utf-8"),
+        package_xbbg_mcpb.render_posix_launcher(repo_root),
+    ):
+        assert "export XBBG_MCP_HINT_DIRS" in launcher
+        assert "export XBBG_MCP_REPO_ROOT" in launcher
+        for removed in ("export DYLD_", "export LD_LIBRARY_PATH", "export PATH", "contains_blpapi_lib"):
+            assert removed not in launcher
 
 
-def test_minimum_blpapi_version_uses_newest_imported_symbol(tmp_path) -> None:
-    binary = tmp_path / "xbbg-mcp-real"
-    binary.write_bytes(b"prefix\0BLPAPI_3.6.4\0BLPAPI_3.20.0\0BLPAPI_3.15.0\0suffix")
+def test_staged_posix_launcher_replaces_only_the_real_binary_lookup() -> None:
+    repo_root = Path(__file__).resolve().parents[1]
+    source = (repo_root / "scripts" / "xbbg-mcp").read_text(encoding="utf-8")
+    staged = package_xbbg_mcpb.render_posix_launcher(repo_root)
 
-    assert package_xbbg_mcpb.minimum_blpapi_version(binary) == "3.20.0"
-
-
-def test_minimum_blpapi_version_fails_closed_without_symbols(tmp_path) -> None:
-    binary = tmp_path / "xbbg-mcp-real"
-    binary.write_bytes(b"no Bloomberg symbol versions")
-
-    with pytest.raises(SystemExit, match="pass --min-blpapi-version explicitly"):
-        package_xbbg_mcpb.minimum_blpapi_version(binary)
+    assert "bin/darwin-arm64/xbbg-mcp-real" in staged
+    assert "bin/darwin-arm64/xbbg-mcp-real" not in source
+    assert staged.split("export_runtime_hints() {")[1] == source.split("export_runtime_hints() {")[1]
 
 
-def test_windows_launcher_controls_dll_precedence() -> None:
-    launcher = package_xbbg_mcpb.render_windows_launcher("03.020.000")
+def test_readme_describes_the_binary_side_search_order() -> None:
+    readme = package_xbbg_mcpb.README_TEMPLATE.format(version="1.0.0")
 
-    assert '$requiredBlpapiVersion = [Version]"3.20.0"' in launcher
-    assert "Assert-ValidatedDllWins $realBin $libDir" in launcher
-    assert "$startInfo.WorkingDirectory = $libDir" in launcher
-    assert '$startInfo.EnvironmentVariables["PATH"] = "$libDir;$env:PATH"' in launcher
-    assert '$env:PATH = "$libDir;$env:PATH"' not in launcher
-
-
-def test_windows_launcher_revalidates_direct_call_input() -> None:
-    with pytest.raises(argparse.ArgumentTypeError):
-        package_xbbg_mcpb.render_windows_launcher('3.20.0"; Write-Output injected; #')
+    assert "do not search for the Bloomberg runtime" in readme
+    assert "XBBG_MCP_LIB_DIR" in readme and "XBBG_DEV_SDK_ROOT" in readme
+    assert "version cannot be verified" not in readme
+    assert "shadow" not in readme
 
 
 def test_release_metadata_settings_stay_in_sync() -> None:
