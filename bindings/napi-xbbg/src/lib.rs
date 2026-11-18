@@ -607,21 +607,9 @@ impl From<SessionConnections> for SessionConnectionsOutput {
 }
 
 impl TlsMaterialInput {
-    /// The host spec carries blobs as standard base64; the host decodes them once.
+    /// The host takes the owned material as is: a blob is shared, never re-encoded.
     fn into_spec(self) -> TlsMaterialSpec {
-        match self.0 {
-            TlsMaterial::Path(path) => TlsMaterialSpec {
-                path: Some(path),
-                bytes: None,
-            },
-            TlsMaterial::Blob(blob) => TlsMaterialSpec {
-                path: None,
-                bytes: Some(base64::engine::Engine::encode(
-                    &base64::engine::general_purpose::STANDARD,
-                    &*blob,
-                )),
-            },
-        }
+        TlsMaterialSpec::ready(self.0)
     }
 }
 
@@ -4595,6 +4583,10 @@ mod tests {
         let mut trust_backing = [b"prefix".as_slice(), trust, b"suffix"].concat();
         let client_input = TlsMaterialInput::from_bytes(&client_backing[6..6 + credentials.len()]);
         let trust_input = TlsMaterialInput::from_bytes(&trust_backing[6..6 + trust.len()]);
+        let TlsMaterial::Blob(owned_client) = &client_input.0 else {
+            panic!("expected owned blob");
+        };
+        let owned_client = owned_client.clone();
         let input = EngineConfigInput {
             zfp_remote: Some("8194".into()),
             tls: Some(TlsConfigInput {
@@ -4627,6 +4619,7 @@ mod tests {
             panic!("expected client blob");
         };
         assert_eq!(actual_client.as_ref(), credentials);
+        assert!(Arc::ptr_eq(actual_client, &owned_client));
         assert_eq!(tls.trust_material, TlsMaterial::Blob(Arc::from(&trust[..])));
         assert_eq!(tls.handshake_timeout_ms, Some(0));
         assert_eq!(tls.crl_fetch_timeout_ms, Some(25));

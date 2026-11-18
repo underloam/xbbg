@@ -24,7 +24,6 @@ xbbg-log = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-host = { workspace = true }
 xbbg-recipes = { workspace = true }
-base64 = { workspace = true }
 
 [features]
 default = ["live"]
