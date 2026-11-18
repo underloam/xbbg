@@ -31,7 +31,7 @@ Adding a call to a new function means adding its name to `functions.txt`. `build
 | 1 | `BLPAPI_INCLUDE_DIR` | The directory holding the `blpapi_*.h` headers |
 | 2 | `BLPAPI_ROOT` | Finds `include/` (or `Include/`) in the root, then in each versioned subdirectory one or two levels down, newest first |
 
-The runtime library is never needed to build. Tests, benchmarks and Rust applications find it at run time with `xbbg_sdk::locate::from_env`, which reads `BLPAPI_LIB_DIR` and `BLPAPI_ROOT`, and open it with `xbbg_core::load`.
+The runtime library is never needed to build. Tests, benchmarks and Rust applications find it at run time with `xbbg_sdk::locate::locate`, the one search order every xbbg host shares (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, then the xbbg cache), and open it with `xbbg_core::load`; `xbbg_host::sdk::locate_and_load` does both.
 
 ## Binding generation controls
 

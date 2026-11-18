@@ -55,7 +55,7 @@ xbbg_core::load("/path/to/libblpapi3_64.so")?; // once, before any other call
 | `sdk()` | The loaded table; panics, saying so, if nothing is loaded. One atomic load on the hot path |
 | `loaded_sdk_path()` | The path that was loaded, or `None` |
 
-Choosing the library path is the caller's job. Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::from_env`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
+Choosing the library path is the caller's job. Hosts call `xbbg_host::sdk::locate_and_load`, which runs the shared search order in `xbbg_sdk::locate` (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, the xbbg cache). Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::locate`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
 
 ## Features
 
