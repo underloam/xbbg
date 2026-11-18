@@ -99,3 +99,38 @@ describe('sdk request provenance', () => {
     expect(error.bloomberg_request_ids).toBeUndefined();
   });
 });
+
+describe('host validation context', () => {
+  it('keeps the offending element and suggestion from the context line', () => {
+    const context = { element: 'requestTimeoutMs', suggestion: 'requestTimeoutMs' };
+    const wrapped = wrapError(
+      new Error(`[XBBG:VALIDATION] [XBBG_CONTEXT]${JSON.stringify(context)}\nsynthetic failure`),
+    );
+    expect(wrapped).toBeInstanceOf(BlpValidationError);
+    if (!(wrapped instanceof BlpValidationError)) {
+      throw new Error('expected validation error');
+    }
+    expect(wrapped.message).toBe('synthetic failure');
+    expect(wrapped.element).toBe('requestTimeoutMs');
+    expect(wrapped.suggestion).toBe('requestTimeoutMs');
+  });
+
+  it('does not let an absent suggestion hide one parsed from the message', () => {
+    const wrapped = wrapError(
+      new Error(
+        `[XBBG:VALIDATION] [XBBG_CONTEXT]${JSON.stringify({ element: 'fields' })}\nunknown (did you mean 'PX_LAST'?)`,
+      ),
+    );
+    if (!(wrapped instanceof BlpValidationError)) {
+      throw new Error('expected validation error');
+    }
+    expect(wrapped.element).toBe('fields');
+    expect(wrapped.suggestion).toBe('PX_LAST');
+  });
+
+  it('treats a malformed native argument as a validation error', () => {
+    const wrapped = wrapError(new Error('[XBBG:ARGUMENT] unknown field synthetic'));
+    expect(wrapped).toBeInstanceOf(BlpValidationError);
+    expect(wrapped.message).toBe('unknown field synthetic');
+  });
+});

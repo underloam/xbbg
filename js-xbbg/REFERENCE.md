@@ -532,7 +532,7 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 - `maxSubscriptionSessions`: concurrent subscription-session cap, default **32**, minimum **1**, and at least `subscriptionPoolSize`; native admission waits for capacity instead of allocating unbounded sessions
 - `subscriptionFlushThreshold`: default per-subscription `flushThreshold`, **16**, minimum **1**; the maximum number of already-queued updates combined into one read batch, never a wait for more
 
-The JS binding forwards these fields directly to the Rust engine, so Node can configure the same auth and transport features already available in the core runtime. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`.
+The JS binding forwards these fields to the shared xbbg host layer, which parses them with the same rules as the Java binding. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`. Configuration failures reject with `BlpValidationError`; when one member is at fault before the engine's own checks (for example `validationMode` or `requestTimeoutMs`), its name is in `element`.
 
 ```typescript
 xbbg.configure({ bqlAppName: 'example-bql-app' });

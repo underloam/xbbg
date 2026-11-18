@@ -39,10 +39,14 @@ use xbbg_async::engine::{
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, KeyColumn, SessionConnections,
-    SubscribeRequest, SubscriptionHandle, ValidationMode,
+    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, SessionConnections, SubscribeRequest,
+    SubscriptionHandle,
 };
 use xbbg_core::BlpError;
+use xbbg_host::config::{
+    AuthConfigSpec, EngineConfigSpec, RetryPolicySpec, ServerAddressSpec, Socks5Spec,
+    TlsConfigSpec, TlsMaterialSpec,
+};
 use xbbg_host::errors::{HostError, HostErrorKind};
 use xbbg_host::schema::SchemaJsonCache;
 
@@ -600,228 +604,105 @@ impl From<SessionConnections> for SessionConnectionsOutput {
     }
 }
 
-fn config_field_name(field: &str) -> &str {
-    match field {
-        "auth_method" => "auth.method",
-        "app_name" => "auth.appName",
-        "bql_app_name" => "bqlAppName",
-        "dir_property" => "auth.dirProperty",
-        "user_id" => "auth.userId",
-        "ip_address" => "auth.ipAddress",
-        "token" => "auth.token",
-        "tls_client_credentials" => "tls.clientCredentials",
-        "tls_trust_material" => "tls.trustMaterial",
-        "tls_handshake_timeout_ms" => "tls.handshakeTimeoutMs",
-        "tls_crl_fetch_timeout_ms" => "tls.crlFetchTimeoutMs",
-        "zfp_remote" => "zfpRemote",
-        "socks5_host" => "socks5.host",
-        "socks5_port" => "socks5.port",
-        "socks5_host/socks5_port" => "socks5",
-        "request_pool_size" => "requestPoolSize",
-        "runtime_worker_threads" => "runtimeWorkerThreads",
-        "max_subscription_sessions" => "maxSubscriptionSessions",
-        "subscription_pool_size" => "subscriptionPoolSize",
-        "command_queue_size" => "commandQueueSize",
-        "subscription_stream_capacity" => "subscriptionStreamCapacity",
-        "subscription_flush_threshold" => "subscriptionFlushThreshold",
-        "shard_threshold" => "shardThreshold",
-        "shard_chunk_size" => "shardChunkSize",
-        "shard_max_concurrent" => "shardMaxConcurrent",
-        "keep_alive_inactivity_ms" => "keepAliveInactivityMs",
-        "keep_alive_response_timeout_ms" => "keepAliveResponseTimeoutMs",
-        "slow_consumer_hi_water_mark" => "slowConsumerHiWaterMark",
-        "slow_consumer_lo_water_mark" => "slowConsumerLoWaterMark",
-        other => other,
+impl TlsMaterialInput {
+    /// The host spec carries blobs as standard base64; the host decodes them once.
+    fn into_spec(self) -> TlsMaterialSpec {
+        match self.0 {
+            TlsMaterial::Path(path) => TlsMaterialSpec {
+                path: Some(path),
+                bytes: None,
+            },
+            TlsMaterial::Blob(blob) => TlsMaterialSpec {
+                path: None,
+                bytes: Some(base64::engine::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    &*blob,
+                )),
+            },
+        }
     }
 }
 
-fn require_non_negative_duration(value: i64, field: &str) -> Result<u64, Error> {
-    u64::try_from(value).map_err(|_| {
-        Error::new(
-            Status::InvalidArg,
-            format!("{field} must be a non-negative integer number of milliseconds"),
-        )
-    })
+impl From<EngineConfigInput> for EngineConfigSpec {
+    fn from(input: EngineConfigInput) -> Self {
+        Self {
+            host: input.host,
+            port: input.port,
+            servers: input.servers.map(|servers| {
+                servers
+                    .into_iter()
+                    .map(|server| ServerAddressSpec {
+                        host: server.host,
+                        port: server.port,
+                    })
+                    .collect()
+            }),
+            zfp_remote: input.zfp_remote,
+            request_pool_size: input.request_pool_size,
+            subscription_pool_size: input.subscription_pool_size,
+            runtime_worker_threads: input.runtime_worker_threads,
+            max_subscription_sessions: input.max_subscription_sessions,
+            shard_requests: input.shard_requests,
+            shard_threshold: input.shard_threshold,
+            shard_chunk_size: input.shard_chunk_size,
+            shard_max_concurrent: input.shard_max_concurrent,
+            validation_mode: input.validation_mode,
+            key_column: input.key_column,
+            subscription_flush_threshold: input.subscription_flush_threshold,
+            max_event_queue_size: input.max_event_queue_size,
+            command_queue_size: input.command_queue_size,
+            subscription_stream_capacity: input.subscription_stream_capacity,
+            overflow_policy: input.overflow_policy,
+            warmup_services: input.warmup_services,
+            field_cache_path: input.field_cache_path,
+            bql_app_name: input.bql_app_name,
+            auth: input.auth.map(|auth| AuthConfigSpec {
+                method: auth.method,
+                app_name: auth.app_name,
+                dir_property: auth.dir_property,
+                user_id: auth.user_id,
+                ip_address: auth.ip_address,
+                token: auth.token,
+            }),
+            tls: input.tls.map(|tls| TlsConfigSpec {
+                client_credentials: tls.client_credentials.map(TlsMaterialInput::into_spec),
+                client_credentials_password: tls.client_credentials_password,
+                trust_material: tls.trust_material.map(TlsMaterialInput::into_spec),
+                handshake_timeout_ms: tls.handshake_timeout_ms,
+                crl_fetch_timeout_ms: tls.crl_fetch_timeout_ms,
+            }),
+            num_start_attempts: input.num_start_attempts,
+            auto_restart_on_disconnection: input.auto_restart_on_disconnection,
+            retry_policy: input.retry_policy.map(|retry| RetryPolicySpec {
+                max_retries: retry.max_retries,
+                initial_delay_ms: retry.initial_delay_ms,
+                backoff_factor: retry.backoff_factor,
+                max_delay_ms: retry.max_delay_ms,
+            }),
+            request_timeout_ms: input.request_timeout_ms,
+            streams_deactivated_warn_ms: input.streams_deactivated_warn_ms,
+            reconnect_grace_ms: input.reconnect_grace_ms,
+            keep_alive_enabled: input.keep_alive_enabled,
+            keep_alive_inactivity_ms: input.keep_alive_inactivity_ms,
+            keep_alive_response_timeout_ms: input.keep_alive_response_timeout_ms,
+            slow_consumer_hi_water_mark: input.slow_consumer_hi_water_mark,
+            slow_consumer_lo_water_mark: input.slow_consumer_lo_water_mark,
+            sdk_log_level: input.sdk_log_level,
+            socks5: input.socks5.map(|proxy| Socks5Spec {
+                host: proxy.host,
+                port: proxy.port,
+            }),
+        }
+    }
 }
 
 impl TryFrom<EngineConfigInput> for EngineConfig {
     type Error = Error;
 
     fn try_from(input: EngineConfigInput) -> Result<Self, Self::Error> {
-        let mut config = EngineConfig::default();
-
-        let validation_mode = match input.validation_mode {
-            Some(mode) => ValidationMode::from_str(&mode)
-                .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?,
-            None => config.validation_mode,
-        };
-
-        let overflow_policy = match input.overflow_policy {
-            Some(policy) => OverflowPolicy::from_str(&policy)
-                .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?,
-            None => config.overflow_policy,
-        };
-
-        let key_column = match input.key_column {
-            Some(key) => {
-                KeyColumn::from_str(&key).map_err(|e| Error::new(Status::InvalidArg, e))?
-            }
-            None => config.key_column,
-        };
-
-        if let Some(size) = input.request_pool_size {
-            config.request_pool_size = size as usize;
-        }
-        if let Some(size) = input.subscription_pool_size {
-            config.subscription_pool_size = size as usize;
-        }
-        if let Some(size) = input.runtime_worker_threads {
-            config.runtime_worker_threads = size as usize;
-        }
-        if let Some(size) = input.max_subscription_sessions {
-            config.max_subscription_sessions = size as usize;
-        }
-        if let Some(enabled) = input.shard_requests {
-            config.shard_requests = enabled;
-        }
-        if let Some(size) = input.shard_threshold {
-            config.shard_threshold = size as usize;
-        }
-        if let Some(size) = input.shard_chunk_size {
-            config.shard_chunk_size = size as usize;
-        }
-        if let Some(size) = input.shard_max_concurrent {
-            config.shard_max_concurrent = size as usize;
-        }
-        if let Some(size) = input.subscription_flush_threshold {
-            config.subscription_flush_threshold = size as usize;
-        }
-        if let Some(size) = input.max_event_queue_size {
-            config.max_event_queue_size = size as usize;
-        }
-        if let Some(size) = input.command_queue_size {
-            config.command_queue_size = size as usize;
-        }
-        if let Some(size) = input.subscription_stream_capacity {
-            config.subscription_stream_capacity = size as usize;
-        }
-        if let Some(services) = input.warmup_services {
-            config.warmup_services = services;
-        }
-        if let Some(field_cache_path) = input.field_cache_path {
-            config.field_cache_path = Some(field_cache_path.into());
-        }
-        config.bql_app_name = input.bql_app_name;
-        if let Some(num_start_attempts) = input.num_start_attempts {
-            config.num_start_attempts = num_start_attempts as usize;
-        }
-        if let Some(auto_restart) = input.auto_restart_on_disconnection {
-            config.auto_restart_on_disconnection = auto_restart;
-        }
-        if let Some(retry_policy) = input.retry_policy {
-            if let Some(max_retries) = retry_policy.max_retries {
-                config.retry_policy.max_retries = max_retries;
-            }
-            if let Some(initial_delay_ms) = retry_policy.initial_delay_ms {
-                config.retry_policy.initial_delay_ms =
-                    require_non_negative_duration(initial_delay_ms, "retryPolicy.initialDelayMs")?;
-            }
-            if let Some(backoff_factor) = retry_policy.backoff_factor {
-                config.retry_policy.backoff_factor = backoff_factor;
-            }
-            if let Some(max_delay_ms) = retry_policy.max_delay_ms {
-                config.retry_policy.max_delay_ms =
-                    require_non_negative_duration(max_delay_ms, "retryPolicy.maxDelayMs")?;
-            }
-        }
-        if let Some(request_timeout_ms) = input.request_timeout_ms {
-            config.request_timeout_ms =
-                require_non_negative_duration(request_timeout_ms, "requestTimeoutMs")?;
-        }
-        if let Some(streams_deactivated_warn_ms) = input.streams_deactivated_warn_ms {
-            config.streams_deactivated_warn_ms = require_non_negative_duration(
-                streams_deactivated_warn_ms,
-                "streamsDeactivatedWarnMs",
-            )?;
-        }
-        if let Some(reconnect_grace_ms) = input.reconnect_grace_ms {
-            config.reconnect_grace_ms =
-                require_non_negative_duration(reconnect_grace_ms, "reconnectGraceMs")?;
-        }
-        if let Some(keep_alive_enabled) = input.keep_alive_enabled {
-            config.keep_alive_enabled = keep_alive_enabled;
-        }
-        if let Some(v) = input.keep_alive_inactivity_ms {
-            config.keep_alive_inactivity_ms = Some(v);
-        }
-        if let Some(v) = input.keep_alive_response_timeout_ms {
-            config.keep_alive_response_timeout_ms = Some(v);
-        }
-        if let Some(sdk_log_level) = input.sdk_log_level {
-            config.sdk_log_level = sdk_log_level
-                .parse()
-                .map_err(|e: String| Error::new(Status::InvalidArg, e))?;
-        }
-        config.validation_mode = validation_mode;
-        config.overflow_policy = overflow_policy;
-        config.key_column = key_column;
-
-        let auth = input.auth.as_ref();
-        let mut tls = input.tls;
-        let client_credentials = tls
-            .as_mut()
-            .and_then(|tls| tls.client_credentials.take())
-            .map(|material| material.0);
-        let trust_material = tls
-            .as_mut()
-            .and_then(|tls| tls.trust_material.take())
-            .map(|material| material.0);
-        let tls = tls.as_ref();
-        xbbg_async::config::normalize(
-            config,
-            xbbg_async::config::ConfigInput {
-                auth: xbbg_async::config::AuthInput {
-                    method: auth.map(|auth| auth.method.as_str()),
-                    app_name: auth.and_then(|auth| auth.app_name.as_deref()),
-                    dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
-                    user_id: auth.and_then(|auth| auth.user_id.as_deref()),
-                    ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
-                    token: auth.and_then(|auth| auth.token.as_deref()),
-                },
-                tls: xbbg_async::config::TlsInput {
-                    client_credentials,
-                    client_credentials_password: tls
-                        .and_then(|tls| tls.client_credentials_password.as_deref()),
-                    trust_material,
-                    handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
-                    crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
-                },
-                transport: xbbg_async::config::TransportInput {
-                    host: input.host.as_deref().unwrap_or("localhost"),
-                    port: input.port.unwrap_or(8194),
-                    explicit_host_port: input.host.is_some() || input.port.is_some(),
-                    zfp_remote: input.zfp_remote.as_deref(),
-                    socks5_host: input.socks5.as_ref().map(|proxy| proxy.host.as_str()),
-                    socks5_port: input.socks5.as_ref().map(|proxy| proxy.port),
-                },
-                slow_consumer_hi_water_mark: input.slow_consumer_hi_water_mark,
-                slow_consumer_lo_water_mark: input.slow_consumer_lo_water_mark,
-            },
-            input
-                .servers
-                .as_deref()
-                .unwrap_or_default()
-                .iter()
-                .map(|server| (server.host.as_str(), server.port)),
-            config_field_name,
-        )
-        .map_err(|error| {
-            let detail = match error {
-                BlpAsyncError::ConfigError { detail } => detail,
-                other => other.to_string(),
-            };
-            Error::new(Status::InvalidArg, detail)
-        })
+        EngineConfigSpec::from(input)
+            .into_engine_config()
+            .map_err(host_error_to_napi)
     }
 }
 
@@ -4674,10 +4555,6 @@ mod tests {
         let mut trust_backing = [b"prefix".as_slice(), trust, b"suffix"].concat();
         let client_input = TlsMaterialInput::from_bytes(&client_backing[6..6 + credentials.len()]);
         let trust_input = TlsMaterialInput::from_bytes(&trust_backing[6..6 + trust.len()]);
-        let TlsMaterial::Blob(owned_client) = &client_input.0 else {
-            panic!("expected owned blob");
-        };
-        let owned_client = owned_client.clone();
         let input = EngineConfigInput {
             zfp_remote: Some("8194".into()),
             tls: Some(TlsConfigInput {
@@ -4710,12 +4587,43 @@ mod tests {
             panic!("expected client blob");
         };
         assert_eq!(actual_client.as_ref(), credentials);
-        assert!(Arc::ptr_eq(actual_client, &owned_client));
         assert_eq!(tls.trust_material, TlsMaterial::Blob(Arc::from(&trust[..])));
         assert_eq!(tls.handshake_timeout_ms, Some(0));
         assert_eq!(tls.crl_fetch_timeout_ms, Some(25));
         assert!(matches!(config.transport, Transport::Zfp(_)));
         assert!(!format!("{tls:?}").contains("synthetic"));
+    }
+
+    #[test]
+    fn engine_config_errors_are_coded_with_the_offending_member() {
+        let error = EngineConfig::try_from(EngineConfigInput {
+            request_timeout_ms: Some(-1),
+            ..minimal_input()
+        })
+        .err()
+        .expect("negative timeout should fail");
+        assert_eq!(error.status, Status::InvalidArg);
+        assert!(error.reason.starts_with("[XBBG:VALIDATION] [XBBG_CONTEXT]"));
+        let (context, message) = error
+            .reason
+            .strip_prefix("[XBBG:VALIDATION] [XBBG_CONTEXT]")
+            .and_then(|rest| rest.split_once('\n'))
+            .expect("context line");
+        let context: serde_json::Value = serde_json::from_str(context).expect("context json");
+        assert_eq!(context["element"], "requestTimeoutMs");
+        assert_eq!(
+            message,
+            "requestTimeoutMs must be a non-negative integer number of milliseconds"
+        );
+
+        let error = EngineConfig::try_from(EngineConfigInput {
+            request_pool_size: Some(0),
+            ..minimal_input()
+        })
+        .err()
+        .expect("zero pool should fail");
+        assert!(error.reason.starts_with("[XBBG:VALIDATION] "));
+        assert!(error.reason.contains("requestPoolSize"));
     }
 
     #[test]

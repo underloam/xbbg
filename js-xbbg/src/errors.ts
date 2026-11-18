@@ -106,7 +106,12 @@ function cacheWrappedError(source: unknown, wrapped: BlpError): BlpError {
   return wrapped;
 }
 
-function fromCode(code: string, msg: string, context: BlpRequestErrorOptions = {}): BlpError {
+/** Everything the native `[XBBG_CONTEXT]` line can carry; absent members stay absent. */
+type DecodedContext = BlpRequestErrorOptions &
+  BlpValidationErrorOptions &
+  BlpSubscriptionDataLossErrorOptions;
+
+function fromCode(code: string, msg: string, context: DecodedContext = {}): BlpError {
   const requestOptions = { ...parseRequestOptions(msg), ...context };
   switch (code) {
     case 'SESSION':
@@ -120,6 +125,8 @@ function fromCode(code: string, msg: string, context: BlpRequestErrorOptions = {
         ...parseSubscriptionDataLossOptions(msg),
         ...context,
       });
+    // ARGUMENT is a malformed native argument: caller input like VALIDATION.
+    case 'ARGUMENT':
     case 'VALIDATION':
       return new BlpValidationError(msg, { ...parseValidationOptions(msg), ...context });
     case 'TIMEOUT':
@@ -205,9 +212,19 @@ export function wrapError(napiError: unknown): BlpError {
   return cacheWrappedError(napiError, new BlpError(msg));
 }
 
+type TextMember = 'element' | 'suggestion' | 'topic' | 'detail' | 'code';
+
+function textMember(
+  parsed: Record<string, unknown>,
+  key: TextMember,
+): Partial<Record<TextMember, string>> {
+  const value = parsed[key];
+  return typeof value === 'string' ? { [key]: value } : {};
+}
+
 function decodeRequestContext(message: string): {
   message: string;
-  options: BlpRequestErrorOptions;
+  options: DecodedContext;
 } {
   const prefix = '[XBBG_CONTEXT]';
   const newline = message.indexOf('\n');
@@ -224,7 +241,7 @@ function decodeRequestContext(message: string): {
     return { message, options: {} };
   }
   const ids = parsed.bloomberg_request_ids;
-  const options: BlpRequestErrorOptions = {
+  const options: DecodedContext = {
     service: typeof parsed.service === 'string' ? parsed.service : undefined,
     operation: typeof parsed.operation === 'string' ? parsed.operation : undefined,
     request_id: typeof parsed.request_id === 'string' ? parsed.request_id : undefined,
@@ -234,6 +251,11 @@ function decodeRequestContext(message: string): {
       Array.isArray(ids) && ids.every((id): id is string => typeof id === 'string')
         ? ids
         : undefined,
+    ...textMember(parsed, 'element'),
+    ...textMember(parsed, 'suggestion'),
+    ...textMember(parsed, 'topic'),
+    ...textMember(parsed, 'detail'),
+    ...textMember(parsed, 'code'),
   };
   return { message: message.slice(newline + 1), options };
 }
