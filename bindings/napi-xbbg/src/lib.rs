@@ -6,8 +6,8 @@ mod sdk;
 #[doc(hidden)]
 pub mod subscription_fixture;
 pub use ext::*;
-pub use sdk::*;
 use request::pairs_to_map;
+pub use sdk::*;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
