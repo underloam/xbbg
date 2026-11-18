@@ -35,8 +35,8 @@ bindgen = { workspace = true, features = ["runtime"] }
 # The crate has no features, so no `[package.metadata.docs.rs]` selection is needed.
 
 [package.metadata.cargo-shear]
-# bindgen emits cty references into OUT_DIR/bindings.rs, outside the source tree.
-ignored = ["cty"]
+# bindgen emits cty and libloading references into OUT_DIR/bindings.rs, outside the source tree.
+ignored = ["cty", "libloading"]
 
 [lints]
 workspace = true

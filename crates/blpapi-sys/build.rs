@@ -133,11 +133,13 @@ fn main() {
     // bindgen drops an allowlisted name the headers do not declare without a word.
     // Left alone, a typo or a function an SDK removed would only surface as a
     // missing method at the first call site, or never.
-    let generated = bindings.to_string();
+    // Compare without whitespace: without rustfmt (CI containers may lack it) bindgen
+    // writes `pub blpapi_X :` rather than `pub blpapi_X:`.
+    let generated: String = bindings.to_string().split_whitespace().collect();
     let missing: Vec<&str> = functions
         .iter()
         .map(String::as_str)
-        .filter(|function| !generated.contains(&format!("pub {function}:")))
+        .filter(|function| !generated.contains(&format!("pub{function}:")))
         .collect();
     if !missing.is_empty() {
         panic!(
