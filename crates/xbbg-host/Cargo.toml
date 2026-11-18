@@ -22,6 +22,10 @@ xbbg-log = { workspace = true }
 xbbg-recipes = { workspace = true }
 xbbg-sdk = { workspace = true }
 
+[dev-dependencies]
+# Fixtures for the runtime search tests (`tests/sdk_*.rs`).
+tempfile = { workspace = true }
+
 [features]
 default = ["live"]
 live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
