@@ -1,6 +1,4 @@
 /* oxlint-disable import/max-dependencies -- public entry point intentionally consolidates native and helper modules. */
-import type { Table } from 'apache-arrow';
-
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -21,7 +19,6 @@ import {
   nativeArrowToBackend,
   nativeRecipeResult,
   normalizeBackend,
-  toArrowTableFromNative,
   warnTickerKeyColumn,
 } from './backends';
 // Date / datetime helpers (#317): isolated module so they can be tested
@@ -45,10 +42,9 @@ import { isPlainObject } from './objects';
 import {
   createSubscription,
   MKTDATA_SERVICE,
+  Subscription,
   validateDelayedPolicy,
-  validateStreamControls,
 } from './subscriptions';
-import type { Subscription } from './subscriptions';
 import type {
   ActiveCdxOptions,
   AdminStatus,
@@ -271,185 +267,36 @@ type StudyParams = Record<string, PrimitiveValue | undefined>;
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-const ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE =
-  'ETF NAV relationship result is not one-to-one with requested ETFs';
-
-function malformedEtfNavRelationship(): BlpValidationError {
-  return new BlpValidationError(ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE, { element: 'tickers' });
-}
-
-function firstSeenDuplicates(values: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const duplicates: string[] = [];
-  for (const value of values) {
-    if (seen.has(value)) {
-      if (!duplicates.includes(value)) {
-        duplicates.push(value);
-      }
-    } else {
-      seen.add(value);
-    }
-  }
-  return duplicates;
-}
-
 /**
- * Validate an ETF NAV relationship table and return one iNAV ticker per ETF.
- *
- * Enforces one row per `input_order` with exact ordered `etf_ticker`
- * identity, no iNAV validation errors, no missing iNAV relationships, and an
- * unambiguous iNAV reverse mapping — all before any subscription is opened.
+ * The `StreamOptions` members the native preflight reads. The host rejects unknown
+ * members, so only these cross the boundary (undefined members are omitted).
  */
-function validatedInavTickers(etfList: readonly string[], table: Table): string[] {
-  const inputOrder = table.getChild('input_order');
-  const etfTicker = table.getChild('etf_ticker');
-  const inavTicker = table.getChild('inav_ticker');
-  const inavValidationError = table.getChild('inav_validation_error');
-  if (
-    inputOrder === null ||
-    etfTicker === null ||
-    inavTicker === null ||
-    inavValidationError === null
-  ) {
-    throw malformedEtfNavRelationship();
-  }
-  if (table.numRows !== etfList.length) {
-    throw malformedEtfNavRelationship();
-  }
+const PREFLIGHT_STREAM_OPTION_KEYS = [
+  'delivery',
+  'options',
+  'conflate',
+  'flushThreshold',
+  'overflowPolicy',
+  'streamCapacity',
+  'allFields',
+  'fields',
+  'aliases',
+  'onDelayed',
+  'isolated',
+  'rows',
+  'onFieldError',
+  'zeroAsNull',
+] as const;
 
-  const rowByOrder = new Map<number, number>();
-  for (let rowIndex = 0; rowIndex < table.numRows; rowIndex += 1) {
-    const order: unknown = inputOrder.get(rowIndex);
-    if (typeof order !== 'number' || rowByOrder.has(order)) {
-      throw malformedEtfNavRelationship();
-    }
-    rowByOrder.set(order, rowIndex);
-  }
-
-  const rows: { etf: string; rowIndex: number }[] = [];
-  for (const [index, etf] of etfList.entries()) {
-    const rowIndex = rowByOrder.get(index);
-    if (rowIndex === undefined || etfTicker.get(rowIndex) !== etf) {
-      throw malformedEtfNavRelationship();
-    }
-    rows.push({ etf, rowIndex });
-  }
-
-  for (const { etf, rowIndex } of rows) {
-    const validationError: unknown = inavValidationError.get(rowIndex);
-    if (typeof validationError === 'string' && validationError.trim().length > 0) {
-      throw new BlpValidationError(`Invalid iNAV relationship for ETF ${etf}: ${validationError}`, {
-        element: 'tickers',
-      });
+function preflightStreamOptions(options: object): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const key of PREFLIGHT_STREAM_OPTION_KEYS) {
+    const value: unknown = Reflect.get(options, key);
+    if (value !== undefined) {
+      payload[key] = value;
     }
   }
-
-  const pairs = rows.map(({ etf, rowIndex }) => {
-    const raw: unknown = inavTicker.get(rowIndex);
-    const trimmed = typeof raw === 'string' ? raw.trim() : '';
-    return { etf, inav: trimmed.length > 0 ? trimmed : null };
-  });
-
-  const missing = pairs.filter(({ inav }) => inav === null).map(({ etf }) => etf);
-  if (missing.length > 0) {
-    throw new BlpValidationError(
-      `Missing valid iNAV relationship for ETFs: ${missing.join(', ')}`,
-      { element: 'tickers' },
-    );
-  }
-
-  const resolved = pairs.flatMap(({ etf, inav }) => (inav === null ? [] : [{ etf, inav }]));
-  const owners = new Map<string, string[]>();
-  for (const { etf, inav } of resolved) {
-    const list = owners.get(inav);
-    if (list === undefined) {
-      owners.set(inav, [etf]);
-    } else {
-      list.push(etf);
-    }
-  }
-  for (const { inav } of resolved) {
-    const etfs = owners.get(inav);
-    if (etfs !== undefined && etfs.length > 1) {
-      throw new BlpValidationError(
-        `Ambiguous iNAV reverse mapping for ${inav}: ${etfs.join(', ')}`,
-        {
-          element: 'tickers',
-        },
-      );
-    }
-  }
-
-  return resolved.map(({ inav }) => inav);
-}
-
-function validatedAuctionTopics(
-  securities: readonly string[],
-  table: Table,
-): { topics: string[]; aliases: Record<string, string> } {
-  const malformed = (): BlpValidationError =>
-    new BlpValidationError(
-      `Venue resolution is not one-to-one with securities: ${securities.join(', ')}`,
-      { element: 'securities' },
-    );
-  const order = table.getChild('input_order');
-  const security = table.getChild('security');
-  const venue = table.getChild('venue_topic');
-  const status = table.getChild('status');
-  const error = table.getChild('error');
-  if (
-    order === null ||
-    security === null ||
-    venue === null ||
-    status === null ||
-    error === null ||
-    table.numRows !== securities.length
-  ) {
-    throw malformed();
-  }
-  const rows = new Map<number, number>();
-  for (let row = 0; row < table.numRows; row += 1) {
-    const inputOrder: unknown = order.get(row);
-    if (typeof inputOrder !== 'number' || rows.has(inputOrder)) {
-      throw malformed();
-    }
-    rows.set(inputOrder, row);
-  }
-  const topics: string[] = [];
-  const labels = new Map<string, string>();
-  const failures: string[] = [];
-  for (const [index, input] of securities.entries()) {
-    const row = rows.get(index);
-    if (row === undefined || security.get(row) !== input) {
-      throw malformed();
-    }
-    const topic: unknown = venue.get(row);
-    const detail: unknown = error.get(row);
-    const resolution: unknown = status.get(row);
-    if (
-      resolution !== 'resolved' ||
-      typeof topic !== 'string' ||
-      topic.trim().length === 0 ||
-      (typeof detail === 'string' && detail.trim().length > 0)
-    ) {
-      failures.push(`${input}: ${typeof detail === 'string' ? detail : String(resolution)}`);
-      continue;
-    }
-    const normalizedTopic = topic.trim();
-    const previous = labels.get(normalizedTopic);
-    if (previous !== undefined) {
-      failures.push(`Ambiguous venue ${normalizedTopic}: ${previous}, ${input}`);
-    } else {
-      labels.set(normalizedTopic, input);
-      topics.push(normalizedTopic);
-    }
-  }
-  if (failures.length > 0) {
-    throw new BlpValidationError(`Auction preflight failed: ${failures.join('; ')}`, {
-      element: 'securities',
-    });
-  }
-  return { topics, aliases: Object.fromEntries(labels) };
+  return payload;
 }
 
 function toRequestString(value: unknown): string {
@@ -2012,53 +1859,45 @@ export class Engine {
     );
   }
 
-  /** Resolve every input before opening a single, venue-only subscription. */
+  /**
+   * Resolve every input before opening a single, venue-only subscription.
+   *
+   * The native host layer validates the inputs and stream options, resolves the
+   * venues and opens the stream; a failed preflight opens nothing.
+   */
   public async subscribeAuction(
     securities: string | readonly string[],
     options: AuctionStreamOptions = {},
   ): Promise<Subscription> {
-    validateStreamControls(options);
-    if ('aliases' in options && options.aliases !== undefined) {
-      throw new BlpValidationError('Auction aliases are derived from input securities', {
-        element: 'aliases',
-      });
-    }
-    const inputs = [...new Set(toStringArray(securities))];
-    if (inputs.length === 0) {
-      throw new BlpValidationError('securities must not be empty', { element: 'securities' });
-    }
-    const { fields, pcsOverrides, zeroAsNull, ...streamOptions } = options;
-    const requestedFields =
-      fields === undefined || fields.length === 0 ? AuctionFields.default : fields;
-    let venues: Table;
-    try {
-      venues = toArrowTableFromNative(await this.inner.recipeResolveVenues(inputs, pcsOverrides));
-    } catch (error) {
-      throw wrapError(error);
-    }
-    const { topics, aliases } = validatedAuctionTopics(inputs, venues);
-    return await this.subscribe(topics, requestedFields, {
-      ...streamOptions,
-      aliases,
-      zeroAsNull:
-        zeroAsNull ??
-        AuctionFields.zeroPriceFields.filter((field) => requestedFields.includes(field)),
-    });
+    return await this.openAuction(securities, options, false);
   }
 
   public async streamAuction(
     securities: string | readonly string[],
     options: Omit<AuctionStreamOptions, 'rows'> = {},
   ): Promise<Subscription> {
-    if ('rows' in options && options.rows !== undefined) {
-      throw new BlpValidationError(
-        'streamAuction always delivers rows; use subscribeAuction for rows=false',
-        {
-          element: 'rows',
-        },
+    return await this.openAuction(securities, options, true);
+  }
+
+  private async openAuction(
+    securities: string | readonly string[],
+    options: AuctionStreamOptions,
+    streamAuction: boolean,
+  ): Promise<Subscription> {
+    const { pcsOverrides, ...streamOptions } = options;
+    try {
+      const stream = await this.inner.subscribeAuction(
+        JSON.stringify({
+          securities: toStringArray(securities),
+          pcsOverrides,
+          streamAuction,
+          options: preflightStreamOptions(streamOptions),
+        }),
       );
+      return new Subscription(stream);
+    } catch (error) {
+      throw wrapError(error);
     }
-    return await this.subscribeAuction(securities, options);
   }
 
   public async issuerIsins(
@@ -2126,28 +1965,17 @@ export class Engine {
     tickers: string | readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    const etfList = toStringArray(tickers).map((ticker) => ticker.trim());
-    if (etfList.length === 0) {
-      throw new BlpValidationError('etfs must not be empty', { element: 'tickers' });
-    }
-    const duplicates = firstSeenDuplicates(etfList);
-    if (duplicates.length > 0) {
-      throw new BlpValidationError(
-        `Duplicate ETF inputs are not allowed: ${duplicates.join(', ')}`,
-        { element: 'tickers' },
-      );
-    }
-
-    let relationships: Table;
     try {
-      relationships = toArrowTableFromNative(await this.inner.recipeEtfNavRelationships(etfList));
+      const stream = await this.inner.subscribeEtfInav(
+        JSON.stringify({
+          tickers: toStringArray(tickers),
+          options: preflightStreamOptions(options),
+        }),
+      );
+      return new Subscription(stream);
     } catch (error) {
       throw wrapError(error);
     }
-    const inavTickers = validatedInavTickers(etfList, relationships);
-
-    const { fields = ['LAST_PRICE'], ...streamOptions } = options;
-    return await this.subscribe(inavTickers, fields, streamOptions);
   }
 
   public async currencyConversion(

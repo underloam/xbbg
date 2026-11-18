@@ -245,6 +245,10 @@ export interface NativeEngine {
     zeroAsNull?: readonly string[],
     delivery?: StreamOptions['delivery'],
   ): Promise<NativeSubscription>;
+  /** Host `AuctionSubscribeArgs` JSON: `{securities, pcsOverrides?, streamAuction?, options?}`. */
+  subscribeAuction(args: string): Promise<NativeSubscription>;
+  /** Host `EtfInavSubscribeArgs` JSON: `{tickers, options?}`. */
+  subscribeEtfInav(args: string): Promise<NativeSubscription>;
   subscriptionFeeds(): FeedInfo[];
   connections(): SessionConnections[];
   signalShutdown(): void;

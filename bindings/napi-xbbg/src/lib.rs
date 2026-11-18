@@ -47,8 +47,10 @@ use xbbg_host::config::{
     AuthConfigSpec, EngineConfigSpec, RetryPolicySpec, ServerAddressSpec, Socks5Spec,
     TlsConfigSpec, TlsMaterialSpec,
 };
-use xbbg_host::errors::{HostError, HostErrorKind};
+use xbbg_host::errors::{HostError, HostErrorKind, parse_args};
+use xbbg_host::preflight::{prepare_auction_subscribe, prepare_etf_inav_subscribe};
 use xbbg_host::schema::SchemaJsonCache;
+use xbbg_host::subscribe::PreparedSubscribe;
 
 use xbbg_async::subscription_consumer::{
     PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer, SubscriptionDeliveryAck,
@@ -1714,6 +1716,32 @@ impl JsEngine {
         Ok(JsSubscription::from_stream(stream, consumer_batch_items))
     }
 
+    /// Resolve auction venues and open one venue subscription (host preflight).
+    ///
+    /// `args` is the host `AuctionSubscribeArgs` JSON object:
+    /// `{securities, pcsOverrides?, streamAuction?, options?}`.
+    #[napi]
+    pub async fn subscribe_auction(&self, args: String) -> napi::Result<JsSubscription> {
+        let args = parse_args(&args).map_err(host_error_to_napi)?;
+        let prepared = prepare_auction_subscribe(&self.engine, args, self.subscription_batch_items)
+            .await
+            .map_err(host_error_to_napi)?;
+        self.subscribe_prepared(prepared).await
+    }
+
+    /// Resolve each ETF's iNAV ticker and open one iNAV subscription (host preflight).
+    ///
+    /// `args` is the host `EtfInavSubscribeArgs` JSON object: `{tickers, options?}`.
+    #[napi]
+    pub async fn subscribe_etf_inav(&self, args: String) -> napi::Result<JsSubscription> {
+        let args = parse_args(&args).map_err(host_error_to_napi)?;
+        let prepared =
+            prepare_etf_inav_subscribe(&self.engine, args, self.subscription_batch_items)
+                .await
+                .map_err(host_error_to_napi)?;
+        self.subscribe_prepared(prepared).await
+    }
+
     /// Current shared-feed diagnostics, without identity or transport configuration.
     #[napi]
     pub fn subscription_feeds(&self) -> Vec<FeedInfoOutput> {
@@ -2213,6 +2241,18 @@ impl JsEngine {
         .await
         .map_err(recipe_error_to_napi)?;
         to_native_record_batch(batch)
+    }
+
+    async fn subscribe_prepared(
+        &self,
+        prepared: PreparedSubscribe,
+    ) -> napi::Result<JsSubscription> {
+        let stream = self
+            .engine
+            .subscribe(prepared.request)
+            .await
+            .map_err(blp_async_error_to_napi)?;
+        Ok(JsSubscription::from_stream(stream, prepared.batch_items))
     }
 
     fn start_engine(config: EngineConfig) -> napi::Result<Self> {
@@ -4624,6 +4664,54 @@ mod tests {
         .expect("zero pool should fail");
         assert!(error.reason.starts_with("[XBBG:VALIDATION] "));
         assert!(error.reason.contains("requestPoolSize"));
+    }
+
+    #[test]
+    fn host_errors_keep_their_kind_status_and_context_on_the_wire() {
+        let bare = host_error_to_napi(HostError::internal("synthetic failure"));
+        assert_eq!(bare.status, Status::GenericFailure);
+        assert_eq!(bare.reason, "[XBBG:INTERNAL] synthetic failure");
+
+        let argument = host_error_to_napi(HostError::argument("unknown field 'synthetic'"));
+        assert_eq!(argument.status, Status::InvalidArg);
+        assert_eq!(argument.reason, "[XBBG:ARGUMENT] unknown field 'synthetic'");
+
+        let contextual = host_error_to_napi(
+            HostError::validation("synthetic rejection")
+                .with_element("tickers")
+                .with_suggestion("PX_LAST")
+                .with_bloomberg_request_ids(["sdk-synthetic-a", "sdk-synthetic-z"]),
+        );
+        assert_eq!(contextual.status, Status::InvalidArg);
+        let (code, rest) = contextual.reason.split_once("] ").expect("code prefix");
+        assert_eq!(code, "[XBBG:VALIDATION");
+        let (context, message) = rest
+            .strip_prefix("[XBBG_CONTEXT]")
+            .and_then(|rest| rest.split_once('\n'))
+            .expect("context line");
+        assert_eq!(message, "synthetic rejection");
+        let context: serde_json::Value = serde_json::from_str(context).expect("context json");
+        assert_eq!(
+            context,
+            serde_json::json!({
+                "element": "tickers",
+                "suggestion": "PX_LAST",
+                "bloomberg_request_ids": ["sdk-synthetic-a", "sdk-synthetic-z"],
+            })
+        );
+
+        let single = host_error_to_napi(
+            HostError::new(HostErrorKind::Request, "synthetic request failure")
+                .with_bloomberg_request_ids(["sdk-synthetic-a"]),
+        );
+        let context = single
+            .reason
+            .strip_prefix("[XBBG:REQUEST] [XBBG_CONTEXT]")
+            .and_then(|rest| rest.split_once('\n'))
+            .map(|(context, _)| context)
+            .expect("context line");
+        let context: serde_json::Value = serde_json::from_str(context).expect("context json");
+        assert_eq!(context["bloomberg_request_id"], "sdk-synthetic-a");
     }
 
     #[test]

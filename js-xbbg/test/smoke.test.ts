@@ -13,7 +13,7 @@ import type {
   SeatType,
   StreamOptions,
 } from '../src/index';
-import type { NativeArrowColumn, NativeArrowZeroCopyBatch, NativeSubscription } from '../src/napi';
+import type { NativeArrowZeroCopyBatch, NativeSubscription } from '../src/napi';
 import type { RequestInput } from '../src/types';
 
 const SESSION_HOST = process.env.XBBG_HOST ?? 'localhost';
@@ -1214,172 +1214,31 @@ describe('recipe wrapper forwarding', () => {
   });
 });
 
-function int32Column(name: string, values: readonly number[]): NativeArrowColumn {
-  return {
-    name,
-    type: 'int32',
-    nullable: false,
-    length: values.length,
-    nullCount: 0,
-    data: typedBuffer(new Int32Array(values)),
-  };
+// The relationship checks run in xbbg-host, which has its own Rust tests.
+// These tests pin what the wrapper sends to the native preflight and how it reports a rejection.
+function inavPreflightHarness(subscribeEtfInav: (args: string) => Promise<NativeSubscription>): {
+  engine: api.Engine;
+  payloads: unknown[];
+} {
+  const engine = Object.create(api.Engine.prototype) as api.Engine;
+  const payloads: unknown[] = [];
+  Reflect.set(engine, 'inner', {
+    subscribeEtfInav: async (args: string) => {
+      payloads.push(JSON.parse(args) as unknown);
+      return await subscribeEtfInav(args);
+    },
+  });
+  return { engine, payloads };
 }
 
 describe('subscribeEtfInav preflight', () => {
   const QQQ = 'QQQ US Equity';
   const AT1 = 'AT1 LN Equity';
-  const QQQ_NAV = 'QQQNV Index';
-  const QQQ_INAV = 'QXV Index';
-  const AT1_INAV = 'AT1IN Index';
 
-  // Arrow validity bits; each row's bit is set once, so addition equals OR.
-  const VALIDITY_BITS = [1, 2, 4, 8, 16, 32, 64, 128] as const;
+  it('sends the tickers as given and a defined, known stream option set', async () => {
+    const { engine, payloads } = inavPreflightHarness(async () => fakeNativeSubscription());
 
-  function utf8Column(name: string, values: readonly (string | null)[]): NativeArrowColumn {
-    const offsets = new Int32Array(values.length + 1);
-    const bitmap = new Uint8Array(Math.max(1, Math.ceil(values.length / 8)));
-    let text = '';
-    let nullCount = 0;
-    for (const [index, value] of values.entries()) {
-      if (value === null) {
-        nullCount += 1;
-      } else {
-        text += value;
-        const byteIndex = Math.floor(index / 8);
-        bitmap[byteIndex] = (bitmap[byteIndex] ?? 0) + (VALIDITY_BITS[index % 8] ?? 0);
-      }
-      offsets[index + 1] = Buffer.byteLength(text);
-    }
-    return {
-      name,
-      type: 'utf8',
-      nullable: true,
-      length: values.length,
-      nullCount,
-      ...(nullCount > 0 ? { nullBitmap: Buffer.from(bitmap) } : {}),
-      offsets: typedBuffer(offsets),
-      data: Buffer.from(text),
-    };
-  }
-
-  interface RelationshipFixtureRow {
-    inputOrder: number;
-    etfTicker: string;
-    navTicker?: string | null;
-    inavTicker: string | null;
-    inavValidationError?: string | null;
-  }
-
-  function relationshipBatch(rows: readonly RelationshipFixtureRow[]): NativeArrowZeroCopyBatch {
-    const navTickers = rows.map((row) => row.navTicker ?? null);
-    const inavTickers = rows.map((row) => row.inavTicker);
-    return {
-      columns: [
-        int32Column(
-          'input_order',
-          rows.map((row) => row.inputOrder),
-        ),
-        utf8Column(
-          'etf_ticker',
-          rows.map((row) => row.etfTicker),
-        ),
-        utf8Column('nav_ticker', navTickers),
-        utf8Column(
-          'nav_market_sector_des',
-          navTickers.map((ticker) => (ticker === null ? null : 'Index')),
-        ),
-        utf8Column(
-          'nav_name',
-          navTickers.map((ticker) => (ticker === null ? null : `${ticker} name`)),
-        ),
-        utf8Column(
-          'nav_validation_error',
-          rows.map(() => null),
-        ),
-        utf8Column('inav_ticker', inavTickers),
-        utf8Column(
-          'inav_market_sector_des',
-          inavTickers.map((ticker) => (ticker === null ? null : 'Index')),
-        ),
-        utf8Column(
-          'inav_name',
-          inavTickers.map((ticker) => (ticker === null ? null : `${ticker} name`)),
-        ),
-        utf8Column(
-          'inav_validation_error',
-          rows.map((row) => row.inavValidationError ?? null),
-        ),
-      ],
-      kind: 'zeroCopy',
-      metadata: {},
-      numRows: rows.length,
-    };
-  }
-
-  function qqqAt1Batch(): NativeArrowZeroCopyBatch {
-    return relationshipBatch([
-      { inputOrder: 0, etfTicker: QQQ, navTicker: QQQ_NAV, inavTicker: QQQ_INAV },
-      { inputOrder: 1, etfTicker: AT1, inavTicker: AT1_INAV },
-    ]);
-  }
-
-  interface SubscribeCall {
-    tickers: readonly string[];
-    fields: readonly string[];
-    options: Record<string, unknown>;
-  }
-
-  function preflightHarness(batchFactory: () => NativeArrowZeroCopyBatch): {
-    engine: api.Engine;
-    recipeCalls: unknown[][];
-    subscribeCalls: SubscribeCall[];
-    subscription: object;
-  } {
-    const engine = Object.create(api.Engine.prototype) as api.Engine;
-    const recipeCalls: unknown[][] = [];
-    const subscribeCalls: SubscribeCall[] = [];
-    const subscription = {};
-    Reflect.set(engine, 'inner', {
-      recipeEtfNavRelationships: async (...args: unknown[]) => {
-        recipeCalls.push(args);
-        return batchFactory();
-      },
-    });
-    Reflect.set(
-      engine,
-      'subscribe',
-      async (
-        tickers: readonly string[],
-        fields: readonly string[],
-        options: Record<string, unknown>,
-      ) => {
-        subscribeCalls.push({ tickers, fields, options });
-        return subscription;
-      },
-    );
-    return { engine, recipeCalls, subscribeCalls, subscription };
-  }
-
-  it('delegates validated iNAV topics with default LAST_PRICE', async () => {
-    const { engine, recipeCalls, subscribeCalls, subscription } = preflightHarness(qqqAt1Batch);
-
-    const result = await engine.subscribeEtfInav([` ${QQQ} `, AT1]);
-
-    expect(result).toBe(subscription);
-    expect(recipeCalls).toStrictEqual([[[QQQ, AT1]]]);
-    expect(subscribeCalls).toStrictEqual([
-      { tickers: [QQQ_INAV, AT1_INAV], fields: ['LAST_PRICE'], options: {} },
-    ]);
-  });
-
-  it('honors a custom fields override and forwards remaining stream options', async () => {
-    const { engine, subscribeCalls } = preflightHarness(() =>
-      relationshipBatch([
-        { inputOrder: 0, etfTicker: QQQ, navTicker: QQQ_NAV, inavTicker: QQQ_INAV },
-      ]),
-    );
-
-    await engine.subscribeEtfInav(QQQ, {
+    const result = await engine.subscribeEtfInav([` ${QQQ} `, AT1], {
       fields: ['BID', 'ASK'],
       conflate: true,
       flushThreshold: 5,
@@ -1388,13 +1247,15 @@ describe('subscribeEtfInav preflight', () => {
       allFields: true,
       options: ['interval=2'],
       delivery: 'deltas',
+      rows: undefined,
     });
 
-    expect(subscribeCalls).toStrictEqual([
+    expect(result).toBeInstanceOf(api.Subscription);
+    expect(payloads).toStrictEqual([
       {
-        tickers: [QQQ_INAV],
-        fields: ['BID', 'ASK'],
+        tickers: [` ${QQQ} `, AT1],
         options: {
+          fields: ['BID', 'ASK'],
           conflate: true,
           flushThreshold: 5,
           overflowPolicy: 'block',
@@ -1407,119 +1268,27 @@ describe('subscribeEtfInav preflight', () => {
     ]);
   });
 
-  it('rejects empty input before native resolution', async () => {
-    const { engine, recipeCalls, subscribeCalls } = preflightHarness(qqqAt1Batch);
+  it('wraps a single ticker and sends empty options by default', async () => {
+    const { engine, payloads } = inavPreflightHarness(async () => fakeNativeSubscription());
 
-    await expectValidationError(engine.subscribeEtfInav([]), 'etfs must not be empty');
+    await engine.subscribeEtfInav(QQQ);
 
-    expect(recipeCalls).toStrictEqual([]);
-    expect(subscribeCalls).toStrictEqual([]);
+    expect(payloads).toStrictEqual([{ tickers: [QQQ], options: {} }]);
   });
 
-  it('rejects duplicate trimmed inputs before native resolution', async () => {
-    const { engine, recipeCalls, subscribeCalls } = preflightHarness(qqqAt1Batch);
+  it.each([
+    'etfs must not be empty',
+    `Duplicate ETF inputs are not allowed: ${QQQ}, ${AT1}`,
+    `Invalid iNAV relationship for ETF ${AT1}: NAME is missing`,
+    `Missing valid iNAV relationship for ETFs: ${QQQ}, ${AT1}`,
+    `Ambiguous iNAV reverse mapping for QXV Index: ${QQQ}, QQQM US Equity`,
+    'ETF NAV relationship result is not one-to-one with requested ETFs',
+  ])('reports the native rejection %j as a validation error on tickers', async (message) => {
+    const { engine } = inavPreflightHarness(async () => {
+      throw new Error(`[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"tickers"}\n${message}`);
+    });
 
-    await expectValidationError(
-      engine.subscribeEtfInav([QQQ, AT1, ` ${QQQ} `, AT1]),
-      `Duplicate ETF inputs are not allowed: ${QQQ}, ${AT1}`,
-    );
-
-    expect(recipeCalls).toStrictEqual([]);
-    expect(subscribeCalls).toStrictEqual([]);
-  });
-
-  it('rejects an invalid iNAV relationship before opening a stream', async () => {
-    const { engine, recipeCalls, subscribeCalls } = preflightHarness(() =>
-      relationshipBatch([
-        { inputOrder: 0, etfTicker: QQQ, navTicker: QQQ_NAV, inavTicker: QQQ_INAV },
-        {
-          inputOrder: 1,
-          etfTicker: AT1,
-          inavTicker: AT1_INAV,
-          inavValidationError: 'NAME is missing',
-        },
-      ]),
-    );
-
-    await expectValidationError(
-      engine.subscribeEtfInav([QQQ, AT1]),
-      `Invalid iNAV relationship for ETF ${AT1}: NAME is missing`,
-    );
-
-    expect(recipeCalls).toHaveLength(1);
-    expect(subscribeCalls).toStrictEqual([]);
-  });
-
-  it('collects every missing iNAV relationship in request order', async () => {
-    const { engine, subscribeCalls } = preflightHarness(() =>
-      relationshipBatch([
-        { inputOrder: 0, etfTicker: QQQ, navTicker: QQQ_NAV, inavTicker: null },
-        { inputOrder: 1, etfTicker: AT1, inavTicker: '   ' },
-        { inputOrder: 2, etfTicker: 'SPY US Equity', inavTicker: 'SPYIV Index' },
-      ]),
-    );
-
-    await expectValidationError(
-      engine.subscribeEtfInav([QQQ, AT1, 'SPY US Equity']),
-      `Missing valid iNAV relationship for ETFs: ${QQQ}, ${AT1}`,
-    );
-
-    expect(subscribeCalls).toStrictEqual([]);
-  });
-
-  it('rejects an ambiguous iNAV reverse mapping', async () => {
-    const { engine, subscribeCalls } = preflightHarness(() =>
-      relationshipBatch([
-        { inputOrder: 0, etfTicker: QQQ, navTicker: QQQ_NAV, inavTicker: QQQ_INAV },
-        { inputOrder: 1, etfTicker: 'QQQM US Equity', inavTicker: QQQ_INAV },
-      ]),
-    );
-
-    await expectValidationError(
-      engine.subscribeEtfInav([QQQ, 'QQQM US Equity']),
-      `Ambiguous iNAV reverse mapping for ${QQQ_INAV}: ${QQQ}, QQQM US Equity`,
-    );
-
-    expect(subscribeCalls).toStrictEqual([]);
-  });
-
-  it('rejects malformed relationship results atomically', async () => {
-    const malformedBatches: (() => NativeArrowZeroCopyBatch)[] = [
-      // Too few rows.
-      () => relationshipBatch([{ inputOrder: 0, etfTicker: QQQ, inavTicker: QQQ_INAV }]),
-      // Duplicate input_order.
-      () =>
-        relationshipBatch([
-          { inputOrder: 0, etfTicker: QQQ, inavTicker: QQQ_INAV },
-          { inputOrder: 0, etfTicker: AT1, inavTicker: AT1_INAV },
-        ]),
-      // Mismatched etf_ticker identity.
-      () =>
-        relationshipBatch([
-          { inputOrder: 0, etfTicker: QQQ, inavTicker: QQQ_INAV },
-          { inputOrder: 1, etfTicker: 'WRONG US Equity', inavTicker: AT1_INAV },
-        ]),
-      // Missing required vector.
-      () => ({
-        columns: [
-          int32Column('input_order', [0, 1]),
-          utf8Column('etf_ticker', [QQQ, AT1]),
-          utf8Column('inav_ticker', [QQQ_INAV, AT1_INAV]),
-        ],
-        kind: 'zeroCopy',
-        metadata: {},
-        numRows: 2,
-      }),
-    ];
-
-    for (const batchFactory of malformedBatches) {
-      const { engine, subscribeCalls } = preflightHarness(batchFactory);
-      await expectValidationError(
-        engine.subscribeEtfInav([QQQ, AT1]),
-        'ETF NAV relationship result is not one-to-one with requested ETFs',
-      );
-      expect(subscribeCalls).toStrictEqual([]);
-    }
+    await expectValidationError(engine.subscribeEtfInav([QQQ, AT1]), message);
   });
 });
 

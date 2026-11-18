@@ -503,7 +503,7 @@ try {
 }
 ```
 
-`subscribeAuction` and `streamAuction` perform atomic preflight: every distinct input must resolve before any subscription opens. Identical input strings collapse; distinct inputs resolving to the same venue raise `BlpValidationError` naming the conflicting inputs. Any unresolved, unsupported or mismatched input also fails preflight. Venue topics are automatically aliased to the original security strings; caller-supplied aliases are rejected before resolution. Dynamic `add()` takes already-resolved venue topics with aliases; `remove()` takes original security labels.
+`subscribeAuction` and `streamAuction` perform atomic preflight: every distinct input must resolve before any subscription opens. Identical input strings collapse; distinct inputs resolving to the same venue raise `BlpValidationError` naming the conflicting inputs. Any unresolved, unsupported or mismatched input also fails preflight. Venue topics are automatically aliased to the original security strings; caller-supplied aliases are rejected before resolution. Dynamic `add()` takes already-resolved venue topics with aliases; `remove()` takes original security labels. The auction and iNAV preflights run in the shared xbbg host layer and validate stream options before any Bloomberg request is sent.
 
 `AuctionFields` exposes readonly `imbalance`, `indicative`, `state`, `halts`, `results`, `composite`, `quotes` and `default` arrays sourced from Rust. `default` concatenates the first five groups (39 fields), excluding composite prices and quotes. Missing or empty snapshot/auction-stream fields select that default. These are stream-valid names (`THEO_PRICE`, `BID`, `ASK`), not static aliases such as `PX_THEO` or `PX_BID`.
 

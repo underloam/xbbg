@@ -666,124 +666,65 @@ function venueBatch(rows: readonly VenueFixture[]): NativeArrowZeroCopyBatch {
 }
 
 describe('auction preflight and results', () => {
-  it('rejects caller aliases before resolving or opening auction feeds', async () => {
-    const recipeResolveVenues = vi.fn<NativeEngine['recipeResolveVenues']>();
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({ recipeResolveVenues, subscribe });
-    const options = { aliases: { VENUE_A: 'custom' } } as api.AuctionStreamOptions;
-    await expect(engine.subscribeAuction(['SYN_A'], options)).rejects.toMatchObject({
+  // The preflight rules run in xbbg-host, which has its own Rust tests.
+  // These tests pin what the wrapper sends and how it reports a rejection.
+  it.each(['subscribeAuction', 'streamAuction'] as const)(
+    'sends %s inputs and stream options to the native host preflight',
+    async (method) => {
+      const subscribeAuction = vi
+        .fn<NativeEngine['subscribeAuction']>()
+        .mockResolvedValue(fakeNativeSubscription());
+      const engine = engineWithNative({ subscribeAuction });
+      const pcsOverrides = { 'SYNTHETIC EXCHANGE': 'PCS' };
+      const subscription = await engine[method](
+        ['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'],
+        {
+          fields: ['BID'],
+          pcsOverrides,
+          isolated: true,
+          onDelayed: 'raise',
+          delivery: 'state',
+        },
+      );
+      expect(subscription).toBeInstanceOf(api.Subscription);
+      expect(subscribeAuction).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+        securities: ['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'],
+        pcsOverrides,
+        streamAuction: method === 'streamAuction',
+        options: { fields: ['BID'], isolated: true, onDelayed: 'raise', delivery: 'state' },
+      });
+    },
+  );
+
+  it('wraps a single security and sends only known, defined stream options', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockResolvedValue(fakeNativeSubscription());
+    const engine = engineWithNative({ subscribeAuction });
+    const options = { rows: undefined, unknownOption: 1 } as api.AuctionStreamOptions;
+    await engine.subscribeAuction('SYN_A', options);
+    expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+      securities: ['SYN_A'],
+      streamAuction: false,
+      options: {},
+    });
+  });
+
+  it('reports a native preflight rejection as a coded validation error', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"aliases"}\nAuction aliases are derived from input securities',
+        ),
+      );
+    const engine = engineWithNative({ subscribeAuction });
+    await expect(engine.subscribeAuction(['SYN_A'])).rejects.toMatchObject({
       name: 'BlpValidationError',
       element: 'aliases',
+      message: 'Auction aliases are derived from input securities',
     });
-    expect(recipeResolveVenues).not.toHaveBeenCalled();
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it.each(['subscribeAuction', 'streamAuction'] as const)(
-    'atomically resolves unique inputs for %s and preserves their labels',
-    async (method) => {
-      const recipe = vi.fn<NativeEngine['recipeResolveVenues']>().mockResolvedValue(
-        venueBatch([
-          { inputOrder: 1, security: 'SYN_B US Equity', topic: 'SYN_B UW Equity' },
-          { inputOrder: 0, security: 'SYN_A US Equity', topic: 'SYN_A UN Equity' },
-        ]),
-      );
-      const subscribe = vi
-        .fn<NativeEngine['subscribe']>()
-        .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({ recipeResolveVenues: recipe, subscribe });
-      const pcsOverrides = { 'SYNTHETIC EXCHANGE': 'PCS' };
-      await engine[method](['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'], {
-        fields: ['BID'],
-        pcsOverrides,
-        isolated: true,
-        onDelayed: 'raise',
-        delivery: 'state',
-      });
-      expect(recipe).toHaveBeenCalledWith(['SYN_A US Equity', 'SYN_B US Equity'], pcsOverrides);
-      expect(subscribe).toHaveBeenCalledWith(
-        ['SYN_A UN Equity', 'SYN_B UW Equity'],
-        ['BID'],
-        undefined,
-        { 'SYN_A UN Equity': 'SYN_A US Equity', 'SYN_B UW Equity': 'SYN_B US Equity' },
-        'raise',
-        true,
-        undefined,
-        undefined,
-        [],
-        'state',
-      );
-    },
-  );
-
-  it.each(['unresolved', 'unsupported', 'mismatch'])(
-    'opens no partial stream when any input is %s',
-    async (status) => {
-      const subscribe = vi.fn<NativeEngine['subscribe']>();
-      const engine = engineWithNative({
-        subscribe,
-        recipeResolveVenues: async () =>
-          venueBatch([
-            { inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' },
-            {
-              inputOrder: 1,
-              security: 'SYN_B',
-              topic: 'VENUE_B',
-              status,
-              error: 'venue not validated',
-            },
-          ]),
-      });
-      await expect(engine.subscribeAuction(['SYN_A', 'SYN_B'])).rejects.toMatchObject({
-        name: 'BlpValidationError',
-        element: 'securities',
-        message: expect.stringContaining('SYN_B'),
-      });
-      expect(subscribe).not.toHaveBeenCalled();
-    },
-  );
-
-  it('rejects distinct inputs sharing a venue instead of silently merging their labels', async () => {
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({
-      subscribe,
-      recipeResolveVenues: async () =>
-        venueBatch([
-          { inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' },
-          { inputOrder: 1, security: 'SYN_B', topic: 'VENUE_A' },
-        ]),
-    });
-    await expect(engine.subscribeAuction(['SYN_A', 'SYN_B'])).rejects.toThrow(/SYN_A, SYN_B/u);
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { rows: [{ inputOrder: 0, security: 'WRONG', topic: 'VENUE_A' }] },
-    { rows: [{ inputOrder: 1, security: 'SYN_A', topic: 'VENUE_A' }] },
-    { rows: [{ inputOrder: 0, security: 'SYN_A', topic: null }] },
-    { rows: [] },
-  ])('rejects incomplete or misidentified recipe rows before subscribing', async ({ rows }) => {
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({
-      subscribe,
-      recipeResolveVenues: async () => venueBatch(rows),
-    });
-    await expect(engine.subscribeAuction(['SYN_A'])).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it('rejects empty inputs before resolution and retains default fields for an empty field list', async () => {
-    const recipe = vi
-      .fn<NativeEngine['recipeResolveVenues']>()
-      .mockResolvedValue(venueBatch([{ inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' }]));
-    const subscribe = vi
-      .fn<NativeEngine['subscribe']>()
-      .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ recipeResolveVenues: recipe, subscribe });
-    await expect(engine.subscribeAuction([])).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(recipe).not.toHaveBeenCalled();
-    await engine.subscribeAuction('SYN_A', { fields: [] });
-    expect(subscribe.mock.calls[0]?.[1]).toStrictEqual(api.AuctionFields.default);
   });
 
   it('converts resolve and snapshot recipe tables using the requested backend', async () => {
@@ -816,51 +757,49 @@ describe('auction preflight and results', () => {
   });
 
   it.each([
-    { fields: undefined, zeroAsNull: undefined, expected: ['THEO_PRICE', 'INDICATIVE_NEAR'] },
-    { fields: [], zeroAsNull: undefined, expected: ['THEO_PRICE', 'INDICATIVE_NEAR'] },
-    {
-      fields: ['BID', 'REFERENCE_PRICE_RT'],
-      zeroAsNull: undefined,
-      expected: ['REFERENCE_PRICE_RT'],
-    },
-    { fields: ['THEO_PRICE'], zeroAsNull: [], expected: [] },
-    { fields: ['BID'], zeroAsNull: ['BID'], expected: ['BID'] },
+    { zeroAsNull: undefined, expected: {} },
+    { zeroAsNull: [], expected: { zeroAsNull: [] } },
+    { zeroAsNull: ['BID'], expected: { zeroAsNull: ['BID'] } },
   ])(
-    'applies auction zero sentinels only to selected fields: %j',
-    async ({ fields, zeroAsNull, expected }) => {
-      const subscribe = vi
-        .fn<NativeEngine['subscribe']>()
+    'forwards an explicit zeroAsNull choice to the host default rule: %j',
+    async ({ zeroAsNull, expected }) => {
+      const subscribeAuction = vi
+        .fn<NativeEngine['subscribeAuction']>()
         .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({
-        subscribe,
-        recipeResolveVenues: async () =>
-          venueBatch([{ inputOrder: 0, security: 'SYN', topic: 'VENUE' }]),
-      });
+      const engine = engineWithNative({ subscribeAuction });
       await engine.subscribeAuction('SYN', {
-        fields,
+        fields: ['THEO_PRICE'],
         zeroAsNull,
         rows: false,
         onFieldError: 'raise',
       });
-      expect(subscribe.mock.calls[0]?.slice(-4)).toStrictEqual([
-        false,
-        'raise',
-        expected,
-        undefined,
-      ]);
+      expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+        securities: ['SYN'],
+        streamAuction: false,
+        options: { fields: ['THEO_PRICE'], rows: false, onFieldError: 'raise', ...expected },
+      });
     },
   );
 
-  it('rejects a row-delivery option on streamAuction before venue resolution', async () => {
-    const recipeResolveVenues = vi.fn<NativeEngine['recipeResolveVenues']>();
-    const engine = engineWithNative({ recipeResolveVenues });
+  it('lets the native preflight reject a row-delivery option on streamAuction', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"rows"}\nstreamAuction always delivers rows; use subscribeAuction for rows=false',
+        ),
+      );
+    const engine = engineWithNative({ subscribeAuction });
     const options = { fields: ['BID'], rows: false };
     await expect(engine.streamAuction('SYN', options)).rejects.toMatchObject({
       name: 'BlpValidationError',
       element: 'rows',
       message: expect.stringContaining('subscribeAuction'),
     });
-    expect(recipeResolveVenues).not.toHaveBeenCalled();
+    expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toMatchObject({
+      streamAuction: true,
+      options: { rows: false },
+    });
   });
 });
 

@@ -80,7 +80,7 @@ export function validateDelayedPolicy(policy: unknown): void {
   }
 }
 
-export function validateStreamControls(options: SubscriptionOptions): void {
+function validateStreamControls(options: SubscriptionOptions): void {
   validateAliases(options.aliases);
   validateDelayedPolicy(options.onDelayed);
   const isolated: unknown = options.isolated;
