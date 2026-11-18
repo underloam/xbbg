@@ -505,11 +505,17 @@ jobs:
 
       - name: Enforce glibc 2.28 floor on native addon (Linux)
         if: runner.os == 'Linux'
-        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.core_package_dir }}/napi_xbbg.node"
+        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.core_package_dir }}/napi_xbbg.node" "${{ matrix.core_package_dir }}/napi_xbbg_runtime.node"
+
+      - name: Check the resolver addon never links the Bloomberg runtime
+        shell: bash
+        run: |
+          py="$(command -v python3 || command -v python)"
+          "$py" scripts/check_runtime_addon_links.py "${{ matrix.core_package_dir }}/napi_xbbg_runtime.node"
 
       - name: Validate core native package export
         run: |
-          node -e "const addon = require('./${{ matrix.core_package_dir }}'); console.log(addon.binaryPath);"
+          node -e "const fs = require('node:fs'); const addon = require('./${{ matrix.core_package_dir }}'); console.log(addon.binaryPath); if (!fs.existsSync(addon.runtimeBinaryPath)) throw new Error('missing runtime resolver addon ' + addon.runtimeBinaryPath); console.log(addon.runtimeBinaryPath);"
 
       # Only this job builds the real addon on Linux, Windows, and macOS; the
       # Ubuntu JS quality job has none, so native-dependent suites such as
@@ -528,14 +534,14 @@ jobs:
         working-directory: js-xbbg
         run: bun --bun run test
 
-      - name: Remove local js-xbbg build artifact (Unix)
+      - name: Remove local js-xbbg build artifacts (Unix)
         if: runner.os != 'Windows'
-        run: rm -f js-xbbg/napi_xbbg.node
+        run: rm -f js-xbbg/napi_xbbg.node js-xbbg/napi_xbbg_runtime.node
 
-      - name: Remove local js-xbbg build artifact (Windows)
+      - name: Remove local js-xbbg build artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Remove-Item js-xbbg\napi_xbbg.node -Force
+        run: Remove-Item js-xbbg\napi_xbbg.node, js-xbbg\napi_xbbg_runtime.node -Force
 
       - name: Smoke test packaged @xbbg/core install
         shell: bash

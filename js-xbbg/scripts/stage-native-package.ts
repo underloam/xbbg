@@ -5,12 +5,18 @@ import path from 'node:path';
 
 import { assertNativeBuildArtifact, readNativeBuildInfo } from './native-build-info';
 import { runNpm } from './npm-process';
-import { nativeBinaryName, nativePackageSpecForKey, platformKey } from './platform-map';
+import {
+  nativeBinaryName,
+  nativePackageSpecForKey,
+  platformKey,
+  runtimeBinaryName,
+} from './platform-map';
 import type { NativePackageSpec } from './platform-map';
 
 const repoRoot = path.resolve(__dirname, '..', '..');
 const packageDir = path.resolve(repoRoot, 'js-xbbg');
 const sourceBinary = path.join(packageDir, nativeBinaryName);
+const sourceRuntimeBinary = path.join(packageDir, runtimeBinaryName);
 
 interface StageOptions {
   build: boolean;
@@ -85,25 +91,34 @@ function tempPathFor(destPath: string, suffix: string): string {
   );
 }
 
-function copyBinarySafely(
-  sourcePath: string,
-  destPath: string,
+function prepareBinary(sourcePath: string, tempPath: string, what: string): void {
+  fs.copyFileSync(sourcePath, tempPath);
+  fs.chmodSync(tempPath, 0o755);
+  const stat = fs.statSync(tempPath);
+  if (!stat.isFile() || stat.size === 0) {
+    fail(`prepared ${what} is empty: ${tempPath}`);
+  }
+}
+
+// Both addons are verified against the build provenance before either one replaces a staged file.
+function copyBinariesSafely(
+  destBinary: string,
+  destRuntimeBinary: string,
   key: NativePackageSpec['key'],
   release: boolean,
 ): void {
-  const tempPath = tempPathFor(destPath, 'binary');
+  const tempPath = tempPathFor(destBinary, 'binary');
+  const tempRuntimePath = tempPathFor(destRuntimeBinary, 'binary');
   try {
     const provenance = readNativeBuildInfo(path.join(packageDir, '.native-build-info.json'));
-    fs.copyFileSync(sourcePath, tempPath);
-    fs.chmodSync(tempPath, 0o755);
-    const stat = fs.statSync(tempPath);
-    if (!stat.isFile() || stat.size === 0) {
-      fail(`prepared native addon is empty: ${tempPath}`);
-    }
-    assertNativeBuildArtifact(provenance, tempPath, key, release);
-    fs.renameSync(tempPath, destPath);
+    prepareBinary(sourceBinary, tempPath, 'native addon');
+    prepareBinary(sourceRuntimeBinary, tempRuntimePath, 'runtime resolver addon');
+    assertNativeBuildArtifact(provenance, tempPath, tempRuntimePath, key, release);
+    fs.renameSync(tempPath, destBinary);
+    fs.renameSync(tempRuntimePath, destRuntimeBinary);
   } finally {
     fs.rmSync(tempPath, { force: true });
+    fs.rmSync(tempRuntimePath, { force: true });
   }
 }
 
@@ -141,8 +156,15 @@ function stagePackage(release: boolean, version: string | null = null): StagePac
     );
   }
 
+  if (!fs.existsSync(sourceRuntimeBinary)) {
+    fail(
+      `expected built runtime resolver addon at ${sourceRuntimeBinary}; run npm --prefix js-xbbg run build:native first or pass --build`,
+    );
+  }
+
   const destBinary = path.join(localPackageDir, spec.binaryName);
-  copyBinarySafely(sourceBinary, destBinary, spec.key, release);
+  const destRuntimeBinary = path.join(localPackageDir, spec.runtimeBinaryName);
+  copyBinariesSafely(destBinary, destRuntimeBinary, spec.key, release);
 
   if (version !== null) {
     const normalizedVersion = version.replace(/^v/u, '');
@@ -155,11 +177,12 @@ function stagePackage(release: boolean, version: string | null = null): StagePac
   }
 
   console.log(`Staged ${sourceBinary} -> ${destBinary}`);
+  console.log(`Staged ${sourceRuntimeBinary} -> ${destRuntimeBinary}`);
   return { destBinary, key, localPackageDir, packageName: spec.packageName };
 }
 
 function maybeBuild({ build, release }: StageOptions): void {
-  if (!build && fs.existsSync(sourceBinary)) {
+  if (!build && fs.existsSync(sourceBinary) && fs.existsSync(sourceRuntimeBinary)) {
     return;
   }
   runNpm(

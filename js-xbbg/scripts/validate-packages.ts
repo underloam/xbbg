@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 
 import { runNpm } from './npm-process';
-import { nativeBinaryName, nativePackageSpecs } from './platform-map';
+import { nativeBinaryName, nativePackageSpecs, runtimeBinaryName } from './platform-map';
 import type { NativePackageSpec } from './platform-map';
 
 const repoRoot = path.resolve(__dirname, '..', '..');
@@ -113,7 +113,7 @@ function packageSpecs(allPlatforms: boolean): PackageSpec[] {
     {
       dir: packageDir,
       expectedFiles: ['dist/index.js', 'dist/index.d.ts', 'README.md', 'LICENSE', 'package.json'],
-      forbiddenFiles: [nativeBinaryName],
+      forbiddenFiles: [nativeBinaryName, runtimeBinaryName],
       name: '@xbbg/core',
     },
   ];

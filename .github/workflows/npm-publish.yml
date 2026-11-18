@@ -206,7 +206,13 @@ jobs:
 
       - name: Enforce glibc 2.28 floor on native addon (Linux)
         if: runner.os == 'Linux'
-        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.package_dir }}/napi_xbbg.node"
+        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.package_dir }}/napi_xbbg.node" "${{ matrix.package_dir }}/napi_xbbg_runtime.node"
+
+      - name: Check the resolver addon never links the Bloomberg runtime
+        shell: bash
+        run: |
+          py="$(command -v python3 || command -v python)"
+          "$py" scripts/check_runtime_addon_links.py "${{ matrix.package_dir }}/napi_xbbg_runtime.node"
 
       - name: Upload staged native package artifact
         uses: actions/upload-artifact@v7

@@ -12,6 +12,10 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const packedMode = process.argv.includes('--packed');
 const bunMode = process.argv.includes('--bun');
 
+// The resolver addon ships in the platform package, loads without Bloomberg, and scans an empty cache.
+const RUNTIME_ADDON_SCRIPT =
+  "const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const pkg = require(`@xbbg/core-${process.platform}-${process.arch}`); if (!fs.existsSync(pkg.runtimeBinaryPath)) throw new Error(`missing runtime resolver addon ${pkg.runtimeBinaryPath}`); const addon = require(pkg.runtimeBinaryPath); const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-smoke-cache-')); const scan = addon.scanCache(cache); fs.rmSync(cache, { recursive: true }); if (scan.runtimes.length !== 0 || scan.rejected.length !== 0) throw new Error('expected an empty cache scan'); console.log('runtime resolver addon ok', typeof addon.preloadLibrary);";
+
 const LOAD_PACKAGE_SCRIPT =
   "const resolved = require.resolve('@xbbg/core'); if (!resolved.includes('dist')) throw new Error(`expected packaged dist entrypoint, got ${resolved}`); const core = require('@xbbg/core'); console.log(resolved, typeof core.connect, typeof core.version, core.version());";
 
@@ -58,6 +62,7 @@ function smokeRuntimeEnv(): NodeJS.ProcessEnv {
 
 function smokeRequire(appDir: string, runtime: string = process.execPath): void {
   run(runtime, ['-e', LOAD_PACKAGE_SCRIPT], { cwd: appDir, env: smokeRuntimeEnv() });
+  run(runtime, ['-e', RUNTIME_ADDON_SCRIPT], { cwd: appDir, env: process.env });
 }
 
 function smokeSourceInstall(jsPackageDir: string): void {

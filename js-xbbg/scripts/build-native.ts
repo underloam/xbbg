@@ -4,7 +4,7 @@ import path from 'node:path';
 
 import { inspectRustCodegen, sha256File } from './native-build-info';
 import type { NativeBuildInfo } from './native-build-info';
-import { nativeBinaryName } from './platform-map';
+import { nativeBinaryName, runtimeBinaryName } from './platform-map';
 
 const packageDir = path.resolve(__dirname, '..');
 const repoRoot = path.resolve(packageDir, '..');
@@ -220,6 +220,19 @@ function patchDarwinNativeAddon(binaryPath: string, sdkLibDir: string): void {
   verifyDarwinPortableBinary(binaryPath);
 }
 
+// The resolver addon has no Bloomberg dependency: it only needs a portable install name.
+function patchDarwinRuntimeAddon(binaryPath: string): void {
+  if (process.platform !== 'darwin') {
+    return;
+  }
+
+  installNameTool(
+    ['-id', `@rpath/${runtimeBinaryName}`, binaryPath],
+    `Failed to set portable install name for ${binaryPath}`,
+  );
+  verifyDarwinPortableBinary(binaryPath);
+}
+
 function sdkVersion(includeDir: string): string | null {
   const headerPath = path.join(includeDir, 'blpapi_versionmacros.h');
   if (!fs.existsSync(headerPath)) {
@@ -237,6 +250,7 @@ function main(): void {
   // Portable release by default; host tuning is deliberately local-only.
   const profile = process.argv.includes('--debug') ? 'debug' : 'release';
   const outputPath = path.join(packageDir, nativeBinaryName);
+  const runtimeOutputPath = path.join(packageDir, runtimeBinaryName);
   const env: NodeJS.ProcessEnv = { ...process.env };
   if ((env.BLPAPI_ROOT ?? '').length === 0 && (env.XBBG_DEV_SDK_ROOT ?? '').length > 0) {
     env.BLPAPI_ROOT = path.resolve(repoRoot, env.XBBG_DEV_SDK_ROOT ?? '');
@@ -251,7 +265,14 @@ function main(): void {
   }
   // Otherwise leave flag resolution to Cargo, including .cargo/config.toml.
   // Its build-script event reports the effective values, not this launcher's guesses.
-  const cargoArgs = ['build', '-p', 'napi-xbbg', '--message-format=json-render-diagnostics'];
+  const cargoArgs = [
+    'build',
+    '-p',
+    'napi-xbbg',
+    '-p',
+    'napi-xbbg-runtime',
+    '--message-format=json-render-diagnostics',
+  ];
   if (profile === 'release') {
     cargoArgs.push('--release');
   }
@@ -302,6 +323,18 @@ function main(): void {
     fail('Cargo did not identify exactly one loadable native library');
   }
   const artifactPath = files[0];
+  const runtimeArtifacts = events.filter(
+    (event) =>
+      event.reason === 'compiler-artifact' &&
+      event.target?.name === 'napi_xbbg_runtime' &&
+      event.target.crate_types.includes('cdylib'),
+  );
+  const runtimeFiles =
+    runtimeArtifacts[0]?.filenames?.filter((file) => /\.(?:dll|dylib|so)$/u.test(file)) ?? [];
+  if (runtimeArtifacts.length !== 1 || runtimeFiles.length !== 1 || runtimeFiles[0] === undefined) {
+    fail('Cargo did not identify exactly one napi-xbbg-runtime loadable native library');
+  }
+  const runtimeArtifactPath = runtimeFiles[0];
   const producer = events.filter(
     (event) => event.reason === 'build-script-executed' && event.package_id === artifact.package_id,
   );
@@ -361,12 +394,19 @@ function main(): void {
   }
   const sdkLibDir = path.dirname(libraryFile);
   const preparedOutput = path.join(packageDir, `.${nativeBinaryName}.${process.pid}.build.tmp`);
+  const preparedRuntimeOutput = path.join(
+    packageDir,
+    `.${runtimeBinaryName}.${process.pid}.build.tmp`,
+  );
   const infoPath = path.join(packageDir, '.native-build-info.json');
   const preparedInfo = `${infoPath}.${process.pid}.tmp`;
   try {
     fs.copyFileSync(artifactPath, preparedOutput);
     fs.chmodSync(preparedOutput, 0o755);
     patchDarwinNativeAddon(preparedOutput, sdkLibDir);
+    fs.copyFileSync(runtimeArtifactPath, preparedRuntimeOutput);
+    fs.chmodSync(preparedRuntimeOutput, 0o755);
+    patchDarwinRuntimeAddon(preparedRuntimeOutput);
     const buildInfo: NativeBuildInfo = {
       allocator: buildValue('ALLOCATOR'),
       artifactSha256: sha256File(preparedOutput),
@@ -376,7 +416,11 @@ function main(): void {
       profile,
       rustcVersion: buildValue('RUSTC_VERSION'),
       rustFlags,
-      schemaVersion: 1,
+      runtimeAddon: {
+        file: runtimeBinaryName,
+        sha256: sha256File(preparedRuntimeOutput),
+      },
+      schemaVersion: 2,
       sdkLibrary: { file: path.basename(libraryFile), sha256: sha256File(libraryFile) },
       sdkVersion: headerVersion,
       target,
@@ -385,13 +429,18 @@ function main(): void {
     };
     fs.writeFileSync(preparedInfo, `${JSON.stringify(buildInfo, null, 2)}\n`);
     fs.renameSync(preparedOutput, outputPath);
+    fs.renameSync(preparedRuntimeOutput, runtimeOutputPath);
     fs.renameSync(preparedInfo, infoPath);
   } finally {
     fs.rmSync(preparedOutput, { force: true });
+    fs.rmSync(preparedRuntimeOutput, { force: true });
     fs.rmSync(preparedInfo, { force: true });
   }
   console.log(
     `Copied ${path.relative(repoRoot, artifactPath)} -> ${path.relative(repoRoot, outputPath)}`,
+  );
+  console.log(
+    `Copied ${path.relative(repoRoot, runtimeArtifactPath)} -> ${path.relative(repoRoot, runtimeOutputPath)}`,
   );
 }
 
