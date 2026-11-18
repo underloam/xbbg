@@ -1,6 +1,7 @@
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 
 use arrow::record_batch::RecordBatch;
 use rmcp::handler::server::tool::ToolRouter;
@@ -16,6 +17,7 @@ use xbbg_async::engine::{
 use xbbg_async::error_presentation::blp_error_display;
 use xbbg_core::errors::ValidationError;
 use xbbg_core::{AuthConfig, BlpError};
+use xbbg_host::teardown::{DeferredDrop, wait_idle_timeout};
 use xbbg_recipes::{
     RecipeError, recipe_auction_snapshot, recipe_delay_status, recipe_resolve_venues,
 };
@@ -39,10 +41,15 @@ use serialization::{
     should_offload_items,
 };
 
+/// The engine, started on first use. `DeferredDrop` moves the last release off whatever thread
+/// holds it: dropping an engine stops its Bloomberg sessions and joins its runtime, which must
+/// not happen on a Tokio worker. `main` waits for the deferred drop before the process exits.
+type EngineCell = OnceCell<DeferredDrop<Engine>>;
+
 struct XbbgMcpServer {
     #[allow(dead_code)] // read by rmcp's generated ServerHandler impl
     tool_router: ToolRouter<Self>,
-    engine: OnceCell<Arc<Engine>>,
+    engine: Arc<EngineCell>,
     engine_config: EngineConfig,
     result_limits: ResultLimits,
     serialization_permits: Arc<Semaphore>,
@@ -62,7 +69,7 @@ impl XbbgMcpServer {
         }
         Ok(Self {
             tool_router: Self::tool_router(),
-            engine: OnceCell::new(),
+            engine: Arc::new(OnceCell::new()),
             engine_config,
             result_limits,
             serialization_permits: Arc::new(Semaphore::new(MAX_CONCURRENT_SERIALIZATIONS)),
@@ -73,20 +80,26 @@ impl XbbgMcpServer {
         result.map_err(|error| bound_existing_error(error, &self.result_limits))
     }
 
-    async fn engine(&self) -> Result<&Arc<Engine>, ErrorData> {
+    /// A second owner of the engine cell, so the caller decides when the last release happens.
+    fn engine_cell(&self) -> Arc<EngineCell> {
+        Arc::clone(&self.engine)
+    }
+
+    async fn engine(&self) -> Result<&Engine, ErrorData> {
         self.engine
             .get_or_try_init(|| async {
                 let config = self.engine_config.clone();
                 let limits = self.result_limits.clone();
                 tokio::task::spawn_blocking(move || {
                     Engine::start(config)
-                        .map(Arc::new)
+                        .map(DeferredDrop::new)
                         .map_err(|error| map_request_error(error, &limits))
                 })
                 .await
                 .map_err(|error| bounded_internal_error(&error, &self.result_limits))?
             })
             .await
+            .map(|engine| &**engine)
     }
 
     async fn run_blocking_serialization<T, F>(&self, operation: F) -> Result<T, ErrorData>
@@ -953,11 +966,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let server = XbbgMcpServer::new_from_env()?;
     let (stdin, stdin_monitor) = stdin::stdin()?;
-    let quit_reason = server
-        .serve((stdin, tokio::io::stdout()))
-        .await?
-        .waiting()
-        .await?;
+    let engine = server.engine_cell();
+    let served = async {
+        let quit_reason = server
+            .serve((stdin, tokio::io::stdout()))
+            .await?
+            .waiting()
+            .await?;
+        Ok::<_, Box<dyn std::error::Error>>(quit_reason)
+    }
+    .await;
+    // The service is done, so this is the last owner of the engine: release it and let its
+    // Bloomberg sessions stop before the process exits.
+    drop(engine);
+    wait_for_engine_teardown().await;
+    let quit_reason = served?;
     match quit_reason {
         rmcp::service::QuitReason::Closed => stdin_monitor.ensure_clean_shutdown()?,
         rmcp::service::QuitReason::Cancelled => {
@@ -972,6 +995,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// How long exit waits for the engine's sessions to stop before giving up on them.
+const ENGINE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
+
+async fn wait_for_engine_teardown() {
+    // A blocking wait on a condition variable, so it stays off the async workers.
+    let finished = tokio::task::spawn_blocking(|| wait_idle_timeout(ENGINE_TEARDOWN_TIMEOUT))
+        .await
+        .unwrap_or(false);
+    if !finished {
+        xbbg_log::warn!(
+            timeout_secs = ENGINE_TEARDOWN_TIMEOUT.as_secs(),
+            "Bloomberg sessions were still stopping at exit"
+        );
+    }
 }
 
 #[cfg(test)]
