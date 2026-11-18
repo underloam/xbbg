@@ -220,6 +220,23 @@ pub fn config_field_name(field: &str) -> &str {
     }
 }
 
+/// Engine field identifiers as their own labels, for flat attribute-style
+/// configuration whose attributes carry the engine's snake_case names.
+fn engine_field_name(field: &str) -> &str {
+    field
+}
+
+/// Auth, TLS and SOCKS5 as a flat attribute set holds them (see
+/// [`EngineConfigSpec::into_engine_config_flat`]): each member settable on its
+/// own, TLS materials already in memory (no base64 round trip) and the SOCKS5
+/// host and port independent, so a half-set pair reaches the engine's own check.
+pub struct FlatConfigParts<'a> {
+    pub auth: AuthInput<'a>,
+    pub tls: TlsInput<'a>,
+    pub socks5_host: Option<&'a str>,
+    pub socks5_port: Option<u16>,
+}
+
 fn non_negative_duration(value: i64, label: &str) -> Result<u64, HostError> {
     u64::try_from(value).map_err(|_| {
         HostError::validation(format!(
@@ -249,8 +266,10 @@ impl EngineConfigSpec {
     }
 
     /// Overlay on [`EngineConfig::default`] and normalize, in napi's check order.
-    pub fn into_engine_config(self) -> Result<EngineConfig, HostError> {
-        let mut tls = self.tls;
+    pub fn into_engine_config(mut self) -> Result<EngineConfig, HostError> {
+        let auth = self.auth.take();
+        let mut tls = self.tls.take();
+        let socks5 = self.socks5.take();
         let client_credentials = tls
             .as_mut()
             .and_then(|tls| tls.client_credentials.take())
@@ -262,6 +281,56 @@ impl EngineConfigSpec {
             .map(|material| material.into_material("tls.trustMaterial"))
             .transpose()?;
 
+        let auth = auth.as_ref();
+        let tls = tls.as_ref();
+        let nested = FlatConfigParts {
+            auth: AuthInput {
+                method: auth.map(|auth| auth.method.as_str()),
+                app_name: auth.and_then(|auth| auth.app_name.as_deref()),
+                dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
+                user_id: auth.and_then(|auth| auth.user_id.as_deref()),
+                ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
+                token: auth.and_then(|auth| auth.token.as_deref()),
+            },
+            tls: TlsInput {
+                client_credentials,
+                client_credentials_password: tls
+                    .and_then(|tls| tls.client_credentials_password.as_deref()),
+                trust_material,
+                handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
+                crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
+            },
+            socks5_host: socks5.as_ref().map(|proxy| proxy.host.as_str()),
+            socks5_port: socks5.as_ref().map(|proxy| proxy.port),
+        };
+        self.convert(nested, config_field_name)
+    }
+
+    /// Like [`Self::into_engine_config`] for a flat attribute set, where auth,
+    /// TLS and SOCKS5 members are set one by one (Python's `EngineConfig`):
+    /// `parts` carries them instead of the spec's `auth`, `tls` and `socks5`,
+    /// which must be absent. Messages name engine fields by their own
+    /// snake_case identifiers (`request_pool_size`, `auth_method`,
+    /// `socks5_host/socks5_port`) rather than the JSON members.
+    pub fn into_engine_config_flat(
+        self,
+        parts: FlatConfigParts<'_>,
+    ) -> Result<EngineConfig, HostError> {
+        if self.auth.is_some() || self.tls.is_some() || self.socks5.is_some() {
+            return Err(HostError::internal(
+                "flat configuration carries auth, tls and socks5 in its parts, not in the spec",
+            ));
+        }
+        self.convert(parts, engine_field_name)
+    }
+
+    /// The overlay and normalization shared by both entry points; `self` has
+    /// no `auth`, `tls` or `socks5` left, `nested` holds them.
+    fn convert(
+        self,
+        nested: FlatConfigParts<'_>,
+        field_name: fn(&str) -> &str,
+    ) -> Result<EngineConfig, HostError> {
         let mut config = EngineConfig::default();
         let validation_mode = parse_member(
             self.validation_mode,
@@ -374,43 +443,28 @@ impl EngineConfigSpec {
         config.overflow_policy = overflow_policy;
         config.key_column = key_column;
 
-        let auth = self.auth.as_ref();
-        let tls = tls.as_ref();
-        let servers = self.servers.as_deref().unwrap_or_default();
         xbbg_async::config::normalize(
             config,
             ConfigInput {
-                auth: AuthInput {
-                    method: auth.map(|auth| auth.method.as_str()),
-                    app_name: auth.and_then(|auth| auth.app_name.as_deref()),
-                    dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
-                    user_id: auth.and_then(|auth| auth.user_id.as_deref()),
-                    ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
-                    token: auth.and_then(|auth| auth.token.as_deref()),
-                },
-                tls: TlsInput {
-                    client_credentials,
-                    client_credentials_password: tls
-                        .and_then(|tls| tls.client_credentials_password.as_deref()),
-                    trust_material,
-                    handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
-                    crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
-                },
+                auth: nested.auth,
+                tls: nested.tls,
                 transport: TransportInput {
                     host: self.host.as_deref().unwrap_or("localhost"),
                     port: self.port.unwrap_or(8194),
                     explicit_host_port: self.host.is_some() || self.port.is_some(),
                     zfp_remote: self.zfp_remote.as_deref(),
-                    socks5_host: self.socks5.as_ref().map(|proxy| proxy.host.as_str()),
-                    socks5_port: self.socks5.as_ref().map(|proxy| proxy.port),
+                    socks5_host: nested.socks5_host,
+                    socks5_port: nested.socks5_port,
                 },
                 slow_consumer_hi_water_mark: self.slow_consumer_hi_water_mark,
                 slow_consumer_lo_water_mark: self.slow_consumer_lo_water_mark,
             },
-            servers
+            self.servers
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
                 .map(|server| (server.host.as_str(), server.port)),
-            config_field_name,
+            field_name,
         )
         .map_err(|error| match error {
             BlpAsyncError::ConfigError { detail } => HostError::validation(detail),
@@ -915,5 +969,119 @@ mod tests {
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
         assert!(!debug.contains("c2VjcmV0"), "{debug}");
+    }
+
+    fn flat(spec: EngineConfigSpec, parts: FlatConfigParts<'_>) -> Result<EngineConfig, HostError> {
+        spec.into_engine_config_flat(parts)
+    }
+
+    fn empty_parts<'a>() -> FlatConfigParts<'a> {
+        FlatConfigParts {
+            auth: AuthInput::default(),
+            tls: TlsInput::default(),
+            socks5_host: None,
+            socks5_port: None,
+        }
+    }
+
+    #[test]
+    fn flat_configuration_labels_engine_fields_by_their_own_names() {
+        let error = flat(
+            EngineConfigSpec {
+                request_pool_size: Some(0),
+                ..Default::default()
+            },
+            empty_parts(),
+        )
+        .err()
+        .expect("rejected");
+        assert_eq!(error.kind, HostErrorKind::Validation);
+        assert!(error.message.contains("request_pool_size"), "{error:?}");
+
+        let message = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                socks5_host: Some("proxy.invalid"),
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(message, "socks5_host set without socks5_port");
+
+        let message = flat(
+            EngineConfigSpec {
+                zfp_remote: Some("8194".into()),
+                ..Default::default()
+            },
+            FlatConfigParts {
+                socks5_host: Some("proxy.invalid"),
+                socks5_port: Some(1080),
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(
+            message,
+            "zfp_remote cannot be combined with socks5_host/socks5_port"
+        );
+
+        let message = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                auth: AuthInput {
+                    app_name: Some("my-app"),
+                    ..AuthInput::default()
+                },
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(
+            message,
+            "auth_method is required when auth-specific fields are provided"
+        );
+    }
+
+    #[test]
+    fn flat_configuration_takes_tls_materials_without_encoding() {
+        let config = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                tls: TlsInput {
+                    client_credentials: Some(TlsMaterial::Blob(Arc::from([0_u8, 1, 2].as_slice()))),
+                    trust_material: Some(TlsMaterial::Blob(Arc::from([3_u8, 4].as_slice()))),
+                    ..TlsInput::default()
+                },
+                ..empty_parts()
+            },
+        )
+        .unwrap();
+        let tls = config.tls.expect("tls normalized");
+        assert!(
+            matches!(&tls.client_credentials, TlsMaterial::Blob(bytes) if bytes[..] == [0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn flat_configuration_rejects_nested_members_on_the_spec() {
+        let error = flat(
+            EngineConfigSpec {
+                socks5: Some(Socks5Spec {
+                    host: "p".into(),
+                    port: 1,
+                }),
+                ..Default::default()
+            },
+            empty_parts(),
+        )
+        .err()
+        .expect("rejected");
+        assert_eq!(error.kind, HostErrorKind::Internal);
     }
 }

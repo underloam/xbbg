@@ -91,19 +91,21 @@ use pyo3_stub_gen::{define_stub_info_gatherer, derive::*};
 use tokio::sync::watch;
 use xbbg_log::{debug, info, warn};
 
+use xbbg_async::config::{AuthInput, TlsInput};
 use xbbg_async::engine::state::{SubscriptionArrowBatcher, SubscriptionMetrics};
 use xbbg_async::engine::{
-    AdminStatusInfo, Engine, EngineConfig, RetryPolicy, ServerAddr, ServiceStatusInfo,
-    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDeliveryMode, SubscriptionEventInfo,
+    AdminStatusInfo, Engine, EngineConfig, ServerAddr, ServiceStatusInfo, SessionStatusInfo,
+    SharedSubscriptionStatus, SubscriptionDeliveryMode, SubscriptionEventInfo,
     SubscriptionFailureInfo, TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
 use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, KeyColumn, OverflowPolicy, SubscribeRequest,
-    SubscriptionHandle, ValidationMode,
+    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, OverflowPolicy, SubscribeRequest,
+    SubscriptionHandle,
 };
 use xbbg_core::BlpError;
 use xbbg_ext::MarketTiming;
+use xbbg_host::config::{EngineConfigSpec, FlatConfigParts, RetryPolicySpec, ServerAddressSpec};
 
 mod completion;
 mod ext;
@@ -879,118 +881,152 @@ fn default_direct_host_port(defaults: &EngineConfig) -> (String, u16) {
     }
 }
 
+/// The engine's numeric members are 32-bit in the shared config spec.
+fn config_u32(value: usize, field: &str) -> PyResult<u32> {
+    u32::try_from(value)
+        .map_err(|_| PyValueError::new_err(format!("{field} must not exceed {}", u32::MAX)))
+}
+
+/// The engine's millisecond durations are signed 64-bit in the shared config spec.
+fn config_millis(value: u64, field: &str) -> PyResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| PyValueError::new_err(format!("{field} must not exceed {}", i64::MAX)))
+}
+
 impl TryFrom<&PyEngineConfig> for EngineConfig {
     type Error = PyErr;
 
+    /// Parse and validate through `xbbg_host::config`; every failure is a
+    /// `ValueError` carrying the host's message, with engine fields named by
+    /// their Python attribute names.
     fn try_from(py_config: &PyEngineConfig) -> Result<Self, Self::Error> {
-        let validation_mode: ValidationMode = py_config
-            .validation_mode
-            .parse()
-            .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
-
-        let overflow_policy: OverflowPolicy = py_config
-            .overflow_policy
-            .parse()
-            .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
-
-        let key_column: KeyColumn = py_config
-            .key_column
-            .parse()
-            .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
-
-        let config = EngineConfig {
-            transport: Transport::Direct(Vec::new()),
-            tls: None,
-            request_pool_size: py_config.request_pool_size,
-            subscription_pool_size: py_config.subscription_pool_size,
-            runtime_worker_threads: py_config.runtime_worker_threads,
-            max_subscription_sessions: py_config.max_subscription_sessions,
-            shard_requests: py_config.shard_requests,
-            shard_threshold: py_config.shard_threshold,
-            shard_chunk_size: py_config.shard_chunk_size,
-            shard_max_concurrent: py_config.shard_max_concurrent,
-            validation_mode,
-            key_column,
-            subscription_flush_threshold: py_config.subscription_flush_threshold,
-            max_event_queue_size: py_config.max_event_queue_size,
-            command_queue_size: py_config.command_queue_size,
-            subscription_stream_capacity: py_config.subscription_stream_capacity,
-            overflow_policy,
-            warmup_services: py_config.warmup_services.clone(),
-            field_cache_path: py_config
-                .field_cache_path
-                .as_ref()
-                .map(std::path::PathBuf::from),
-            auth: None,
+        // Python infers an explicit host/port from non-default values, so the
+        // spec carries only members that differ from the defaults.
+        let spec = EngineConfigSpec {
+            host: (py_config.host != "localhost").then(|| py_config.host.clone()),
+            port: (py_config.port != 8194).then_some(py_config.port),
+            servers: Some(
+                py_config
+                    .servers
+                    .iter()
+                    .map(|(host, port)| ServerAddressSpec {
+                        host: host.clone(),
+                        port: *port,
+                    })
+                    .collect(),
+            ),
+            zfp_remote: py_config.zfp_remote.clone(),
+            request_pool_size: Some(config_u32(
+                py_config.request_pool_size,
+                "request_pool_size",
+            )?),
+            subscription_pool_size: Some(config_u32(
+                py_config.subscription_pool_size,
+                "subscription_pool_size",
+            )?),
+            runtime_worker_threads: Some(config_u32(
+                py_config.runtime_worker_threads,
+                "runtime_worker_threads",
+            )?),
+            max_subscription_sessions: Some(config_u32(
+                py_config.max_subscription_sessions,
+                "max_subscription_sessions",
+            )?),
+            shard_requests: Some(py_config.shard_requests),
+            shard_threshold: Some(config_u32(py_config.shard_threshold, "shard_threshold")?),
+            shard_chunk_size: Some(config_u32(py_config.shard_chunk_size, "shard_chunk_size")?),
+            shard_max_concurrent: Some(config_u32(
+                py_config.shard_max_concurrent,
+                "shard_max_concurrent",
+            )?),
+            validation_mode: Some(py_config.validation_mode.clone()),
+            key_column: Some(py_config.key_column.clone()),
+            subscription_flush_threshold: Some(config_u32(
+                py_config.subscription_flush_threshold,
+                "subscription_flush_threshold",
+            )?),
+            max_event_queue_size: Some(config_u32(
+                py_config.max_event_queue_size,
+                "max_event_queue_size",
+            )?),
+            command_queue_size: Some(config_u32(
+                py_config.command_queue_size,
+                "command_queue_size",
+            )?),
+            subscription_stream_capacity: Some(config_u32(
+                py_config.subscription_stream_capacity,
+                "subscription_stream_capacity",
+            )?),
+            overflow_policy: Some(py_config.overflow_policy.clone()),
+            warmup_services: Some(py_config.warmup_services.clone()),
+            field_cache_path: py_config.field_cache_path.clone(),
             bql_app_name: py_config.bql_app_name.clone(),
-            num_start_attempts: py_config.num_start_attempts,
-            auto_restart_on_disconnection: py_config.auto_restart_on_disconnection,
-            retry_policy: RetryPolicy {
-                max_retries: py_config.retry_max_retries,
-                initial_delay_ms: py_config.retry_initial_delay_ms,
-                backoff_factor: py_config.retry_backoff_factor,
-                max_delay_ms: py_config.retry_max_delay_ms,
-            },
-            request_timeout_ms: py_config.request_timeout_ms,
-            streams_deactivated_warn_ms: py_config.streams_deactivated_warn_ms,
-            reconnect_grace_ms: py_config.reconnect_grace_ms,
-            keep_alive_enabled: py_config.keep_alive_enabled,
+            num_start_attempts: Some(config_u32(
+                py_config.num_start_attempts,
+                "num_start_attempts",
+            )?),
+            auto_restart_on_disconnection: Some(py_config.auto_restart_on_disconnection),
+            retry_policy: Some(RetryPolicySpec {
+                max_retries: Some(py_config.retry_max_retries),
+                initial_delay_ms: Some(config_millis(
+                    py_config.retry_initial_delay_ms,
+                    "retry_initial_delay_ms",
+                )?),
+                backoff_factor: Some(py_config.retry_backoff_factor),
+                max_delay_ms: Some(config_millis(
+                    py_config.retry_max_delay_ms,
+                    "retry_max_delay_ms",
+                )?),
+            }),
+            request_timeout_ms: Some(config_millis(
+                py_config.request_timeout_ms,
+                "request_timeout_ms",
+            )?),
+            streams_deactivated_warn_ms: Some(config_millis(
+                py_config.streams_deactivated_warn_ms,
+                "streams_deactivated_warn_ms",
+            )?),
+            reconnect_grace_ms: Some(config_millis(
+                py_config.reconnect_grace_ms,
+                "reconnect_grace_ms",
+            )?),
+            keep_alive_enabled: Some(py_config.keep_alive_enabled),
             keep_alive_inactivity_ms: py_config.keep_alive_inactivity_ms,
             keep_alive_response_timeout_ms: py_config.keep_alive_response_timeout_ms,
-            slow_consumer_hi_water_mark: None,
-            slow_consumer_lo_water_mark: None,
-            sdk_log_level: py_config
-                .sdk_log_level
-                .parse()
-                .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?,
+            slow_consumer_hi_water_mark: py_config.slow_consumer_hi_water_mark.map(f64::from),
+            slow_consumer_lo_water_mark: py_config.slow_consumer_lo_water_mark.map(f64::from),
+            sdk_log_level: Some(py_config.sdk_log_level.clone()),
+            auth: None,
+            tls: None,
+            socks5: None,
         };
-        xbbg_async::config::normalize(
-            config,
-            xbbg_async::config::ConfigInput {
-                auth: xbbg_async::config::AuthInput {
-                    method: py_config.auth_method.as_deref(),
-                    app_name: py_config.app_name.as_deref(),
-                    dir_property: py_config.dir_property.as_deref(),
-                    user_id: py_config.user_id.as_deref(),
-                    ip_address: py_config.ip_address.as_deref(),
-                    token: py_config.token.as_deref(),
-                },
-                tls: xbbg_async::config::TlsInput {
-                    client_credentials: py_config
-                        .tls_client_credentials
-                        .as_ref()
-                        .map(|material| material.0.clone()),
-                    client_credentials_password: py_config
-                        .tls_client_credentials_password
-                        .as_deref(),
-                    trust_material: py_config
-                        .tls_trust_material
-                        .as_ref()
-                        .map(|material| material.0.clone()),
-                    handshake_timeout_ms: py_config.tls_handshake_timeout_ms,
-                    crl_fetch_timeout_ms: py_config.tls_crl_fetch_timeout_ms,
-                },
-                transport: xbbg_async::config::TransportInput {
-                    host: &py_config.host,
-                    port: py_config.port,
-                    explicit_host_port: py_config.host != "localhost" || py_config.port != 8194,
-                    zfp_remote: py_config.zfp_remote.as_deref(),
-                    socks5_host: py_config.socks5_host.as_deref(),
-                    socks5_port: py_config.socks5_port,
-                },
-                slow_consumer_hi_water_mark: py_config.slow_consumer_hi_water_mark.map(f64::from),
-                slow_consumer_lo_water_mark: py_config.slow_consumer_lo_water_mark.map(f64::from),
+        let parts = FlatConfigParts {
+            auth: AuthInput {
+                method: py_config.auth_method.as_deref(),
+                app_name: py_config.app_name.as_deref(),
+                dir_property: py_config.dir_property.as_deref(),
+                user_id: py_config.user_id.as_deref(),
+                ip_address: py_config.ip_address.as_deref(),
+                token: py_config.token.as_deref(),
             },
-            py_config
-                .servers
-                .iter()
-                .map(|(host, port)| (host.as_str(), *port)),
-            |field| field,
-        )
-        .map_err(|error| match error {
-            BlpAsyncError::ConfigError { detail } => PyValueError::new_err(detail),
-            other => PyValueError::new_err(other.to_string()),
-        })
+            tls: TlsInput {
+                client_credentials: py_config
+                    .tls_client_credentials
+                    .as_ref()
+                    .map(|material| material.0.clone()),
+                client_credentials_password: py_config.tls_client_credentials_password.as_deref(),
+                trust_material: py_config
+                    .tls_trust_material
+                    .as_ref()
+                    .map(|material| material.0.clone()),
+                handshake_timeout_ms: py_config.tls_handshake_timeout_ms,
+                crl_fetch_timeout_ms: py_config.tls_crl_fetch_timeout_ms,
+            },
+            socks5_host: py_config.socks5_host.as_deref(),
+            socks5_port: py_config.socks5_port,
+        };
+        spec.into_engine_config_flat(parts)
+            .map_err(|error| PyValueError::new_err(error.message))
     }
 }
 
@@ -3762,6 +3798,73 @@ mod tests {
         assert!(
             err.to_string()
                 .contains("zfp_remote cannot be combined with socks5_host/socks5_port")
+        );
+    }
+
+    #[test]
+    fn py_engine_config_names_python_attributes_and_infers_explicit_host_port() {
+        let mut config = PyEngineConfig::new(None).expect("default config");
+        config.socks5_host = Some("proxy.invalid".to_string());
+        let err = EngineConfig::try_from(&config)
+            .err()
+            .expect("half-set SOCKS5");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: socks5_host set without socks5_port"
+        );
+
+        config.socks5_host = None;
+        config.auth_method = None;
+        config.app_name = Some("app-name".to_string());
+        let err = EngineConfig::try_from(&config)
+            .err()
+            .expect("auth fields without a method");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: auth_method is required when auth-specific fields are provided"
+        );
+
+        // Explicit host/port is inferred from non-default values only.
+        config.app_name = None;
+        config.zfp_remote = Some("8196".to_string());
+        config.host = "localhost".to_string();
+        config.port = 8194;
+        assert!(matches!(
+            EngineConfig::try_from(&config)
+                .expect("default host/port with ZFP")
+                .transport,
+            Transport::Zfp(_)
+        ));
+        config.port = 8195;
+        assert!(
+            EngineConfig::try_from(&config)
+                .err()
+                .expect("non-default port with ZFP")
+                .to_string()
+                .contains("zfp_remote cannot be combined with host/port/servers")
+        );
+    }
+
+    #[test]
+    fn py_engine_config_rejects_values_the_shared_spec_cannot_hold() {
+        let mut config = PyEngineConfig::new(None).expect("default config");
+        config.request_pool_size = usize::MAX;
+        let err = EngineConfig::try_from(&config)
+            .err()
+            .expect("oversized pool");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: request_pool_size must not exceed 4294967295"
+        );
+
+        let mut config = PyEngineConfig::new(None).expect("default config");
+        config.request_timeout_ms = u64::MAX;
+        let err = EngineConfig::try_from(&config)
+            .err()
+            .expect("oversized timeout");
+        assert_eq!(
+            err.to_string(),
+            "ValueError: request_timeout_ms must not exceed 9223372036854775807"
         );
     }
 
