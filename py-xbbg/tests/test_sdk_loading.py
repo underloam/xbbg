@@ -692,8 +692,14 @@ def test_load_sdk_with_blpapi_root_loads_the_runtime_and_reports_it(tmp_path):
     script = (
         "import json\n"
         "from xbbg import _core\n"  # the import guard loads the runtime
-        "again = _core.load_sdk({'explicit': 'does-not-exist'})\n"
-        "print(json.dumps({'loaded': _core.loaded_sdk(), 'again': again, 'version': list(_core.sdk_version())}))\n"
+        "again = _core.load_sdk()\n"
+        "try:\n"
+        "    _core.load_sdk({'explicit': 'does-not-exist'})\n"
+        "    replaced = None\n"
+        "except ImportError as exc:\n"
+        "    replaced = str(exc)\n"
+        "print(json.dumps({'loaded': _core.loaded_sdk(), 'again': again, 'replaced': replaced,"
+        " 'version': list(_core.sdk_version())}))\n"
     )
 
     result = _run_core(script, tmp_path, BLPAPI_ROOT=root)
@@ -706,8 +712,11 @@ def test_load_sdk_with_blpapi_root_loads_the_runtime_and_reports_it(tmp_path):
     assert loaded["version"] == ".".join(str(part) for part in payload["version"])
     assert Path(loaded["path"]).name.startswith(("libblpapi3", "blpapi3"))
     assert Path(root).resolve() in Path(loaded["path"]).resolve().parents
-    # A loaded runtime is returned unchanged, whatever the request.
+    # Without an explicit path, loading again returns the loaded runtime.
     assert payload["again"]["path"] == loaded["path"]
+    # A different explicit path never replaces the loaded runtime.
+    assert payload["replaced"] is not None
+    assert "already loaded" in payload["replaced"]
 
 
 def test_the_runtime_search_reaches_the_explicit_path_first(tmp_path):
