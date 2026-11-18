@@ -631,24 +631,78 @@ fn split_search_path(value: &str, platform: Platform) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use sha2::{Digest, Sha256};
+
     use super::*;
+    use crate::cache::INSTALLS_DIR;
+    use crate::provenance::{PROVENANCE_FILE, Provenance};
+
+    const LINUX: Platform = Platform::LinuxX86_64;
+    const LIBRARY: &[u8] = b"synthetic library bytes";
 
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().expect("a file has a directory")).expect("create dirs");
         fs::write(path, b"").expect("create file");
     }
 
+    fn temp() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp dir")
+    }
+
+    fn text(path: &Path) -> String {
+        path.display().to_string()
+    }
+
     /// A request that reads only `vars`, never the process environment or the default cache.
-    fn request(vars: &[(&str, &Path)], platform: Platform) -> LocateRequest {
+    fn request(platform: Platform, vars: &[(&str, String)]) -> LocateRequest {
         LocateRequest {
             env: Some(
                 vars.iter()
-                    .map(|(name, value)| ((*name).to_owned(), value.display().to_string()))
+                    .map(|(name, value)| ((*name).to_owned(), value.clone()))
                     .collect(),
             ),
             platform: Some(platform),
             ..LocateRequest::default()
         }
+    }
+
+    fn sources(found: &Located) -> Vec<SourceKind> {
+        let mut sources: Vec<_> = found.candidates.iter().map(|c| c.source).collect();
+        sources.dedup();
+        sources
+    }
+
+    fn paths(found: &Located) -> Vec<&Path> {
+        found.candidates.iter().map(|c| c.path.as_path()).collect()
+    }
+
+    /// Installs a Linux runtime as `<cache>/sdk/<version>/linux-x86_64/<name>`; the recorded hash
+    /// is the library's unless `corrupt`.
+    fn install(cache: &Path, version: &str, name: &str, corrupt: bool) -> PathBuf {
+        let dir = cache
+            .join(INSTALLS_DIR)
+            .join(version)
+            .join(LINUX.as_str())
+            .join(name);
+        fs::create_dir_all(dir.join("lib")).expect("create install");
+        fs::write(dir.join("lib/libblpapi3_64.so"), LIBRARY).expect("write library");
+        let recorded: &[u8] = if corrupt { b"other bytes" } else { LIBRARY };
+        let provenance = Provenance {
+            version: version.to_owned(),
+            platform: LINUX,
+            source: "artifact:synthetic".into(),
+            artifact_url: "file:synthetic".into(),
+            artifact_sha256: hex::encode(Sha256::digest(version.as_bytes())),
+            lib: "lib/libblpapi3_64.so".into(),
+            lib_sha256: hex::encode(Sha256::digest(recorded)),
+            licenses: vec![],
+        };
+        fs::write(
+            dir.join(PROVENANCE_FILE),
+            serde_json::to_vec(&provenance).expect("provenance json"),
+        )
+        .expect("write provenance");
+        dir
     }
 
     #[test]
@@ -668,22 +722,653 @@ mod tests {
     }
 
     #[test]
-    fn lib_dir_then_root() {
-        let platform = Platform::LinuxX86_64;
-        let lib = tempfile::tempdir().expect("temp dir");
-        let root = tempfile::tempdir().expect("temp dir");
-        touch(&lib.path().join("libblpapi3_64.so"));
-        touch(&root.path().join("Linux/libblpapi3_64.so"));
-        let found = locate(&request(
-            &[("BLPAPI_LIB_DIR", lib.path()), ("BLPAPI_ROOT", root.path())],
-            platform,
-        ));
-        let sources: Vec<_> = found.candidates.iter().map(|c| c.source).collect();
-        assert_eq!(sources, [SourceKind::BlpapiLibDir, SourceKind::BlpapiRoot]);
-        assert_eq!(
-            found.candidates[0].path,
-            lib.path().join("libblpapi3_64.so")
+    fn every_rule_in_order() {
+        let tmp = temp();
+        let root = tmp.path();
+        let explicit = root.join("explicit/anything.bin");
+        touch(&explicit);
+        touch(&root.join("libdir/libblpapi3_64.so"));
+        touch(&root.join("sdk/Linux/libblpapi3_64.so"));
+        let repo = root.join("repo");
+        touch(&repo.join("dev/lib/libblpapi3_64.so"));
+        touch(&repo.join("vendor/blpapi-sdk/3.26.5.1/Linux/libblpapi3_64.so"));
+        touch(&root.join("wheel/libblpapi3.so"));
+        touch(&root.join("home/blp/DAPI/libblpapi3_64.so"));
+        touch(&root.join("ld2/libblpapi3_64.so"));
+        install(&root.join("cache"), "3.26.9.1", "artifact-1", false);
+
+        let mut request = request(
+            LINUX,
+            &[
+                ("BLPAPI_LIB_DIR", text(&root.join("libdir"))),
+                ("BLPAPI_ROOT", text(&root.join("sdk"))),
+                ("XBBG_DEV_SDK_ROOT", "dev".to_owned()),
+                ("HOME", text(&root.join("home"))),
+                (
+                    "LD_LIBRARY_PATH",
+                    format!(
+                        "{}:{}",
+                        root.join("ld1").display(),
+                        root.join("ld2").display()
+                    ),
+                ),
+            ],
         );
-        assert_eq!(found.candidates[0].detail, "BLPAPI_LIB_DIR");
+        request.explicit = Some(explicit);
+        request.repo_root = Some(repo);
+        request.cache_root = Some(root.join("cache"));
+        request.hints = vec![Hint {
+            label: "blpapi_python".into(),
+            dir: root.join("wheel"),
+        }];
+
+        let found = locate(&request);
+        assert_eq!(
+            sources(&found),
+            [
+                SourceKind::Explicit,
+                SourceKind::BlpapiLibDir,
+                SourceKind::BlpapiRoot,
+                SourceKind::DevSdkRoot,
+                SourceKind::Vendored,
+                SourceKind::Hint,
+                SourceKind::Terminal,
+                SourceKind::SearchPath,
+                SourceKind::Cache,
+            ]
+        );
+        let details: Vec<_> = found.candidates.iter().map(|c| c.detail.as_str()).collect();
+        assert_eq!(details[1], "BLPAPI_LIB_DIR");
+        assert_eq!(details[2], "BLPAPI_ROOT");
+        assert_eq!(details[3], "XBBG_DEV_SDK_ROOT");
+        assert_eq!(details[5], "blpapi_python");
+        assert_eq!(details[7], "LD_LIBRARY_PATH");
+        assert_eq!(found.candidates[0].path, root.join("explicit/anything.bin"));
+        assert_eq!(found.candidates[5].path, root.join("wheel/libblpapi3.so"));
+        assert_eq!(found.candidates[8].version.as_deref(), Some("3.26.9.1"));
+    }
+
+    #[test]
+    fn a_host_environment_view_replaces_the_process_environment() {
+        // The process may name a runtime in BLPAPI_ROOT / BLPAPI_LIB_DIR; an empty view hides it.
+        let found = locate(&request(LINUX, &[]));
+        assert!(
+            found
+                .candidates
+                .iter()
+                .all(|c| !matches!(c.source, SourceKind::BlpapiLibDir | SourceKind::BlpapiRoot))
+        );
+        assert!(found.rejected.is_empty(), "{:?}", found.rejected);
+
+        let tmp = temp();
+        touch(&tmp.path().join("Linux/libblpapi3_64.so"));
+        let found = locate(&request(LINUX, &[("BLPAPI_ROOT", text(tmp.path()))]));
+        assert_eq!(paths(&found), [tmp.path().join("Linux/libblpapi3_64.so")]);
+    }
+
+    #[test]
+    fn empty_variables_count_as_unset() {
+        let found = locate(&request(
+            LINUX,
+            &[
+                ("BLPAPI_LIB_DIR", String::new()),
+                ("BLPAPI_ROOT", String::new()),
+            ],
+        ));
+        assert!(found.candidates.is_empty());
+        assert!(found.rejected.is_empty());
+    }
+
+    #[test]
+    fn one_file_found_by_several_rules_is_listed_once_at_its_first_rule() {
+        let tmp = temp();
+        let library = tmp.path().join("sdk/libblpapi3_64.so");
+        touch(&library);
+        let mut request = request(
+            LINUX,
+            &[
+                ("BLPAPI_LIB_DIR", text(&tmp.path().join("sdk"))),
+                ("BLPAPI_ROOT", text(tmp.path())),
+            ],
+        );
+        request.explicit = Some(library.clone());
+        request.hints = vec![Hint {
+            label: "again".into(),
+            dir: tmp.path().join("sdk"),
+        }];
+        let found = locate(&request);
+        assert_eq!(paths(&found), [library]);
+        assert_eq!(found.candidates[0].source, SourceKind::Explicit);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_link_to_a_listed_file_is_a_duplicate() {
+        let tmp = temp();
+        let library = tmp.path().join("sdk/libblpapi3_64.so");
+        touch(&library);
+        fs::create_dir_all(tmp.path().join("link")).expect("create dir");
+        std::os::unix::fs::symlink(&library, tmp.path().join("link/libblpapi3.so"))
+            .expect("symlink");
+        let found = locate(&request(
+            LINUX,
+            &[
+                ("BLPAPI_LIB_DIR", text(&tmp.path().join("sdk"))),
+                ("BLPAPI_ROOT", text(&tmp.path().join("link"))),
+            ],
+        ));
+        assert_eq!(paths(&found), [library]);
+    }
+
+    #[test]
+    fn windows_paths_are_deduplicated_ignoring_case() {
+        let tmp = temp();
+        // A case-insensitive file system names one file two ways; on others only one exists and
+        // the key comparison is what is under test.
+        let mut search = Search {
+            platform: Platform::WindowsX86_64,
+            found: Located::default(),
+            seen: HashSet::new(),
+        };
+        search.push(
+            tmp.path().join("Bin/Blpapi3_64.DLL"),
+            SourceKind::Hint,
+            "a",
+            None,
+        );
+        search.push(
+            tmp.path().join("bin/blpapi3_64.dll"),
+            SourceKind::Hint,
+            "b",
+            None,
+        );
+        assert_eq!(search.found.candidates.len(), 1);
+        assert_eq!(search.found.candidates[0].detail, "a");
+    }
+
+    #[test]
+    fn a_relative_dev_root_is_relative_to_the_repo_root() {
+        let tmp = temp();
+        touch(&tmp.path().join("repo/sdk-dev/Linux/libblpapi3_64.so"));
+        let mut request = request(LINUX, &[("XBBG_DEV_SDK_ROOT", "sdk-dev".to_owned())]);
+        request.repo_root = Some(tmp.path().join("repo"));
+        let found = locate(&request);
+        assert_eq!(
+            paths(&found),
+            [tmp.path().join("repo/sdk-dev/Linux/libblpapi3_64.so")]
+        );
+        assert_eq!(found.candidates[0].source, SourceKind::DevSdkRoot);
+
+        // An absolute value ignores the repo root.
+        request.env = Some(BTreeMap::from([(
+            "XBBG_DEV_SDK_ROOT".to_owned(),
+            text(&tmp.path().join("repo/sdk-dev")),
+        )]));
+        request.repo_root = Some(tmp.path().join("elsewhere"));
+        assert_eq!(locate(&request).candidates.len(), 1);
+    }
+
+    #[test]
+    fn a_dev_root_that_holds_nothing_is_rejected_with_its_variable() {
+        let tmp = temp();
+        let mut request = request(LINUX, &[("XBBG_DEV_SDK_ROOT", "missing".to_owned())]);
+        request.repo_root = Some(tmp.path().to_path_buf());
+        let found = locate(&request);
+        assert!(found.candidates.is_empty());
+        assert_eq!(found.rejected.len(), 1);
+        let refused = &found.rejected[0];
+        assert_eq!(refused.source, SourceKind::DevSdkRoot);
+        assert_eq!(refused.detail, "XBBG_DEV_SDK_ROOT");
+        assert_eq!(refused.path, tmp.path().join("missing"));
+        assert_eq!(refused.reason, "does not exist");
+    }
+
+    #[test]
+    fn the_vendored_sdk_lists_the_newest_version_first() {
+        let tmp = temp();
+        for version in ["3.9.0", "3.26.5.1", "3.26.10.0"] {
+            touch(
+                &tmp.path()
+                    .join("vendor/blpapi-sdk")
+                    .join(version)
+                    .join("Linux/libblpapi3_64.so"),
+            );
+        }
+        let mut request = request(LINUX, &[]);
+        request.repo_root = Some(tmp.path().to_path_buf());
+        let found = locate(&request);
+        let order: Vec<_> = found
+            .candidates
+            .iter()
+            .map(|c| {
+                assert_eq!(c.source, SourceKind::Vendored);
+                c.path
+                    .strip_prefix(tmp.path().join("vendor/blpapi-sdk"))
+                    .expect("under the vendor directory")
+                    .components()
+                    .next()
+                    .expect("a version directory")
+                    .as_os_str()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        assert_eq!(order, ["3.26.10.0", "3.26.5.1", "3.9.0"]);
+
+        // No repo root, no vendored rule.
+        assert!(locate(&self::request(LINUX, &[])).candidates.is_empty());
+    }
+
+    #[test]
+    fn root_layouts_cover_the_sdk_archives() {
+        for (platform, relative) in [
+            (LINUX, "Linux/libblpapi3_64.so"),
+            (Platform::MacosAarch64, "Darwin/libblpapi3_64.so"),
+            (Platform::MacosAarch64, "lib/libblpapi3_64.dylib"),
+            (Platform::MacosAarch64, "lib/libblpapi3.dylib"),
+            (Platform::WindowsX86_64, "bin/blpapi3_64.dll"),
+            (Platform::WindowsX86_64, "lib/win64/blpapi3_64.dll"),
+            (LINUX, "libblpapi3_64.so"),
+            (LINUX, "lib64/libblpapi3.so"),
+        ] {
+            let root = temp();
+            touch(&root.path().join(relative));
+            let found = locate(&request(platform, &[("BLPAPI_ROOT", text(root.path()))]));
+            assert_eq!(
+                paths(&found),
+                [root.path().join(relative)],
+                "{platform} {relative}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_may_contain_versioned_sdks_newest_first() {
+        let root = temp();
+        touch(&root.path().join("3.9.0/Linux/libblpapi3_64.so"));
+        touch(&root.path().join("3.26.5.1/Linux/libblpapi3_64.so"));
+        // One level deeper, as in a container holding a nested SDK.
+        touch(&root.path().join("sdk/3.30.0.0/Linux/libblpapi3_64.so"));
+        let found = locate(&request(LINUX, &[("BLPAPI_ROOT", text(root.path()))]));
+        assert_eq!(
+            paths(&found),
+            [
+                root.path().join("3.26.5.1/Linux/libblpapi3_64.so"),
+                root.path().join("3.9.0/Linux/libblpapi3_64.so"),
+                root.path().join("sdk/3.30.0.0/Linux/libblpapi3_64.so"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_directory_lists_its_file_names_in_preference_order() {
+        let dir = temp();
+        touch(&dir.path().join("libblpapi3.so"));
+        touch(&dir.path().join("libblpapi3_64.so"));
+        let found = locate(&request(LINUX, &[("BLPAPI_LIB_DIR", text(dir.path()))]));
+        assert_eq!(
+            paths(&found),
+            [
+                dir.path().join("libblpapi3_64.so"),
+                dir.path().join("libblpapi3.so")
+            ]
+        );
+    }
+
+    #[test]
+    fn lib_dir_is_searched_directly_only() {
+        let dir = temp();
+        touch(&dir.path().join("Linux/libblpapi3_64.so"));
+        let found = locate(&request(LINUX, &[("BLPAPI_LIB_DIR", text(dir.path()))]));
+        assert!(found.candidates.is_empty());
+        assert_eq!(found.rejected.len(), 1);
+        assert!(
+            found.rejected[0]
+                .reason
+                .contains("holds no Bloomberg runtime library")
+        );
+        assert!(found.rejected[0].reason.contains("libblpapi3_64.so"));
+    }
+
+    #[test]
+    fn explicit_paths_are_files_or_directories() {
+        let tmp = temp();
+        touch(&tmp.path().join("odd name"));
+        touch(&tmp.path().join("sdk/Linux/libblpapi3_64.so"));
+        touch(&tmp.path().join("empty/readme.txt"));
+
+        let explicit = |path: PathBuf| {
+            let mut request = request(LINUX, &[]);
+            request.explicit = Some(path);
+            locate(&request)
+        };
+        // A file is taken as it is, whatever its name.
+        assert_eq!(
+            paths(&explicit(tmp.path().join("odd name"))),
+            [tmp.path().join("odd name")]
+        );
+        // A directory goes through the SDK layouts.
+        assert_eq!(
+            paths(&explicit(tmp.path().join("sdk"))),
+            [tmp.path().join("sdk/Linux/libblpapi3_64.so")]
+        );
+        let nothing = explicit(tmp.path().join("empty"));
+        assert!(nothing.candidates.is_empty());
+        assert_eq!(nothing.rejected[0].source, SourceKind::Explicit);
+        assert!(
+            nothing.rejected[0]
+                .reason
+                .starts_with("holds no Bloomberg runtime library")
+        );
+        let missing = explicit(tmp.path().join("missing"));
+        assert_eq!(missing.rejected[0].reason, "does not exist");
+    }
+
+    #[test]
+    fn a_hint_that_is_a_file_is_a_candidate_and_an_empty_one_is_rejected() {
+        let tmp = temp();
+        touch(&tmp.path().join("one/libblpapi3_64.so"));
+        let mut request = request(LINUX, &[]);
+        request.hints = vec![
+            Hint {
+                label: "first".into(),
+                dir: tmp.path().join("none"),
+            },
+            Hint {
+                label: "second".into(),
+                dir: tmp.path().join("one/libblpapi3_64.so"),
+            },
+        ];
+        let found = locate(&request);
+        assert_eq!(found.candidates.len(), 1);
+        assert_eq!(found.candidates[0].detail, "second");
+        assert_eq!(found.rejected.len(), 1);
+        assert_eq!(found.rejected[0].detail, "first");
+    }
+
+    #[test]
+    fn search_path_directories_are_searched_in_variable_order() {
+        let tmp = temp();
+        let (a, b, c) = (
+            tmp.path().join("a"),
+            tmp.path().join("b"),
+            tmp.path().join("c"),
+        );
+        touch(&a.join("libblpapi3_64.so"));
+        touch(&b.join("libblpapi3_64.so"));
+        touch(&c.join("libblpapi3_64.dylib"));
+
+        let found = locate(&request(
+            LINUX,
+            &[(
+                "LD_LIBRARY_PATH",
+                format!(":{}::{}:", b.display(), a.display()),
+            )],
+        ));
+        assert_eq!(
+            paths(&found),
+            [b.join("libblpapi3_64.so"), a.join("libblpapi3_64.so")]
+        );
+        assert!(
+            found
+                .candidates
+                .iter()
+                .all(|c| c.detail == "LD_LIBRARY_PATH")
+        );
+
+        // macOS reads DYLD_LIBRARY_PATH, then DYLD_FALLBACK_LIBRARY_PATH, and ignores the others.
+        let found = locate(&request(
+            Platform::MacosAarch64,
+            &[
+                ("DYLD_FALLBACK_LIBRARY_PATH", text(&c)),
+                ("DYLD_LIBRARY_PATH", text(&a)),
+                ("LD_LIBRARY_PATH", text(&b)),
+            ],
+        ));
+        assert_eq!(
+            paths(&found),
+            [a.join("libblpapi3_64.so"), c.join("libblpapi3_64.dylib")]
+        );
+        assert_eq!(found.candidates[1].detail, "DYLD_FALLBACK_LIBRARY_PATH");
+    }
+
+    #[test]
+    fn windows_path_entries_are_trimmed_unquoted_and_names_match_in_any_case() {
+        let tmp = temp();
+        let (a, b, c) = (
+            tmp.path().join("a"),
+            tmp.path().join("b c"),
+            tmp.path().join("c"),
+        );
+        touch(&b.join("blpapi3_64.dll"));
+        touch(&c.join("blpapi3_64.dll"));
+        fs::create_dir_all(&a).expect("create dir");
+        // The view's own spelling of the name, as Node's process.env has it on Windows.
+        let found = locate(&request(
+            Platform::WindowsX86_64,
+            &[(
+                "Path",
+                format!("{} ; \"{}\" ;; {}", a.display(), b.display(), c.display()),
+            )],
+        ));
+        assert_eq!(
+            paths(&found),
+            [b.join("blpapi3_64.dll"), c.join("blpapi3_64.dll")]
+        );
+        assert_eq!(found.candidates[0].detail, "PATH");
+
+        // Other platforms match names exactly.
+        let found = locate(&request(LINUX, &[("Ld_Library_Path", text(&b))]));
+        assert!(found.candidates.is_empty());
+    }
+
+    fn windows_roots(vars: &[(&str, &str)]) -> Vec<String> {
+        let vars: BTreeMap<String, String> = vars
+            .iter()
+            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
+            .collect();
+        let env = Env {
+            vars: Some(&vars),
+            ignore_case: true,
+        };
+        terminal_roots(&env, Platform::WindowsX86_64)
+            .iter()
+            .map(|root| text(root))
+            .collect()
+    }
+
+    #[test]
+    fn windows_terminal_roots_follow_the_environment() {
+        assert_eq!(
+            windows_roots(&[
+                ("SystemDrive", "D:"),
+                ("PROGRAMFILES", r"E:\PF"),
+                ("PROGRAMFILES(X86)", ""),
+                ("LOCALAPPDATA", r"E:\Local\"),
+            ]),
+            [
+                r"D:\blp\DAPI",
+                r"C:\blp\DAPI",
+                r"E:\PF\Bloomberg\Blp\DAPI",
+                r"D:\Program Files\Bloomberg\Blp\DAPI",
+                r"D:\Program Files (x86)\Bloomberg\Blp\DAPI",
+                r"E:\Local\Bloomberg\DAPI",
+                r"E:\Local\Bloomberg\Blp\DAPI",
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_terminal_roots_default_to_the_c_drive_and_dedupe_ignoring_case() {
+        // A missing or malformed SYSTEMDRIVE is C:; repeats collapse whatever their case.
+        assert_eq!(
+            windows_roots(&[("SYSTEMDRIVE", "Q"), ("PROGRAMFILES", r"c:\program files")]),
+            [
+                r"C:\blp\DAPI",
+                r"c:\program files\Bloomberg\Blp\DAPI",
+                r"C:\Program Files (x86)\Bloomberg\Blp\DAPI",
+            ]
+        );
+        // USERPROFILE stands in for LOCALAPPDATA.
+        let roots = windows_roots(&[("USERPROFILE", r"C:\Users\someone")]);
+        assert_eq!(
+            roots[roots.len() - 2..],
+            [
+                r"C:\Users\someone\AppData\Local\Bloomberg\DAPI",
+                r"C:\Users\someone\AppData\Local\Bloomberg\Blp\DAPI",
+            ]
+        );
+    }
+
+    #[test]
+    fn posix_terminal_roots_are_home_and_opt() {
+        let vars = BTreeMap::from([("HOME".to_owned(), "/home/someone/".to_owned())]);
+        let env = Env {
+            vars: Some(&vars),
+            ignore_case: false,
+        };
+        assert_eq!(
+            terminal_roots(&env, LINUX),
+            [
+                PathBuf::from("/home/someone/blp/DAPI"),
+                PathBuf::from("/opt/bloomberg/DAPI")
+            ]
+        );
+        let none = BTreeMap::new();
+        let env = Env {
+            vars: Some(&none),
+            ignore_case: false,
+        };
+        assert_eq!(
+            terminal_roots(&env, Platform::MacosAarch64),
+            [PathBuf::from("/opt/bloomberg/DAPI")]
+        );
+    }
+
+    #[test]
+    fn terminal_roots_are_searched_in_their_layouts() {
+        let home = temp();
+        touch(&home.path().join("blp/DAPI/libblpapi3_64.so"));
+        let found = locate(&request(LINUX, &[("HOME", text(home.path()))]));
+        let terminal: Vec<_> = found
+            .candidates
+            .iter()
+            .filter(|c| c.source == SourceKind::Terminal)
+            .collect();
+        assert_eq!(terminal.len(), 1);
+        assert_eq!(
+            terminal[0].path,
+            home.path().join("blp/DAPI/libblpapi3_64.so")
+        );
+        assert_eq!(terminal[0].detail, text(&home.path().join("blp/DAPI")));
+    }
+
+    #[test]
+    fn the_cache_lists_verified_installs_best_first_and_rejects_the_rest() {
+        let tmp = temp();
+        let cache = tmp.path().join("cache");
+        let old = install(&cache, "3.26.5.1", "artifact-a", false);
+        let new = install(&cache, "3.26.9.1", "artifact-b", false);
+        let bad = install(&cache, "3.27.0.0", "artifact-c", true);
+
+        let mut request = request(LINUX, &[]);
+        request.cache_root = Some(cache.clone());
+        let found = locate(&request);
+        assert_eq!(
+            paths(&found),
+            [
+                new.join("lib/libblpapi3_64.so"),
+                old.join("lib/libblpapi3_64.so")
+            ]
+        );
+        assert_eq!(found.candidates[0].version.as_deref(), Some("3.26.9.1"));
+        assert_eq!(found.candidates[0].detail, text(&new));
+        assert_eq!(found.rejected.len(), 1);
+        assert_eq!(found.rejected[0].path, bad);
+        assert_eq!(found.rejected[0].source, SourceKind::Cache);
+        assert_eq!(found.rejected[0].detail, text(&bad));
+        assert!(!found.rejected[0].reason.is_empty());
+
+        // Without a request root the view's XBBG_CACHE_DIR names the cache.
+        let by_env = locate(&self::request(LINUX, &[("XBBG_CACHE_DIR", text(&cache))]));
+        assert_eq!(by_env, found);
+    }
+
+    #[test]
+    fn requests_and_results_round_trip_as_camel_case_json() {
+        let request = LocateRequest {
+            explicit: Some(PathBuf::from("lib")),
+            hints: vec![Hint {
+                label: "blpapi_python".into(),
+                dir: PathBuf::from("wheel"),
+            }],
+            env: Some(BTreeMap::from([("PATH".to_owned(), "x".to_owned())])),
+            cache_root: Some(PathBuf::from("cache")),
+            repo_root: Some(PathBuf::from("repo")),
+            platform: Some(Platform::MacosAarch64),
+        };
+        let json = serde_json::to_value(&request).expect("serialize");
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "explicit": "lib",
+                "hints": [{"label": "blpapi_python", "dir": "wheel"}],
+                "env": {"PATH": "x"},
+                "cacheRoot": "cache",
+                "repoRoot": "repo",
+                "platform": "macos-aarch64",
+            })
+        );
+        assert_eq!(
+            serde_json::from_value::<LocateRequest>(json).expect("parse"),
+            request
+        );
+        assert_eq!(
+            serde_json::from_str::<LocateRequest>("{}").expect("parse"),
+            LocateRequest::default()
+        );
+        assert!(serde_json::from_str::<LocateRequest>(r#"{"cacheDir": "x"}"#).is_err());
+
+        let located = Located {
+            candidates: vec![Candidate {
+                path: PathBuf::from("a"),
+                source: SourceKind::BlpapiLibDir,
+                detail: "BLPAPI_LIB_DIR".into(),
+                version: Some("3.26.5.1".into()),
+            }],
+            rejected: vec![Rejected {
+                path: PathBuf::from("b"),
+                source: SourceKind::SearchPath,
+                detail: "PATH".into(),
+                reason: "why".into(),
+            }],
+        };
+        let json = serde_json::to_value(&located).expect("serialize");
+        assert_eq!(json["candidates"][0]["source"], "blpapi_lib_dir");
+        assert_eq!(json["rejected"][0]["source"], "search_path");
+        assert_eq!(
+            serde_json::from_value::<Located>(json).expect("parse"),
+            located
+        );
+    }
+
+    #[test]
+    fn every_source_name_matches_its_serialized_form() {
+        for source in [
+            SourceKind::Explicit,
+            SourceKind::BlpapiLibDir,
+            SourceKind::BlpapiRoot,
+            SourceKind::DevSdkRoot,
+            SourceKind::Vendored,
+            SourceKind::Hint,
+            SourceKind::Terminal,
+            SourceKind::SearchPath,
+            SourceKind::Cache,
+        ] {
+            assert_eq!(
+                serde_json::to_value(source).expect("serialize"),
+                source.as_str()
+            );
+        }
     }
 }
