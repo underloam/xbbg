@@ -16,7 +16,6 @@ members = [
     "bindings/pyo3-xbbg",
     "bindings/pyo3-xbbg-runtime",
     "bindings/napi-xbbg",
-    "bindings/napi-xbbg-runtime",
     "bindings/jni-xbbg",
     "bindings/jni-xbbg-sdk",
     # Applications
@@ -148,11 +147,8 @@ pyo3-stub-gen = { version = "0.23", default-features = false }
 jni = "0.22.4"
 
 # ── Native library loading ────────────────────────────────────────────────────
-# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core;
-# libc and windows-sys serve bindings/napi-xbbg-runtime.
-libc = "0.2"
+# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core.
 libloading = "0.9"
-windows-sys = { version = "0.61", default-features = false }
 
 # ── Bloomberg SDK provisioning (crates/xbbg-sdk) ──────────────────────────────
 # uv publishes every crate as 0.0.x with no semver promise, so the uv crates are

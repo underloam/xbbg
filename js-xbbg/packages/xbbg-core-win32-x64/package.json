@@ -31,8 +31,7 @@
     "README.md",
     "LICENSE",
     "package.json",
-    "napi_xbbg.node",
-    "napi_xbbg_runtime.node"
+    "napi_xbbg.node"
   ],
   "os": [
     "win32"

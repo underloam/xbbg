@@ -1,7 +1,6 @@
 dist/
 napi_xbbg.node
 napi-xbbg.node
-napi_xbbg_runtime.node
 node_modules/
 *.tsbuildinfo
 

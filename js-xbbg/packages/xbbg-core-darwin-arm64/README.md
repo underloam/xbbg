@@ -17,7 +17,6 @@ Direct installation of `@xbbg/core-darwin-arm64` is only recommended for diagnos
 - `index.js`
 - `index.d.ts`
 - `napi_xbbg.node`
-- `napi_xbbg_runtime.node` (resolver addon: finds the Bloomberg runtime in the xbbg cache; it never links Bloomberg)
 - `LICENSE`
 - `package.json` and `README.md`
 

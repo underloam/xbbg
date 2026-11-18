@@ -18,10 +18,8 @@ export interface NativeBuildInfo {
   profile: 'debug' | 'release';
   rustcVersion: string;
   rustFlags: readonly string[];
-  /** The resolver addon built alongside: it never links Bloomberg. */
-  runtimeAddon: { file: string; sha256: string };
-  schemaVersion: 2;
-  sdkLibrary: { file: string; sha256: string };
+  /** Bumped when a field is added or removed, so a file from an older build is refused. */
+  schemaVersion: 3;
   sdkVersion: string;
   target: string;
   targetCpu: string;
@@ -91,7 +89,7 @@ function isNativeBuildInfo(info: unknown): info is NativeBuildInfo {
     typeof info === 'object' &&
     info !== null &&
     'schemaVersion' in info &&
-    info.schemaVersion === 2 &&
+    info.schemaVersion === 3 &&
     'profile' in info &&
     (info.profile === 'debug' || info.profile === 'release') &&
     'portable' in info &&
@@ -117,21 +115,7 @@ function isNativeBuildInfo(info: unknown): info is NativeBuildInfo {
     'target' in info &&
     isNonEmptyString(info.target) &&
     'targetCpu' in info &&
-    isNonEmptyString(info.targetCpu) &&
-    'runtimeAddon' in info &&
-    typeof info.runtimeAddon === 'object' &&
-    info.runtimeAddon !== null &&
-    'file' in info.runtimeAddon &&
-    typeof info.runtimeAddon.file === 'string' &&
-    'sha256' in info.runtimeAddon &&
-    typeof info.runtimeAddon.sha256 === 'string' &&
-    'sdkLibrary' in info &&
-    typeof info.sdkLibrary === 'object' &&
-    info.sdkLibrary !== null &&
-    'file' in info.sdkLibrary &&
-    typeof info.sdkLibrary.file === 'string' &&
-    'sha256' in info.sdkLibrary &&
-    typeof info.sdkLibrary.sha256 === 'string'
+    isNonEmptyString(info.targetCpu)
   );
 }
 
@@ -143,13 +127,7 @@ export function readNativeBuildInfo(file: string): NativeBuildInfo {
   if (!isNativeBuildInfo(info)) {
     throw new Error('native build provenance is incomplete; rebuild the native addon');
   }
-  if (
-    !/^[a-f0-9]{64}$/u.test(info.artifactSha256) ||
-    info.runtimeAddon.file.length === 0 ||
-    !/^[a-f0-9]{64}$/u.test(info.runtimeAddon.sha256) ||
-    info.sdkLibrary.file.length === 0 ||
-    !/^[a-f0-9]{64}$/u.test(info.sdkLibrary.sha256)
-  ) {
+  if (!/^[a-f0-9]{64}$/u.test(info.artifactSha256)) {
     throw new Error('native build provenance contains an invalid artifact identity');
   }
   const codegen = inspectRustCodegen(info.rustFlags);
@@ -162,7 +140,6 @@ export function readNativeBuildInfo(file: string): NativeBuildInfo {
 export function assertNativeBuildArtifact(
   info: NativeBuildInfo,
   preparedFile: string,
-  preparedRuntimeFile: string,
   key: PlatformKey,
   release: boolean,
 ): void {
@@ -176,10 +153,5 @@ export function assertNativeBuildArtifact(
   }
   if (sha256File(preparedFile) !== info.artifactSha256) {
     throw new Error('native addon does not match its build provenance; rebuild before staging');
-  }
-  if (sha256File(preparedRuntimeFile) !== info.runtimeAddon.sha256) {
-    throw new Error(
-      'runtime resolver addon does not match its build provenance; rebuild before staging',
-    );
   }
 }

@@ -1,4 +1,4 @@
-"""Tests for the check that the N-API resolver addon links no Bloomberg runtime and stays small."""
+"""Tests for the check that the N-API engine addon links no Bloomberg runtime."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from pathlib import Path
 
 import pytest
 
-from scripts import check_runtime_addon_links as check
+from scripts import check_napi_addon_links as check
 from scripts.test_stage_jvm_natives import make_elf, make_macho, make_pe
 
-NAME = "napi_xbbg_runtime.node"
+NAME = "napi_xbbg.node"
 
 
 def write(directory: Path, data: bytes) -> Path:
@@ -44,32 +44,3 @@ def test_macho_addon_must_be_relocatable(tmp_path):
         check.check(wrong_name)
     with pytest.raises(check.StageError, match="non-portable"):
         check.check(absolute)
-
-
-def test_addon_over_the_size_budget_is_rejected(tmp_path, capsys):
-    addon = make_elf(["libc.so.6"], payload=b"\x01" * 10_000)
-    path = write(tmp_path, addon)
-
-    assert check.DEFAULT_MAX_BYTES == 2 * 1024 * 1024
-    assert check.main([str(path)]) == 0
-    assert check.main(["--max-bytes", str(len(addon)), str(path)]) == 0
-    capsys.readouterr()
-
-    assert check.main(["--max-bytes", str(len(addon) - 1), str(path)]) == 1
-    error = capsys.readouterr().err
-    assert f"is {len(addon)} bytes" in error
-    assert f"over the {len(addon) - 1} byte budget" in error
-    assert "must not enable xbbg-sdk's `provision` feature" in error
-
-
-def test_default_budget_rejects_a_provisioner_sized_addon(tmp_path, capsys):
-    path = write(tmp_path, make_elf(["libc.so.6"], payload=bytes(range(256)) * 12 * 1024))
-
-    assert path.stat().st_size > check.DEFAULT_MAX_BYTES
-    assert check.main([str(path)]) == 1
-    assert "`provision` feature" in capsys.readouterr().err
-
-
-def test_missing_addon_is_an_error(tmp_path, capsys):
-    assert check.main([str(tmp_path / "absent.node")]) == 1
-    assert "error:" in capsys.readouterr().err

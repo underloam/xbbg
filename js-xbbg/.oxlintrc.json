@@ -21,12 +21,7 @@
     "typeAware": true,
     "typeCheck": true
   },
-  "ignorePatterns": [
-    "dist/**",
-    "node_modules/**",
-    "packages/*/napi_xbbg.node",
-    "packages/*/napi_xbbg_runtime.node"
-  ],
+  "ignorePatterns": ["dist/**", "node_modules/**", "packages/*/napi_xbbg.node"],
   "rules": {
     "eslint/func-style": "off",
     "eslint/id-length": "off",
@@ -182,12 +177,7 @@
       }
     },
     {
-      "files": [
-        "src/native/resolve-native.ts",
-        "src/native/runtime-addon.ts",
-        "src/index.ts",
-        "src/runtime-search-path.ts"
-      ],
+      "files": ["src/native/resolve-native.ts", "src/index.ts"],
       "rules": {
         "node/no-sync": "off"
       }

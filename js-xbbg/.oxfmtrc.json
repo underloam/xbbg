@@ -20,10 +20,5 @@
   "sortPackageJson": {
     "sortScripts": true
   },
-  "ignorePatterns": [
-    "dist/**",
-    "node_modules/**",
-    "packages/*/napi_xbbg.node",
-    "packages/*/napi_xbbg_runtime.node"
-  ]
+  "ignorePatterns": ["dist/**", "node_modules/**", "packages/*/napi_xbbg.node"]
 }

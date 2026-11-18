@@ -9,16 +9,12 @@ const nodeRequire = createRequire(__filename);
 
 interface NativePackageResolution {
   readonly binaryPath: string;
-  /** Absent in platform packages published before the resolver addon existed. */
-  readonly runtimeBinaryPath: string | null;
 }
 
 export interface NativeAddonResolution {
   readonly key: string;
   readonly packageName: string | null;
   readonly binaryPath: string | null;
-  /** The resolver addon beside the engine addon, or null when the package does not ship one. */
-  readonly runtimeBinaryPath: string | null;
 }
 
 interface NativeResolverBaseOptions {
@@ -53,11 +49,7 @@ function isResolutionObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function validateNativePackage(
-  packageName: string,
-  resolved: unknown,
-  existsFile: (target: string) => boolean,
-): NativePackageResolution {
+function validateNativePackage(packageName: string, resolved: unknown): NativePackageResolution {
   if (!isResolutionObject(resolved)) {
     throw new Error(`Invalid native package ${packageName}: expected an object with binaryPath`);
   }
@@ -67,14 +59,7 @@ function validateNativePackage(
   if (typeof resolved.binaryPath !== 'string') {
     throw new TypeError(`Invalid native package ${packageName}: binaryPath must be a string`);
   }
-  // The resolver addon is optional: a missing or unusable one only disables the cache rule.
-  const runtimeBinaryPath =
-    'runtimeBinaryPath' in resolved &&
-    typeof resolved.runtimeBinaryPath === 'string' &&
-    existsFile(resolved.runtimeBinaryPath)
-      ? resolved.runtimeBinaryPath
-      : null;
-  return { binaryPath: resolved.binaryPath, runtimeBinaryPath };
+  return { binaryPath: resolved.binaryPath };
 }
 
 function localPackageIndex(repoRoot: string, packageDir: string): string {
@@ -103,7 +88,7 @@ function resolveInstalledPackage(
   existsFile: (target: string) => boolean,
 ): NativePackageResolution | null {
   try {
-    const resolved = validateNativePackage(packageName, requirePackage(packageName), existsFile);
+    const resolved = validateNativePackage(packageName, requirePackage(packageName));
     if (!existsFile(resolved.binaryPath)) {
       throw new Error(
         `Invalid native package ${packageName}: binaryPath does not exist: ${resolved.binaryPath}`,
@@ -129,11 +114,7 @@ function resolveLocalPackage(
     return null;
   }
 
-  const resolved = validateNativePackage(
-    nativePackage.packageName,
-    requirePackage(localIndex),
-    existsFile,
-  );
+  const resolved = validateNativePackage(nativePackage.packageName, requirePackage(localIndex));
   if (!existsFile(resolved.binaryPath)) {
     throw new Error(
       `Invalid native package ${nativePackage.packageName}: binaryPath does not exist: ${resolved.binaryPath}`,
@@ -145,31 +126,21 @@ function resolveLocalPackage(
 export function resolveNativeAddonCore(options: NativeResolverOptions): NativeAddonResolution {
   const { nativePackage, repoRoot, requirePackage, exists: existsFile } = options;
   if (nativePackage === null) {
-    return { binaryPath: null, key: options.key, packageName: null, runtimeBinaryPath: null };
+    return { binaryPath: null, key: options.key, packageName: null };
   }
 
   const { key, packageName } = nativePackage;
   const installed = resolveInstalledPackage(packageName, requirePackage, existsFile);
   if (installed !== null) {
-    return {
-      binaryPath: installed.binaryPath,
-      key,
-      packageName,
-      runtimeBinaryPath: installed.runtimeBinaryPath,
-    };
+    return { binaryPath: installed.binaryPath, key, packageName };
   }
 
   const local = resolveLocalPackage(repoRoot, nativePackage, requirePackage, existsFile);
   if (local !== null) {
-    return {
-      binaryPath: local.binaryPath,
-      key,
-      packageName,
-      runtimeBinaryPath: local.runtimeBinaryPath,
-    };
+    return { binaryPath: local.binaryPath, key, packageName };
   }
 
-  return { binaryPath: null, key, packageName, runtimeBinaryPath: null };
+  return { binaryPath: null, key, packageName };
 }
 
 export function resolveNativeAddon(repoRoot: string): NativeAddonResolution {

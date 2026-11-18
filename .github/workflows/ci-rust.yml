@@ -295,17 +295,29 @@ jobs:
           cargo clippy -p xbbg-sdk --all-targets --features provision -- -D warnings
           cargo test -p xbbg-sdk --features provision
 
-      # The two resolver bindings must see only xbbg-sdk's default features.
-      - name: Resolver bindings do not pull in the provisioner
+      # The resolver binding must see only xbbg-sdk's default features.
+      - name: Resolver binding does not pull in the provisioner
         run: |
-          crates=$(cargo tree -p pyo3-xbbg-runtime -p napi-xbbg-runtime -e normal --prefix none | awk '{print $1}' | sort -u)
+          crates=$(cargo tree -p pyo3-xbbg-runtime -e normal --prefix none | awk '{print $1}' | sort -u)
           for forbidden in reqwest tokio uv-client rattler_repodata_gateway; do
             if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
               echo "a resolver binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
               exit 1
             fi
           done
-          cargo clippy -p pyo3-xbbg-runtime -p napi-xbbg-runtime --all-targets -- -D warnings
+          cargo clippy -p pyo3-xbbg-runtime --all-targets -- -D warnings
+
+      # The Node addon loads the runtime through xbbg-host, which uses xbbg-sdk's default features.
+      # (It depends on tokio itself, so only the downloader's own entry points are checked.)
+      - name: Node addon does not pull in the provisioner
+        run: |
+          crates=$(cargo tree -p napi-xbbg -e normal --prefix none | awk '{print $1}' | sort -u)
+          for forbidden in reqwest uv-client rattler_repodata_gateway; do
+            if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
+              echo "the Node addon pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
+              exit 1
+            fi
+          done
 
   check-windows:
     name: Check (Windows)
@@ -445,7 +457,7 @@ jobs:
 
       # The resolver alone (default features), as the base packages build it.
       - name: Cargo check the resolver at the MSRV
-        run: cargo check --locked -p xbbg-sdk -p pyo3-xbbg-runtime -p napi-xbbg-runtime --all-targets
+        run: cargo check --locked -p xbbg-sdk -p pyo3-xbbg-runtime --all-targets
 
   # ════════════════════════════════════════════════════════════════════════════
   # NAPI core packaging validation
@@ -541,17 +553,17 @@ jobs:
 
       - name: Enforce glibc 2.28 floor on native addon (Linux)
         if: runner.os == 'Linux'
-        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.core_package_dir }}/napi_xbbg.node" "${{ matrix.core_package_dir }}/napi_xbbg_runtime.node"
+        run: bash scripts/check-glibc-max.sh 2.28 "${{ matrix.core_package_dir }}/napi_xbbg.node"
 
-      - name: Check the resolver addon never links the Bloomberg runtime
+      - name: Check the engine addon never links the Bloomberg runtime
         shell: bash
         run: |
           py="$(command -v python3 || command -v python)"
-          "$py" scripts/check_runtime_addon_links.py "${{ matrix.core_package_dir }}/napi_xbbg_runtime.node"
+          "$py" scripts/check_napi_addon_links.py "${{ matrix.core_package_dir }}/napi_xbbg.node"
 
       - name: Validate core native package export
         run: |
-          node -e "const fs = require('node:fs'); const addon = require('./${{ matrix.core_package_dir }}'); console.log(addon.binaryPath); if (!fs.existsSync(addon.runtimeBinaryPath)) throw new Error('missing runtime resolver addon ' + addon.runtimeBinaryPath); console.log(addon.runtimeBinaryPath);"
+          node -e "const fs = require('node:fs'); const addon = require('./${{ matrix.core_package_dir }}'); if (!fs.existsSync(addon.binaryPath)) throw new Error('missing engine addon ' + addon.binaryPath); console.log(addon.binaryPath);"
 
       # Only this job builds the real addon on Linux, Windows, and macOS; the
       # Ubuntu JS quality job has none, so native-dependent suites such as
@@ -572,12 +584,12 @@ jobs:
 
       - name: Remove local js-xbbg build artifacts (Unix)
         if: runner.os != 'Windows'
-        run: rm -f js-xbbg/napi_xbbg.node js-xbbg/napi_xbbg_runtime.node
+        run: rm -f js-xbbg/napi_xbbg.node
 
       - name: Remove local js-xbbg build artifacts (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
-        run: Remove-Item js-xbbg\napi_xbbg.node, js-xbbg\napi_xbbg_runtime.node -Force
+        run: Remove-Item js-xbbg\napi_xbbg.node -Force
 
       - name: Smoke test packaged @xbbg/core install
         shell: bash

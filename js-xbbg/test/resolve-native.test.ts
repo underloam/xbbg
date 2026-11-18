@@ -11,7 +11,6 @@ import {
   nativeBinaryName,
   nativePackageForKey,
   platformPackages,
-  runtimeBinaryName,
 } from '../src/native/platform-map';
 import type { NativePackageDescriptor } from '../src/native/platform-map';
 import { resolveNativeAddonCore } from '../src/native/resolve-native';
@@ -59,12 +58,7 @@ describe(resolveNativeAddonCore, () => {
         },
       });
 
-      expect(resolution).toStrictEqual({
-        binaryPath: null,
-        key,
-        packageName,
-        runtimeBinaryPath: null,
-      });
+      expect(resolution).toStrictEqual({ binaryPath: null, key, packageName });
     });
   });
 
@@ -236,7 +230,7 @@ describe(resolveNativeAddonCore, () => {
         },
       });
 
-      expect(resolution).toStrictEqual({ binaryPath, key, packageName, runtimeBinaryPath: null });
+      expect(resolution).toStrictEqual({ binaryPath, key, packageName });
     });
   });
 
@@ -259,48 +253,7 @@ describe(resolveNativeAddonCore, () => {
         },
       });
 
-      expect(resolution).toStrictEqual({
-        binaryPath: installedBinary,
-        key,
-        packageName,
-        runtimeBinaryPath: null,
-      });
-    });
-  });
-
-  it('reports the resolver addon shipped beside the engine addon', () => {
-    withTempRepo((repoRoot) => {
-      const binaryPath = path.join(repoRoot, 'native.node');
-      const runtimeBinaryPath = path.join(repoRoot, 'runtime.node');
-      fs.writeFileSync(binaryPath, 'engine');
-      fs.writeFileSync(runtimeBinaryPath, 'resolver');
-
-      const resolution = resolveNativeAddonCore({
-        exists: (target) => fs.existsSync(target),
-        nativePackage,
-        repoRoot,
-        requirePackage: () => ({ binaryPath, runtimeBinaryPath }),
-      });
-
-      expect(resolution).toStrictEqual({ binaryPath, key, packageName, runtimeBinaryPath });
-    });
-  });
-
-  it('ignores a missing or malformed resolver addon path', () => {
-    withTempRepo((repoRoot) => {
-      const binaryPath = path.join(repoRoot, 'native.node');
-      fs.writeFileSync(binaryPath, 'engine');
-
-      for (const runtimeBinaryPath of [path.join(repoRoot, 'absent.node'), 42]) {
-        const resolution = resolveNativeAddonCore({
-          exists: (target) => fs.existsSync(target),
-          nativePackage,
-          repoRoot,
-          requirePackage: () => ({ binaryPath, runtimeBinaryPath }),
-        });
-        expect(resolution.binaryPath).toBe(binaryPath);
-        expect(resolution.runtimeBinaryPath).toBeNull();
-      }
+      expect(resolution).toStrictEqual({ binaryPath: installedBinary, key, packageName });
     });
   });
 
@@ -315,12 +268,7 @@ describe(resolveNativeAddonCore, () => {
       },
     });
 
-    expect(resolution).toStrictEqual({
-      binaryPath: null,
-      key: 'freebsd-x64',
-      packageName: null,
-      runtimeBinaryPath: null,
-    });
+    expect(resolution).toStrictEqual({ binaryPath: null, key: 'freebsd-x64', packageName: null });
   });
 });
 
@@ -351,13 +299,14 @@ describe('platform map packaging metadata', () => {
         os: spec.os,
         packageDir: spec.packageDir,
         packageName: spec.packageName,
-        runtimeBinaryName: spec.runtimeBinaryName,
       });
       expect(path.basename(spec.packageDir)).toBe(spec.dirName);
       expect(spec.binaryName).toBe(nativeBinaryName);
       expect(spec.expectedFiles).toContain(nativeBinaryName);
-      expect(spec.runtimeBinaryName).toBe(runtimeBinaryName);
-      expect(spec.expectedFiles).toContain(runtimeBinaryName);
+      // The engine addon is the only native file: Bloomberg is loaded by path at run time.
+      expect(spec.expectedFiles.filter((file) => file.endsWith('.node'))).toStrictEqual([
+        nativeBinaryName,
+      ]);
     }
   });
 
@@ -378,9 +327,7 @@ describe('platform map packaging metadata', () => {
       expect(manifest.os).toStrictEqual([spec.os]);
       expect(manifest.cpu).toStrictEqual([spec.cpu]);
       expect(manifest.files).toStrictEqual([...spec.expectedFiles]);
-      for (const expectedFile of spec.expectedFiles.filter(
-        (file) => file !== spec.binaryName && file !== spec.runtimeBinaryName,
-      )) {
+      for (const expectedFile of spec.expectedFiles.filter((file) => file !== spec.binaryName)) {
         expect(fs.existsSync(path.join(packageDir, expectedFile))).toBeTruthy();
       }
     }
