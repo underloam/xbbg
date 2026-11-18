@@ -1,5 +1,3 @@
-use std::env;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -11,12 +9,10 @@ use rmcp::{ErrorData, ServerHandler, ServiceExt, tool, tool_handler, tool_router
 use serde_json::{Value, json};
 use tokio::sync::{OnceCell, Semaphore};
 use xbbg_async::BlpAsyncError;
-use xbbg_async::engine::{
-    Engine, EngineConfig, KeyColumn, RequestParams, RetryPolicy, ServerAddr, Transport,
-};
+use xbbg_async::engine::{Engine, EngineConfig, KeyColumn, RequestParams};
 use xbbg_async::error_presentation::blp_error_display;
+use xbbg_core::BlpError;
 use xbbg_core::errors::ValidationError;
-use xbbg_core::{AuthConfig, BlpError};
 use xbbg_host::teardown::{DeferredDrop, wait_idle_timeout};
 use xbbg_recipes::{
     RecipeError, recipe_auction_snapshot, recipe_delay_status, recipe_resolve_venues,
@@ -25,6 +21,7 @@ use xbbg_recipes::{
 mod request_adapter;
 mod runtime;
 mod serialization;
+mod settings;
 mod stdin;
 
 use request_adapter::{
@@ -36,7 +33,7 @@ use request_adapter::{
 };
 
 use serialization::{
-    MIN_RESULT_BYTES, ResultLimits, bounded_error_display, bounded_error_text, bounded_json_text,
+    ResultLimits, bounded_error_display, bounded_error_text, bounded_json_text,
     entitlement_check_to_json, json_serialized_len, record_batch_to_json, should_offload,
     should_offload_items,
 };
@@ -59,7 +56,7 @@ impl XbbgMcpServer {
     fn new_from_env() -> Result<Self, String> {
         const MAX_CONCURRENT_SERIALIZATIONS: usize = 2;
 
-        let (engine_config, result_limits) = load_settings_from_env()?;
+        let (engine_config, result_limits) = settings::load_from_env()?;
         if engine_config.key_column == KeyColumn::Ticker {
             xbbg_log::warn!(
                 "results name the security column 'ticker', which collides with Bloomberg's \
@@ -425,268 +422,6 @@ impl ServerHandler for XbbgMcpServer {
     }
 }
 
-fn load_settings_from_env() -> Result<(EngineConfig, ResultLimits), String> {
-    // Keep the initial env surface intentionally narrow: expose the subset we can document and
-    // support honestly for MCP deployment, rather than implying full parity with every EngineConfig knob.
-    let mut config = EngineConfig::default();
-
-    let host = env_string(&[
-        "XBBG_MCP_HOST",
-        "XBBG_MCP_SERVER_HOST",
-        "XBBG_HOST",
-        "XBBG_SERVER_HOST",
-        "XBBG_SERVER",
-    ])
-    .unwrap_or_else(|| "localhost".to_string());
-    let port = env_u16(&[
-        "XBBG_MCP_PORT",
-        "XBBG_MCP_SERVER_PORT",
-        "XBBG_PORT",
-        "XBBG_SERVER_PORT",
-    ])?
-    .unwrap_or(8194);
-    config.transport = Transport::Direct(vec![ServerAddr::new(host, port)]);
-    config.bql_app_name = env_string(&["XBBG_MCP_BQL_APP_NAME"]);
-    config.request_pool_size =
-        env_usize(&["XBBG_MCP_REQUEST_POOL_SIZE", "XBBG_REQUEST_POOL_SIZE"])?
-            .unwrap_or(config.request_pool_size);
-    config.validation_mode = env_parsed(
-        &["XBBG_MCP_VALIDATION_MODE", "XBBG_VALIDATION_MODE"],
-        "validation_mode",
-    )?
-    .unwrap_or(config.validation_mode);
-    config.field_cache_path = env_string(&["XBBG_MCP_FIELD_CACHE_PATH", "XBBG_FIELD_CACHE_PATH"])
-        .map(PathBuf::from)
-        .or_else(|| config.field_cache_path.clone());
-    if let Some(warmup_services) = env_csv(&["XBBG_MCP_WARMUP_SERVICES", "XBBG_WARMUP_SERVICES"]) {
-        config.warmup_services = warmup_services;
-    }
-    config.sdk_log_level = env_parsed(
-        &["XBBG_MCP_SDK_LOG_LEVEL", "XBBG_SDK_LOG_LEVEL"],
-        "sdk_log_level",
-    )?
-    .unwrap_or(config.sdk_log_level);
-    config.num_start_attempts = env_usize(&[
-        "XBBG_MCP_NUM_START_ATTEMPTS",
-        "XBBG_NUM_START_ATTEMPTS",
-        "XBBG_MAX_ATTEMPT",
-    ])?
-    .unwrap_or(config.num_start_attempts);
-    config.auto_restart_on_disconnection = env_bool(&[
-        "XBBG_MCP_AUTO_RESTART_ON_DISCONNECTION",
-        "XBBG_AUTO_RESTART_ON_DISCONNECTION",
-        "XBBG_AUTO_RESTART",
-    ])?
-    .unwrap_or(config.auto_restart_on_disconnection);
-    config.retry_policy = RetryPolicy {
-        max_retries: env_u32(&["XBBG_MCP_RETRY_MAX_RETRIES", "XBBG_RETRY_MAX_RETRIES"])?
-            .unwrap_or(config.retry_policy.max_retries),
-        initial_delay_ms: env_u64(&[
-            "XBBG_MCP_RETRY_INITIAL_DELAY_MS",
-            "XBBG_RETRY_INITIAL_DELAY_MS",
-        ])?
-        .unwrap_or(config.retry_policy.initial_delay_ms),
-        backoff_factor: env_f64(&["XBBG_MCP_RETRY_BACKOFF_FACTOR", "XBBG_RETRY_BACKOFF_FACTOR"])?
-            .unwrap_or(config.retry_policy.backoff_factor),
-        max_delay_ms: env_u64(&["XBBG_MCP_RETRY_MAX_DELAY_MS", "XBBG_RETRY_MAX_DELAY_MS"])?
-            .unwrap_or(config.retry_policy.max_delay_ms),
-    };
-    config.overflow_policy = env_parsed(
-        &["XBBG_MCP_OVERFLOW_POLICY", "XBBG_OVERFLOW_POLICY"],
-        "overflow_policy",
-    )?
-    .unwrap_or(config.overflow_policy);
-    config.key_column = env_parsed(&["XBBG_MCP_KEY_COLUMN", "XBBG_KEY_COLUMN"], "key_column")?
-        .unwrap_or(config.key_column);
-    config.auth = build_auth_from_env()?;
-
-    let defaults = ResultLimits::default();
-    let result_limits = ResultLimits {
-        max_rows: env_limit(&["XBBG_MCP_MAX_ROWS"], "max_rows", defaults.max_rows, 1)?,
-        max_cells: env_limit(&["XBBG_MCP_MAX_CELLS"], "max_cells", defaults.max_cells, 1)?,
-        max_metadata_properties: env_limit(
-            &["XBBG_MCP_MAX_METADATA_PROPERTIES"],
-            "max_metadata_properties",
-            defaults.max_metadata_properties,
-            1,
-        )?,
-        max_metadata_bytes: env_limit(
-            &["XBBG_MCP_MAX_METADATA_BYTES"],
-            "max_metadata_bytes",
-            defaults.max_metadata_bytes,
-            1,
-        )?,
-        max_string_chars: env_limit(
-            &["XBBG_MCP_MAX_STRING_CHARS"],
-            "max_string_chars",
-            defaults.max_string_chars,
-            1,
-        )?,
-        max_string_bytes: env_limit(
-            &["XBBG_MCP_MAX_STRING_BYTES"],
-            "max_string_bytes",
-            defaults.max_string_bytes,
-            '…'.len_utf8(),
-        )?,
-        max_result_bytes: env_limit(
-            &["XBBG_MCP_MAX_RESULT_BYTES"],
-            "max_result_bytes",
-            defaults.max_result_bytes,
-            MIN_RESULT_BYTES,
-        )?,
-    };
-
-    Ok((config, result_limits))
-}
-
-fn build_auth_from_env() -> Result<Option<AuthConfig>, String> {
-    let auth_method = env_string(&["XBBG_MCP_AUTH_METHOD", "XBBG_AUTH_METHOD"]);
-    let app_name = env_string(&["XBBG_MCP_APP_NAME", "XBBG_APP_NAME"]);
-    let dir_property = env_string(&["XBBG_MCP_DIR_PROPERTY", "XBBG_DIR_PROPERTY"]);
-    let user_id = env_string(&["XBBG_MCP_USER_ID", "XBBG_USER_ID"]);
-    let ip_address = env_string(&["XBBG_MCP_IP_ADDRESS", "XBBG_IP_ADDRESS"]);
-    let token = env_string(&["XBBG_MCP_TOKEN", "XBBG_TOKEN"]);
-
-    let Some(method) = auth_method.map(|value| value.to_ascii_lowercase()) else {
-        if app_name.is_some()
-            || dir_property.is_some()
-            || user_id.is_some()
-            || ip_address.is_some()
-            || token.is_some()
-        {
-            return Err(
-                "auth_method is required when auth-specific environment variables are set"
-                    .to_string(),
-            );
-        }
-        return Ok(None);
-    };
-
-    let auth = match method.as_str() {
-        "" | "none" => None,
-        "user" => Some(AuthConfig::User),
-        "app" => Some(AuthConfig::App {
-            app_name: required_env_value(&app_name, "app_name", &method)?,
-        }),
-        "userapp" => Some(AuthConfig::UserApp {
-            app_name: required_env_value(&app_name, "app_name", &method)?,
-        }),
-        "dir" | "directory" => Some(AuthConfig::Directory {
-            property_name: required_env_value(&dir_property, "dir_property", &method)?,
-        }),
-        "manual" => Some(AuthConfig::Manual {
-            app_name: required_env_value(&app_name, "app_name", &method)?,
-            user_id: required_env_value(&user_id, "user_id", &method)?,
-            ip_address: required_env_value(&ip_address, "ip_address", &method)?,
-        }),
-        "token" => Some(AuthConfig::Token {
-            token: required_env_value(&token, "token", &method)?,
-        }),
-        other => {
-            return Err(format!(
-                "invalid auth_method '{other}' (expected none, user, app, userapp, dir, directory, manual, or token)"
-            ));
-        }
-    };
-
-    Ok(auth)
-}
-
-fn required_env_value(value: &Option<String>, field: &str, method: &str) -> Result<String, String> {
-    value
-        .clone()
-        .ok_or_else(|| format!("{field} is required for auth_method={method}"))
-}
-
-fn env_string(keys: &[&str]) -> Option<String> {
-    keys.iter().find_map(|key| {
-        env::var(key)
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-    })
-}
-
-fn env_csv(keys: &[&str]) -> Option<Vec<String>> {
-    keys.iter().find_map(|key| {
-        env::var(key).ok().map(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<_>>()
-        })
-    })
-}
-
-fn env_usize(keys: &[&str]) -> Result<Option<usize>, String> {
-    env_parse(keys, "usize", str::parse)
-}
-
-fn env_limit(keys: &[&str], label: &str, default: usize, minimum: usize) -> Result<usize, String> {
-    let value = env_usize(keys)?.unwrap_or(default);
-    if value < minimum {
-        return Err(format!("{label} must be at least {minimum}, got {value}"));
-    }
-    Ok(value)
-}
-
-fn env_u16(keys: &[&str]) -> Result<Option<u16>, String> {
-    env_parse(keys, "u16", str::parse)
-}
-
-fn env_u32(keys: &[&str]) -> Result<Option<u32>, String> {
-    env_parse(keys, "u32", str::parse)
-}
-
-fn env_u64(keys: &[&str]) -> Result<Option<u64>, String> {
-    env_parse(keys, "u64", str::parse)
-}
-
-fn env_f64(keys: &[&str]) -> Result<Option<f64>, String> {
-    env_parse(keys, "f64", str::parse)
-}
-
-fn env_bool(keys: &[&str]) -> Result<Option<bool>, String> {
-    env_parse(keys, "bool", parse_bool)
-}
-
-fn env_parsed<T>(keys: &[&str], label: &str) -> Result<Option<T>, String>
-where
-    T: std::str::FromStr,
-    T::Err: std::fmt::Display,
-{
-    env_parse(keys, label, str::parse)
-}
-
-fn env_parse<T, E, F>(keys: &[&str], label: &str, parser: F) -> Result<Option<T>, String>
-where
-    F: Fn(&str) -> Result<T, E>,
-    E: std::fmt::Display,
-{
-    for key in keys {
-        if let Ok(raw) = env::var(key) {
-            let value = raw.trim();
-            if value.is_empty() {
-                continue;
-            }
-            return parser(value)
-                .map(Some)
-                .map_err(|err| format!("invalid {label} in {key}: {err}"));
-        }
-    }
-    Ok(None)
-}
-
-fn parse_bool(value: &str) -> Result<bool, String> {
-    match value.to_ascii_lowercase().as_str() {
-        "1" | "true" | "yes" | "on" => Ok(true),
-        "0" | "false" | "no" | "off" => Ok(false),
-        _ => Err(format!("expected true/false style boolean, got '{value}'")),
-    }
-}
-
 fn truncation_data(truncated: bool) -> Option<Value> {
     truncated.then(|| json!({"message_truncated": true}))
 }
@@ -964,7 +699,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         version = %sdk.version,
         "loaded the Bloomberg runtime"
     );
-    let server = XbbgMcpServer::new_from_env()?;
+    let server = match XbbgMcpServer::new_from_env() {
+        Ok(server) => server,
+        Err(message) => {
+            // Printed, not returned, for the same reason as the runtime error above.
+            eprintln!("xbbg-mcp: {message}");
+            std::process::exit(1);
+        }
+    };
     let (stdin, stdin_monitor) = stdin::stdin()?;
     let engine = server.engine_cell();
     let served = async {
@@ -1016,6 +758,7 @@ async fn wait_for_engine_teardown() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::serialization::MIN_RESULT_BYTES;
     use std::collections::HashMap;
     use xbbg_core::EntitlementCheck;
 

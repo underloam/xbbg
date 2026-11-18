@@ -274,6 +274,8 @@ Supported auth methods:
 - `manual`
 - `token`
 
+The settings above are checked at startup by the configuration rules every xbbg binding shares (`xbbg-host`). A setting the engine would reject (for example `XBBG_MCP_REQUEST_POOL_SIZE=0`, or an auth method without the value it needs) stops the server before it serves anything: it prints `xbbg-mcp: invalid configuration: …` to stderr, naming the variable that set the value, and exits with status 1. On shutdown the server waits up to 10 seconds for the engine's Bloomberg sessions to stop before it exits.
+
 ### BQL client context
 
 The shared Rust engine owns the optional BQL application-name default.
