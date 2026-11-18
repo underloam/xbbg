@@ -1,6 +1,7 @@
 package io.github.underloam.xbbg.internal;
 
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.concurrent.CompletableFuture;
 
 /**
@@ -12,7 +13,7 @@ import java.util.concurrent.CompletableFuture;
  */
 public final class NativeSdk {
   /** ABI version this class expects from {@code xbbg_sdk_jni}. */
-  public static final int ABI = 1;
+  public static final int ABI = 2;
 
   private static final String LIBRARY = "xbbg_sdk_jni";
   private static volatile boolean loaded;
@@ -24,6 +25,10 @@ public final class NativeSdk {
   static native void provision(String optionsJson, long token);
 
   static native String installed(String cacheDir, String platform);
+
+  static native String scanCache(String cacheDir, String platform);
+
+  static native String defaultCacheRoot0();
 
   static native void cancel(long token);
 
@@ -86,5 +91,32 @@ public final class NativeSdk {
   public static String installedJson(Path cacheDir, String platform) {
     ensureLoaded();
     return installed(cacheDir.toAbsolutePath().toString(), platform);
+  }
+
+  /**
+   * Scans a cache root with the native resolver: every install is verified (provenance, path
+   * containment, sha256 re-hash, platform).
+   *
+   * @param cacheDir the cache root
+   * @param platform the platform id
+   * @return a JSON object: {@code runtimes}, the verified installs best first (newest version, then
+   *     newest provenance), and {@code rejected}, objects with {@code installDir} and {@code
+   *     reason}
+   */
+  public static String scanCacheJson(Path cacheDir, String platform) {
+    ensureLoaded();
+    return scanCache(cacheDir.toAbsolutePath().toString(), platform);
+  }
+
+  /**
+   * The xbbg cache root by the native rules ({@code XBBG_CACHE_DIR}, then the platform default).
+   * The JVM-property layer ({@code xbbg.cache.dir}) is the caller's.
+   *
+   * @return the cache root, or {@code null} when no home directory is known
+   */
+  public static Path defaultCacheRoot() {
+    ensureLoaded();
+    String root = defaultCacheRoot0();
+    return root == null ? null : Paths.get(root);
   }
 }

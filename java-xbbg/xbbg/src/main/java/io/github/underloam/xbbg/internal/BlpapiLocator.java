@@ -1,9 +1,8 @@
 package io.github.underloam.xbbg.internal;
 
+import io.github.underloam.xbbg.BlpException;
 import io.github.underloam.xbbg.BlpapiNotFoundException;
-import java.io.File;
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.nio.file.DirectoryStream;
 import java.nio.file.Files;
 import java.nio.file.InvalidPathException;
@@ -30,8 +29,10 @@ import java.util.function.Function;
  *       Windows; the root, {@code lib}, {@code Linux} or {@code Darwin} elsewhere; then the same
  *       layouts under versioned subdirectories, newest first);
  *   <li>the Bloomberg Terminal DAPI directories, then (Windows) each {@code PATH} entry;
- *   <li>the newest valid install provisioned under {@code <cache>/sdk/<version>/<platform>/}, whose
- *       library still matches the sha256 recorded in {@code provenance.json}.
+ *   <li>the best verified install provisioned under {@code <cache>/sdk/}, as selected by the native
+ *       cache resolver ({@link NativeSdk#scanCacheJson}): newest version first, then newest
+ *       provenance; a library that no longer matches the sha256 in {@code provenance.json} is
+ *       rejected and reported by {@link #notFound()}.
  * </ol>
  *
  * The first directory holding one of {@link Platform#blpapiLibraryNames()} wins. Environment and
@@ -404,110 +405,36 @@ public final class BlpapiLocator {
     return null;
   }
 
+  /**
+   * The best verified install under the cache, chosen by the native resolver: it re-hashes each
+   * library against its {@code provenance.json}, orders installs by version and then provenance
+   * time, and reports what it rejected and why.
+   */
   private Path findProvisioned() {
-    Path sdkRoot = cacheRoot.resolve("sdk");
-    if (!Files.isDirectory(sdkRoot)) {
-      return null;
+    if (!Files.isDirectory(cacheRoot.resolve("sdk"))) {
+      return null; // nothing provisioned: the native resolver need not even load
     }
-    List<Path> versions = new ArrayList<Path>();
-    try (DirectoryStream<Path> stream = Files.newDirectoryStream(sdkRoot)) {
-      for (Path child : stream) {
-        if (Files.isDirectory(child)) {
-          versions.add(child);
-        }
-      }
-    } catch (IOException e) {
-      skippedInstalls.add(sdkRoot + ": " + e.getMessage());
-      return null;
-    }
-    Collections.sort(versions, NEWEST_VERSION_FIRST);
-    for (Path version : versions) {
-      Path platformDir = version.resolve(platform.id());
-      if (!Files.isDirectory(platformDir)) {
-        continue;
-      }
-      for (Path install : installsNewestFirst(platformDir)) {
-        Path library = validInstall(install);
-        if (library != null) {
-          return library;
-        }
-      }
-    }
-    return null;
-  }
-
-  private List<Path> installsNewestFirst(Path platformDir) {
-    final List<Path> installs = new ArrayList<Path>();
-    final Map<Path, Long> modified = new java.util.HashMap<Path, Long>();
-    try (DirectoryStream<Path> stream = Files.newDirectoryStream(platformDir)) {
-      for (Path child : stream) {
-        Path provenance = child.resolve("provenance.json");
-        if (Files.isRegularFile(provenance)) {
-          installs.add(child);
-          modified.put(child, Files.getLastModifiedTime(provenance).toMillis());
-        }
-      }
-    } catch (IOException e) {
-      skippedInstalls.add(platformDir + ": " + e.getMessage());
-      return installs;
-    }
-    Collections.sort(
-        installs,
-        (left, right) -> {
-          int byTime = Long.compare(modified.get(right), modified.get(left));
-          return byTime != 0 ? byTime : fileName(left).compareTo(fileName(right));
-        });
-    return installs;
-  }
-
-  private Path validInstall(Path install) {
-    Map<String, Object> provenance;
+    String what = "cache scan";
+    Map<String, Object> scan;
     try {
-      String text =
-          new String(
-              Files.readAllBytes(install.resolve("provenance.json")), StandardCharsets.UTF_8);
-      provenance = JsonFields.object(Json.parse(text), "provenance.json");
-    } catch (IOException | RuntimeException e) {
-      skippedInstalls.add(install + ": unreadable provenance.json (" + e.getMessage() + ")");
+      scan =
+          JsonFields.object(
+              JsonFields.parse(NativeSdk.scanCacheJson(cacheRoot, platform.id()), what), what);
+    } catch (BlpException e) {
+      skippedInstalls.add(cacheRoot.resolve("sdk") + ": " + e.getMessage());
       return null;
     }
-    Object platformValue = provenance.get("platform");
-    Object libValue = provenance.get("lib");
-    Object shaValue = provenance.get("libSha256");
-    if (!platform.id().equals(platformValue)) {
-      skippedInstalls.add(install + ": provenance.json platform is " + platformValue);
-      return null;
-    }
-    if (!(libValue instanceof String) || !(shaValue instanceof String)) {
-      skippedInstalls.add(install + ": provenance.json lacks lib or libSha256");
-      return null;
-    }
-    String relative = (String) libValue;
-    if (relative.isEmpty()
-        || relative.startsWith("/")
-        || relative.contains("\\")
-        || relative.contains(":")
-        || ("/" + relative + "/").contains("/../")) {
+    for (Object entry : JsonFields.list(scan, "rejected")) {
+      Map<String, Object> rejected = JsonFields.object(entry, "rejected install");
       skippedInstalls.add(
-          install + ": provenance.json lib is not a relative path inside the install");
+          JsonFields.string(rejected, "installDir") + ": " + JsonFields.string(rejected, "reason"));
+    }
+    List<Object> runtimes = JsonFields.list(scan, "runtimes");
+    if (runtimes.isEmpty()) {
       return null;
     }
-    Path library = install.resolve(relative.replace('/', File.separatorChar)).normalize();
-    if (!library.startsWith(install.normalize()) || !Files.isRegularFile(library)) {
-      skippedInstalls.add(install + ": library " + relative + " is missing");
-      return null;
-    }
-    try {
-      String actual = Hashes.sha256Hex(library);
-      if (!actual.equalsIgnoreCase((String) shaValue)) {
-        skippedInstalls.add(install + ": library sha256 does not match provenance.json");
-        return null;
-      }
-    } catch (IOException e) {
-      skippedInstalls.add(install + ": cannot hash library (" + e.getMessage() + ")");
-      return null;
-    }
-    return library.toAbsolutePath();
+    return Paths.get(
+        JsonFields.string(JsonFields.object(runtimes.get(0), "runtime"), "libraryPath"));
   }
 
   private Path resolve(String value) {

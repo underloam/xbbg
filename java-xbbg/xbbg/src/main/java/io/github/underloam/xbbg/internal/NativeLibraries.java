@@ -187,12 +187,17 @@ public final class NativeLibraries {
   }
 
   /**
-   * Returns the xbbg cache root, by the rules of the Rust {@code xbbg_sdk::default_cache_root}:
-   * system property {@code xbbg.cache.dir}, else {@code XBBG_CACHE_DIR}, else {@code
+   * Returns the xbbg cache root: system property {@code xbbg.cache.dir}, else the default of the
+   * Rust {@code xbbg_sdk::default_cache_root}: {@code XBBG_CACHE_DIR}, else {@code
    * %LOCALAPPDATA%\xbbg} (falling back to {@code %USERPROFILE%\AppData\Local\xbbg}) on Windows,
    * {@code $HOME/Library/Caches/xbbg} on macOS and {@code $XDG_CACHE_HOME/xbbg} (when absolute) or
    * {@code $HOME/.cache/xbbg} elsewhere. Like Rust, an empty environment variable counts as unset;
    * where Rust finds no home directory, the JVM's {@code user.home} is used.
+   *
+   * <p>Rust is the authority for the default ({@link NativeSdk#defaultCacheRoot()}), but this
+   * method must not call it: the bundled natives, {@code xbbg_sdk_jni} included, are extracted to
+   * {@code <cache>/jvm/}, so a root is needed before any native library can be loaded. These rules
+   * are therefore the bootstrap only; a test asserts that they agree with the native default.
    *
    * @return the absolute cache root
    */

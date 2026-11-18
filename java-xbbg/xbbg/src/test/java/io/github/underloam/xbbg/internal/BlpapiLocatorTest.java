@@ -11,7 +11,6 @@ import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.attribute.FileTime;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.HashMap;
@@ -105,54 +104,6 @@ class BlpapiLocatorTest {
     assertTrue(
         missing.getMessage().startsWith("-Dxbbg.blpapi.path points to "), missing.getMessage());
     assertTrue(missing.getMessage().contains("which does not exist"), missing.getMessage());
-  }
-
-  @Test
-  void findsTheNewestValidProvisionedInstall() throws IOException {
-    Path sdk = temp.resolve("cache").resolve("sdk");
-    provisioned(
-        sdk.resolve("3.24.10.1").resolve("linux-x86_64").resolve("pypi-aaaaaaaaaaaa"), true);
-    Path newest =
-        provisioned(
-            sdk.resolve("3.25.1.1").resolve("linux-x86_64").resolve("conda-bbbbbbbbbbbb"), true);
-    provisioned(
-        sdk.resolve("3.26.0.1").resolve("macos-aarch64").resolve("pypi-cccccccccccc"), true);
-    Path corrupt =
-        provisioned(
-            sdk.resolve("9.0.0.0").resolve("linux-x86_64").resolve("pypi-dddddddddddd"), false);
-    Files.createDirectories(
-        sdk.resolve("9.9.9.9").resolve("linux-x86_64").resolve("pypi-incomplete"));
-
-    BlpapiLocator locator = locator(Platform.LINUX_X86_64, null);
-    assertEquals(newest, locator.findLocal());
-
-    Files.delete(newest);
-    Files.delete(
-        sdk.resolve("3.24.10.1")
-            .resolve("linux-x86_64")
-            .resolve("pypi-aaaaaaaaaaaa")
-            .resolve("lib")
-            .resolve("libblpapi3_64.so"));
-    assertNull(locator.findLocal());
-    String message = locator.notFound().getMessage();
-    assertTrue(message.contains("skipped " + corrupt.getParent().getParent()), message);
-    assertTrue(message.contains("library sha256 does not match provenance.json"), message);
-  }
-
-  @Test
-  void skipsProvenanceThatEscapesTheInstall() throws IOException {
-    Path install =
-        temp.resolve("cache")
-            .resolve("sdk")
-            .resolve("3.25.1.1")
-            .resolve("linux-x86_64")
-            .resolve("pypi-x");
-    library(temp.resolve("cache").resolve("sdk"), "libblpapi3_64.so");
-    writeProvenance(install, "../../../libblpapi3_64.so", Hashes.sha256Hex(new byte[0]));
-    BlpapiLocator locator = locator(Platform.LINUX_X86_64, null);
-    assertNull(locator.findLocal());
-    assertTrue(
-        locator.notFound().getMessage().contains("lib is not a relative path inside the install"));
   }
 
   @Test
@@ -274,38 +225,6 @@ class BlpapiLocatorTest {
       }
     }
     return count;
-  }
-
-  private Path provisioned(Path install, boolean validHash) throws IOException {
-    Path lib = library(install.resolve("lib"), "libblpapi3_64.so");
-    String sha = validHash ? Hashes.sha256Hex(lib) : Hashes.sha256Hex(new byte[] {1});
-    writeProvenance(install, "lib/libblpapi3_64.so", sha);
-    return lib;
-  }
-
-  private void writeProvenance(Path install, String lib, String sha) throws IOException {
-    Files.createDirectories(install);
-    String platform = install.getParent().getFileName().toString();
-    Path provenance = install.resolve("provenance.json");
-    Files.write(
-        provenance,
-        Json.write(
-                new java.util.LinkedHashMap<String, Object>() {
-                  private static final long serialVersionUID = 1L;
-
-                  {
-                    put("version", install.getParent().getParent().getFileName().toString());
-                    put("platform", platform);
-                    put("source", "pypi:https://example.invalid/simple");
-                    put("artifactUrl", "https://example.invalid/blpapi.whl");
-                    put("artifactSha256", sha);
-                    put("lib", lib);
-                    put("libSha256", sha);
-                    put("licenses", Arrays.asList("licenses/LICENSE"));
-                  }
-                })
-            .getBytes(StandardCharsets.UTF_8));
-    Files.setLastModifiedTime(provenance, FileTime.fromMillis(System.currentTimeMillis()));
   }
 
   @Test

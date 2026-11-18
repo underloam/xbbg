@@ -6,7 +6,9 @@
 //! Natives of `io.github.underloam.xbbg.internal.NativeSdk`:
 //! `abiVersion()`, `provision(optionsJson, token)` (async: completes the token through
 //! `NativeBridge` with the result JSON, see [`request`]), `installed(cacheDir, platform)` (sync:
-//! a JSON array) and `cancel(token)`.
+//! a JSON array of the verified installs, newest version first), `scanCache(cacheDir, platform)`
+//! (sync: `{runtimes, rejected}` of `xbbg_runtime::scan_cache`, see [`request::scan_json`]), `defaultCacheRoot0()` (sync: the
+//! xbbg cache root, or `null` when no home directory is known) and `cancel(token)`.
 
 mod bridge;
 mod request;
@@ -18,12 +20,13 @@ use jni::objects::{JClass, JString};
 use jni::strings::JNIString;
 use jni::sys::{JNI_ERR, JNI_OK, JNI_VERSION_1_8, jint, jlong};
 use jni::{Env, EnvUnowned, JavaVM, jni_str};
-use xbbg_sdk::{Platform, Provisioner};
+use xbbg_runtime::Platform;
+use xbbg_sdk::Provisioner;
 
 use crate::bridge::{NativeError, SdkError, ThrowSdk, spawn_call};
 
 /// Version of the Java/native contract; `NativeSdk.ABI` must match.
-const ABI_VERSION: jint = 1;
+const ABI_VERSION: jint = 2;
 
 /// Initializes the JavaVM singleton and the cached `NativeBridge` methods. A missing bridge
 /// class fails the load with `UnsatisfiedLinkError`.
@@ -136,6 +139,45 @@ pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_installe
         };
         let installed = xbbg_sdk::installed(&cache_dir, platform).map_err(SdkError::from)?;
         Ok(JString::new(env, request::results_json(&installed))?)
+    })
+    .resolve::<ThrowSdk>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_scanCache<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    cache_dir: JString<'local>,
+    platform: JString<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> Result<_, NativeError> {
+        let cache_dir = PathBuf::from(string_arg(env, &cache_dir, "cacheDir")?);
+        let platform = string_arg(env, &platform, "platform")?
+            .parse::<Platform>()
+            .map_err(|err| SdkError::from(xbbg_sdk::Error::from(err)))?;
+        let scan = xbbg_runtime::scan_cache(&cache_dir, platform).map_err(|source| {
+            SdkError::from(xbbg_sdk::Error::Io {
+                context: format!("scanning {}", cache_dir.display()),
+                source,
+            })
+        })?;
+        Ok(JString::new(env, request::scan_json(&scan))?)
+    })
+    .resolve::<ThrowSdk>()
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_defaultCacheRoot0<
+    'local,
+>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> Result<_, NativeError> {
+        match xbbg_runtime::default_cache_root() {
+            Some(root) => Ok(JString::new(env, root.to_string_lossy())?),
+            None => Ok(JString::null()),
+        }
     })
     .resolve::<ThrowSdk>()
 }
