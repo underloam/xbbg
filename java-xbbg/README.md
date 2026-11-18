@@ -230,6 +230,10 @@ java -cp xbbg-<version>.jar io.github.underloam.xbbg.sdk.BlpapiSdk \
     --source conda:https://conda.anaconda.org/conda-forge --cache-dir /opt/xbbg-cache
 ```
 
+The Python and Node packages read the same cache with the same verification, so a runtime
+provisioned this way also serves them (point them at it with `XBBG_CACHE_DIR` when it is not the
+default cache directory).
+
 Wheels older than 3.24.10 are refused: earlier wheels rename the library. Bloomberg's licence
 terms apply to the runtime however it is obtained.
 
