@@ -33,13 +33,24 @@ except ImportError:  # sources that were never built or installed
     _distribution_version = None
 __version__ = _distribution_version or "0+unknown"
 
+
+def _load_runtime(core: ModuleType) -> None:
+    # Imported on first use, so a plain `import xbbg` stays cheap; the guard itself never
+    # imports _sdk, which imports the guard.
+    from . import _sdk
+
+    _sdk.load_runtime(core)
+
+
 # Every import of the native extension, including `from xbbg._core import X`
 # (which bypasses __getattr__), checks that it was built for this xbbg and
 # then loads the Bloomberg SDK runtime into the process (see _sdk.load_runtime).
-_core_guard.install(_distribution_version)
+_core_guard.install(_distribution_version, load_runtime=_load_runtime)
 
 # Lazy import of the Rust module to avoid import errors when it's not built
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from . import _core
 
 # Same-thread re-entry detection only. Other threads importing concurrently wait

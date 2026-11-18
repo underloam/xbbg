@@ -500,11 +500,13 @@ def test_blpapi_wheel_entry_takes_the_distribution_version_when_the_search_has_n
 def _guard_loader(monkeypatch):
     from importlib.machinery import ExtensionFileLoader
 
+    import xbbg
     from xbbg import _core_guard
 
     monkeypatch.setattr(ExtensionFileLoader, "exec_module", lambda self, module: None)
     monkeypatch.setattr(_core_guard, "verify_core", lambda *args, **kwargs: None)
-    return _core_guard._VerifiedCoreLoader("xbbg._core", "_core.so", None)
+    # The loader the package installs, which looks up `_sdk.load_runtime` on each call.
+    return _core_guard._VerifiedCoreLoader("xbbg._core", "_core.so", None, xbbg._load_runtime)
 
 
 def test_importing_the_extension_loads_the_runtime(monkeypatch):

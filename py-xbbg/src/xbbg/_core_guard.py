@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 import warnings
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Callable, Sequence
     from importlib.machinery import ModuleSpec
     from types import ModuleType
 
@@ -55,14 +55,16 @@ def is_native_import_error(error: ImportError) -> bool:
     )
 
 
-def install(distribution_version: str | None) -> None:
+def install(distribution_version: str | None, *, load_runtime: Callable[[ModuleType], None]) -> None:
     """Verify ``xbbg._core`` on every import path, including ``from xbbg._core import ...``.
 
     Args:
         distribution_version: Version written into ``xbbg/_version.py`` at build time, or ``None`` without one.
+        load_runtime: Loads the Bloomberg runtime into the process once the extension has loaded
+            (``xbbg._sdk.load_runtime``); passed in so this module never imports ``_sdk``.
     """
     sys.meta_path[:] = [finder for finder in sys.meta_path if not getattr(finder, "xbbg_core_guard", False)]
-    sys.meta_path.insert(0, _CoreFinder(distribution_version))
+    sys.meta_path.insert(0, _CoreFinder(distribution_version, load_runtime))
 
 
 def verify_core(core: ModuleType, *, distribution_version: str | None, package_dir: Path = _PACKAGE_DIR) -> None:
@@ -148,8 +150,9 @@ class _CoreFinder:
 
     xbbg_core_guard = True
 
-    def __init__(self, distribution_version: str | None) -> None:
+    def __init__(self, distribution_version: str | None, load_runtime: Callable[[ModuleType], None]) -> None:
         self._distribution_version = distribution_version
+        self._load_runtime = load_runtime
 
     def find_spec(
         self, fullname: str, path: Sequence[str] | None, target: ModuleType | None = None
@@ -158,7 +161,9 @@ class _CoreFinder:
             return None
         spec = PathFinder.find_spec(fullname, path, target)
         if spec is not None and isinstance(spec.loader, ExtensionFileLoader):
-            spec.loader = _VerifiedCoreLoader(fullname, spec.loader.path, self._distribution_version)
+            spec.loader = _VerifiedCoreLoader(
+                fullname, spec.loader.path, self._distribution_version, self._load_runtime
+            )
         return spec
 
 
@@ -169,18 +174,19 @@ class _VerifiedCoreLoader(ExtensionFileLoader):
     process right after, with the one search order of ``xbbg-sdk`` (see ``xbbg._sdk``).
     """
 
-    def __init__(self, name: str, path: str, distribution_version: str | None) -> None:
+    def __init__(
+        self, name: str, path: str, distribution_version: str | None, load_runtime: Callable[[ModuleType], None]
+    ) -> None:
         super().__init__(name, path)
         self._distribution_version = distribution_version
+        self._load_runtime = load_runtime
 
     def exec_module(self, module: ModuleType) -> None:
         super().exec_module(module)
         verify_core(module, distribution_version=self._distribution_version)
         if getattr(_deferral, "active", False):
             return
-        from . import _sdk
-
-        _sdk.load_runtime(module)
+        self._load_runtime(module)
 
 
 def import_without_runtime() -> ModuleType:
