@@ -15,8 +15,7 @@ use std::sync::{Mutex, PoisonError};
 
 use serde::Serialize;
 use xbbg_core::SdkLoadError;
-use xbbg_sdk::locate::locate;
-pub use xbbg_sdk::locate::{Candidate, Hint, LocateRequest, Located, Rejected, SourceKind};
+pub use xbbg_sdk::locate::{Candidate, Hint, LocateRequest, Located, Rejected, SourceKind, locate};
 
 /// The runtime a host ended up with.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -145,6 +144,18 @@ pub fn locate_and_load_json(request_json: &str) -> Result<String, String> {
         }),
         Err(not_found) => Err(failure_json(&not_found.to_string(), &not_found.rejected)),
     }
+}
+
+/// [`locate`] with JSON on both sides: the search without loading, for reporting what a host
+/// would pick (`get_sdk_info`, diagnostics).
+///
+/// `Ok` is a [`Located`] as camelCase JSON (`candidates`, `rejected`). `Err` is the same
+/// `{"message", "rejected"}` object as [`locate_and_load_json`], for a malformed request.
+pub fn locate_json(request_json: &str) -> Result<String, String> {
+    let request: LocateRequest = serde_json::from_str(request_json)
+        .map_err(|error| failure_json(&format!("invalid locate request: {error}"), &[]))?;
+    serde_json::to_string(&locate(&request))
+        .map_err(|error| failure_json(&format!("cannot encode the search result: {error}"), &[]))
 }
 
 fn failure_json(message: &str, rejected: &[Rejected]) -> String {
