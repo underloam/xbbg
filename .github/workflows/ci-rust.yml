@@ -300,7 +300,7 @@ jobs:
         run: |
           crates=$(cargo tree -p pyo3-xbbg-runtime -p napi-xbbg-runtime -e normal --prefix none | awk '{print $1}' | sort -u)
           for forbidden in reqwest tokio uv-client rattler_repodata_gateway; do
-            if grep -qx "$forbidden" <<< "$crates"; then
+            if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
               echo "a resolver binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
               exit 1
             fi
