@@ -134,19 +134,27 @@ impl std::fmt::Debug for TlsConfigSpec {
 }
 
 /// A TLS file path or DER blob; exactly one member is set.
-#[derive(Clone, Deserialize, PartialEq, Eq)]
+///
+/// From JSON that is `path` or `bytes`. Rust callers that already hold the
+/// material build it with [`TlsMaterialSpec::ready`], which never touches
+/// base64; `ready` is not part of the JSON contract.
+#[derive(Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TlsMaterialSpec {
     pub path: Option<String>,
     /// Standard base64 (with padding) of the DER bytes.
     pub bytes: Option<String>,
+    /// Material the caller already holds (a path or an owned blob); skipped by serde.
+    #[serde(skip)]
+    pub ready: Option<TlsMaterial>,
 }
 
 impl std::fmt::Debug for TlsMaterialSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match (&self.path, &self.bytes) {
-            (Some(_), None) => "path",
-            (None, Some(_)) => "bytes",
+        let kind = match (&self.path, &self.bytes, &self.ready) {
+            (Some(_), None, None) => "path",
+            (None, Some(_), None) => "bytes",
+            (None, None, Some(_)) => "ready",
             _ => "invalid",
         };
         write!(f, "TlsMaterialSpec({kind}, <redacted>)")
@@ -154,17 +162,27 @@ impl std::fmt::Debug for TlsMaterialSpec {
 }
 
 impl TlsMaterialSpec {
+    /// A spec for material the caller already holds, so a blob is shared as is
+    /// instead of being base64 encoded only to be decoded again.
+    pub fn ready(material: TlsMaterial) -> Self {
+        Self {
+            ready: Some(material),
+            ..Self::default()
+        }
+    }
+
     /// Own the material before any engine check; blobs are decoded once.
     fn into_material(self, label: &str) -> Result<TlsMaterial, HostError> {
-        match (self.path, self.bytes) {
-            (Some(path), None) => Ok(TlsMaterial::Path(path)),
-            (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+        match (self.path, self.bytes, self.ready) {
+            (Some(path), None, None) => Ok(TlsMaterial::Path(path)),
+            (None, Some(encoded), None) => base64::engine::general_purpose::STANDARD
                 .decode(encoded.as_bytes())
                 .map(|bytes| TlsMaterial::Blob(Arc::from(bytes)))
                 .map_err(|_| {
                     HostError::argument(format!("{label}.bytes must be standard base64"))
                         .with_element(label)
                 }),
+            (None, None, Some(material)) => Ok(material),
             _ => Err(HostError::argument(format!(
                 "{label} must set exactly one of 'path' or 'bytes'"
             ))
@@ -1083,5 +1101,42 @@ mod tests {
         .err()
         .expect("rejected");
         assert_eq!(error.kind, HostErrorKind::Internal);
+    }
+
+    #[test]
+    fn ready_tls_material_is_used_as_is_and_stays_out_of_json() {
+        let spec = EngineConfigSpec {
+            tls: Some(TlsConfigSpec {
+                client_credentials: Some(TlsMaterialSpec::ready(TlsMaterial::Blob(Arc::from(
+                    [0_u8, 1, 2].as_slice(),
+                )))),
+                client_credentials_password: None,
+                trust_material: Some(TlsMaterialSpec::ready(TlsMaterial::Blob(Arc::from(
+                    [3_u8, 4].as_slice(),
+                )))),
+                handshake_timeout_ms: None,
+                crl_fetch_timeout_ms: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            format!("{:?}", spec.tls.as_ref().unwrap().trust_material),
+            "Some(TlsMaterialSpec(ready, <redacted>))"
+        );
+        let tls = spec.into_engine_config().unwrap().tls.expect("tls");
+        assert!(
+            matches!(&tls.client_credentials, TlsMaterial::Blob(bytes) if bytes[..] == [0, 1, 2])
+        );
+        assert!(matches!(&tls.trust_material, TlsMaterial::Blob(bytes) if bytes[..] == [3, 4]));
+
+        let both = TlsMaterialSpec {
+            path: Some("p".into()),
+            ..TlsMaterialSpec::ready(TlsMaterial::Path("q".into()))
+        };
+        let error = both.into_material("tls.trustMaterial").unwrap_err();
+        assert_eq!(error.kind, HostErrorKind::Argument);
+
+        let error = rejected(r#"{"tls": {"trustMaterial": {"ready": {}}}}"#);
+        assert_eq!(error.kind, HostErrorKind::Argument);
     }
 }
