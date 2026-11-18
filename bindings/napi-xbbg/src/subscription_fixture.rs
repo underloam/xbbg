@@ -6,9 +6,11 @@ use napi::bindgen_prelude::{ClassInstance, Error, Status};
 use napi_derive::napi;
 use xbbg_async::testing::SubscriptionFixture;
 
+use xbbg_async::SubscribeRequest;
+use xbbg_async::engine::OverflowPolicy;
+
 use crate::{
-    EngineConfig, JsSubscription, OverflowPolicy, SubscribeRequest, blp_async_error_to_napi, coded,
-    subscription_delivery_from_input,
+    EngineConfig, JsSubscription, SubscriptionDeliveryMode, blp_async_error_to_napi, coded,
 };
 
 #[derive(Default)]
@@ -108,7 +110,13 @@ impl JsSubscriptionFixture {
                 "flushThreshold must be positive",
             ));
         }
-        let delivery = subscription_delivery_from_input(options.delivery.as_deref())?;
+        let delivery = options
+            .delivery
+            .as_deref()
+            .map(SubscriptionDeliveryMode::from_str)
+            .transpose()
+            .map_err(|error| coded(Status::InvalidArg, "VALIDATION", error.to_string()))?
+            .unwrap_or_default();
         let overflow_policy = options
             .overflow_policy
             .as_deref()

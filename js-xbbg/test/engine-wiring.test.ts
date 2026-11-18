@@ -1,4 +1,5 @@
 import type { Table } from 'apache-arrow';
+import type { Mock } from 'vitest';
 
 import { DataType, DateUnit, tableFromIPC, tableToIPC, TimeUnit } from 'apache-arrow';
 
@@ -118,10 +119,7 @@ describe('shared subscription controls', () => {
       const subscribe = vi
         .fn<NativeEngine['subscribe']>()
         .mockResolvedValue(fakeNativeSubscription());
-      const subscribeWithOptions = vi
-        .fn<NativeEngine['subscribeWithOptions']>()
-        .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({ subscribe, subscribeWithOptions });
+      const engine = engineWithNative({ subscribe });
       const aliases = { 'SYN UN Equity': 'source' };
       await engine[method](['SYN UN Equity'], ['BID'], {
         aliases,
@@ -132,25 +130,29 @@ describe('shared subscription controls', () => {
         zeroAsNull: ['BID'],
         delivery: 'deltas',
       });
-      const call =
-        method === 'subscribe' ? subscribe.mock.calls[0] : subscribeWithOptions.mock.calls[0];
-      expect(call?.slice(-7)).toStrictEqual([
-        aliases,
-        'raise',
-        true,
-        false,
-        'raise',
-        ['BID'],
-        'deltas',
-      ]);
+      expect(subscribeArgs(subscribe)).toStrictEqual({
+        service: '//blp/mktdata',
+        tickers: ['SYN UN Equity'],
+        fields: ['BID'],
+        rawOptions: false,
+        options: {
+          aliases,
+          onDelayed: 'raise',
+          isolated: true,
+          rows: false,
+          onFieldError: 'raise',
+          zeroAsNull: ['BID'],
+          delivery: 'deltas',
+        },
+      });
     },
   );
 
   it('passes policies through module-level subscriptions and option-based subscribe', async () => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions, signalShutdown: () => undefined });
+    const engine = engineWithNative({ subscribe, signalShutdown: () => undefined });
     vi.spyOn(api.Engine, 'connect').mockResolvedValue(engine);
     api.configure({});
     const options = {
@@ -166,41 +168,16 @@ describe('shared subscription controls', () => {
     try {
       await api.asubscribe('SYN', 'BID', options);
       await api.subscribe('SYN', 'BID', options);
-      expect(subscribeWithOptions.mock.calls).toStrictEqual([
-        [
-          '//blp/mktdata',
-          ['SYN'],
-          ['BID'],
-          ['conflate'],
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          options.aliases,
-          'ignore',
-          false,
-          false,
-          'ignore',
-          ['BID'],
-          'deltas',
-        ],
-        [
-          '//blp/mktdata',
-          ['SYN'],
-          ['BID'],
-          ['conflate'],
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          options.aliases,
-          'ignore',
-          false,
-          false,
-          'ignore',
-          ['BID'],
-          'deltas',
-        ],
+      const expected = {
+        service: '//blp/mktdata',
+        tickers: ['SYN'],
+        fields: ['BID'],
+        rawOptions: false,
+        options,
+      };
+      expect(subscribe.mock.calls.map(([args]) => JSON.parse(args) as unknown)).toStrictEqual([
+        expected,
+        expected,
       ]);
     } finally {
       api.configure();
@@ -208,34 +185,24 @@ describe('shared subscription controls', () => {
   });
 
   it.each([
-    { onDelayed: 'unknown' },
-    { isolated: 'true' },
     { aliases: ['label'] },
     { aliases: { SYN: 42 } },
-    { aliases: new Date(0) },
-    { aliases: new Map([['SYN', 'label']]) },
-    { aliases: /SYN/u },
-    { aliases: Object.create({ inheritedLabel: 'SYN' }) as unknown },
-    { rows: 'false' },
-    { onFieldError: 'unknown' },
-    { zeroAsNull: 'THEO_PRICE' },
-    { zeroAsNull: ['THEO_PRICE', 7] },
-    { delivery: 'snapshot' },
+    { onDelayed: 'unknown' },
     { delivery: 'state', rows: false },
-    { delivery: 'state', overflowPolicy: 'drop_oldest' },
-    { delivery: 'state', streamCapacity: 8 },
-  ])('rejects invalid controls before opening a feed: %j', async (options) => {
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const subscribeWithOptions = vi.fn<NativeEngine['subscribeWithOptions']>();
-    const engine = engineWithNative({ subscribe, subscribeWithOptions });
+  ])('wraps a host rejection of invalid controls: %j', async (options) => {
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
+      .mockRejectedValue(
+        new Error('[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"aliases"}\nsynthetic rejection'),
+      );
+    const engine = engineWithNative({ subscribe });
     await expect(
       engine.subscribe(['SYN'], ['BID'], options as api.StreamOptions),
     ).rejects.toBeInstanceOf(api.BlpValidationError);
     await expect(
       engine.stream(['SYN'], ['BID'], options as api.StreamOptions),
     ).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(subscribe).not.toHaveBeenCalled();
-    expect(subscribeWithOptions).not.toHaveBeenCalled();
+    expect(subscribe).toHaveBeenCalledTimes(2);
   });
 
   it('exposes a live field projection after addFields and keeps labels on add', async () => {
@@ -953,14 +920,19 @@ describe('request delayed-data policy', () => {
     expect(emitted).not.toHaveBeenCalled();
   });
 
-  it('rejects an unknown policy before calling native', async () => {
-    const request = vi.fn<NativeEngine['request']>();
+  it('wraps the native rejection of an unknown policy', async () => {
+    const request = vi
+      .fn<NativeEngine['request']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"onDelayed"}\nonDelayed must be warn, raise, or ignore',
+        ),
+      );
     const engine = engineWithNative({ request });
 
     await expect(
       engine.bdp(['SYN_A Equity'], ['PX_LAST'], { onDelayed: 'WARN' as never }),
     ).rejects.toMatchObject({ name: 'BlpValidationError', element: 'onDelayed' });
-    expect(request).not.toHaveBeenCalled();
   });
 });
 
@@ -1263,6 +1235,11 @@ describe('shared native recipe result adapter', () => {
   });
 });
 
+/** The parsed `SubscribeArgs` JSON of one native `subscribe` call. */
+function subscribeArgs(subscribe: Mock<NativeEngine['subscribe']>, call = 0): unknown {
+  return JSON.parse(subscribe.mock.calls[call]?.[0] ?? 'null') as unknown;
+}
+
 describe('subscription service option forwarding', () => {
   it.each([
     { method: 'stream', service: '//blp/mktdata' },
@@ -1271,10 +1248,10 @@ describe('subscription service option forwarding', () => {
     { method: 'depth', service: '//blp/mktdepthdata' },
     { method: 'chains', service: '//blp/mktlist' },
   ] as const)('forwards every control through $method', async ({ method, service }) => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
     const options: api.StreamOptions = {
       options: [' &interval=1 ', ' '],
       flushThreshold: 5,
@@ -1293,23 +1270,17 @@ describe('subscription service option forwarding', () => {
       ? engine[method](['SYN'], ['BID'], options)
       : engine[method]('SYN', { ...options, fields: ['BID'] }));
 
-    expect(subscribeWithOptions).toHaveBeenCalledWith(
+    // Normalization and validation of the options happen in the host.
+    expect(subscribeArgs(subscribe)).toStrictEqual({
       service,
-      ['SYN'],
-      ['BID'],
-      ['interval=1'],
-      5,
-      'drop_newest',
-      8,
-      true,
-      { SYN: 'label' },
-      'ignore',
-      true,
-      false,
-      'raise',
-      ['BID'],
-      'deltas',
-    );
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: false,
+      options: {
+        ...options,
+        ...(method === 'stream' || method === 'vwap' ? {} : { fields: ['BID'] }),
+      },
+    });
   });
 
   it.each([
@@ -1319,24 +1290,25 @@ describe('subscription service option forwarding', () => {
     { method: 'depth', service: '//blp/mktdepthdata' },
     { method: 'chains', service: '//blp/mktlist' },
   ] as const)('forwards state delivery and batch size through $method', async ({ method }) => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription({ delivery: 'state', requiresDeliveries: true }));
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
     const options: api.StreamOptions = { delivery: 'state', flushThreshold: 5 };
     const subscription = await (method === 'stream' || method === 'vwap'
       ? engine[method](['SYN'], ['BID'], options)
       : engine[method]('SYN', { ...options, fields: ['BID'] }));
     expect(subscription.delivery).toBe('state');
-    expect(subscribeWithOptions.mock.calls[0]?.[4]).toBe(5);
-    expect(subscribeWithOptions.mock.calls[0]?.at(-1)).toBe('state');
+    expect(subscribeArgs(subscribe)).toMatchObject({
+      options: { delivery: 'state', flushThreshold: 5 },
+    });
   });
 
   it('preserves raw positional wire options and native policy strings', async () => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
 
     await engine.subscribeWithOptions(
       '//blp/mktdata',
@@ -1356,38 +1328,64 @@ describe('subscription service option forwarding', () => {
       'deltas',
     );
 
-    expect(subscribeWithOptions).toHaveBeenCalledWith(
-      '//blp/mktdata',
-      ['SYN'],
-      ['BID'],
-      [' &raw=1 '],
-      5,
-      'native-policy',
-      8,
-      true,
-      { SYN: 'label' },
-      'ignore',
-      true,
-      false,
-      'raise',
-      ['BID'],
-      'deltas',
-    );
+    expect(subscribeArgs(subscribe)).toStrictEqual({
+      service: '//blp/mktdata',
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: true,
+      options: {
+        options: [' &raw=1 '],
+        flushThreshold: 5,
+        overflowPolicy: 'native-policy',
+        streamCapacity: 8,
+        allFields: true,
+        aliases: { SYN: 'label' },
+        onDelayed: 'ignore',
+        isolated: true,
+        rows: false,
+        onFieldError: 'raise',
+        zeroAsNull: ['BID'],
+        delivery: 'deltas',
+      },
+    });
   });
 
-  it('rejects conflicting or unsupported conflation before calling native', async () => {
-    const subscribeWithOptions = vi.fn<NativeEngine['subscribeWithOptions']>();
-    const engine = engineWithNative({ subscribeWithOptions });
+  it('sends only the stream option members the host reads', async () => {
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
+      .mockResolvedValue(fakeNativeSubscription());
+    const engine = engineWithNative({ subscribe });
 
-    await expect(
-      engine.stream(['SYN'], ['BID'], {
-        conflate: true,
-        options: [' &INTERVAL=1'],
-      }),
-    ).rejects.toThrow('conflate=true cannot be combined with interval');
-    await expect(engine.vwap(['SYN'], ['BID'], { conflate: true })).rejects.toThrow(
-      'conflate=true is only supported for //blp/mktdata',
-    );
-    expect(subscribeWithOptions).not.toHaveBeenCalled();
+    await engine.stream(['SYN'], ['BID'], {
+      rows: true,
+      unrelated: 'dropped',
+      backend: 'json',
+    } as api.StreamOptions);
+
+    expect(subscribeArgs(subscribe)).toStrictEqual({
+      service: '//blp/mktdata',
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: false,
+      options: { rows: true },
+    });
+  });
+
+  it('surfaces a host rejection as a validation error with its element', async () => {
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"conflate"}\n' +
+            'conflate=true is only supported for //blp/mktdata subscriptions',
+        ),
+      );
+    const engine = engineWithNative({ subscribe });
+
+    await expect(engine.vwap(['SYN'], ['BID'], { conflate: true })).rejects.toMatchObject({
+      element: 'conflate',
+      message: 'conflate=true is only supported for //blp/mktdata subscriptions',
+      name: 'BlpValidationError',
+    });
   });
 });

@@ -40,8 +40,8 @@ import { isPlainObject } from './objects';
 import {
   createSubscription,
   MKTDATA_SERVICE,
+  streamOptionsPayload,
   Subscription,
-  validateDelayedPolicy,
 } from './subscriptions';
 import type {
   ActiveCdxOptions,
@@ -263,38 +263,6 @@ export const CDX_RISK_FIELDS = Object.freeze([...GENERATED_CDX_RISK_FIELDS]);
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
-/**
- * The `StreamOptions` members the native preflight reads. The host rejects unknown
- * members, so only these cross the boundary (undefined members are omitted).
- */
-const PREFLIGHT_STREAM_OPTION_KEYS = [
-  'delivery',
-  'options',
-  'conflate',
-  'flushThreshold',
-  'overflowPolicy',
-  'streamCapacity',
-  'allFields',
-  'fields',
-  'aliases',
-  'onDelayed',
-  'isolated',
-  'rows',
-  'onFieldError',
-  'zeroAsNull',
-] as const;
-
-function preflightStreamOptions(options: object): Record<string, unknown> {
-  const payload: Record<string, unknown> = {};
-  for (const key of PREFLIGHT_STREAM_OPTION_KEYS) {
-    const value: unknown = Reflect.get(options, key);
-    if (value !== undefined) {
-      payload[key] = value;
-    }
-  }
-  return payload;
-}
-
 function toRequestString(value: unknown): string {
   return String(value);
 }
@@ -310,12 +278,6 @@ function getLegacySecurityOverrides(params: RequestInput): unknown {
     return params.securityOverrides;
   }
   return undefined;
-}
-
-/** Validate a request `onDelayed` policy; true when the host must emit delayed-data warnings. */
-function warnsOnDelayedData(policy: unknown): boolean {
-  validateDelayedPolicy(policy);
-  return policy === 'warn';
 }
 
 function mapObjectToPairs(obj: OverridesMap | undefined): StringPair[] | undefined {
@@ -849,7 +811,7 @@ export class Engine {
 
   /** Run a native request and convert the result for `backend`. */
   private async execute(backend: BackendKind, nativeParams: RequestInput): Promise<unknown> {
-    const warnDelayed = warnsOnDelayedData(nativeParams.onDelayed);
+    const warnDelayed = nativeParams.onDelayed === 'warn';
     try {
       if (backend === Backend.POLARS) {
         const file = await this.inner.requestIpcFile(nativeParams);
@@ -890,7 +852,6 @@ export class Engine {
   }
 
   public async requestRaw(params: RequestInput): Promise<Buffer> {
-    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -903,7 +864,7 @@ export class Engine {
         ...rest,
         ...mapOverridesToRequestParts(overrides),
       });
-      if (warnDelayed) {
+      if (params.onDelayed === 'warn') {
         emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
       }
       warnTickerKeyColumn(this.inner.keyColumn, ipc);
@@ -1210,14 +1171,7 @@ export class Engine {
     fields: readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    return await createSubscription(
-      this.inner,
-      MKTDATA_SERVICE,
-      tickers,
-      fields,
-      options,
-      'default',
-    );
+    return await createSubscription(this.inner, MKTDATA_SERVICE, tickers, fields, options);
   }
 
   public async subscribeWithOptions(
@@ -1256,7 +1210,7 @@ export class Engine {
         zeroAsNull,
         delivery,
       },
-      'raw',
+      true,
     );
   }
 
@@ -1707,7 +1661,7 @@ export class Engine {
           securities: toStringArray(securities),
           pcsOverrides,
           streamAuction,
-          options: preflightStreamOptions(streamOptions),
+          options: streamOptionsPayload(streamOptions),
         }),
       );
       return new Subscription(stream);
@@ -1785,7 +1739,7 @@ export class Engine {
       const stream = await this.inner.subscribeEtfInav(
         JSON.stringify({
           tickers: toStringArray(tickers),
-          options: preflightStreamOptions(options),
+          options: streamOptionsPayload(options),
         }),
       );
       return new Subscription(stream);

@@ -12,7 +12,6 @@ pub use sdk::*;
 
 use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
-use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
@@ -33,16 +32,13 @@ use xbbg_async::engine::state::{
     UpdateValue,
 };
 use xbbg_async::engine::{
-    AdminStatusInfo, Engine, EngineConfig, OverflowPolicy, RequestParams, ServerAddr,
-    ServiceStatusInfo, SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDelivery,
-    SubscriptionDeliveryMode, SubscriptionEventInfo, SubscriptionFailureInfo, SubscriptionGap,
-    SubscriptionStatusState, TlsMaterial, TopicStatusInfo, Transport,
+    AdminStatusInfo, Engine, EngineConfig, RequestParams, ServerAddr, ServiceStatusInfo,
+    SessionStatusInfo, SharedSubscriptionStatus, SubscriptionDelivery, SubscriptionDeliveryMode,
+    SubscriptionEventInfo, SubscriptionFailureInfo, SubscriptionGap, SubscriptionStatusState,
+    TlsMaterial, TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
-use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FeedInfo, FieldErrorPolicy, SessionConnections, SubscribeRequest,
-    SubscriptionHandle,
-};
+use xbbg_async::{BlpAsyncError, FeedInfo, SessionConnections, SubscriptionHandle};
 use xbbg_core::BlpError;
 use xbbg_host::config::{
     AuthConfigSpec, EngineConfigSpec, RetryPolicySpec, ServerAddressSpec, Socks5Spec,
@@ -51,7 +47,7 @@ use xbbg_host::config::{
 use xbbg_host::errors::{HostError, HostErrorKind, parse_args};
 use xbbg_host::preflight::{prepare_auction_subscribe, prepare_etf_inav_subscribe};
 use xbbg_host::schema::SchemaJsonCache;
-use xbbg_host::subscribe::PreparedSubscribe;
+use xbbg_host::subscribe::{PreparedSubscribe, prepare_subscribe};
 
 use xbbg_async::subscription_consumer::{
     PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer, SubscriptionDeliveryAck,
@@ -1209,29 +1205,13 @@ fn host_error_to_napi(error: HostError) -> Error {
     )
 }
 
-fn delayed_policy_from_input(on_delayed: Option<&str>) -> napi::Result<DelayedPolicy> {
-    on_delayed
-        .map(DelayedPolicy::from_str)
-        .transpose()
-        .map(|policy| policy.unwrap_or_default())
-        .map_err(blp_async_error_to_napi)
-}
-
-fn field_error_policy_from_input(on_field_error: Option<&str>) -> napi::Result<FieldErrorPolicy> {
-    on_field_error
-        .map(FieldErrorPolicy::from_str)
-        .transpose()
-        .map(|policy| policy.unwrap_or_default())
-        .map_err(blp_async_error_to_napi)
-}
-fn subscription_delivery_from_input(
-    delivery: Option<&str>,
-) -> napi::Result<SubscriptionDeliveryMode> {
-    delivery
-        .map(SubscriptionDeliveryMode::from_str)
-        .transpose()
-        .map(|mode| mode.unwrap_or_default())
-        .map_err(|error| coded(Status::InvalidArg, "VALIDATION", error.to_string()))
+/// Parse the JSON arguments of `subscribe` and run the host's validation and
+/// request assembly. `engine_batch_items` is the engine's default read batch size.
+fn prepare_subscribe_args(
+    args: &str,
+    engine_batch_items: usize,
+) -> Result<PreparedSubscribe, HostError> {
+    prepare_subscribe(parse_args(args)?, engine_batch_items)
 }
 
 fn subscription_closed_error() -> Error {
@@ -1588,121 +1568,15 @@ impl JsEngine {
             .map_err(blp_async_error_to_napi)
     }
 
+    /// Validate, prepare and open one subscription (host `prepare_subscribe`).
+    ///
+    /// `args` is the host `SubscribeArgs` JSON object:
+    /// `{service?, tickers, fields, rawOptions?, options?}`.
     #[napi]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe(
-        &self,
-        tickers: Vec<String>,
-        fields: Vec<String>,
-        all_fields: Option<bool>,
-        aliases: Option<HashMap<String, String>>,
-        on_delayed: Option<String>,
-        isolated: Option<bool>,
-        rows: Option<bool>,
-        on_field_error: Option<String>,
-        zero_as_null: Option<Vec<String>>,
-        delivery: Option<String>,
-    ) -> napi::Result<JsSubscription> {
-        let all_fields = all_fields.unwrap_or(false);
-        let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
-        let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
-        let delivery = subscription_delivery_from_input(delivery.as_deref())?;
-        let stream = self
-            .engine
-            .subscribe(SubscribeRequest {
-                topics: tickers,
-                fields,
-                all_fields,
-                delivery,
-                aliases: aliases.unwrap_or_default().into_iter().collect(),
-                delayed_policy,
-                field_error_policy,
-                deliver_rows: rows.unwrap_or(true),
-                zero_as_null: zero_as_null.unwrap_or_default(),
-                isolated: isolated.unwrap_or(false),
-                ..SubscribeRequest::default()
-            })
-            .await
-            .map_err(blp_async_error_to_napi)?;
-
-        Ok(JsSubscription::from_stream(
-            stream,
-            self.subscription_batch_items,
-        ))
-    }
-
-    #[napi]
-    #[allow(clippy::too_many_arguments)]
-    pub async fn subscribe_with_options(
-        &self,
-        service: String,
-        tickers: Vec<String>,
-        fields: Vec<String>,
-        options: Option<Vec<String>>,
-        flush_threshold: Option<u32>,
-        overflow_policy: Option<String>,
-        stream_capacity: Option<u32>,
-        all_fields: Option<bool>,
-        aliases: Option<HashMap<String, String>>,
-        on_delayed: Option<String>,
-        isolated: Option<bool>,
-        rows: Option<bool>,
-        on_field_error: Option<String>,
-        zero_as_null: Option<Vec<String>>,
-        delivery: Option<String>,
-    ) -> napi::Result<JsSubscription> {
-        let overflow = match overflow_policy {
-            Some(policy) => Some(
-                OverflowPolicy::from_str(&policy)
-                    .map_err(|e| Error::new(Status::InvalidArg, e.to_string()))?,
-            ),
-            None => None,
-        };
-        let all_fields = all_fields.unwrap_or(false);
-        let delayed_policy = delayed_policy_from_input(on_delayed.as_deref())?;
-        let field_error_policy = field_error_policy_from_input(on_field_error.as_deref())?;
-        let delivery = subscription_delivery_from_input(delivery.as_deref())?;
-
-        if stream_capacity == Some(0) {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "streamCapacity must be greater than zero",
-            ));
-        }
-        if flush_threshold == Some(0) {
-            return Err(Error::new(
-                Status::InvalidArg,
-                "flushThreshold must be greater than zero",
-            ));
-        }
-        let consumer_batch_items = flush_threshold
-            .map(|value| value as usize)
-            .unwrap_or(self.subscription_batch_items);
-
-        let stream = self
-            .engine
-            .subscribe(SubscribeRequest {
-                service,
-                topics: tickers,
-                fields,
-                all_fields,
-                delivery,
-                options: options.unwrap_or_default(),
-                aliases: aliases.unwrap_or_default().into_iter().collect(),
-                delayed_policy,
-                field_error_policy,
-                deliver_rows: rows.unwrap_or(true),
-                zero_as_null: zero_as_null.unwrap_or_default(),
-                isolated: isolated.unwrap_or(false),
-                stream_capacity: stream_capacity.map(|v| v as usize),
-                flush_threshold: flush_threshold.map(|v| v as usize),
-                overflow_policy: overflow,
-                ..SubscribeRequest::default()
-            })
-            .await
-            .map_err(blp_async_error_to_napi)?;
-
-        Ok(JsSubscription::from_stream(stream, consumer_batch_items))
+    pub async fn subscribe(&self, args: String) -> napi::Result<JsSubscription> {
+        let prepared = prepare_subscribe_args(&args, self.subscription_batch_items)
+            .map_err(host_error_to_napi)?;
+        self.subscribe_prepared(prepared).await
     }
 
     /// Resolve auction venues and open one venue subscription (host preflight).
@@ -3323,10 +3197,12 @@ impl JsSubscription {
 mod tests {
     use super::*;
     use std::future::Future;
+    use xbbg_async::engine::OverflowPolicy;
     use xbbg_async::engine::state::{
         FieldLayout, FieldMeta, subscription_channel, subscription_channel_with_policy,
     };
     use xbbg_async::services::ExtractorType;
+    use xbbg_async::{DelayedPolicy, FieldErrorPolicy};
     use xbbg_core::AuthConfig;
 
     fn minimal_input() -> EngineConfigInput {
@@ -3439,42 +3315,168 @@ mod tests {
         }
     }
 
-    #[test]
-    fn delayed_policy_input_normalizes_valid_values_and_rejects_unknown_values() {
-        assert_eq!(
-            delayed_policy_from_input(Some(" WARN ")).unwrap(),
-            DelayedPolicy::Warn
-        );
-        assert_eq!(
-            delayed_policy_from_input(Some("Raise")).unwrap(),
-            DelayedPolicy::Raise
-        );
-        assert_eq!(
-            delayed_policy_from_input(Some(" ignore ")).unwrap(),
-            DelayedPolicy::Ignore
-        );
-        for invalid in ["", "warning", "silent"] {
-            let error = delayed_policy_from_input(Some(invalid)).unwrap_err();
-            assert_eq!(error.status, Status::InvalidArg);
-            assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
-        }
+    fn subscribe_error(args: &str) -> Error {
+        host_error_to_napi(
+            prepare_subscribe_args(args, 64).expect_err("subscribe arguments must be rejected"),
+        )
     }
 
     #[test]
-    fn field_error_policy_input_normalizes_values_and_rejects_unknown_values() {
-        for (input, expected) in [
-            (None, FieldErrorPolicy::Warn),
-            (Some(" WARN "), FieldErrorPolicy::Warn),
-            (Some("Raise"), FieldErrorPolicy::Raise),
-            (Some(" ignore "), FieldErrorPolicy::Ignore),
-        ] {
-            assert_eq!(field_error_policy_from_input(input).unwrap(), expected);
+    fn subscribe_arguments_default_to_a_market_data_request() {
+        let prepared = prepare_subscribe_args(
+            r#"{"tickers":["IBM US Equity"],"fields":["LAST_PRICE"]}"#,
+            64,
+        )
+        .expect("defaults");
+        assert_eq!(prepared.batch_items, 64);
+        assert_eq!(prepared.request.service, "//blp/mktdata");
+        assert_eq!(prepared.request.topics, ["IBM US Equity"]);
+        assert_eq!(prepared.request.fields, ["LAST_PRICE"]);
+        assert!(prepared.request.options.is_empty());
+        assert!(prepared.request.deliver_rows);
+        assert!(!prepared.request.isolated);
+        assert_eq!(prepared.request.delayed_policy, DelayedPolicy::Warn);
+        assert_eq!(prepared.request.field_error_policy, FieldErrorPolicy::Warn);
+        assert_eq!(prepared.request.delivery, SubscriptionDeliveryMode::Deltas);
+        assert_eq!(prepared.request.stream_capacity, None);
+        assert_eq!(prepared.request.flush_threshold, None);
+        assert_eq!(prepared.request.overflow_policy, None);
+    }
+
+    #[test]
+    fn subscribe_arguments_carry_every_stream_option() {
+        let prepared = prepare_subscribe_args(
+            r#"{"service":"//blp/mktdata","tickers":["IBM US Equity"],"fields":["BID"],
+                "options":{"options":[" & interval=5 ","  "],"flushThreshold":8,
+                "overflowPolicy":"drop_newest","streamCapacity":32,"allFields":true,
+                "aliases":{"IBM US Equity":"ibm"},"onDelayed":"raise","isolated":true,
+                "rows":false,"onFieldError":"ignore","zeroAsNull":["BID"],
+                "delivery":"deltas"}}"#,
+            64,
+        )
+        .expect("all options");
+        let request = prepared.request;
+        assert_eq!(prepared.batch_items, 8);
+        assert_eq!(request.options, ["interval=5"]);
+        assert_eq!(request.flush_threshold, Some(8));
+        assert_eq!(request.stream_capacity, Some(32));
+        assert_eq!(request.overflow_policy, Some(OverflowPolicy::DropNewest));
+        assert!(request.all_fields);
+        assert_eq!(
+            request.aliases,
+            [("IBM US Equity".to_string(), "ibm".to_string())]
+        );
+        assert_eq!(request.delayed_policy, DelayedPolicy::Raise);
+        assert!(request.isolated);
+        assert!(!request.deliver_rows);
+        assert_eq!(request.field_error_policy, FieldErrorPolicy::Ignore);
+        assert_eq!(request.zero_as_null, ["BID"]);
+    }
+
+    #[test]
+    fn subscribe_raw_options_pass_through_and_named_options_add_conflate() {
+        let raw = prepare_subscribe_args(
+            r#"{"tickers":["A"],"fields":["F"],"rawOptions":true,"options":{"options":[" &raw "]}}"#,
+            64,
+        )
+        .expect("raw options");
+        assert_eq!(raw.request.options, [" &raw "]);
+
+        let named = prepare_subscribe_args(
+            r#"{"tickers":["A"],"fields":["F"],"options":{"conflate":true}}"#,
+            64,
+        )
+        .expect("conflate");
+        assert_eq!(named.request.options, ["conflate"]);
+    }
+
+    #[test]
+    fn subscribe_rejections_are_coded_with_the_offending_element() {
+        let cases = [
+            (
+                r#"{"onDelayed":"WARN"}"#,
+                "onDelayed",
+                "onDelayed must be warn, raise, or ignore",
+            ),
+            (
+                r#"{"onDelayed":" warn "}"#,
+                "onDelayed",
+                "onDelayed must be warn, raise, or ignore",
+            ),
+            (
+                r#"{"onFieldError":"silent"}"#,
+                "onFieldError",
+                "onFieldError must be warn, raise, or ignore",
+            ),
+            (
+                r#"{"delivery":"Raise"}"#,
+                "delivery",
+                "delivery must be deltas or state",
+            ),
+            (
+                r#"{"isolated":"yes"}"#,
+                "isolated",
+                "isolated must be a boolean",
+            ),
+            (
+                r#"{"aliases":["IBM"]}"#,
+                "aliases",
+                "aliases must map topic strings to label strings",
+            ),
+            (
+                r#"{"delivery":"state","streamCapacity":4}"#,
+                "streamCapacity",
+                "delivery=state does not accept streamCapacity",
+            ),
+            (
+                r#"{"conflate":true,"options":["interval=5"]}"#,
+                "conflate",
+                "conflate=true cannot be combined with interval options; intervalization overrides conflation",
+            ),
+            (
+                r#"{"streamCapacity":0}"#,
+                "streamCapacity",
+                "streamCapacity must be greater than zero",
+            ),
+            (
+                r#"{"flushThreshold":0}"#,
+                "flushThreshold",
+                "flushThreshold must be greater than zero",
+            ),
+        ];
+        for (options, element, message) in cases {
+            let args = format!(r#"{{"tickers":["A"],"fields":["F"],"options":{options}}}"#);
+            let error = subscribe_error(&args);
+            assert_eq!(error.status, Status::InvalidArg, "{options}");
+            let (code, context, text) = decode_coded(&error);
+            assert_eq!(code, "[XBBG:VALIDATION", "{options}");
+            assert_eq!(context["element"], element, "{options}");
+            assert_eq!(text, message, "{options}");
         }
-        for invalid in ["", "warning", "silent"] {
-            let error = field_error_policy_from_input(Some(invalid)).unwrap_err();
-            assert_eq!(error.status, Status::InvalidArg);
-            assert!(error.reason.starts_with("[XBBG:VALIDATION]"));
-        }
+
+        let error = subscribe_error(
+            r#"{"service":"//blp/mktvwap","tickers":["A"],"fields":["F"],"options":{"conflate":true}}"#,
+        );
+        let (code, context, text) = decode_coded(&error);
+        assert_eq!(code, "[XBBG:VALIDATION");
+        assert_eq!(context["element"], "conflate");
+        assert_eq!(
+            text,
+            "conflate=true is only supported for //blp/mktdata subscriptions"
+        );
+
+        let error = subscribe_error(
+            r#"{"tickers":["A"],"fields":["F"],"options":{"overflowPolicy":"nope"}}"#,
+        );
+        let (code, context, text) = decode_coded(&error);
+        assert_eq!(code, "[XBBG:VALIDATION");
+        assert_eq!(context["element"], "overflowPolicy");
+        assert!(text.contains("nope"), "{text}");
+
+        let error =
+            subscribe_error(r#"{"tickers":["A"],"fields":["F"],"options":{"backend":"x"}}"#);
+        assert_eq!(error.status, Status::InvalidArg);
+        assert_eq!(error.reason, "[XBBG:ARGUMENT] unknown field 'backend'");
     }
 
     #[test]

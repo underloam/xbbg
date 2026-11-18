@@ -17,7 +17,6 @@ import type {
   SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
-  StreamOptions,
   StringPair,
   SubscriptionEvent,
   SubscriptionDeliveryMode,
@@ -216,35 +215,8 @@ export interface NativeEngine {
   listCachedSchemas(): string[];
   getEnumValues(service: string, operation: string, element: string): Promise<string[] | null>;
   listValidElements(service: string, operation: string): Promise<string[] | null>;
-  subscribe(
-    tickers: readonly string[],
-    fields: readonly string[],
-    allFields: boolean | undefined,
-    aliases?: Readonly<Record<string, string>>,
-    onDelayed?: StreamOptions['onDelayed'],
-    isolated?: boolean,
-    rows?: boolean,
-    onFieldError?: string,
-    zeroAsNull?: readonly string[],
-    delivery?: StreamOptions['delivery'],
-  ): Promise<NativeSubscription>;
-  subscribeWithOptions(
-    service: string,
-    tickers: readonly string[],
-    fields: readonly string[],
-    options: readonly string[] | undefined,
-    flushThreshold: number | undefined,
-    overflowPolicy: string | undefined,
-    streamCapacity: number | undefined,
-    allFields: boolean | undefined,
-    aliases?: Readonly<Record<string, string>>,
-    onDelayed?: StreamOptions['onDelayed'],
-    isolated?: boolean,
-    rows?: boolean,
-    onFieldError?: string,
-    zeroAsNull?: readonly string[],
-    delivery?: StreamOptions['delivery'],
-  ): Promise<NativeSubscription>;
+  /** Host `SubscribeArgs` JSON: `{service?, tickers, fields, rawOptions?, options?}`. */
+  subscribe(args: string): Promise<NativeSubscription>;
   /** Host `AuctionSubscribeArgs` JSON: `{securities, pcsOverrides?, streamAuction?, options?}`. */
   subscribeAuction(args: string): Promise<NativeSubscription>;
   /** Host `EtfInavSubscribeArgs` JSON: `{tickers, options?}`. */

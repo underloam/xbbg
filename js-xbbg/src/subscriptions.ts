@@ -41,18 +41,42 @@ export const MKTDATA_SERVICE = '//blp/mktdata';
 // The positional subscribeWithOptions API also accepts native overflow policy strings.
 type SubscriptionOptions = Omit<StreamOptions, 'overflowPolicy'> & { overflowPolicy?: string };
 
-function subscriptionOptionKey(option: string): string {
-  return normalizeSubscriptionOption(option).split('=')[0]?.trim().toLowerCase() ?? '';
-}
+/**
+ * The `StreamOptions` members the native subscribe path reads. The host rejects unknown
+ * members, so only these cross the boundary (undefined members are omitted).
+ */
+const STREAM_OPTION_KEYS = [
+  'delivery',
+  'options',
+  'conflate',
+  'flushThreshold',
+  'overflowPolicy',
+  'streamCapacity',
+  'allFields',
+  'fields',
+  'aliases',
+  'onDelayed',
+  'isolated',
+  'rows',
+  'onFieldError',
+  'zeroAsNull',
+] as const;
 
-function normalizeSubscriptionOption(option: string): string {
-  let clean = option.trim();
-  while (clean.startsWith('&')) {
-    clean = clean.slice(1).trim();
+export function streamOptionsPayload(options: object): Record<string, unknown> {
+  const payload: Record<string, unknown> = {};
+  for (const key of STREAM_OPTION_KEYS) {
+    const value: unknown = Reflect.get(options, key);
+    if (value !== undefined) {
+      payload[key] = value;
+    }
   }
-  return clean;
+  return payload;
 }
 
+/**
+ * `Subscription.add` aliases reach native as a typed map, not through the host's JSON
+ * arguments, so this check stays here (the same message as the host's `validate_aliases`).
+ */
 function validateAliases(aliases: unknown): void {
   if (aliases === undefined) {
     return;
@@ -71,145 +95,29 @@ function validateAliases(aliases: unknown): void {
   });
 }
 
-/** Reject `onDelayed` values other than warn, raise, or ignore (subscriptions and requests). */
-export function validateDelayedPolicy(policy: unknown): void {
-  if (policy !== undefined && policy !== 'warn' && policy !== 'raise' && policy !== 'ignore') {
-    throw new BlpValidationError('onDelayed must be warn, raise, or ignore', {
-      element: 'onDelayed',
-    });
-  }
-}
-
-function validateStreamControls(options: SubscriptionOptions): void {
-  validateAliases(options.aliases);
-  validateDelayedPolicy(options.onDelayed);
-  const isolated: unknown = options.isolated;
-  if (isolated !== undefined && typeof isolated !== 'boolean') {
-    throw new BlpValidationError('isolated must be a boolean', { element: 'isolated' });
-  }
-  const rows: unknown = options.rows;
-  if (rows !== undefined && typeof rows !== 'boolean') {
-    throw new BlpValidationError('rows must be a boolean', { element: 'rows' });
-  }
-  const delivery: unknown = options.delivery;
-  if (delivery !== undefined && delivery !== 'deltas' && delivery !== 'state') {
-    throw new BlpValidationError('delivery must be deltas or state', { element: 'delivery' });
-  }
-  if (delivery === 'state') {
-    if (rows === false) {
-      throw new BlpValidationError('delivery=state cannot be combined with rows=false', {
-        element: 'rows',
-      });
-    }
-    for (const control of ['overflowPolicy', 'streamCapacity'] as const) {
-      if (options[control] !== undefined) {
-        throw new BlpValidationError(`delivery=state does not accept ${control}`, {
-          element: control,
-        });
-      }
-    }
-  }
-  const fieldPolicy: unknown = options.onFieldError;
-  if (
-    fieldPolicy !== undefined &&
-    fieldPolicy !== 'warn' &&
-    fieldPolicy !== 'raise' &&
-    fieldPolicy !== 'ignore'
-  ) {
-    throw new BlpValidationError('onFieldError must be warn, raise, or ignore', {
-      element: 'onFieldError',
-    });
-  }
-  const zeroAsNull: unknown = options.zeroAsNull;
-  if (
-    zeroAsNull !== undefined &&
-    (!Array.isArray(zeroAsNull) || zeroAsNull.some((field: unknown) => typeof field !== 'string'))
-  ) {
-    throw new BlpValidationError('zeroAsNull must be an array of field names', {
-      element: 'zeroAsNull',
-    });
-  }
-}
-
-function buildStreamSubscriptionOptions(
-  service: string,
-  options: SubscriptionOptions,
-): readonly string[] | undefined {
-  const rawOptions = options.options;
-  const { conflate } = options;
-
-  if (rawOptions === undefined && conflate !== true) {
-    return undefined;
-  }
-
-  const subscriptionOptions = (rawOptions ?? [])
-    .map((option) => normalizeSubscriptionOption(option))
-    .filter((option) => option.length > 0);
-
-  if (conflate === true) {
-    if (service !== MKTDATA_SERVICE) {
-      throw new BlpValidationError(
-        'conflate=true is only supported for //blp/mktdata subscriptions',
-        { element: 'conflate' },
-      );
-    }
-    if (subscriptionOptions.some((option) => subscriptionOptionKey(option) === 'interval')) {
-      throw new BlpValidationError(
-        'conflate=true cannot be combined with interval options; intervalization overrides conflation',
-        { element: 'conflate' },
-      );
-    }
-    if (!subscriptionOptions.some((option) => subscriptionOptionKey(option) === 'conflate')) {
-      subscriptionOptions.push('conflate');
-    }
-  }
-
-  return subscriptionOptions.length > 0 || rawOptions !== undefined
-    ? subscriptionOptions
-    : undefined;
-}
-
+/**
+ * Open a subscription. The host validates the stream controls and builds the engine
+ * request. `rawOptions` is the positional `subscribeWithOptions` form: Bloomberg options
+ * pass through unchanged instead of being normalized.
+ */
 export async function createSubscription(
-  engine: Pick<NativeEngine, 'subscribe' | 'subscribeWithOptions'>,
+  engine: Pick<NativeEngine, 'subscribe'>,
   service: string,
   tickers: readonly string[],
   fields: readonly string[],
   options: SubscriptionOptions,
-  mode: 'default' | 'stream' | 'raw' = 'stream',
+  rawOptions = false,
 ): Promise<Subscription> {
   try {
-    // Raw positional calls preserve the caller's wire options; named options normalize them.
-    validateStreamControls(options);
-    const subscriptionOptions =
-      mode === 'raw' ? options.options : buildStreamSubscriptionOptions(service, options);
-    const controls = [
-      options.allFields,
-      options.aliases,
-      options.onDelayed,
-      options.isolated,
-      options.rows,
-      options.onFieldError,
-      options.zeroAsNull,
-      options.delivery,
-    ] as const;
-    const useDefaults =
-      mode === 'default' &&
-      subscriptionOptions === undefined &&
-      options.flushThreshold === undefined &&
-      options.overflowPolicy === undefined &&
-      options.streamCapacity === undefined;
-    const stream = useDefaults
-      ? await engine.subscribe(tickers, fields, ...controls)
-      : await engine.subscribeWithOptions(
-          service,
-          tickers,
-          fields,
-          subscriptionOptions,
-          options.flushThreshold,
-          options.overflowPolicy,
-          options.streamCapacity,
-          ...controls,
-        );
+    const stream = await engine.subscribe(
+      JSON.stringify({
+        service,
+        tickers,
+        fields,
+        rawOptions,
+        options: streamOptionsPayload(options),
+      }),
+    );
     return new Subscription(stream);
   } catch (error) {
     throw wrapError(error);

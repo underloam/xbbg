@@ -407,79 +407,40 @@ describe('@xbbg/core surface', () => {
 function fakeEngine(captured: Record<string, unknown>): api.Engine {
   const engine = Object.create(api.Engine.prototype) as api.Engine;
   (engine as unknown as { inner: unknown }).inner = {
-    subscribe: async (
-      tickers: readonly string[],
-      fields: readonly string[],
-      allFields?: boolean,
-    ) => {
-      captured.subscribe = { allFields, fields, tickers };
-      return fakeNativeSubscription();
-    },
-    subscribeWithOptions: async (
-      service: string,
-      tickers: readonly string[],
-      fields: readonly string[],
-      options?: readonly string[],
-      flushThreshold?: number,
-      overflowPolicy?: string,
-      streamCapacity?: number,
-      allFields?: boolean,
-    ) => {
-      captured.subscribeWithOptions = {
-        allFields,
-        fields,
-        flushThreshold,
-        options,
-        overflowPolicy,
-        service,
-        streamCapacity,
-        tickers,
-      };
+    subscribe: async (args: string) => {
+      captured.subscribe = JSON.parse(args);
       return fakeNativeSubscription();
     },
   };
   return engine;
 }
 
+// The host builds the Bloomberg option (xbbg-host `prepare_subscribe`).
+// Its tests cover `&conflate` normalization and the conflate rejections; only the hand-off is checked here.
 describe('conflated market data options', () => {
-  it('adds the conflate Bloomberg option for mktdata subscriptions', async () => {
+  it('forwards conflate for mktdata subscriptions', async () => {
     const captured: Record<string, unknown> = {};
     await fakeEngine(captured).subscribe(['ES1 Index'], ['BID', 'ASK'], { conflate: true });
 
-    expect(captured.subscribe).toBeUndefined();
-    expect(captured.subscribeWithOptions).toMatchObject({
+    expect(captured.subscribe).toStrictEqual({
       fields: ['BID', 'ASK'],
-      options: ['conflate'],
+      options: { conflate: true },
+      rawOptions: false,
       service: '//blp/mktdata',
       tickers: ['ES1 Index'],
     });
   });
 
-  it('normalizes ampersand conflate and avoids duplicates', async () => {
+  it('forwards conflate with the caller options unchanged', async () => {
     const captured: Record<string, unknown> = {};
     await fakeEngine(captured).subscribe(['ES1 Index'], ['BID', 'ASK'], {
       conflate: true,
       options: ['&conflate'],
     });
 
-    expect(captured.subscribeWithOptions).toMatchObject({
-      options: ['conflate'],
+    expect(captured.subscribe).toMatchObject({
+      options: { conflate: true, options: ['&conflate'] },
     });
-  });
-
-  it('rejects conflate for non-mktdata helpers', async () => {
-    await expect(
-      fakeEngine({}).vwap(['IBM US Equity'], ['VWAP'], { conflate: true }),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
-  });
-
-  it('rejects conflate with interval options', async () => {
-    await expect(
-      fakeEngine({}).subscribe(['ES1 Index'], ['BID', 'ASK'], {
-        conflate: true,
-        options: ['interval=5'],
-      }),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
   });
 });
 
