@@ -1,3 +1,4 @@
+import { spawnSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import { createRequire } from 'node:module';
@@ -65,18 +66,20 @@ describe.skipIf(!fs.existsSync(addonPath))('native runtime resolver addon', () =
     ]);
   });
 
-  test('reports the cache root override', () => {
-    const previous = process.env.XBBG_CACHE_DIR;
-    process.env.XBBG_CACHE_DIR = cacheRoot;
-    try {
-      expect(addon.defaultCacheRoot()).toBe(cacheRoot);
-    } finally {
-      if (previous === undefined) {
-        delete process.env.XBBG_CACHE_DIR;
-      } else {
-        process.env.XBBG_CACHE_DIR = previous;
-      }
-    }
+  // The addon reads the operating-system environment, so the override is set at process start.
+  // Under Bun a `process.env` assignment never reaches it.
+  test('reports the cache root override from the environment the process starts with', () => {
+    const child = spawnSync(
+      process.execPath,
+      [
+        '-e',
+        `process.stdout.write(String(require(${JSON.stringify(addonPath)}).defaultCacheRoot()))`,
+      ],
+      { encoding: 'utf8', env: { ...process.env, XBBG_CACHE_DIR: cacheRoot } },
+    );
+
+    expect(child.stderr).toBe('');
+    expect(child.stdout).toBe(cacheRoot);
   });
 
   test('lists verified runtimes best first and refused ones with their reason', () => {

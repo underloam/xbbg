@@ -9,6 +9,7 @@ import {
 
 interface MockAddon extends RuntimeAddon {
   readonly preloaded: string[];
+  readonly scannedRoots: (string | undefined)[];
 }
 
 function runtime(installDir: string, libName = 'lib.bin'): CacheScan['runtimes'][number] {
@@ -27,6 +28,7 @@ function mockAddon(
   failPreload: ReadonlySet<string> = new Set(),
 ): MockAddon {
   const preloaded: string[] = [];
+  const scannedRoots: (string | undefined)[] = [];
   return {
     defaultCacheRoot: () => null,
     preloadLibrary(libPath: string) {
@@ -36,12 +38,14 @@ function mockAddon(
       preloaded.push(libPath);
     },
     preloaded,
-    scanCache() {
+    scanCache(cacheRoot?: string) {
+      scannedRoots.push(cacheRoot);
       if (scan instanceof Error) {
         throw scan;
       }
       return scan;
     },
+    scannedRoots,
   };
 }
 
@@ -178,6 +182,16 @@ describe('xbbg cache rule', () => {
     expect(() =>
       loadWithCacheFallback(engineLoad(failing), { loadRuntimeAddon: () => failing }),
     ).toThrow(new Error(LOADER_ERROR));
+  });
+
+  it('scans the cache root named in its environment, else the addon default', () => {
+    const named = mockAddon({ rejected: [], runtimes: [] });
+    applyCacheRule({ env: { XBBG_CACHE_DIR: '/srv/xbbg-cache' }, loadRuntimeAddon: () => named });
+    expect(named.scannedRoots).toStrictEqual(['/srv/xbbg-cache']);
+
+    const unset = mockAddon({ rejected: [], runtimes: [] });
+    applyCacheRule({ env: { XBBG_CACHE_DIR: '' }, loadRuntimeAddon: () => unset });
+    expect(unset.scannedRoots).toStrictEqual([undefined]);
   });
 
   it('prepends the library directory to PATH on Windows only', () => {

@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 
-import type { RuntimeAddon } from './native/runtime-addon';
+import type { CacheScan, RuntimeAddon } from './native/runtime-addon';
 
 const BLPAPI_RUNTIME_NAMES = Object.freeze([
   'blpapi3_64.dll',
@@ -289,9 +289,13 @@ export function applyCacheRule(options: CacheRuleOptions): CacheRuleResult {
     return { libPath: null, problems };
   }
 
-  let scan: ReturnType<RuntimeAddon['scanCache']>;
+  // XBBG_CACHE_DIR is read from `env`, not by the addon: under Bun and in worker threads a
+  // `process.env` assignment never reaches the operating-system environment the addon reads.
+  const override = env.XBBG_CACHE_DIR;
+  const cacheRoot = override !== undefined && override.length > 0 ? override : undefined;
+  let scan: CacheScan;
   try {
-    scan = runtimeAddon.scanCache();
+    scan = runtimeAddon.scanCache(cacheRoot);
   } catch {
     return { libPath: null, problems };
   }
