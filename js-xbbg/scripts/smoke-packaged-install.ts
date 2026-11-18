@@ -85,13 +85,14 @@ function smokeMissingRuntime(appDir: string, runtime: string): void {
     for (const dir of [libDir, cacheDir, homeDir]) {
       fs.mkdirSync(dir);
     }
-    for (const name of [
+    const runtimeNames = [
       'blpapi3_64.dll',
       'libblpapi3_64.so',
       'libblpapi3_64.dylib',
       'libblpapi3.so',
       'libblpapi3.dylib',
-    ]) {
+    ];
+    for (const name of runtimeNames) {
       fs.writeFileSync(path.join(libDir, name), 'not a shared library');
     }
     const withheld = new Set([
@@ -108,6 +109,18 @@ function smokeMissingRuntime(appDir: string, runtime: string): void {
       USERPROFILE: homeDir,
       XBBG_CACHE_DIR: cacheDir,
     };
+    // The search also scans PATH on Windows, where CI puts the SDK's runtime directory.
+    // Drop every PATH entry that holds a runtime so nothing else can satisfy the import.
+    const pathKey = Object.keys(env).find((key) => key.toUpperCase() === 'PATH');
+    if (pathKey !== undefined) {
+      env[pathKey] = (env[pathKey] ?? '')
+        .split(path.delimiter)
+        .filter(
+          (dir) =>
+            dir.length > 0 && !runtimeNames.some((name) => fs.existsSync(path.join(dir, name))),
+        )
+        .join(path.delimiter);
+    }
     run(runtime, ['-e', MISSING_RUNTIME_SCRIPT], { cwd: appDir, env });
   } finally {
     fs.rmSync(scratch, { force: true, recursive: true });
