@@ -112,6 +112,7 @@ mod ext;
 mod log_bridge;
 mod markets;
 mod native_arrow;
+mod preflight;
 mod recipes;
 mod request;
 mod result_diagnostics;
@@ -2699,6 +2700,9 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     // Register ext functions (date, pivot, ticker, futures, cdx, currency utilities)
     ext::register_ext_module(m)?;
+
+    // Register auction and ETF iNAV preflight checks (shared with xbbg-host)
+    preflight::register(m)?;
 
     // Register markets functions (session derivation, market rules, timezone inference)
     markets::register(m)?;

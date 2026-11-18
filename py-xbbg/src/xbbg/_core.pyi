@@ -67,6 +67,8 @@ __all__ = [
     "ext_parse_date",
     "ext_parse_ticker",
     "ext_pivot_to_wide",
+    "ext_plan_auction",
+    "ext_plan_etf_inav",
     "ext_previous_cdx_series",
     "ext_rename_dividend_columns",
     "ext_rename_etf_columns",
@@ -74,6 +76,8 @@ __all__ = [
     "ext_session_times_to_utc",
     "ext_set_exchange_override",
     "ext_validate_generic_ticker",
+    "ext_validated_auction_venues",
+    "ext_validated_inav_tickers",
     "get_log_level",
     "load_sdk",
     "loaded_sdk",
@@ -1686,6 +1690,21 @@ def ext_pivot_to_wide(batch: ArrowRecordBatch) -> typing.Any:
     Output: ArrowRecordBatch with the input's key column, then one column per field
     """
 
+def ext_plan_auction(securities: typing.Sequence[builtins.str], aliases_given: builtins.bool) -> builtins.list[builtins.str]:
+    r"""
+    Check auction inputs before venue resolution and return them de-duplicated
+    in first-seen order.
+    
+    `aliases_given` is whether the caller passed an `aliases` option at all:
+    auction aliases are always derived from the inputs, so any value is rejected.
+    """
+
+def ext_plan_etf_inav(etfs: typing.Sequence[builtins.str]) -> builtins.list[builtins.str]:
+    r"""
+    Check ETF inputs before relationship resolution and return them trimmed, in
+    input order.
+    """
+
 def ext_previous_cdx_series(ticker: builtins.str) -> typing.Optional[builtins.str]:
     r"""
     Get the previous series ticker for a CDX index.
@@ -1719,6 +1738,20 @@ def ext_set_exchange_override(ticker: builtins.str, timezone: typing.Optional[bu
 def ext_validate_generic_ticker(ticker: builtins.str) -> None:
     r"""
     Validate that a ticker is generic (not specific).
+    """
+
+def ext_validated_auction_venues(inputs: typing.Sequence[builtins.str], table: typing.Any) -> dict:
+    r"""
+    Validate a venue-resolution table against the planned inputs.
+    
+    Returns `{venue_topic: input}` in input order: the trimmed venue topics to
+    subscribe and the labels they carry back to the inputs.
+    """
+
+def ext_validated_inav_tickers(etfs: typing.Sequence[builtins.str], table: typing.Any) -> builtins.list[builtins.str]:
+    r"""
+    Validate an ETF NAV relationship table against the planned ETFs and return
+    one iNAV ticker per ETF.
     """
 
 def get_log_level() -> builtins.str:

@@ -239,6 +239,23 @@ async def test_subscribe_etf_inav_rejects_trimmed_duplicates(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_subscribe_etf_inav_trims_with_the_shared_host_rule(monkeypatch):
+    # The shared rule is JavaScript's trim: it removes a BOM but not a Unit
+    # Separator, unlike str.strip().
+    recipe_calls = _patch_recipe(monkeypatch, lambda: ArrowTable.from_pylist([]))
+    subscribe_calls = _patch_asubscribe(monkeypatch, object())
+
+    with pytest.raises(ValueError, match=rf"Duplicate ETF inputs are not allowed: {QQQ}$"):
+        await etf.asubscribe_etf_inav([QQQ, f"\ufeff{QQQ}\u00a0"])
+    assert recipe_calls == []
+
+    with pytest.raises(ValueError, match="not one-to-one"):
+        await etf.asubscribe_etf_inav([QQQ, f"\x1c{QQQ}"])
+    assert recipe_calls[0][1] == ([QQQ, f"\x1c{QQQ}"],)
+    assert subscribe_calls == []
+
+
+@pytest.mark.asyncio
 async def test_subscribe_etf_inav_rejects_invalid_relationship(monkeypatch):
     rows = [
         _relationship_row(0, QQQ, nav_ticker=QQQ_NAV, inav_ticker=QQQ_INAV),

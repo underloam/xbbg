@@ -200,6 +200,84 @@ async def test_distinct_inputs_resolving_to_same_venue_are_ambiguous(monkeypatch
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "securities,kwargs,message",
+    [
+        ([FIRST], {"aliases": {FIRST_VENUE: FIRST}}, "Auction aliases are derived from input securities"),
+        ([FIRST], {"aliases": None}, "Auction aliases are derived from input securities"),
+        ([], {}, "securities must not be empty"),
+    ],
+)
+async def test_input_checks_run_in_the_shared_host_layer_before_any_lookup(monkeypatch, securities, kwargs, message):
+    recipe_calls = _patch_recipe(monkeypatch, [_row(0, FIRST, FIRST_VENUE)])
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("an invalid request must fail before subscription")
+
+    monkeypatch.setattr(blp, "asubscribe", forbidden)
+    with pytest.raises(BlpValidationError, match=message):
+        await auction.asubscribe_auction(securities, **kwargs)
+    assert recipe_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rows,message",
+    [
+        (
+            [_row(0, FIRST, FIRST_VENUE), _row(1, SECOND, FIRST_VENUE)],
+            f"Auction preflight failed: Ambiguous venue {FIRST_VENUE}: {FIRST}, {SECOND}",
+        ),
+        (
+            [_row(0, FIRST, FIRST_VENUE)],
+            f"Venue resolution is not one-to-one with securities: {FIRST}, {SECOND}",
+        ),
+        (
+            [_row(0, FIRST, FIRST_VENUE), _row(0, SECOND, SECOND_VENUE)],
+            f"Venue resolution is not one-to-one with securities: {FIRST}, {SECOND}",
+        ),
+        (
+            [_row(0, FIRST, FIRST_VENUE), _row(1, SECOND, "   ", "unresolved")],
+            f"Auction preflight failed: {SECOND}: unresolved",
+        ),
+        (
+            [_row(0, FIRST, FIRST_VENUE, "mismatch", "wrong venue"), _row(1, SECOND, None, "unresolved", "no listing")],
+            f"Auction preflight failed: {FIRST}: wrong venue; {SECOND}: no listing",
+        ),
+    ],
+)
+async def test_venue_table_checks_report_the_shared_host_wording(monkeypatch, rows, message):
+    _patch_recipe(monkeypatch, rows)
+
+    async def forbidden(*_args, **_kwargs):
+        pytest.fail("a failed preflight must not subscribe")
+
+    monkeypatch.setattr(blp, "asubscribe", forbidden)
+    with pytest.raises(BlpValidationError) as raised:
+        await auction.asubscribe_auction([FIRST, SECOND])
+    assert str(raised.value) == message
+
+
+@pytest.mark.asyncio
+async def test_venue_topics_are_trimmed_and_a_blank_error_does_not_fail_a_resolved_row(monkeypatch):
+    _patch_recipe(
+        monkeypatch,
+        [_row(0, FIRST, f"  {FIRST_VENUE}\t", error="  "), _row(1, SECOND, SECOND_VENUE)],
+    )
+    calls = []
+
+    async def subscribe(tickers, fields, **kwargs):
+        calls.append((tickers, kwargs))
+        return object()
+
+    monkeypatch.setattr(blp, "asubscribe", subscribe)
+    await auction.asubscribe_auction([FIRST, SECOND])
+    topics, options = calls[0]
+    assert topics == [FIRST_VENUE, SECOND_VENUE]
+    assert options["aliases"] == {FIRST_VENUE: FIRST, SECOND_VENUE: SECOND}
+
+
+@pytest.mark.asyncio
 async def test_snapshot_and_resolution_preserve_rows_and_backend(monkeypatch):
     rows = [_row(0, FIRST, FIRST_VENUE), _row(1, FIRST, FIRST_VENUE)]
     _patch_recipe(monkeypatch, rows)
