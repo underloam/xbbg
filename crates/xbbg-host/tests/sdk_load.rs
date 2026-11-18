@@ -60,17 +60,48 @@ fn a_bogus_first_candidate_is_rejected_and_the_real_runtime_loads_once() {
         refused.reason
     );
 
-    // A second call is idempotent, whatever it asks for.
+    // A second call is idempotent, whatever else it asks for.
     assert_eq!(locate_and_load(&request).expect("second call"), loaded);
     assert_eq!(
         locate_and_load(&LocateRequest::default()).expect("third call"),
         loaded
     );
+
+    // So is one that names the loaded file, or its directory, explicitly.
+    for same in [
+        loaded.path.clone(),
+        loaded.path.parent().expect("a directory").to_owned(),
+    ] {
+        let explicit = LocateRequest {
+            explicit: Some(same),
+            ..LocateRequest::default()
+        };
+        assert_eq!(
+            locate_and_load(&explicit).expect("explicit loaded file"),
+            loaded
+        );
+    }
+
+    // An explicit path that is not the loaded file cannot replace it.
     let elsewhere = LocateRequest {
-        explicit: Some(bogus),
+        explicit: Some(bogus.clone()),
         ..LocateRequest::default()
     };
-    assert_eq!(locate_and_load(&elsewhere).expect("fourth call"), loaded);
+    let error = locate_and_load(&elsewhere).expect_err("a loaded runtime is not replaced");
+    assert_eq!(error.rejected.len(), 1, "{:?}", error.rejected);
+    assert_eq!(error.rejected[0].source, SourceKind::Explicit);
+    assert_eq!(error.rejected[0].path, bogus);
+    assert_eq!(
+        error.rejected[0].reason,
+        format!(
+            "a Bloomberg runtime is already loaded from {}; it cannot be replaced by {} in the \
+             same process",
+            loaded.path.display(),
+            bogus.display()
+        )
+    );
+    assert!(error.to_string().contains("already loaded"));
+    assert_eq!(xbbg_core::loaded_sdk_path(), Some(loaded.path.as_path()));
 
     // The JSON surface reports the same runtime.
     let json = locate_and_load_json("{}").expect("json call");

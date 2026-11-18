@@ -75,16 +75,25 @@ static LOADED: Mutex<Option<LoadedSdk>> = Mutex::new(None);
 /// through to the other rules and loading a runtime the caller did not name. A directory that
 /// holds no library is that failure too. Without an explicit path every rule is tried in order.
 ///
-/// A second call, with any request, returns the runtime the first one loaded. A runtime loaded by
-/// other means (`xbbg_core::load`) is returned too, with the rule that would have found it if the
-/// search lists it.
+/// A second call returns the runtime the first one loaded, whatever else it asks for, unless it
+/// names an explicit path that does not resolve to that file: a process holds one runtime, so
+/// that call fails with the loaded and requested paths instead of silently ignoring the request.
+/// A runtime loaded by other means (`xbbg_core::load`) counts as loaded, with the rule that would
+/// have found it if the search lists it.
 ///
 /// # Errors
 ///
-/// [`SdkNotFound`] when no candidate loads; it lists every refusal.
+/// [`SdkNotFound`] when no candidate loads, or when a loaded runtime cannot be replaced by the
+/// explicit path; it lists every refusal.
 pub fn locate_and_load(request: &LocateRequest) -> Result<LoadedSdk, SdkNotFound> {
     let mut slot = LOADED.lock().unwrap_or_else(PoisonError::into_inner);
-    if let Some(loaded) = slot.as_ref() {
+    let already = slot
+        .as_ref()
+        .map(|loaded| loaded.path.clone())
+        .or_else(|| xbbg_core::loaded_sdk_path().map(Path::to_path_buf));
+    if request.explicit.is_none()
+        && let Some(loaded) = slot.as_ref()
+    {
         return Ok(loaded.clone());
     }
 
@@ -104,17 +113,38 @@ pub fn locate_and_load(request: &LocateRequest) -> Result<LoadedSdk, SdkNotFound
         .filter(|refused| keep(refused.source))
         .collect();
 
-    if let Some(path) = xbbg_core::loaded_sdk_path() {
+    if let Some(path) = already {
         let found = candidates
             .iter()
-            .find(|candidate| same_file(&candidate.path, path));
+            .find(|candidate| same_file(&candidate.path, &path));
+        if let Some(explicit) = &request.explicit
+            && found.is_none()
+        {
+            let requested = std::path::absolute(explicit).unwrap_or_else(|_| explicit.clone());
+            return Err(SdkNotFound {
+                rejected: vec![Rejected {
+                    reason: format!(
+                        "a Bloomberg runtime is already loaded from {}; it cannot be \
+                         replaced by {} in the same process",
+                        path.display(),
+                        requested.display()
+                    ),
+                    detail: requested.display().to_string(),
+                    path: requested,
+                    source: SourceKind::Explicit,
+                }],
+            });
+        }
+        if let Some(loaded) = slot.as_ref() {
+            return Ok(loaded.clone());
+        }
         let loaded = LoadedSdk {
-            path: path.to_path_buf(),
             source: found.map_or(SourceKind::Explicit, |candidate| candidate.source),
             detail: found.map_or_else(
                 || "loaded before the search".to_owned(),
                 |candidate| candidate.detail.clone(),
             ),
+            path,
             version: runtime_version(),
             rejected,
         };
@@ -202,10 +232,17 @@ fn runtime_version() -> String {
     format!("{major}.{minor}.{patch}.{build}")
 }
 
+/// Same path, or two spellings (links, `..`, and on Windows letter case) of one file.
 fn same_file(a: &Path, b: &Path) -> bool {
-    a == b
+    let same = |a: &Path, b: &Path| {
+        a == b
+            || (cfg!(windows)
+                && a.to_string_lossy()
+                    .eq_ignore_ascii_case(&b.to_string_lossy()))
+    };
+    same(a, b)
         || matches!(
             (a.canonicalize(), b.canonicalize()),
-            (Ok(a), Ok(b)) if a == b
+            (Ok(a), Ok(b)) if same(&a, &b)
         )
 }
