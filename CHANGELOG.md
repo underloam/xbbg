@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
   5. `PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS;
   6. the xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), whose runtime is used only after its library matches the SHA-256 recorded when it was installed.
 
-  A runtime that does not load (another architecture, or a runtime too old to provide a function xbbg calls) is skipped and the next one is tried. When none loads, the error lists every location tried and why it was refused. An explicit path is authoritative: when it does not load, nothing else is tried, and a runtime already loaded in the process is never replaced by another. A runtime provisioned once, for example with the Java package's `BlpapiSdk` command, now serves all four packages.
+  A runtime that does not load (another architecture, or a runtime too old to provide a function xbbg calls) is skipped and the next one is tried. So is a runtime the dynamic loader swaps for another file: on macOS, dyld looks in `DYLD_LIBRARY_PATH` for the same file name before it opens an absolute path, so the library in use would not be the one chosen (or, from the cache, verified). When none loads, the error lists every location tried and why it was refused. An explicit path is authoritative: when it does not load, nothing else is tried, and a runtime already loaded in the process is never replaced by another. A runtime provisioned once, for example with the Java package's `BlpapiSdk` command, now serves all four packages.
 
 ### Changed
 

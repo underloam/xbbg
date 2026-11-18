@@ -8237,6 +8237,7 @@ name = "xbbg_core"
 version = "1.8.1"
 dependencies = [
  "ctor",
+ "libc",
  "libloading 0.9.0",
  "rustc-hash 2.1.3",
  "thiserror 2.0.21",

@@ -64,6 +64,21 @@ pub enum SdkLoadError {
         /// The library that was requested.
         requested: PathBuf,
     },
+    /// The dynamic loader mapped a different file than the one opened. macOS's dyld looks in the
+    /// `DYLD_LIBRARY_PATH` directories by file name before it uses an absolute path, so the library
+    /// that was chosen (and, for the xbbg cache, verified) would not be the one in use.
+    #[error(
+        "the dynamic loader mapped {} instead of the Bloomberg runtime {} (on macOS, \
+         DYLD_LIBRARY_PATH is searched by file name first)",
+        mapped.display(),
+        path.display()
+    )]
+    Substituted {
+        /// The library that was opened.
+        path: PathBuf,
+        /// The file the loader mapped instead.
+        mapped: PathBuf,
+    },
 }
 
 /// Loads the Bloomberg runtime at `path` into this process.
@@ -148,6 +163,17 @@ fn open(path: &Path) -> Result<Blpapi, SdkLoadError> {
         message: error.to_string(),
     })?;
 
+    #[cfg(unix)]
+    if let Some(mapped) = mapped_image(&library)
+        && !is_same_file(&mapped, path)
+    {
+        // Dropping the library closes the handle this call opened.
+        return Err(SdkLoadError::Substituted {
+            path: path.to_path_buf(),
+            mapped,
+        });
+    }
+
     // SAFETY: `Blpapi`'s function pointers carry the signatures of the SDK headers this crate was
     // built against, which is the contract of the BLPAPI C ABI for a runtime of that family. The
     // library handle moves into the table and is never closed.
@@ -155,6 +181,35 @@ fn open(path: &Path) -> Result<Blpapi, SdkLoadError> {
         path: path.to_path_buf(),
         message: error.to_string(),
     })
+}
+
+/// The file the dynamic loader actually mapped for `library`, from the image that holds one of
+/// its functions. `None` when the library has no BLPAPI symbol (the table load then reports it)
+/// or the loader cannot say.
+#[cfg(unix)]
+fn mapped_image(library: &libloading::os::unix::Library) -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    // SAFETY: looking a symbol up only reads the library's symbol table; its address is only
+    // passed to dladdr, never called or dereferenced.
+    let symbol = unsafe { library.get::<*mut libc::c_void>(b"blpapi_getVersionInfo\0") }.ok()?;
+    let address = symbol.into_raw();
+    let mut info = std::mem::MaybeUninit::<libc::Dl_info>::zeroed();
+    // SAFETY: `address` lies in an image this process has loaded; dladdr fills `info` and returns
+    // zero when it cannot.
+    if unsafe { libc::dladdr(address, info.as_mut_ptr()) } == 0 {
+        return None;
+    }
+    // SAFETY: dladdr returned non-zero, so it initialized `info`.
+    let info = unsafe { info.assume_init() };
+    if info.dli_fname.is_null() {
+        return None;
+    }
+    // SAFETY: `dli_fname` is a NUL-terminated path owned by the loader for the image's lifetime,
+    // and the image stays loaded while `library` is open.
+    let name = unsafe { CStr::from_ptr(info.dli_fname) };
+    Some(PathBuf::from(OsStr::from_bytes(name.to_bytes())))
 }
 
 /// The loaded runtime's function table.

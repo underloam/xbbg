@@ -26,7 +26,7 @@ default = ["live"]
 # loader in src/loader.rs are unconditional, so a non-live build cannot compile;
 # src/lib.rs raises an explicit compile_error! so that failure is legible instead
 # of surfacing as a wall of unresolved imports.
-live = ["dep:blpapi-sys", "dep:libloading"]
+live = ["dep:blpapi-sys", "dep:libloading", "dep:libc"]
 # SDK-created events for downstream regression tests; not enabled in production.
 test-support = ["live"]
 
@@ -35,6 +35,10 @@ thiserror = { workspace = true }
 blpapi-sys = { workspace = true, optional = true }
 libloading = { workspace = true, optional = true }
 rustc-hash = { workspace = true }  # Fast non-cryptographic hashing for Name cache
+
+# dladdr: which file the dynamic loader mapped for the runtime (see src/loader.rs).
+[target.'cfg(unix)'.dependencies]
+libc = { workspace = true, optional = true }
 
 [dev-dependencies]
 # Loads the Bloomberg runtime before main in this crate's test binaries and examples, finding it

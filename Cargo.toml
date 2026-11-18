@@ -146,8 +146,10 @@ pyo3-stub-gen = { version = "0.23", default-features = false }
 jni = "0.22.4"
 
 # ── Native library loading ────────────────────────────────────────────────────
-# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core.
+# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core; libc's
+# dladdr tells xbbg-core which file the dynamic loader actually mapped.
 libloading = "0.9"
+libc = "0.2"
 
 # ── Bloomberg SDK provisioning (crates/xbbg-sdk) ──────────────────────────────
 # uv publishes every crate as 0.0.x with no semver promise, so the uv crates are
