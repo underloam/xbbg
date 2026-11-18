@@ -63,6 +63,12 @@ const STREAM_OPTION_KEYS = [
 ] as const;
 
 export function streamOptionsPayload(options: object): Record<string, unknown> {
+  // JSON would turn a `Map` or class instance into `{}` and drop the aliases without a word.
+  // Check them here, before the host sees the payload; `null` means absent, as in the host.
+  const aliases: unknown = Reflect.get(options, 'aliases');
+  if (aliases !== null) {
+    validateAliases(aliases);
+  }
   const payload: Record<string, unknown> = {};
   for (const key of STREAM_OPTION_KEYS) {
     const value: unknown = Reflect.get(options, key);

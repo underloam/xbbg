@@ -184,25 +184,40 @@ describe('shared subscription controls', () => {
     }
   });
 
+  it.each([{ onDelayed: 'unknown' }, { delivery: 'state', rows: false }])(
+    'wraps a host rejection of invalid controls: %j',
+    async (options) => {
+      const subscribe = vi
+        .fn<NativeEngine['subscribe']>()
+        .mockRejectedValue(
+          new Error('[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"delivery"}\nsynthetic rejection'),
+        );
+      const engine = engineWithNative({ subscribe });
+      await expect(
+        engine.subscribe(['SYN'], ['BID'], options as api.StreamOptions),
+      ).rejects.toBeInstanceOf(api.BlpValidationError);
+      await expect(
+        engine.stream(['SYN'], ['BID'], options as api.StreamOptions),
+      ).rejects.toBeInstanceOf(api.BlpValidationError);
+      expect(subscribe).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  // JSON would carry a Map as `{}`, silently dropping the aliases, so they never reach the host.
   it.each([
     { aliases: ['label'] },
     { aliases: { SYN: 42 } },
-    { onDelayed: 'unknown' },
-    { delivery: 'state', rows: false },
-  ])('wraps a host rejection of invalid controls: %j', async (options) => {
-    const subscribe = vi
-      .fn<NativeEngine['subscribe']>()
-      .mockRejectedValue(
-        new Error('[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"aliases"}\nsynthetic rejection'),
-      );
+    { aliases: new Map([['SYN', 'label']]) },
+  ])('rejects aliases that are not a plain string map before the host: %o', async (options) => {
+    const subscribe = vi.fn<NativeEngine['subscribe']>();
     const engine = engineWithNative({ subscribe });
     await expect(
-      engine.subscribe(['SYN'], ['BID'], options as api.StreamOptions),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
-    await expect(
-      engine.stream(['SYN'], ['BID'], options as api.StreamOptions),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(subscribe).toHaveBeenCalledTimes(2);
+      engine.subscribe(['SYN'], ['BID'], options as unknown as api.StreamOptions),
+    ).rejects.toMatchObject({
+      element: 'aliases',
+      message: expect.stringContaining('aliases must map topic strings to label strings'),
+    });
+    expect(subscribe).not.toHaveBeenCalled();
   });
 
   it('exposes a live field projection after addFields and keeps labels on add', async () => {
