@@ -8,6 +8,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 import io.github.underloam.xbbg.BlpapiNotFoundException;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashMap;
@@ -70,6 +71,24 @@ class BlpapiLocatorTest {
 
     properties.put(BlpapiLocator.PATH_PROPERTY, temp.resolve("abs").resolve("..").toString());
     assertEquals(temp.toString(), parse(locator(null).requestJson()).get("explicit"));
+  }
+
+  @Test
+  void aRelativePropertyResolvesAgainstTheProcessDirectoryWithoutUserDir() {
+    properties.put(BlpapiLocator.PATH_PROPERTY, "runtime");
+    BlpapiLocator locator =
+        new BlpapiLocator(lookup(env), lookup(properties), null, temp.resolve("cache"));
+    assertEquals(
+        Paths.get("").toAbsolutePath().resolve("runtime").normalize().toString(),
+        parse(locator.requestJson()).get("explicit"));
+  }
+
+  @Test
+  void anInvalidPropertyPathNamesTheProperty() {
+    properties.put(BlpapiLocator.PATH_PROPERTY, "bad\0path");
+    IllegalArgumentException error =
+        assertThrows(IllegalArgumentException.class, () -> locator(null).requestJson());
+    assertTrue(error.getMessage().startsWith(BlpapiLocator.PATH_PROPERTY + " is not a valid path"));
   }
 
   @Test
