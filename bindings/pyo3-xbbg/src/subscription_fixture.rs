@@ -27,16 +27,14 @@ impl PySubscriptionFixture {
     fn start_subscribe<'py>(
         &self,
         py: Python<'py>,
-        request: SubscribeRequest,
+        prepared: PreparedSubscribe,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fixture = self.fixture.clone();
         let legacy_read_started = self.legacy_read_started.clone();
-        let batch_items = request.flush_threshold.unwrap_or(self.batch_items);
-        if batch_items == 0 {
-            return Err(PyValueError::new_err(
-                "flush_threshold must be greater than zero",
-            ));
-        }
+        let PreparedSubscribe {
+            request,
+            batch_items,
+        } = prepared;
         shutdown_safe_future(py, async move {
             let stream = fixture
                 .subscribe(request)
@@ -127,36 +125,29 @@ impl PySubscriptionFixture {
         session_wait_ms: Option<u64>,
         delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let overflow_policy = overflow_policy
-            .as_deref()
-            .map(|value| {
-                value
-                    .parse::<OverflowPolicy>()
-                    .map_err(PyValueError::new_err)
-            })
-            .transpose()?;
         self.start_subscribe(
             py,
-            SubscribeRequest {
-                service,
-                topics: tickers,
-                fields,
-                all_fields,
-                options: options.unwrap_or_default(),
-                aliases: aliases.unwrap_or_default().into_iter().collect(),
-                delayed_policy: parse_delayed_policy(on_delayed)?,
-                field_error_policy: parse_field_error_policy(on_field_error)?,
-                deliver_rows: rows,
-                delivery: delivery
-                    .parse::<SubscriptionDeliveryMode>()
-                    .map_err(blp_async_error_to_pyerr)?,
-                zero_as_null: zero_as_null.unwrap_or_default(),
-                session_wait: session_wait_ms.map(std::time::Duration::from_millis),
-                isolated,
-                stream_capacity,
-                flush_threshold,
-                overflow_policy,
-            },
+            prepare_subscribe_params(
+                SubscribeParams {
+                    service: Some(service),
+                    tickers,
+                    fields,
+                    options,
+                    flush_threshold,
+                    overflow_policy,
+                    stream_capacity,
+                    all_fields,
+                    aliases,
+                    on_delayed,
+                    isolated,
+                    rows,
+                    on_field_error,
+                    zero_as_null,
+                    session_wait_ms,
+                    delivery,
+                },
+                self.batch_items,
+            )?,
         )
     }
 

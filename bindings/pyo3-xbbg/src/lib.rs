@@ -76,7 +76,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use std::collections::{HashMap, VecDeque};
-use std::str::FromStr;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -95,17 +94,15 @@ use xbbg_async::config::{AuthInput, TlsInput};
 use xbbg_async::engine::state::{SubscriptionArrowBatcher, SubscriptionMetrics};
 use xbbg_async::engine::{
     AdminStatusInfo, Engine, EngineConfig, ServerAddr, ServiceStatusInfo, SessionStatusInfo,
-    SharedSubscriptionStatus, SubscriptionDeliveryMode, SubscriptionEventInfo,
-    SubscriptionFailureInfo, TlsMaterial, TopicStatusInfo, Transport,
+    SharedSubscriptionStatus, SubscriptionEventInfo, SubscriptionFailureInfo, TlsMaterial,
+    TopicStatusInfo, Transport,
 };
 use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, ErrorStyle};
-use xbbg_async::{
-    BlpAsyncError, DelayedPolicy, FieldErrorPolicy, OverflowPolicy, SubscribeRequest,
-    SubscriptionHandle,
-};
+use xbbg_async::{BlpAsyncError, OverflowPolicy, SubscriptionHandle};
 use xbbg_core::BlpError;
 use xbbg_ext::MarketTiming;
 use xbbg_host::config::{EngineConfigSpec, FlatConfigParts, RetryPolicySpec, ServerAddressSpec};
+use xbbg_host::subscribe::PreparedSubscribe;
 
 mod completion;
 mod ext;
@@ -118,6 +115,7 @@ mod request;
 mod result_diagnostics;
 mod sdk;
 mod shaping;
+mod subscribe;
 #[cfg(feature = "test-support")]
 mod subscription_fixture;
 mod teardown;
@@ -127,6 +125,7 @@ use completion::{
     TickDictKeys, Unsubscribed, record_batch_future, shutdown_safe_future,
 };
 use request::dict_to_request_params;
+use subscribe::{SubscribeParams, prepare as prepare_subscribe_params};
 use teardown::{EngineOwner, SubscriptionOwner};
 
 use xbbg_async::subscription_consumer::{
@@ -383,15 +382,6 @@ fn blp_error_to_pyerr(error: BlpError) -> PyErr {
 /// Convert an async error into its Python exception.
 fn blp_async_error_to_pyerr(error: BlpAsyncError) -> PyErr {
     error_presentation_to_pyerr(ErrorPresentation::from_async(error, ErrorStyle::Python))
-}
-
-fn parse_delayed_policy(on_delayed: &str) -> PyResult<DelayedPolicy> {
-    DelayedPolicy::from_str(on_delayed).map_err(|error| PyValueError::new_err(error.to_string()))
-}
-
-fn parse_field_error_policy(on_field_error: &str) -> PyResult<FieldErrorPolicy> {
-    FieldErrorPolicy::from_str(on_field_error)
-        .map_err(|error| PyValueError::new_err(error.to_string()))
 }
 
 fn subscription_control_error_to_pyerr(error: BlpAsyncError) -> PyErr {
@@ -1515,51 +1505,40 @@ impl PyEngine {
         delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
-        let batch_items = flush_threshold.unwrap_or(self.subscription_batch_items);
-        if batch_items == 0 {
-            return Err(PyValueError::new_err(
-                "flush_threshold must be greater than zero",
-            ));
-        }
-
-        let op = overflow_policy
-            .as_deref()
-            .map(|s| {
-                s.parse::<OverflowPolicy>()
-                    .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))
-            })
-            .transpose()?;
-        let delayed_policy = parse_delayed_policy(on_delayed)?;
-        let field_error_policy = parse_field_error_policy(on_field_error)?;
-        let delivery = delivery
-            .parse::<SubscriptionDeliveryMode>()
-            .map_err(blp_async_error_to_pyerr)?;
+        let PreparedSubscribe {
+            request,
+            batch_items,
+        } = prepare_subscribe_params(
+            SubscribeParams {
+                service: None,
+                tickers,
+                fields,
+                options: None,
+                flush_threshold,
+                overflow_policy,
+                stream_capacity,
+                all_fields,
+                aliases,
+                on_delayed,
+                isolated,
+                rows,
+                on_field_error,
+                zero_as_null,
+                session_wait_ms,
+                delivery,
+            },
+            self.subscription_batch_items,
+        )?;
 
         debug!(
-            tickers = ?tickers,
-            fields = ?fields,
+            tickers = ?request.topics,
+            fields = ?request.fields,
             "PyEngine: creating subscription"
         );
 
         shutdown_safe_future(py, async move {
             let stream = engine
-                .subscribe(SubscribeRequest {
-                    topics: tickers,
-                    fields,
-                    all_fields,
-                    aliases: aliases.unwrap_or_default().into_iter().collect(),
-                    delayed_policy,
-                    field_error_policy,
-                    deliver_rows: rows,
-                    delivery,
-                    zero_as_null: zero_as_null.unwrap_or_default(),
-                    session_wait: session_wait_ms.map(std::time::Duration::from_millis),
-                    isolated,
-                    stream_capacity,
-                    flush_threshold,
-                    overflow_policy: op,
-                    ..SubscribeRequest::default()
-                })
+                .subscribe(request)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
 
@@ -1644,54 +1623,42 @@ impl PyEngine {
         delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let engine = self.engine.clone();
-        let batch_items = flush_threshold.unwrap_or(self.subscription_batch_items);
-        if batch_items == 0 {
-            return Err(PyValueError::new_err(
-                "flush_threshold must be greater than zero",
-            ));
-        }
-
-        let op = overflow_policy
-            .as_deref()
-            .map(|s| {
-                s.parse::<OverflowPolicy>()
-                    .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))
-            })
-            .transpose()?;
-        let delayed_policy = parse_delayed_policy(on_delayed)?;
-        let field_error_policy = parse_field_error_policy(on_field_error)?;
-        let delivery = delivery
-            .parse::<SubscriptionDeliveryMode>()
-            .map_err(blp_async_error_to_pyerr)?;
+        let PreparedSubscribe {
+            request,
+            batch_items,
+        } = prepare_subscribe_params(
+            SubscribeParams {
+                service: Some(service),
+                tickers,
+                fields,
+                options,
+                flush_threshold,
+                overflow_policy,
+                stream_capacity,
+                all_fields,
+                aliases,
+                on_delayed,
+                isolated,
+                rows,
+                on_field_error,
+                zero_as_null,
+                session_wait_ms,
+                delivery,
+            },
+            self.subscription_batch_items,
+        )?;
 
         debug!(
-            service = %service,
-            tickers = ?tickers,
-            fields = ?fields,
-            options = ?options,
+            service = %request.service,
+            tickers = ?request.topics,
+            fields = ?request.fields,
+            options = ?request.options,
             "PyEngine: creating subscription with options"
         );
 
         shutdown_safe_future(py, async move {
             let stream = engine
-                .subscribe(SubscribeRequest {
-                    service,
-                    topics: tickers,
-                    fields,
-                    all_fields,
-                    options: options.unwrap_or_default(),
-                    aliases: aliases.unwrap_or_default().into_iter().collect(),
-                    delayed_policy,
-                    field_error_policy,
-                    deliver_rows: rows,
-                    delivery,
-                    zero_as_null: zero_as_null.unwrap_or_default(),
-                    session_wait: session_wait_ms.map(std::time::Duration::from_millis),
-                    isolated,
-                    stream_capacity,
-                    flush_threshold,
-                    overflow_policy: op,
-                })
+                .subscribe(request)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
 
@@ -2704,6 +2671,9 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Register auction and ETF iNAV preflight checks (shared with xbbg-host)
     preflight::register(m)?;
 
+    // Register subscription argument checks (shared with xbbg-host)
+    subscribe::register(m)?;
+
     // Register markets functions (session derivation, market rules, timezone inference)
     markets::register(m)?;
 
@@ -2768,6 +2738,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, AtomicU64};
     use tokio::sync::Mutex;
+    use xbbg_async::DelayedPolicy;
     use xbbg_async::engine::state::{
         FieldKind, FieldLayout, FieldMeta, SubscriptionUpdate, subscription_channel,
         subscription_channel_with_policy,
@@ -2969,36 +2940,6 @@ mod tests {
             subscription_metrics_totals(&metrics_map),
             (7, 2, 6, true, 0, 0, 0)
         );
-    }
-
-    #[test]
-    fn invalid_delayed_policy_is_a_python_value_error() {
-        Python::initialize();
-        Python::attach(|py| {
-            for policy in ["", "delayed", "warning"] {
-                let error = parse_delayed_policy(policy).expect_err("invalid delayed policy");
-                assert!(error.is_instance_of::<PyValueError>(py));
-            }
-        });
-    }
-
-    #[test]
-    fn field_error_policy_parsing_rejects_invalid_values_and_normalizes_valid_policies() {
-        Python::initialize();
-        Python::attach(|py| {
-            for policy in ["", "delayed", "warning"] {
-                let error =
-                    parse_field_error_policy(policy).expect_err("invalid field-error policy");
-                assert!(error.is_instance_of::<PyValueError>(py));
-            }
-            for (policy, expected) in [
-                ("warn", FieldErrorPolicy::Warn),
-                (" RAISE ", FieldErrorPolicy::Raise),
-                ("Ignore", FieldErrorPolicy::Ignore),
-            ] {
-                assert_eq!(parse_field_error_policy(policy).unwrap(), expected);
-            }
-        });
     }
 
     #[test]

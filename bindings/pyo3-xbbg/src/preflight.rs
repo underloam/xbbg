@@ -23,7 +23,8 @@ use xbbg_host::subscribe::StreamOptionsSpec;
 
 use crate::recipes::recipe_arrow_batch;
 
-fn host_error(error: HostError) -> PyErr {
+/// A host failure as the `ValueError` every Python argument problem raises.
+pub(crate) fn host_error(error: HostError) -> PyErr {
     PyValueError::new_err(error.message)
 }
 

@@ -82,6 +82,7 @@ __all__ = [
     "load_sdk",
     "loaded_sdk",
     "locate_sdk",
+    "normalize_subscription_options",
     "recipe_active_cdx",
     "recipe_active_futures",
     "recipe_adjust_ccy",
@@ -110,6 +111,7 @@ __all__ = [
     "recipe_yas",
     "sdk_version",
     "set_log_level",
+    "validate_subscription_controls",
     "version",
 ]
 
@@ -1790,6 +1792,16 @@ def locate_sdk(request: typing.Optional[dict] = None) -> dict:
     refused with the reason (`path`, `source`, `detail`, `reason`).
     """
 
+def normalize_subscription_options(options: typing.Optional[typing.Sequence[builtins.str]], conflate: builtins.bool = False, service: typing.Optional[builtins.str] = None) -> typing.Optional[builtins.list[builtins.str]]:
+    r"""
+    Normalize high-level subscription options before they go to Bloomberg.
+    
+    Options are trimmed, a leading `&` is stripped and empties dropped. With
+    `conflate`, `conflate` is appended once; that is rejected for any service but
+    `//blp/mktdata` and when an `interval` option is present. Returns `None` when
+    no options were given and `conflate` is false.
+    """
+
 def recipe_active_cdx(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, lookback_days: typing.Optional[builtins.int] = None, versionless: builtins.bool = False) -> typing.Any:
     r"""
     Resolve the latest CDX series that had started and traded by a date.
@@ -2090,6 +2102,15 @@ def set_log_level(level: builtins.str) -> None:
     
     This sets an atomic integer — no GIL is held on the logging hot path.
     For per-crate control, use the RUST_LOG environment variable instead.
+    """
+
+def validate_subscription_controls(*, delivery: builtins.str = 'deltas', rows: builtins.bool = True, flush_threshold: typing.Optional[builtins.int] = None, stream_capacity: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None) -> None:
+    r"""
+    Check the stream controls `asubscribe` validates before it needs an engine.
+    
+    Raises `ValueError` for an unknown `delivery` or `overflow_policy`, for
+    `delivery="state"` combined with `rows=False` or explicit queue controls, and
+    for a `flush_threshold` or `stream_capacity` below 1.
     """
 
 def version() -> builtins.str: ...
