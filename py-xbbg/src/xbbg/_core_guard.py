@@ -9,15 +9,18 @@ while ``git pull`` updates the Python sources, and its ``_version.py`` is as old
 that extension, so in a source checkout the extension's build commit is compared with
 the checkout's ``HEAD`` instead.
 
-The finder also prepares the Bloomberg SDK library just before the extension loads,
-so ``import xbbg`` itself never touches the SDK.
+The finder also loads the Bloomberg runtime right after the extension imports (the extension
+itself links no Bloomberg code, so it always imports), so ``import xbbg`` itself never touches
+the SDK and a missing runtime surfaces as one ``ImportError`` with the search help.
 """
 
 from __future__ import annotations
 
+import importlib
 from importlib.machinery import ExtensionFileLoader, PathFinder
 from pathlib import Path
 import sys
+import threading
 from typing import TYPE_CHECKING
 import warnings
 
@@ -25,6 +28,9 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
     from importlib.machinery import ModuleSpec
     from types import ModuleType
+
+# Set while ``import_without_runtime`` imports the extension on this thread.
+_deferral = threading.local()
 
 CORE_MODULE = "xbbg._core"
 _PACKAGE_DIR = Path(__file__).resolve().parent
@@ -152,15 +158,16 @@ class _CoreFinder:
             return None
         spec = PathFinder.find_spec(fullname, path, target)
         if spec is not None and isinstance(spec.loader, ExtensionFileLoader):
-            from . import _sdk
-
-            _sdk._prepare_sdk_for_core_import()
             spec.loader = _VerifiedCoreLoader(fullname, spec.loader.path, self._distribution_version)
         return spec
 
 
 class _VerifiedCoreLoader(ExtensionFileLoader):
-    """Extension loader that rejects a binary built for another xbbg before it is used."""
+    """Extension loader that rejects a binary built for another xbbg and then loads the runtime.
+
+    The extension links no Bloomberg code, so it always imports; the runtime is loaded into the
+    process right after, with the one search order of ``xbbg-sdk`` (see ``xbbg._sdk``).
+    """
 
     def __init__(self, name: str, path: str, distribution_version: str | None) -> None:
         super().__init__(name, path)
@@ -169,3 +176,35 @@ class _VerifiedCoreLoader(ExtensionFileLoader):
     def exec_module(self, module: ModuleType) -> None:
         super().exec_module(module)
         verify_core(module, distribution_version=self._distribution_version)
+        if getattr(_deferral, "active", False):
+            return
+        from . import _sdk
+
+        _sdk.load_runtime(module)
+
+
+def import_without_runtime() -> ModuleType:
+    """Import the verified ``xbbg._core`` without loading the Bloomberg runtime.
+
+    ``get_sdk_info`` and ``set_sdk_path`` read the search from the extension, so they must work
+    when no runtime can be found. The caller loads the runtime (or calls :func:`forget_core`).
+    """
+    previous = getattr(_deferral, "active", False)
+    _deferral.active = True
+    try:
+        return importlib.import_module(CORE_MODULE)
+    finally:
+        _deferral.active = previous
+
+
+def forget_core(core: ModuleType) -> None:
+    """Drop an imported ``xbbg._core`` that has no runtime, so the next import loads it again.
+
+    A normal import that fails leaves nothing behind; one made by :func:`import_without_runtime`
+    does, and a later ``import xbbg._core`` would take it from the cache without the search help.
+    """
+    if sys.modules.get(CORE_MODULE) is core:
+        del sys.modules[CORE_MODULE]
+    package = sys.modules.get(CORE_MODULE.rpartition(".")[0])
+    if package is not None and vars(package).get("_core") is core:
+        del vars(package)["_core"]

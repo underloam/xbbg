@@ -75,6 +75,9 @@ __all__ = [
     "ext_set_exchange_override",
     "ext_validate_generic_ticker",
     "get_log_level",
+    "load_sdk",
+    "loaded_sdk",
+    "locate_sdk",
     "recipe_active_cdx",
     "recipe_active_futures",
     "recipe_adjust_ccy",
@@ -1723,6 +1726,37 @@ def get_log_level() -> builtins.str:
     Get the current Rust log level as a string.
     """
 
+def load_sdk(request: typing.Optional[dict] = None) -> dict:
+    r"""
+    Load the Bloomberg runtime into this process and describe it.
+    
+    `request` holds the optional keys of `LocateRequest` (`explicit`, `hints`, `env`,
+    `cacheRoot`, `repoRoot`, `platform`); `None` searches everything with the process
+    environment. Candidates are tried in the single search order; one that fails to load
+    (including a runtime too old for xbbg) is reported and the next is tried. A runtime that is
+    already loaded is returned unchanged.
+    
+    Returns `{"path", "source", "detail", "version", "rejected"}`. Raises `ImportError`
+    listing every rejected candidate when no runtime loads.
+    """
+
+def loaded_sdk() -> typing.Optional[dict]:
+    r"""
+    The Bloomberg runtime loaded into this process, or `None` before `load_sdk` succeeded.
+    
+    Returns `{"path", "source", "detail", "version", "rejected"}`. A runtime loaded without
+    `load_sdk` (a test harness) reports its `path` and `version` with `source` `None`.
+    """
+
+def locate_sdk(request: typing.Optional[dict] = None) -> dict:
+    r"""
+    Search for the Bloomberg runtime without loading it.
+    
+    Takes the same `request` as `load_sdk`. Returns `{"candidates", "rejected"}`: the library
+    files the search found, in order (`path`, `source`, `detail`, `version`), and the places
+    refused with the reason (`path`, `source`, `detail`, `reason`).
+    """
+
 def recipe_active_cdx(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, lookback_days: typing.Optional[builtins.int] = None, versionless: builtins.bool = False) -> typing.Any:
     r"""
     Resolve the latest CDX series that had started and traded by a date.
@@ -2007,7 +2041,12 @@ def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields:
         request_options: Normalized overrides, elements, options, types, format, timezones, EIDs, and validation controls
     """
 
-def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]: ...
+def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]:
+    r"""
+    The loaded runtime's version, `(major, minor, patch, build)`.
+    
+    Raises `RuntimeError` when no runtime is loaded.
+    """
 
 def set_log_level(level: builtins.str) -> None:
     r"""

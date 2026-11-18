@@ -113,6 +113,7 @@ mod native_arrow;
 mod recipes;
 mod request;
 mod result_diagnostics;
+mod sdk;
 mod shaping;
 #[cfg(feature = "test-support")]
 mod subscription_fixture;
@@ -2582,12 +2583,6 @@ fn version() -> String {
     xbbg_core::version().to_string()
 }
 
-#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
-#[pyfunction]
-fn sdk_version() -> (i32, i32, i32, i32) {
-    xbbg_core::sdk_version()
-}
-
 #[pymodule]
 #[pyo3(name = "_core")]
 fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
@@ -2632,7 +2627,7 @@ fn _core(_py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     build_info.set_item("targetFeatures", target_features)?;
     m.add("__build_info__", build_info)?;
     m.add_function(wrap_pyfunction!(version, m)?)?;
-    m.add_function(wrap_pyfunction!(sdk_version, m)?)?;
+    sdk::register(m)?;
     m.add_function(wrap_pyfunction!(_signal_interpreter_shutdown, m)?)?;
     teardown::register(m)?;
     log_bridge::register(m)?;
@@ -3781,6 +3776,9 @@ mod tests {
                 "__version__",
                 "version",
                 "sdk_version",
+                "load_sdk",
+                "locate_sdk",
+                "loaded_sdk",
                 "PyEngine",
                 "PyEngineConfig",
                 "PySubscription",

@@ -35,7 +35,7 @@ __version__ = _distribution_version or "0+unknown"
 
 # Every import of the native extension, including `from xbbg._core import X`
 # (which bypasses __getattr__), checks that it was built for this xbbg and
-# first prepares the Bloomberg SDK library it links against.
+# then loads the Bloomberg SDK runtime into the process (see _sdk.load_runtime).
 _core_guard.install(_distribution_version)
 
 # Lazy import of the Rust module to avoid import errors when it's not built
@@ -52,21 +52,12 @@ _core_module = None
 __all__ = list(PACKAGE_EXPORTS)
 
 
-def _cache_rejection_help() -> str:
-    """List the xbbg cache installs that failed verification, for the missing-SDK message."""
-    try:
-        from . import _sdk
-
-        notes = _sdk.cache_rejection_notes()
-    except Exception:  # never hide the import error this text is attached to
-        return ""
-    if not notes:
-        return ""
-    return "\n\nThese xbbg cache installs were skipped:\n" + "\n".join(f"  - {note}" for note in notes)
-
-
 def _import_core():
-    """Import and cache the native extension with a friendlier DLL error."""
+    """Import and cache the native extension.
+
+    The import guard (``_core_guard``) loads the Bloomberg runtime right after the extension
+    imports and raises an ``ImportError`` listing every place it looked when none loads.
+    """
     global _core_module
     core = _core_module
     if core is not None:
@@ -77,29 +68,6 @@ def _import_core():
     _core_import_state.active = True
     try:
         core = importlib.import_module("xbbg._core")
-    except ImportError as e:
-        msg = str(e)
-        if (
-            "DLL load failed" in msg  # Windows
-            or "cannot open shared object" in msg  # Linux
-            or "Library not loaded" in msg  # macOS dlopen
-            or "image not found" in msg  # older macOS dlopen
-        ):
-            raise ImportError(
-                f"{e}\n\n"
-                "The xbbg native extension requires the Bloomberg C++ SDK shared library.\n"
-                "Supported platforms: Linux x64, macOS arm64/x64, Windows x64/x86\n\n"
-                "You can provide the SDK from any of these sources:\n"
-                "  1. blpapi Python package: pip install blpapi --index-url "
-                "https://blpapi.bloomberg.com/repository/releases/python/simple/\n"
-                "  2. Bloomberg Terminal (DAPI) - automatically detected if installed\n"
-                "  3. Bloomberg C++ SDK: set BLPAPI_ROOT environment variable\n"
-                "  4. xbbg.set_sdk_path('/path/to/sdk') - manually set SDK path\n"
-                "  5. xbbg runtime cache: a Bloomberg runtime provisioned into XBBG_CACHE_DIR "
-                "(default: the per-user xbbg cache directory) is used last, after its hash is verified"
-                f"{_cache_rejection_help()}"
-            ) from e
-        raise
     finally:
         _core_import_state.active = False
     _core_module = core

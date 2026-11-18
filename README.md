@@ -120,9 +120,17 @@ Requirements and notes:
 
 - You need an authorized Bloomberg environment: local Terminal/DAPI, SAPI/B-PIPE, or ZFP, depending on your setup.
 - If you build from source, stage the Bloomberg C++ SDK with `bash ./scripts/sdktool.sh` on macOS/Linux or `.\\scripts\\sdktool.ps1` on Windows PowerShell.
-- If you manage the SDK yourself, set `BLPAPI_ROOT` or use `xbbg.set_sdk_path(...)`.
-- On Windows Terminal installs, xbbg automatically probes DAPI runtime roots such as `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` before requiring manual configuration.
-- Last, xbbg uses a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. The Java package's `BlpapiSdk` command fills that cache (see [the Java runtime docs](java-xbbg/README.md#the-bloomberg-runtime)), and one install serves Python, Node and Java. `xbbg.get_sdk_info()` lists it as the `xbbg_cache` source, together with any cached install it skipped and why.
+- xbbg loads the Bloomberg runtime when `xbbg._core` is first imported (the native extension itself links no Bloomberg code), using the first of these that loads. The same search order, written once in Rust, serves the Python, Node, Java and MCP packages:
+  1. `xbbg.set_sdk_path(...)`: a directory holding the runtime library;
+  2. `BLPAPI_LIB_DIR`: that directory, from the environment;
+  3. `BLPAPI_ROOT`: the root of a Bloomberg C++ SDK (`lib`, `Linux`, `Darwin`, `bin` and versioned subdirectories are understood);
+  4. `XBBG_DEV_SDK_ROOT`: an absolute SDK root for development checkouts;
+  5. Bloomberg's `blpapi` Python package, found without importing it;
+  6. Bloomberg Terminal/DAPI: `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` on Windows, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere;
+  7. the operating system's library search path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
+  8. a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. The Java package's `BlpapiSdk` command fills that cache (see [the Java runtime docs](java-xbbg/README.md#the-bloomberg-runtime)), and one install serves Python, Node and Java.
+
+  A candidate that fails to load (for example a runtime older than the one xbbg needs) is skipped and the search goes on; if nothing loads, `import xbbg._core` raises an `ImportError` that lists every place that was refused and why. A process loads one runtime for its lifetime, so `xbbg.set_sdk_path(...)` must run before anything else uses xbbg. `xbbg.get_sdk_info()` lists each source found (`manual`, `sdk_lib_dir`, `sdk_env`, `dev_sdk_root`, `blpapi_python`, `dapi`, `search_path`, `xbbg_cache`), the cached installs it skipped and why, and which one is `active`.
 - Linux wheels are `manylinux_2_28` (x86_64): any distro with glibc ≥ 2.28 works — RHEL/Alma/Rocky 8+, Debian 10+, Ubuntu 20.04+, Amazon Linux 2023.
 - Optional dataframe conversions are installed separately: `xbbg[pyarrow]`, `xbbg[pandas]`, `xbbg[polars]`, or `xbbg[duckdb]`.
 

@@ -31,10 +31,12 @@ chrono-tz = { workspace = true }
 pyo3-arrow = { workspace = true }
 xbbg-arrow = { workspace = true }
 serde_json = { workspace = true }
+serde = { workspace = true }
 xbbg_core = { workspace = true }
 xbbg-async = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-recipes = { workspace = true }
+xbbg-host = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = { workspace = true }
@@ -43,7 +45,7 @@ pyo3-build-config = { workspace = true }
 default = ["live"]
 mimalloc = ["dep:mimalloc"]
 stub-gen = ["dep:pyo3-stub-gen"]
-live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live"]
+live = ["xbbg_core/live", "xbbg-async/live", "xbbg-recipes/live", "xbbg-host/live"]
 test-support = ["xbbg-async/test-support"]
 
 [lints]
