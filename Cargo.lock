@@ -8169,6 +8169,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "xbbg-runtime"
+version = "1.8.1"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.1",
+ "tempfile",
+]
+
+[[package]]
 name = "xbbg-sdk"
 version = "1.8.1"
 dependencies = [
@@ -8187,7 +8198,6 @@ dependencies = [
  "rattler_redaction",
  "rattler_repodata_gateway",
  "reqwest",
- "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.21",
@@ -8200,6 +8210,7 @@ dependencies = [
  "uv-normalize",
  "uv-pep440",
  "uv-platform-tags",
+ "xbbg-runtime",
  "zip",
 ]
 

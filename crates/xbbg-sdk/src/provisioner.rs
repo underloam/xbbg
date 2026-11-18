@@ -16,14 +16,15 @@ use crate::conda::{self, Conda};
 use crate::error::{Error, Result, redact};
 use crate::http::{self, Fetched, Http};
 use crate::install::{
-    self, Layout, Provenance, Provisioned, add_source, commit, existing_install, find_by_archive,
+    self, Layout, Provisioned, add_source, commit, existing_install, find_by_archive,
     find_by_source,
 };
 use crate::options::{Credential, ProvisionOptions};
-use crate::platform::{Platform, VersionSpec};
+use crate::platform::VersionSpec;
 use crate::pypi::{UvIndex, UvSettings};
 use crate::source::{DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, Source, SourceKind};
 use crate::wheel::{self, Extracted};
+use xbbg_runtime::{Platform, Provenance};
 
 /// Downloads older than this in `<cache>/tmp` belong to crashed runs.
 const STALE_TEMPORARIES: Duration = Duration::from_secs(24 * 60 * 60);
@@ -419,7 +420,7 @@ impl Provisioner {
             let (sha256, source) = (candidate.sha256.clone(), label.to_string());
             blocking(move || {
                 let _lock = lock;
-                existing_install(&dir, &sha256, &source)
+                existing_install(&dir, platform, &sha256, &source)
             })
             .await?
         };
@@ -589,7 +590,7 @@ impl Provisioner {
                     let index = conda::read_index(package)?;
                     if matches!(unpack, Unpack::CondaArtifact) {
                         let subdir = index.subdir.clone().unwrap_or_default();
-                        if subdir != platform.conda_subdir().as_str() {
+                        if subdir != conda::subdir(platform).as_str() {
                             return Err(Error::InvalidArgument(format!(
                                 "the package is built for {}, not {} ({platform})",
                                 if subdir.is_empty() {
@@ -597,7 +598,7 @@ impl Provisioner {
                                 } else {
                                     &subdir
                                 },
-                                platform.conda_subdir().as_str()
+                                conda::subdir(platform).as_str()
                             )));
                         }
                     }

@@ -9,6 +9,8 @@ description = "Locate and provision the Bloomberg BLPAPI runtime from PyPI index
 publish = false
 
 [dependencies]
+# The shared cache resolver: platform names, cache layout, provenance and install verification.
+xbbg-runtime = { workspace = true }
 # PyPI simple indexes (PEP 503 HTML and PEP 691 JSON, including Bloomberg's HTML-only index)
 # through uv's registry client; wheel-name, platform-tag and version semantics from uv.
 uv-cache = { workspace = true }
@@ -40,7 +42,6 @@ base64 = { workspace = true }
 csv = { workspace = true }
 hex = { workspace = true }
 zip = { workspace = true, features = ["deflate"] }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 thiserror = { workspace = true }

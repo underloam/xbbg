@@ -55,6 +55,12 @@ pub enum Error {
     Internal(String),
 }
 
+impl From<xbbg_runtime::ParsePlatformError> for Error {
+    fn from(err: xbbg_runtime::ParsePlatformError) -> Self {
+        Self::UnsupportedPlatform(err.name().to_string())
+    }
+}
+
 /// Result alias for this crate.
 pub type Result<T, E = Error> = std::result::Result<T, E>;
 

@@ -129,7 +129,10 @@ pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeSdk_installe
             None
         } else {
             let name = platform.try_to_string(env)?;
-            Some(name.parse::<Platform>().map_err(SdkError::from)?)
+            Some(
+                name.parse::<Platform>()
+                    .map_err(|err| SdkError::from(xbbg_sdk::Error::from(err)))?,
+            )
         };
         let installed = xbbg_sdk::installed(&cache_dir, platform).map_err(SdkError::from)?;
         Ok(JString::new(env, request::results_json(&installed))?)

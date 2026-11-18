@@ -8,6 +8,7 @@ use std::path::{Component, Path, PathBuf};
 use rattler_conda_types::package::{IndexJson, PackageFile, PathsJson};
 use rattler_conda_types::{
     Channel, ChannelConfig as CondaChannelConfig, MatchSpec, ParseMatchSpecOptions, RepoDataRecord,
+    Subdir,
 };
 use rattler_repodata_gateway::fetch::CacheAction;
 use rattler_repodata_gateway::{
@@ -17,8 +18,25 @@ use rattler_repodata_gateway::{
 use crate::error::{Error, Result, chain};
 use crate::http::Http;
 use crate::install::rename;
-use crate::platform::Platform;
 use crate::wheel::{Extracted, safe_relative};
+use xbbg_runtime::Platform;
+
+/// The conda subdir that holds `platform`'s packages.
+pub(crate) fn subdir(platform: Platform) -> Subdir {
+    match platform {
+        Platform::WindowsX86_64 => Subdir::Win64,
+        Platform::LinuxX86_64 => Subdir::Linux64,
+        Platform::MacosAarch64 => Subdir::OsxArm64,
+    }
+}
+
+/// Directories, relative to a conda package root, that hold `platform`'s shared libraries.
+fn library_dirs(platform: Platform) -> &'static [&'static str] {
+    match platform {
+        Platform::WindowsX86_64 => &["Library/bin"],
+        Platform::LinuxX86_64 | Platform::MacosAarch64 => &["lib"],
+    }
+}
 
 /// The gateway and channel-name resolution of one provisioner.
 pub(crate) struct Conda {
@@ -77,7 +95,7 @@ impl Conda {
         })?;
         let output = self
             .gateway
-            .query([channel.clone()], [platform.conda_subdir()], [spec])
+            .query([channel.clone()], [subdir(platform)], [spec])
             .recursive(false)
             .channel_relations(ChannelRelationsMode::Disabled)
             .execute()
@@ -85,7 +103,7 @@ impl Conda {
             .map_err(|err| {
                 Error::Network(format!(
                     "reading {} repodata of {} failed: {}",
-                    platform.conda_subdir().as_str(),
+                    subdir(platform).as_str(),
                     channel.canonical_name(),
                     chain(&err)
                 ))
@@ -106,7 +124,7 @@ impl Conda {
                     "{} has no {package}{} for {}",
                     channel.canonical_name(),
                     version.map(|v| format!(" {v}")).unwrap_or_default(),
-                    platform.conda_subdir().as_str()
+                    subdir(platform).as_str()
                 ))
             })
     }
@@ -141,8 +159,7 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
         .library_names()
         .iter()
         .flat_map(|name| {
-            platform
-                .conda_library_dirs()
+            library_dirs(platform)
                 .iter()
                 .map(move |dir| Path::new(dir).join(name))
         })
@@ -156,7 +173,7 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
             Error::InvalidArtifact(format!(
                 "the package contains no {} library in {}",
                 platform.library_names().join(" or "),
-                platform.conda_library_dirs().join(" or ")
+                library_dirs(platform).join(" or ")
             ))
         })?;
     let source = package.join(&entry.relative_path);

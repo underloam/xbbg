@@ -3,9 +3,10 @@
 use crate::error::{Error, Result};
 use crate::install::Provisioned;
 use crate::options::ProvisionOptions;
-use crate::platform::{Platform, VersionSpec};
+use crate::platform::VersionSpec;
 use crate::provisioner::Resolved;
 use crate::source::Source;
+use xbbg_runtime::Platform;
 
 /// Blocking facade over [`crate::Provisioner`] with its own current-thread runtime.
 ///

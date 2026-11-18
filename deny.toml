@@ -90,7 +90,7 @@ highlight = "all"
 
 deny = [
     # Only the core owns the Bloomberg SDK seam, including test fixtures. Nothing on the
-    # downloader side (xbbg-sdk, jni-xbbg-sdk) may appear in these lists: that keeps
+    # downloader side (xbbg-runtime, xbbg-sdk, jni-xbbg-sdk) may appear in these lists: that keeps
     # xbbg_sdk_jni free of blpapi.
     { name = "xbbg-blpapi-sys", wrappers = ["xbbg_core"] },
     # Internal engine layers may only be imported by their intended dependents.
