@@ -384,10 +384,79 @@ export interface NativeEngineConstructor {
   connectWithConfig(config: EngineConfig): Promise<NativeEngine>;
 }
 
+/** What a candidate runtime was found by. */
+export type SdkSourceKind =
+  | 'explicit'
+  | 'blpapi_lib_dir'
+  | 'blpapi_root'
+  | 'dev_sdk_root'
+  | 'vendored'
+  | 'hint'
+  | 'terminal'
+  | 'search_path'
+  | 'cache';
+
+/** The host's side of the Bloomberg runtime search; every field is optional. */
+export interface SdkLocateRequest {
+  /** A runtime directory or library file that outranks every other rule. */
+  explicit?: string;
+  /** Host-only directories tried after the vendored SDK, in order. */
+  hints?: readonly { label: string; dir: string }[];
+  /** The host's view of the environment; omitted means the operating system's. */
+  env?: Readonly<Record<string, string>>;
+  /** Overrides `XBBG_CACHE_DIR` and the default cache location. */
+  cacheRoot?: string;
+  /** A development checkout: enables `<repo>/vendor/blpapi-sdk/<newest>`. */
+  repoRoot?: string;
+}
+
+/** A runtime the search order found. */
+export interface SdkCandidate {
+  path: string;
+  source: SdkSourceKind;
+  /** The environment variable, hint label, Terminal root or cache install directory. */
+  detail: string;
+  version?: string | null;
+}
+
+/** A candidate that was refused, and why. */
+export interface SdkRejected {
+  path: string;
+  source: SdkSourceKind;
+  detail: string;
+  reason: string;
+}
+
+export interface LocatedSdk {
+  candidates: SdkCandidate[];
+  rejected: SdkRejected[];
+}
+
+/** The runtime loaded into the process. */
+export interface LoadedSdk {
+  path: string;
+  source: SdkSourceKind;
+  detail: string;
+  /** `major.minor.patch.build`. */
+  version: string;
+  /** Candidates tried and refused before this one. */
+  rejected: SdkRejected[];
+}
+
 export interface NativeAddon {
   JsEngine: NativeEngineConstructor;
   setLogLevel: (level: string) => void;
   getLogLevel: () => string;
+
+  // Bloomberg runtime: the shared search order (crates/xbbg-sdk) and the loader.
+  /** Find a runtime and load it into the process; throws with every refusal listed. */
+  loadSdk: (request?: SdkLocateRequest) => LoadedSdk;
+  /** List the candidates the search order finds, without loading anything. */
+  locateSdk: (request?: SdkLocateRequest) => LocatedSdk;
+  /** The runtime this process loaded, or null before one is loaded. */
+  loadedSdk: () => LoadedSdk | null;
+  /** The loaded runtime's `major.minor.patch.build`, or null before one is loaded. */
+  sdkVersion: () => string | null;
 
   // Auction utilities
   extAuctionFieldGroup: (name: string) => string[] | null;

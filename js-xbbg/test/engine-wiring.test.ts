@@ -38,6 +38,14 @@ vi.mock(import('node:module'), async (importOriginal) => {
     extImbalanceSide: () => null,
     getLogLevel: () => 'off',
     setLogLevel: () => undefined,
+    // The runtime search is covered by sdk-load.test.ts; these tests never reach Bloomberg.
+    loadSdk: () => ({
+      path: 'synthetic-runtime',
+      source: 'explicit',
+      detail: 'engine-wiring mock',
+      version: '0.0.0.0',
+      rejected: [],
+    }),
   };
   // The peer accepts file IPC only; real Arrow decoding exposes its received payload.
   const polars = {
@@ -82,7 +90,6 @@ vi.mock(import('../src/native/resolve-native.js'), () => ({
     binaryPath: 'napi_xbbg.node',
     key: 'test',
     packageName: '@xbbg/core-test',
-    runtimeBinaryPath: null,
   }),
 }));
 

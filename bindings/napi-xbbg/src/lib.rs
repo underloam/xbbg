@@ -1,10 +1,12 @@
 mod arrow_zero_copy;
 mod ext;
 mod request;
+mod sdk;
 #[cfg(feature = "test-support")]
 #[doc(hidden)]
 pub mod subscription_fixture;
 pub use ext::*;
+pub use sdk::*;
 use request::pairs_to_map;
 
 use std::collections::{HashMap, VecDeque};

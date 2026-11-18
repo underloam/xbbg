@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-import { resolveVendorSdkRoot } from '../src/runtime-search-path';
 import { run, runNpm } from './npm-process';
 import { nativePackageSpecForKey, platformKey } from './platform-map';
 
@@ -12,9 +11,9 @@ const repoRoot = path.resolve(__dirname, '..', '..');
 const packedMode = process.argv.includes('--packed');
 const bunMode = process.argv.includes('--bun');
 
-// The resolver addon ships in the platform package, loads without Bloomberg, and scans an empty cache.
-const RUNTIME_ADDON_SCRIPT =
-  "const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path'); const pkg = require(`@xbbg/core-${process.platform}-${process.arch}`); if (!fs.existsSync(pkg.runtimeBinaryPath)) throw new Error(`missing runtime resolver addon ${pkg.runtimeBinaryPath}`); const addon = require(pkg.runtimeBinaryPath); const cache = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-smoke-cache-')); const scan = addon.scanCache(cache); fs.rmSync(cache, { recursive: true }); if (scan.runtimes.length !== 0 || scan.rejected.length !== 0) throw new Error('expected an empty cache scan'); console.log('runtime resolver addon ok', typeof addon.preloadLibrary);";
+// Without a loadable runtime the import throws, and the message lists the library it refused.
+const MISSING_RUNTIME_SCRIPT =
+  "let message; try { require('@xbbg/core'); } catch (error) { message = String(error instanceof Error ? error.message : error); } if (message === undefined) throw new Error('expected the import to fail without a Bloomberg runtime'); if (!message.includes(process.env.BLPAPI_LIB_DIR)) throw new Error(`the error does not list the rejected runtime: ${message}`); console.log('missing-runtime error ok');";
 
 const LOAD_PACKAGE_SCRIPT =
   "const resolved = require.resolve('@xbbg/core'); if (!resolved.includes('dist')) throw new Error(`expected packaged dist entrypoint, got ${resolved}`); const core = require('@xbbg/core'); console.log(resolved, typeof core.connect, typeof core.version, core.version());";
@@ -30,6 +29,20 @@ function lastOutputLine(output: string): string {
     .map((line) => line.trim())
     .filter(Boolean);
   return lines.at(-1) ?? '';
+}
+
+function newestVendoredSdkRoot(): string | null {
+  const vendorDir = path.join(repoRoot, 'vendor', 'blpapi-sdk');
+  if (!fs.existsSync(vendorDir)) {
+    return null;
+  }
+  const versions = fs
+    .readdirSync(vendorDir, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && /^\d+(?:\.\d+)*$/u.test(entry.name))
+    .map((entry) => entry.name)
+    .toSorted((left, right) => right.localeCompare(left, 'en', { numeric: true }));
+  const newest = versions[0];
+  return newest === undefined ? null : path.join(vendorDir, newest);
 }
 
 function smokeRuntimeEnv(): NodeJS.ProcessEnv {
@@ -52,7 +65,7 @@ function smokeRuntimeEnv(): NodeJS.ProcessEnv {
     (env.BLPAPI_ROOT === undefined || env.BLPAPI_ROOT.length === 0) &&
     (env.XBBG_DEV_SDK_ROOT === undefined || env.XBBG_DEV_SDK_ROOT.length === 0)
   ) {
-    const sdkRoot = resolveVendorSdkRoot(repoRoot);
+    const sdkRoot = newestVendoredSdkRoot();
     if (sdkRoot !== null) {
       env.BLPAPI_ROOT = sdkRoot;
     }
@@ -60,9 +73,50 @@ function smokeRuntimeEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
+// A packaged install with no usable Bloomberg runtime must fail at import.
+// The error names what was tried: `BLPAPI_LIB_DIR` points at synthetic library files.
+// The locator finds a candidate, fails to open it, and has a rejection to list.
+function smokeMissingRuntime(appDir: string, runtime: string): void {
+  const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'xbbg-no-runtime-'));
+  try {
+    const libDir = path.join(scratch, 'not-a-runtime');
+    const cacheDir = path.join(scratch, 'cache');
+    const homeDir = path.join(scratch, 'home');
+    for (const dir of [libDir, cacheDir, homeDir]) {
+      fs.mkdirSync(dir);
+    }
+    for (const name of [
+      'blpapi3_64.dll',
+      'libblpapi3_64.so',
+      'libblpapi3_64.dylib',
+      'libblpapi3.so',
+      'libblpapi3.dylib',
+    ]) {
+      fs.writeFileSync(path.join(libDir, name), 'not a shared library');
+    }
+    const withheld = new Set([
+      'BLPAPI_ROOT',
+      'XBBG_DEV_SDK_ROOT',
+      'LD_LIBRARY_PATH',
+      'DYLD_LIBRARY_PATH',
+      'DYLD_FALLBACK_LIBRARY_PATH',
+    ]);
+    const env: NodeJS.ProcessEnv = {
+      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !withheld.has(key))),
+      BLPAPI_LIB_DIR: libDir,
+      HOME: homeDir,
+      USERPROFILE: homeDir,
+      XBBG_CACHE_DIR: cacheDir,
+    };
+    run(runtime, ['-e', MISSING_RUNTIME_SCRIPT], { cwd: appDir, env });
+  } finally {
+    fs.rmSync(scratch, { force: true, recursive: true });
+  }
+}
+
 function smokeRequire(appDir: string, runtime: string = process.execPath): void {
   run(runtime, ['-e', LOAD_PACKAGE_SCRIPT], { cwd: appDir, env: smokeRuntimeEnv() });
-  run(runtime, ['-e', RUNTIME_ADDON_SCRIPT], { cwd: appDir, env: process.env });
+  smokeMissingRuntime(appDir, runtime);
 }
 
 function smokeSourceInstall(jsPackageDir: string): void {

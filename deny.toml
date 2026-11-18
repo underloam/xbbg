@@ -111,9 +111,8 @@ deny = [
     # xbbg-host runs the runtime search (`locate`) for every binding and loads the result.
     # xbbg_core, xbbg-async, xbbg-recipes and xbbg-bench use it to load the runtime in tests,
     # examples and benchmarks: dev-dependencies only, except xbbg-bench (never published).
-    # pyo3-xbbg-runtime and napi-xbbg-runtime are the resolver bindings the Python and Node hosts
-    # drop once they call xbbg-host.
-    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk", "pyo3-xbbg-runtime", "napi-xbbg-runtime", "xbbg-host", "xbbg_core", "xbbg-async", "xbbg-recipes", "xbbg-bench"] },
+    # pyo3-xbbg-runtime is the resolver binding the Python host drops once it calls xbbg-host.
+    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk", "pyo3-xbbg-runtime", "xbbg-host", "xbbg_core", "xbbg-async", "xbbg-recipes", "xbbg-bench"] },
     { name = "uv-client", wrappers = ["xbbg-sdk"] },
     { name = "rattler_repodata_gateway", wrappers = ["xbbg-sdk"] },
     # Python frameworks stay in the Python binding or their own ecosystem.

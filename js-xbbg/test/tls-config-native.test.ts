@@ -15,7 +15,7 @@ describe.skipIf(!existsSync(nativePath))('native TLS configuration boundaries', 
 
   beforeAll(async () => {
     // Load the optional addon only after skipIf excludes unavailable installs.
-    // The package also sets Windows' DLL search path.
+    // The package entry also loads the Bloomberg runtime into the process.
     await import('../src/index.js');
     native = createRequire(__filename)(nativePath) as NativeAddon;
   });

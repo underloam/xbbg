@@ -40,9 +40,8 @@ import {
 } from './errors';
 import type { NativeAddon, NativeArrowZeroCopyBatch, NativeEngine } from './napi';
 import { resolveNativeAddon } from './native/resolve-native';
-import { loadRuntimeAddon } from './native/runtime-addon';
+import { loadBloombergRuntime } from './native/sdk-load';
 import { isPlainObject } from './objects';
-import { configureRuntimeSearchPath, loadWithCacheFallback } from './runtime-search-path';
 import {
   createSubscription,
   MKTDATA_SERVICE,
@@ -161,19 +160,22 @@ function isNativeAddon(value: unknown): value is NativeAddon {
     typeof value.extAuctionZeroPriceFields === 'function' &&
     typeof value.extImbalanceSide === 'function' &&
     typeof value.getLogLevel === 'function' &&
-    typeof value.setLogLevel === 'function'
+    typeof value.setLogLevel === 'function' &&
+    typeof value.loadSdk === 'function'
   );
 }
 
 function requireNativeAddon(modulePath: string): NativeAddon {
-  // The xbbg cache is the last rule: it is tried only when the engine addon cannot load without it.
-  const loaded = loadWithCacheFallback((): unknown => nodeRequire(modulePath), {
-    loadRuntimeAddon: () => loadRuntimeAddon(__dirname),
-  });
-  if (isNativeAddon(loaded)) {
-    return loaded;
+  // The engine addon links no Bloomberg library, so it loads on any machine.
+  // The runtime is found and opened right after, by the one search order in Rust.
+  const loaded: unknown = nodeRequire(modulePath);
+  if (!isNativeAddon(loaded)) {
+    throw new TypeError(
+      `Native addon ${modulePath} does not expose the expected @xbbg/core surface`,
+    );
   }
-  throw new TypeError(`Native addon ${modulePath} does not expose the expected @xbbg/core surface`);
+  loadBloombergRuntime(loaded, { repoRoot: path.resolve(__dirname, '..', '..') });
+  return loaded;
 }
 
 function isBdhOptionsInput(value: DateLike | BdhOptions | undefined): value is BdhOptions {
@@ -187,8 +189,6 @@ function isBdibOptionsInput(
 }
 
 const packageJson = parsePackageJsonShape(nodeRequire('../package.json'));
-
-configureRuntimeSearchPath();
 
 function loadNative(): NativeAddon {
   const root = path.resolve(__dirname, '..', '..');

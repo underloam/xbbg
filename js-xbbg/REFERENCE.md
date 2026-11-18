@@ -12,13 +12,30 @@ Detailed behavior, options, and examples for `@xbbg/core`. Start with the [READM
 
 If no packaged addon is available for your platform, build from source locally instead.
 
-On Windows, `@xbbg/core` prepends the first detected Bloomberg runtime DLL directory before loading the native addon. Explicit `BLPAPI_LIB_DIR` / `BLPAPI_ROOT` values win; otherwise it probes local SDK roots plus standard Terminal DAPI installs including `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI`.
+The engine addon links no Bloomberg library, so it loads on any machine. Right after it loads, `@xbbg/core` finds Bloomberg's runtime library and opens it by absolute path; every Bloomberg call needs it. The search is the Rust crate `xbbg-sdk`'s, the same one the Python, Java and MCP packages use, tried in this order (the first library that opens wins):
 
-### The xbbg cache (last rule)
+1. `BLPAPI_LIB_DIR`: a directory holding the library.
+2. `BLPAPI_ROOT`: an SDK root; the library is looked for in the SDK's own layouts (`lib`, `Linux`, `Darwin`, `bin`, and versioned subdirectories).
+3. `XBBG_DEV_SDK_ROOT`: the same layouts; a relative value is resolved against the repository checkout (development only).
+4. `vendor/blpapi-sdk/<newest>` inside the repository checkout (development only; a package installed from npm has none).
+5. The Bloomberg Terminal folders: `C:\blp\DAPI` and the other standard Windows locations, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere.
+6. The operating system's library search variables: `PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS.
+7. The xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. Only installs whose library matches the SHA-256 in their `provenance.json` are loaded.
 
-If the engine addon cannot load because no other rule produced a Bloomberg runtime, `@xbbg/core` consults the xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. A small resolver addon, `napi_xbbg_runtime.node` (shipped beside the engine addon, never linked to Bloomberg), picks the best install whose library matches the SHA-256 in its `provenance.json`, loads that library into the process (`dlopen` with `RTLD_NOW | RTLD_GLOBAL` on Linux and macOS, `LoadLibraryExW` with the full path on Windows, where its directory is also prepended to `PATH`), and then loads the engine addon again. Installs that fail verification are never loaded; when only such installs exist, the load error says so: `cached Bloomberg runtime <dir> rejected: <reason>`. A package without the resolver addon skips this rule.
+The environment variables are read from `process.env` when the module is imported and handed to the search, so a value your own code assigned before the first `import` of `@xbbg/core` takes effect under Node, Bun and worker threads alike. The runtime is loaded once per process; assignments made after that do not move it.
 
-The resolver addon is the cache-reading half of the Rust crate `xbbg-sdk` (its default build: no networking and no downloader, under 2 MiB, about 0.4 MB on macOS). `@xbbg/core` does not provision a runtime. Fill the cache once with the Java package's command-line provisioner (`java -cp xbbg-<version>.jar io.github.underloam.xbbg.sdk.BlpapiSdk --source <spec>`, see the Java README), and the addon finds it.
+A candidate that does not open (not a library, too old for the functions this package calls) is skipped and the search goes on, so one stale `BLPAPI_ROOT` does not hide a good Terminal install. When nothing opens, importing `@xbbg/core` throws one error that lists every place that was refused, in order, with the reason:
+
+```text
+@xbbg/core could not load the Bloomberg runtime.
+no Bloomberg runtime library could be found or loaded:
+  <source> (<detail>): <path>: <reason>
+Set BLPAPI_LIB_DIR to the folder that holds Bloomberg's blpapi runtime (BLPAPI_ROOT also works).
+```
+
+`@xbbg/core` does not provision a runtime. Fill the cache once with the Java package's command-line provisioner (`java -cp xbbg-<version>.jar io.github.underloam.xbbg.sdk.BlpapiSdk --source <spec>`, see the Java README), and the search finds it.
+
+Compared with earlier releases, the search is the same on every platform: the Terminal folders, the library search variables and the cache are tried on Linux and macOS as well as Windows, and `@xbbg/core` no longer prepends a directory to `PATH`. The cache is simply the last rule, not a retry after a failed addon load.
 
 ## Local Development
 
