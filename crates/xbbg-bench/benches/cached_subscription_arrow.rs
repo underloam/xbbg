@@ -93,6 +93,7 @@ struct ReplayResult {
     drain_on_cancel: bool,
 }
 fn main() {
+    xbbg_bench::load_sdk();
     let config = BenchConfig::from_env();
 
     println!("xbbg cached subscription -> Arrow benchmark");

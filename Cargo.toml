@@ -147,8 +147,11 @@ pyo3-async-runtimes = "0.29"
 pyo3-stub-gen = { version = "0.23", default-features = false }
 jni = "0.22.4"
 
-# ── Native library loading (bindings/napi-xbbg-runtime) ───────────────────────
+# ── Native library loading ────────────────────────────────────────────────────
+# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core;
+# libc and windows-sys serve bindings/napi-xbbg-runtime.
 libc = "0.2"
+libloading = "0.9"
 windows-sys = { version = "0.61", default-features = false }
 
 # ── Bloomberg SDK provisioning (crates/xbbg-sdk) ──────────────────────────────
@@ -189,6 +192,8 @@ async-channel = "2.5"
 crossbeam-queue = "0.3.14"
 simd-json = "0.18"
 tempfile = "3.27"
+# Loads the Bloomberg runtime before main in test binaries (see xbbg_core::load_from_env).
+ctor = "1.0.13"
 
 # =============================================================================
 # Performance-first Release Profile

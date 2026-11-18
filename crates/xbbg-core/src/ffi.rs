@@ -1,6 +1,11 @@
-//! FFI bindings to Bloomberg BLPAPI
+//! FFI types for Bloomberg BLPAPI
 //!
-//! Re-exports from xbbg-blpapi-sys plus local type definitions.
+//! Re-exports the opaque types and constants from xbbg-blpapi-sys, plus the datetime types defined
+//! locally. There are no function re-exports: the runtime is loaded by path, and every BLPAPI call
+//! is `sdk().blpapi_…(…)` on the function table ([`Blpapi`]) that [`crate::sdk`] returns.
+
+// --- The function table ---
+pub use blpapi_sys::Blpapi;
 
 // --- Opaque types ---
 pub use blpapi_sys::{
@@ -17,119 +22,14 @@ pub use blpapi_sys::{
     blpapi_Datetime_t as SdkDatetime, blpapi_HighPrecisionDatetime_t as SdkHighPrecisionDatetime,
 };
 
-// --- Auth functions ---
-pub use blpapi_sys::{
-    blpapi_AuthApplication_create, blpapi_AuthApplication_destroy,
-    blpapi_AuthOptions_create_default, blpapi_AuthOptions_create_forAppMode,
-    blpapi_AuthOptions_create_forToken, blpapi_AuthOptions_create_forUserAndAppMode,
-    blpapi_AuthOptions_create_forUserMode, blpapi_AuthOptions_destroy, blpapi_AuthToken_create,
-    blpapi_AuthToken_destroy, blpapi_AuthUser_createWithActiveDirectoryProperty,
-    blpapi_AuthUser_createWithLogonName, blpapi_AuthUser_createWithManualOptions,
-    blpapi_AuthUser_destroy,
-};
-
 // --- Schema opaque types ---
 pub use blpapi_sys::{
     blpapi_Constant_t, blpapi_ConstantList_t, blpapi_Operation_t, blpapi_SchemaElementDefinition_t,
     blpapi_SchemaTypeDefinition_t,
 };
 
-// --- Name functions ---
-pub use blpapi_sys::{
-    blpapi_Name_create, blpapi_Name_destroy, blpapi_Name_duplicate, blpapi_Name_findName,
-    blpapi_Name_string,
-};
-
-// --- Element functions ---
-pub use blpapi_sys::{
-    blpapi_Element_datatype, blpapi_Element_getElement, blpapi_Element_getElementAt,
-    blpapi_Element_getValueAsBool, blpapi_Element_getValueAsBytes, blpapi_Element_getValueAsChar,
-    blpapi_Element_getValueAsElement, blpapi_Element_getValueAsFloat64,
-    blpapi_Element_getValueAsInt32, blpapi_Element_getValueAsInt64,
-    blpapi_Element_getValueAsString, blpapi_Element_isArray, blpapi_Element_isNull,
-    blpapi_Element_name, blpapi_Element_numElements, blpapi_Element_numValues,
-};
-
-// --- Element setters ---
-pub use blpapi_sys::{
-    BLPAPI_ELEMENT_INDEX_END, blpapi_Element_appendElement, blpapi_Element_setElementFloat64,
-    blpapi_Element_setElementInt32, blpapi_Element_setElementString,
-    blpapi_Element_setValueFloat64, blpapi_Element_setValueInt32, blpapi_Element_setValueInt64,
-    blpapi_Element_setValueString,
-};
-
-// --- Message functions ---
-pub use blpapi_sys::{
-    blpapi_Message_correlationId, blpapi_Message_elements, blpapi_Message_messageType,
-    blpapi_Message_numCorrelationIds, blpapi_Message_typeString,
-};
-
-// --- Event functions ---
-pub use blpapi_sys::{
-    blpapi_Event_eventType, blpapi_Event_release, blpapi_MessageIterator_create,
-    blpapi_MessageIterator_destroy, blpapi_MessageIterator_next,
-};
-
-// --- Session functions ---
-pub use blpapi_sys::{
-    blpapi_Session_cancel, blpapi_Session_create, blpapi_Session_createIdentity,
-    blpapi_Session_destroy, blpapi_Session_generateToken, blpapi_Session_getService,
-    blpapi_Session_nextEvent, blpapi_Session_openService, blpapi_Session_openServiceAsync,
-    blpapi_Session_resubscribe, blpapi_Session_sendAuthorizationRequest,
-    blpapi_Session_sendRequest, blpapi_Session_start, blpapi_Session_stop,
-    blpapi_Session_stopAsync, blpapi_Session_subscribe, blpapi_Session_tryNextEvent,
-    blpapi_Session_unsubscribe,
-};
-
-// --- Service functions ---
-pub use blpapi_sys::{blpapi_Service_createRequest, blpapi_Service_name};
-
-// --- Service schema introspection ---
-pub use blpapi_sys::{
-    blpapi_Service_description, blpapi_Service_getOperationAt, blpapi_Service_numOperations,
-};
-
-// --- Operation functions ---
-pub use blpapi_sys::{
-    blpapi_Operation_description, blpapi_Operation_name, blpapi_Operation_numResponseDefinitions,
-    blpapi_Operation_requestDefinition, blpapi_Operation_responseDefinition,
-};
-
-// --- SchemaElementDefinition functions ---
-pub use blpapi_sys::{
-    blpapi_SchemaElementDefinition_description, blpapi_SchemaElementDefinition_maxValues,
-    blpapi_SchemaElementDefinition_minValues, blpapi_SchemaElementDefinition_name,
-    blpapi_SchemaElementDefinition_type,
-};
-
-pub use blpapi_sys::blpapi_SchemaElementDefinition_status;
-
-// --- SchemaTypeDefinition functions ---
-pub use blpapi_sys::{
-    blpapi_SchemaTypeDefinition_datatype, blpapi_SchemaTypeDefinition_description,
-    blpapi_SchemaTypeDefinition_enumeration, blpapi_SchemaTypeDefinition_getElementDefinitionAt,
-    blpapi_SchemaTypeDefinition_isComplexType, blpapi_SchemaTypeDefinition_isEnumerationType,
-    blpapi_SchemaTypeDefinition_isSimpleType, blpapi_SchemaTypeDefinition_name,
-    blpapi_SchemaTypeDefinition_numElementDefinitions,
-};
-
-pub use blpapi_sys::blpapi_SchemaTypeDefinition_status;
-
-// --- ConstantList/Constant functions ---
-pub use blpapi_sys::{
-    blpapi_Constant_description, blpapi_Constant_name, blpapi_ConstantList_getConstantAt,
-    blpapi_ConstantList_numConstants,
-};
-
-// --- Request functions ---
-pub use blpapi_sys::{
-    blpapi_Request_destroy, blpapi_Request_elements, blpapi_Request_getRequestId,
-};
-
-// --- SubscriptionList functions ---
-pub use blpapi_sys::{
-    blpapi_SubscriptionList_add, blpapi_SubscriptionList_create, blpapi_SubscriptionList_destroy,
-};
+// --- Element setter constants ---
+pub use blpapi_sys::BLPAPI_ELEMENT_INDEX_END;
 
 // --- CorrelationId constants ---
 pub use blpapi_sys::{
@@ -137,53 +37,13 @@ pub use blpapi_sys::{
     BLPAPI_CORRELATION_TYPE_UNSET,
 };
 
-// --- SessionOptions functions ---
-pub use blpapi_sys::{
-    blpapi_SessionOptions_create, blpapi_SessionOptions_destroy,
-    blpapi_SessionOptions_maxEventQueueSize, blpapi_SessionOptions_setAuthenticationOptions,
-    blpapi_SessionOptions_setAutoRestartOnDisconnection,
-    blpapi_SessionOptions_setBandwidthSaveModeDisabled, blpapi_SessionOptions_setConnectTimeout,
-    blpapi_SessionOptions_setDefaultKeepAliveInactivityTime,
-    blpapi_SessionOptions_setDefaultKeepAliveResponseTimeout,
-    blpapi_SessionOptions_setDefaultSubscriptionService,
-    blpapi_SessionOptions_setDefaultTopicPrefix,
-    blpapi_SessionOptions_setFlushPublishedEventsTimeout,
-    blpapi_SessionOptions_setKeepAliveEnabled, blpapi_SessionOptions_setMaxEventQueueSize,
-    blpapi_SessionOptions_setNumStartAttempts,
-    blpapi_SessionOptions_setRecordSubscriptionDataReceiveTimes,
-    blpapi_SessionOptions_setServerAddress, blpapi_SessionOptions_setServerHost,
-    blpapi_SessionOptions_setServerPort, blpapi_SessionOptions_setServiceCheckTimeout,
-    blpapi_SessionOptions_setServiceDownloadTimeout,
-    blpapi_SessionOptions_setSessionIdentityOptions,
-    blpapi_SessionOptions_setSlowConsumerWarningHiWaterMark,
-    blpapi_SessionOptions_setSlowConsumerWarningLoWaterMark, blpapi_SessionOptions_setTlsOptions,
-};
-
-// --- TlsOptions functions ---
-pub use blpapi_sys::{
-    blpapi_TlsOptions_createFromBlobs, blpapi_TlsOptions_createFromFiles,
-    blpapi_TlsOptions_destroy, blpapi_TlsOptions_setCrlFetchTimeoutMs,
-    blpapi_TlsOptions_setTlsHandshakeTimeoutMs,
-};
-
 // --- Socks5Config type ---
 pub use blpapi_sys::blpapi_Socks5Config_t;
 
-// --- Socks5Config functions ---
-pub use blpapi_sys::{blpapi_Socks5Config_create, blpapi_Socks5Config_destroy};
+// --- Identity types ---
+pub use blpapi_sys::blpapi_AbstractSession_t;
 
-// --- SessionOptions proxy function ---
-pub use blpapi_sys::blpapi_SessionOptions_setServerAddressWithProxy;
-
-// --- Identity functions ---
-pub use blpapi_sys::{
-    blpapi_AbstractSession_generateAuthorizedIdentityAsync,
-    blpapi_AbstractSession_getAuthorizedIdentity, blpapi_AbstractSession_t,
-    blpapi_Identity_getSeatType, blpapi_Identity_hasEntitlements, blpapi_Identity_isAuthorized,
-    blpapi_Identity_release, blpapi_Session_getAbstractSession,
-};
-
-// --- Logging functions ---
+// --- Logging types ---
 pub use blpapi_sys::{
     blpapi_Datetime_tag as blpapi_Logging_Datetime_t, blpapi_Logging_Func_t,
     blpapi_Logging_Severity_t, blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_DEBUG,
@@ -192,12 +52,8 @@ pub use blpapi_sys::{
     blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_INFO,
     blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_OFF,
     blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_TRACE,
-    blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_WARN, blpapi_Logging_logTestMessage,
-    blpapi_Logging_registerCallback,
+    blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_WARN,
 };
-
-// --- ZfpUtil functions ---
-pub use blpapi_sys::blpapi_ZfpUtil_getOptionsForLeasedLines;
 
 // --- HighPrecisionDatetime (defined locally for layout control) ---
 
@@ -283,49 +139,78 @@ pub struct blpapi_TimePoint_t {
     pub d_value: i64,
 }
 
-// Declare datetime + timepoint FFI using our local types (not blpapi-sys's)
-unsafe extern "C" {
-    pub fn blpapi_Element_getValueAsHighPrecisionDatetime(
-        element: *mut blpapi_Element_t,
-        buffer: *mut blpapi_HighPrecisionDatetime_t,
-        index: usize,
-    ) -> i32;
+// --- The local datetime types against the SDK's ---
+//
+// `blpapi_Element_getValueAsHighPrecisionDatetime`, `blpapi_Element_setElementDatetime`,
+// `blpapi_Message_timeReceived` and `blpapi_HighPrecisionDatetime_fromTimePoint` take the SDK's
+// own `blpapi_HighPrecisionDatetime_t`, `blpapi_Datetime_t` and `blpapi_TimePoint_t`, which
+// `blpapi-sys` generates with different Rust field names (`milliSeconds`, a nested `datetime`).
+// The call sites hand them pointers to the local types above instead, cast with `.cast()`. That is
+// sound exactly when both sides are the same C layout, which this block proves at compile time:
+// equal size, equal alignment and every field at the same offset.
+const _: () = {
+    use std::mem::{align_of, offset_of, size_of};
 
-    pub fn blpapi_Element_setElementDatetime(
-        element: *mut blpapi_Element_t,
-        name_string: *const std::os::raw::c_char,
-        name: *const blpapi_Name_t,
-        value: *const blpapi_Datetime_t,
-    ) -> i32;
+    type SdkDatetime = blpapi_sys::blpapi_Datetime_t;
+    type SdkHighPrecisionDatetime = blpapi_sys::blpapi_HighPrecisionDatetime_t;
+    type SdkTimePoint = blpapi_sys::blpapi_TimePoint_t;
 
-    pub fn blpapi_Element_setValueDatetime(
-        element: *mut blpapi_Element_t,
-        value: *const blpapi_Datetime_t,
-        index: usize,
-    ) -> i32;
+    assert!(size_of::<blpapi_Datetime_t>() == size_of::<SdkDatetime>());
+    assert!(align_of::<blpapi_Datetime_t>() == align_of::<SdkDatetime>());
+    assert!(offset_of!(blpapi_Datetime_t, parts) == offset_of!(SdkDatetime, parts));
+    assert!(offset_of!(blpapi_Datetime_t, hours) == offset_of!(SdkDatetime, hours));
+    assert!(offset_of!(blpapi_Datetime_t, minutes) == offset_of!(SdkDatetime, minutes));
+    assert!(offset_of!(blpapi_Datetime_t, seconds) == offset_of!(SdkDatetime, seconds));
+    assert!(offset_of!(blpapi_Datetime_t, milliseconds) == offset_of!(SdkDatetime, milliSeconds));
+    assert!(offset_of!(blpapi_Datetime_t, month) == offset_of!(SdkDatetime, month));
+    assert!(offset_of!(blpapi_Datetime_t, day) == offset_of!(SdkDatetime, day));
+    assert!(offset_of!(blpapi_Datetime_t, year) == offset_of!(SdkDatetime, year));
+    assert!(offset_of!(blpapi_Datetime_t, offset) == offset_of!(SdkDatetime, offset));
 
-    /// Get the time this message was received by the SDK.
-    ///
-    /// Returns 0 on success. Fails if receive-time recording was not enabled
-    /// via `blpapi_SessionOptions_setRecordSubscriptionDataReceiveTimes`.
-    pub fn blpapi_Message_timeReceived(
-        message: *const blpapi_Message_t,
-        timeReceived: *mut blpapi_TimePoint_t,
-    ) -> i32;
-
-    /// Convert a TimePoint to a HighPrecisionDatetime.
-    ///
-    /// `offset` is the timezone offset in minutes from UTC (0 = UTC).
-    pub fn blpapi_HighPrecisionDatetime_fromTimePoint(
-        datetime: *mut blpapi_HighPrecisionDatetime_t,
-        timePoint: *const blpapi_TimePoint_t,
-        offset: i16,
-    ) -> i32;
-
-    pub fn blpapi_getVersionInfo(
-        majorVersion: *mut i32,
-        minorVersion: *mut i32,
-        patchVersion: *mut i32,
-        buildVersion: *mut i32,
+    assert!(size_of::<blpapi_HighPrecisionDatetime_t>() == size_of::<SdkHighPrecisionDatetime>());
+    assert!(align_of::<blpapi_HighPrecisionDatetime_t>() == align_of::<SdkHighPrecisionDatetime>());
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, parts)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.parts)
     );
-}
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, hours)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.hours)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, minutes)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.minutes)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, seconds)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.seconds)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, milliseconds)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.milliSeconds)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, month)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.month)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, day)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.day)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, year)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.year)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, offset)
+            == offset_of!(SdkHighPrecisionDatetime, datetime.offset)
+    );
+    assert!(
+        offset_of!(blpapi_HighPrecisionDatetime_t, picoseconds)
+            == offset_of!(SdkHighPrecisionDatetime, picoseconds)
+    );
+
+    assert!(size_of::<blpapi_TimePoint_t>() == size_of::<SdkTimePoint>());
+    assert!(align_of::<blpapi_TimePoint_t>() == align_of::<SdkTimePoint>());
+    assert!(offset_of!(blpapi_TimePoint_t, d_value) == offset_of!(SdkTimePoint, d_value));
+};

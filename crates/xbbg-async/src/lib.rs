@@ -32,6 +32,10 @@ pub use engine::testing;
 // Engine::check_entitlements.
 pub use xbbg_core::{EntitlementCheck, SeatType};
 
+// Runtime loading: `Engine::start` fails with `BlpAsyncError::SdkNotLoaded` until `load` has
+// loaded the Bloomberg runtime.
+pub use xbbg_core::{SdkLoadError, load, loaded_sdk_path};
+
 // Request building and validation
 pub use request_builder::{RequestBuilder, RoutedParams};
 
@@ -40,3 +44,16 @@ pub use schema::{ElementInfo, OperationSchema, SchemaCache, ServiceSchema};
 
 #[cfg(test)]
 mod tests;
+
+// The unit tests drive BLPAPI directly (SDK-built fixtures), so they need the runtime loaded
+// before the first one runs.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn load_sdk_for_tests() {
+    let path = xbbg_sdk::Platform::host()
+        .and_then(xbbg_sdk::locate::from_env)
+        .expect("unit tests need a Bloomberg runtime: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
+    if let Err(error) = xbbg_core::load(path) {
+        panic!("unit tests need a Bloomberg runtime: {error}");
+    }
+}

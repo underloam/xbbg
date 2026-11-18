@@ -18,6 +18,16 @@ use arrow_schema::{DataType, TimeUnit};
 use xbbg_async::engine::{Engine, EngineConfig, ServerAddr, Transport};
 use xbbg_recipes::{recipe_auction_snapshot, recipe_resolve_venues};
 
+#[ctor::ctor(unsafe)]
+fn load_sdk() {
+    xbbg_async::load(
+        xbbg_sdk::Platform::host()
+            .and_then(xbbg_sdk::locate::from_env)
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("tests need a Bloomberg runtime");
+}
+
 fn create_engine() -> Engine {
     let host = std::env::var("BLP_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port: u16 = std::env::var("BLP_PORT")

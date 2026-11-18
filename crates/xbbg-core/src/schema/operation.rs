@@ -6,6 +6,7 @@ use std::rc::Rc;
 
 use crate::errors::{BlpError, Result};
 use crate::ffi;
+use crate::sdk;
 
 use super::element_def::SchemaElementDefinition;
 
@@ -41,7 +42,7 @@ impl<'service> Operation<'service> {
     /// Get the operation name (e.g., "ReferenceDataRequest").
     pub fn name(&self) -> &str {
         unsafe {
-            let name_ptr = ffi::blpapi_Operation_name(self.ptr);
+            let name_ptr = sdk().blpapi_Operation_name(self.ptr);
             if name_ptr.is_null() {
                 return "";
             }
@@ -52,7 +53,7 @@ impl<'service> Operation<'service> {
     /// Get a human-readable description of this operation.
     pub fn description(&self) -> &str {
         unsafe {
-            let desc_ptr = ffi::blpapi_Operation_description(self.ptr);
+            let desc_ptr = sdk().blpapi_Operation_description(self.ptr);
             if desc_ptr.is_null() {
                 return "";
             }
@@ -63,7 +64,7 @@ impl<'service> Operation<'service> {
     /// Get the schema definition for the request.
     pub fn request_definition(&self) -> Result<SchemaElementDefinition<'service>> {
         let mut def_ptr: *mut ffi::blpapi_SchemaElementDefinition_t = std::ptr::null_mut();
-        let rc = unsafe { ffi::blpapi_Operation_requestDefinition(self.ptr, &mut def_ptr) };
+        let rc = unsafe { sdk().blpapi_Operation_requestDefinition(self.ptr, &mut def_ptr) };
 
         if rc != 0 || def_ptr.is_null() {
             return Err(BlpError::Internal {
@@ -78,14 +79,15 @@ impl<'service> Operation<'service> {
 
     /// Get the number of response type definitions.
     pub fn num_response_definitions(&self) -> usize {
-        let count = unsafe { ffi::blpapi_Operation_numResponseDefinitions(self.ptr) };
+        let count = unsafe { sdk().blpapi_Operation_numResponseDefinitions(self.ptr) };
         count.max(0) as usize
     }
 
     /// Get a response definition by index.
     pub fn response_definition(&self, index: usize) -> Result<SchemaElementDefinition<'service>> {
         let mut def_ptr: *mut ffi::blpapi_SchemaElementDefinition_t = std::ptr::null_mut();
-        let rc = unsafe { ffi::blpapi_Operation_responseDefinition(self.ptr, &mut def_ptr, index) };
+        let rc =
+            unsafe { sdk().blpapi_Operation_responseDefinition(self.ptr, &mut def_ptr, index) };
 
         if rc != 0 || def_ptr.is_null() {
             return Err(BlpError::Internal {

@@ -255,6 +255,7 @@ fn print_results(config: &BenchConfig, results: &[IterationResult]) {
 }
 
 fn main() {
+    xbbg_bench::load_sdk();
     let config = BenchConfig {
         rows: parse_env_usize("SUB_REPLAY_ROWS", DEFAULT_ROWS),
         flush_threshold: parse_env_usize("SUB_REPLAY_FLUSH", DEFAULT_FLUSH),

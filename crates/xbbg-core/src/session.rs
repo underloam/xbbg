@@ -10,6 +10,7 @@ use crate::event::Event;
 use crate::identity::Identity;
 use crate::message::Message;
 use crate::request::Request;
+use crate::sdk;
 use crate::service::Service;
 use crate::session_operations::SessionOperations;
 use crate::subscription::SubscriptionList;
@@ -106,7 +107,7 @@ impl Session {
         // - options.as_raw() is guaranteed valid by SessionOptions
         // - handler, dispatcher, and eventQueue are None/null (synchronous mode)
         let ptr = unsafe {
-            crate::ffi::blpapi_Session_create(
+            sdk().blpapi_Session_create(
                 options.as_raw(),
                 None,                 // handler (None = synchronous mode)
                 std::ptr::null_mut(), // dispatcher
@@ -136,7 +137,7 @@ impl Session {
     /// Ok(()) on success, Err on failure
     pub fn start(&self) -> Result<()> {
         // SAFETY: We're calling the Bloomberg API with a valid pointer
-        let rc = unsafe { crate::ffi::blpapi_Session_start(self.ptr) };
+        let rc = unsafe { sdk().blpapi_Session_start(self.ptr) };
 
         if rc != 0 {
             return Err(BlpError::SessionStart {
@@ -214,7 +215,7 @@ impl Session {
     pub fn stop(&self) {
         // SAFETY: We're calling the Bloomberg API with a valid pointer
         unsafe {
-            crate::ffi::blpapi_Session_stop(self.ptr);
+            sdk().blpapi_Session_stop(self.ptr);
         }
     }
 
@@ -235,7 +236,7 @@ impl Session {
 
         // SAFETY: We're calling the Bloomberg API with valid pointers
         let rc = unsafe {
-            crate::ffi::blpapi_Session_nextEvent(self.ptr, &mut event_ptr, timeout_ms.unwrap_or(0))
+            sdk().blpapi_Session_nextEvent(self.ptr, &mut event_ptr, timeout_ms.unwrap_or(0))
         };
 
         if rc != 0 {
@@ -264,7 +265,7 @@ impl Session {
         let mut event_ptr: *mut crate::ffi::blpapi_Event_t = std::ptr::null_mut();
 
         // SAFETY: We're calling the Bloomberg API with valid pointers
-        let rc = unsafe { crate::ffi::blpapi_Session_tryNextEvent(self.ptr, &mut event_ptr) };
+        let rc = unsafe { sdk().blpapi_Session_tryNextEvent(self.ptr, &mut event_ptr) };
 
         if rc == 0 && !event_ptr.is_null() {
             // SAFETY: event_ptr is guaranteed non-null and valid from blpapi_Session_tryNextEvent
@@ -448,8 +449,8 @@ impl Drop for Session {
             // SAFETY: We're calling the Bloomberg API to clean up the session
             // First stop the session, then destroy it
             unsafe {
-                crate::ffi::blpapi_Session_stop(self.ptr);
-                crate::ffi::blpapi_Session_destroy(self.ptr);
+                sdk().blpapi_Session_stop(self.ptr);
+                sdk().blpapi_Session_destroy(self.ptr);
             }
             self.ptr = std::ptr::null_mut();
         }

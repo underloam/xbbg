@@ -2,6 +2,7 @@ use std::ffi::CString;
 
 use crate::errors::{BlpError, Result};
 use crate::ffi;
+use crate::sdk;
 
 /// Safe wrapper around `blpapi_Socks5Config_t`.
 pub struct Socks5Config {
@@ -14,7 +15,7 @@ impl Socks5Config {
             detail: format!("invalid socks5 hostname: {e}"),
         })?;
         let ptr =
-            unsafe { ffi::blpapi_Socks5Config_create(cs.as_ptr(), cs.as_bytes().len(), port) };
+            unsafe { sdk().blpapi_Socks5Config_create(cs.as_ptr(), cs.as_bytes().len(), port) };
         if ptr.is_null() {
             return Err(BlpError::Internal {
                 detail: "blpapi_Socks5Config_create returned null".into(),
@@ -31,7 +32,7 @@ impl Socks5Config {
 impl Drop for Socks5Config {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { ffi::blpapi_Socks5Config_destroy(self.ptr) };
+            unsafe { sdk().blpapi_Socks5Config_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }

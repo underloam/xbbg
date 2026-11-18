@@ -2721,8 +2721,7 @@ fn enable_sdk_logging(level: &str) -> PyResult<()> {
     let lvl: xbbg_async::sdk_logging::SdkLogLevel = level
         .parse()
         .map_err(|e: String| pyo3::exceptions::PyValueError::new_err(e))?;
-    xbbg_async::sdk_logging::register_sdk_logging(lvl);
-    Ok(())
+    xbbg_async::sdk_logging::register_sdk_logging(lvl).map_err(blp_async_error_to_pyerr)
 }
 
 #[cfg(feature = "stub-gen")]

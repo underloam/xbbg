@@ -6,7 +6,7 @@
 //! **Zero allocation**: Messages are borrowed from the event's message
 //! iterator and provide zero-cost access to their contents.
 
-use crate::{CorrelationId, Element, Name, ffi};
+use crate::{CorrelationId, Element, Name, ffi, sdk};
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
@@ -67,7 +67,7 @@ impl<'a> Message<'a> {
         // The Element borrows from this Message, so lifetime 'a is correct.
         // Bloomberg guarantees the element pointer is valid for the message's lifetime.
         // Element::new is safe to call with a valid pointer.
-        let ptr = unsafe { ffi::blpapi_Message_elements(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Message_elements(self.ptr) };
         Element::new(ptr)
     }
 
@@ -95,9 +95,9 @@ impl<'a> Message<'a> {
         // SAFETY: blpapi_Message_messageType returns a valid Name pointer.
         // We duplicate it to get an owned Name that we can return.
         // The duplicate increments Bloomberg's internal refcount.
-        let ptr = unsafe { ffi::blpapi_Message_messageType(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Message_messageType(self.ptr) };
         // SAFETY: blpapi_Name_duplicate returns a valid pointer
-        unsafe { Name::from_raw(NonNull::new(ffi::blpapi_Name_duplicate(ptr)).unwrap()) }
+        unsafe { Name::from_raw(NonNull::new(sdk().blpapi_Name_duplicate(ptr)).unwrap()) }
     }
 
     /// Message type as a borrowed string — no `Name` duplication, no refcount.
@@ -112,7 +112,7 @@ impl<'a> Message<'a> {
     pub fn type_str(&self) -> &'a str {
         // SAFETY: blpapi_Message_typeString returns a valid null-terminated
         // C string owned by the message, valid for the message lifetime 'a.
-        let ptr = unsafe { ffi::blpapi_Message_typeString(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Message_typeString(self.ptr) };
         unsafe { std::ffi::CStr::from_ptr(ptr) }
             .to_str()
             .expect("Bloomberg message type contained invalid UTF-8")
@@ -126,7 +126,7 @@ impl<'a> Message<'a> {
     #[inline(always)]
     pub fn name_key(&self) -> usize {
         // SAFETY: blpapi_Message_messageType returns a valid interned Name pointer.
-        unsafe { ffi::blpapi_Message_messageType(self.ptr) as usize }
+        unsafe { sdk().blpapi_Message_messageType(self.ptr) as usize }
     }
 
     /// Check if the message type matches a pre-interned `Name`
@@ -134,7 +134,7 @@ impl<'a> Message<'a> {
     #[inline(always)]
     pub fn name_eq(&self, other: &Name) -> bool {
         // SAFETY: blpapi_Message_messageType returns a valid interned Name pointer.
-        let ptr = unsafe { ffi::blpapi_Message_messageType(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Message_messageType(self.ptr) };
         ptr == other.as_ptr()
     }
 
@@ -148,17 +148,29 @@ impl<'a> Message<'a> {
     #[inline]
     pub fn time_received_us(&self) -> Option<i64> {
         let mut tp = MaybeUninit::<ffi::blpapi_TimePoint_t>::uninit();
-        // SAFETY: self.ptr is valid for the lifetime 'a. timeReceived writes to tp on success.
-        let rc = unsafe { ffi::blpapi_Message_timeReceived(self.ptr as *const _, tp.as_mut_ptr()) };
+        // SAFETY: self.ptr is valid for the lifetime 'a. timeReceived writes to tp on success. The
+        // pointer is cast from the local `blpapi_TimePoint_t` to the SDK's own type: both are
+        // `repr(C)` with identical size, alignment and field offsets, which the const assertions
+        // in `ffi.rs` check.
+        let rc = unsafe {
+            sdk().blpapi_Message_timeReceived(self.ptr as *const _, tp.as_mut_ptr().cast())
+        };
         if rc != 0 {
             return None;
         }
         let tp = unsafe { tp.assume_init() };
 
         let mut dt = MaybeUninit::<ffi::blpapi_HighPrecisionDatetime_t>::uninit();
-        // SAFETY: tp is initialized above. offset=0 gives UTC datetime.
-        let rc =
-            unsafe { ffi::blpapi_HighPrecisionDatetime_fromTimePoint(dt.as_mut_ptr(), &tp, 0) };
+        // SAFETY: tp is initialized above. offset=0 gives UTC datetime. Both pointers are cast
+        // from the local datetime/timepoint types to the SDK's own, which share their layout (see
+        // the const assertions in `ffi.rs`).
+        let rc = unsafe {
+            sdk().blpapi_HighPrecisionDatetime_fromTimePoint(
+                dt.as_mut_ptr().cast(),
+                (&raw const tp).cast(),
+                0,
+            )
+        };
         if rc != 0 {
             return None;
         }
@@ -177,7 +189,7 @@ impl<'a> Message<'a> {
     #[inline(always)]
     pub fn num_correlation_ids(&self) -> usize {
         // SAFETY: self.ptr is valid for the lifetime 'a
-        let count = unsafe { ffi::blpapi_Message_numCorrelationIds(self.ptr) };
+        let count = unsafe { sdk().blpapi_Message_numCorrelationIds(self.ptr) };
         count.max(0) as usize
     }
 
@@ -201,7 +213,7 @@ impl<'a> Message<'a> {
         // SAFETY: We've verified index is in bounds, and self.ptr is valid.
         // blpapi_Message_correlationId returns the CorrelationId by value.
         unsafe {
-            let cid = ffi::blpapi_Message_correlationId(self.ptr, index);
+            let cid = sdk().blpapi_Message_correlationId(self.ptr, index);
             Some(CorrelationId::from_ffi(&cid))
         }
     }
@@ -241,7 +253,7 @@ impl Iterator for CorrelationIdIter<'_, '_> {
             // SAFETY: i < len == numCorrelationIds, and msg.ptr is valid.
             // blpapi_Message_correlationId returns the CorrelationId by value.
             unsafe {
-                let cid = ffi::blpapi_Message_correlationId(self.msg.ptr, i);
+                let cid = sdk().blpapi_Message_correlationId(self.msg.ptr, i);
                 Some(CorrelationId::from_ffi(&cid))
             }
         } else {

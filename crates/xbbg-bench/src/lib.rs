@@ -15,6 +15,23 @@ mod subscription_replay;
 mod synthetic_subscriptions;
 
 // ---------------------------------------------------------------------------
+// Runtime loading
+// ---------------------------------------------------------------------------
+
+/// Load the Bloomberg runtime named by `BLPAPI_LIB_DIR` / `BLPAPI_ROOT` into this process.
+///
+/// Every benchmark target that touches BLPAPI calls this first in `main`: nothing links the
+/// runtime, so xbbg-core panics on the first SDK call until it is loaded. Returns the loaded
+/// library's path.
+pub fn load_sdk() -> std::path::PathBuf {
+    let path = xbbg_sdk::Platform::host()
+        .and_then(xbbg_sdk::locate::from_env)
+        .expect("benchmarks need the SDK: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
+    xbbg_core::load(&path).unwrap_or_else(|error| panic!("benchmarks need the SDK: {error}"));
+    path
+}
+
+// ---------------------------------------------------------------------------
 // Session helpers
 // ---------------------------------------------------------------------------
 

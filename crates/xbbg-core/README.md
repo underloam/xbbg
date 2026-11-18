@@ -9,7 +9,8 @@ This is the core abstraction layer between raw FFI (`xbbg-blpapi-sys`) and the a
 ```
 src/
 ├── lib.rs           Module declarations + public re-exports
-├── ffi.rs           Centralized FFI re-exports from blpapi_sys + local datetime types
+├── loader.rs        Run-time loading of the Bloomberg runtime: load, sdk(), loaded_sdk_path
+├── ffi.rs           FFI types re-exported from blpapi_sys + local datetime types
 │
 ├── Core types
 │   ├── element.rs   Element wrapper — typed field access, iteration
@@ -40,11 +41,27 @@ src/
     └── constant.rs     Constant + ConstantList for enumerations
 ```
 
+## Loading the Bloomberg runtime
+
+Nothing links `libblpapi3_64`. The Bloomberg runtime is opened by absolute path while the process runs, and every BLPAPI call goes through the function table `sdk()` returns:
+
+```rust
+xbbg_core::load("/path/to/libblpapi3_64.so")?; // once, before any other call
+```
+
+| Function | |
+|----------|---|
+| `load(path)` | Opens the library (`RTLD_NOW \| RTLD_LOCAL`; on Windows `LOAD_WITH_ALTERED_SEARCH_PATH`) and resolves the function table. The path must be absolute. The same path again is a no-op; another path is `SdkLoadError::AlreadyLoaded`. The library is never unloaded |
+| `sdk()` | The loaded table; panics, saying so, if nothing is loaded. One atomic load on the hot path |
+| `loaded_sdk_path()` | The path that was loaded, or `None` |
+
+Choosing the library path is the caller's job. Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::from_env`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| `live` (default) | Real Bloomberg SDK via `blpapi-sys` |
+| `live` (default) | The Bloomberg function table (`blpapi-sys`) and the loader (`libloading`) |
 | `test-support` | SDK-backed synthetic message fixtures; no Bloomberg session needed |
 
 The `live` feature is required to build this crate; it selects the SDK, not
@@ -58,7 +75,7 @@ cargo test -p xbbg_core --test live -- --ignored
 
 ## Design principles
 
-- **All FFI goes through `ffi.rs`** — single point of control for unsafe imports
+- **All FFI goes through `sdk()`** — one loaded function table; `ffi.rs` holds only the types
 - **Zero-allocation hot paths** — direct typed access, no JSON serialization
 - **Sub-microsecond field extraction** — SIMD-accelerated where available
 - **Owned vs borrowed** — `Value<'a>` borrows from Element; `OwnedValue` for storage

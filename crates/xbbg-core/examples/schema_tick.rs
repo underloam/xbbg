@@ -6,6 +6,12 @@ use xbbg_core::{EventType, SessionOptions, session::Session};
 
 #[allow(clippy::result_large_err)]
 fn main() -> xbbg_core::Result<()> {
+    xbbg_core::load(
+        xbbg_sdk::Platform::host()
+            .and_then(xbbg_sdk::locate::from_env)
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("a Bloomberg runtime reachable through BLPAPI_LIB_DIR or BLPAPI_ROOT");
     println!("=== Schema Introspection for IntradayTickRequest ===\n");
 
     let opts = SessionOptions::new()?;

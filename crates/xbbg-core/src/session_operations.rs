@@ -5,7 +5,9 @@
 
 use std::ffi::{CString, c_char};
 
-use crate::{BlpError, CorrelationId, Identity, Request, Result, Service, SubscriptionList, ffi};
+use crate::{
+    BlpError, CorrelationId, Identity, Request, Result, Service, SubscriptionList, ffi, sdk,
+};
 
 pub(crate) struct SessionOperations<'session> {
     ptr: &'session *mut ffi::blpapi_Session_t,
@@ -22,7 +24,7 @@ impl<'session> SessionOperations<'session> {
     pub(crate) fn open_service(&self, name: &str) -> Result<()> {
         let c_name = service_name(name)?;
         // SAFETY: the owner guarantees a live handle; c_name survives the call.
-        let rc = unsafe { ffi::blpapi_Session_openService(*self.ptr, c_name.as_ptr()) };
+        let rc = unsafe { sdk().blpapi_Session_openService(*self.ptr, c_name.as_ptr()) };
         check_service_result(rc, name)
     }
 
@@ -35,7 +37,7 @@ impl<'session> SessionOperations<'session> {
         let mut cid_ffi = cid.to_ffi();
         // SAFETY: valid session/name pointers and initialized CID out-parameter.
         let rc = unsafe {
-            ffi::blpapi_Session_openServiceAsync(*self.ptr, c_name.as_ptr(), &mut cid_ffi)
+            sdk().blpapi_Session_openServiceAsync(*self.ptr, c_name.as_ptr(), &mut cid_ffi)
         };
         check_service_result(rc, name)?;
         Ok(CorrelationId::from_ffi(&cid_ffi))
@@ -46,8 +48,9 @@ impl<'session> SessionOperations<'session> {
         let mut service_ptr = std::ptr::null_mut();
         // SAFETY: valid session/name pointers and service out-parameter. The
         // returned Service borrows the same owner as this operations handle.
-        let rc =
-            unsafe { ffi::blpapi_Session_getService(*self.ptr, &mut service_ptr, c_name.as_ptr()) };
+        let rc = unsafe {
+            sdk().blpapi_Session_getService(*self.ptr, &mut service_ptr, c_name.as_ptr())
+        };
         check_service_result(rc, name)?;
         Service::from_raw(service_ptr)
     }
@@ -65,7 +68,7 @@ impl<'session> SessionOperations<'session> {
         // SAFETY: borrowed handles and label storage survive the call. A null
         // event queue uses the owning session's event delivery mode.
         let rc = unsafe {
-            ffi::blpapi_Session_sendRequest(
+            sdk().blpapi_Session_sendRequest(
                 *self.ptr,
                 request.as_ptr(),
                 &mut cid_ffi,
@@ -90,7 +93,7 @@ impl<'session> SessionOperations<'session> {
         let identity_ptr = identity.map_or(std::ptr::null_mut(), Identity::as_ptr);
         // SAFETY: valid borrowed handles; the optional label survives the call.
         let rc = unsafe {
-            ffi::blpapi_Session_subscribe(
+            sdk().blpapi_Session_subscribe(
                 *self.ptr,
                 subs.as_ptr(),
                 identity_ptr,
@@ -115,7 +118,7 @@ impl<'session> SessionOperations<'session> {
         let label = RequestLabel::new(label, label_kind)?;
         // SAFETY: valid borrowed handles; the optional label survives the call.
         let rc = unsafe {
-            ffi::blpapi_Session_resubscribe(*self.ptr, subs.as_ptr(), label.as_ptr(), label.len())
+            sdk().blpapi_Session_resubscribe(*self.ptr, subs.as_ptr(), label.as_ptr(), label.len())
         };
         check_result(rc, "blpapi_Session_resubscribe")
     }
@@ -123,7 +126,7 @@ impl<'session> SessionOperations<'session> {
     pub(crate) fn unsubscribe(&self, subs: &SubscriptionList) -> Result<()> {
         // SAFETY: valid session/list pointers; no diagnostic label is supplied.
         let rc = unsafe {
-            ffi::blpapi_Session_unsubscribe(*self.ptr, subs.as_ptr(), std::ptr::null(), 0)
+            sdk().blpapi_Session_unsubscribe(*self.ptr, subs.as_ptr(), std::ptr::null(), 0)
         };
         check_result(rc, "blpapi_Session_unsubscribe")
     }
@@ -131,14 +134,15 @@ impl<'session> SessionOperations<'session> {
     pub(crate) fn cancel(&self, cid: &CorrelationId) -> Result<()> {
         let cid_ffi = cid.to_ffi();
         // SAFETY: valid session pointer and one initialized CID by pointer/count.
-        let rc = unsafe { ffi::blpapi_Session_cancel(*self.ptr, &cid_ffi, 1, std::ptr::null(), 0) };
+        let rc =
+            unsafe { sdk().blpapi_Session_cancel(*self.ptr, &cid_ffi, 1, std::ptr::null(), 0) };
         check_result(rc, "blpapi_Session_cancel")
     }
 
     pub(crate) fn create_identity(&self) -> Result<Identity> {
         // SAFETY: valid session pointer. Identity owns the returned reference
         // and releases it exactly once on drop.
-        let identity_ptr = unsafe { ffi::blpapi_Session_createIdentity(*self.ptr) };
+        let identity_ptr = unsafe { sdk().blpapi_Session_createIdentity(*self.ptr) };
         Identity::from_raw(identity_ptr)
     }
 
@@ -147,7 +151,7 @@ impl<'session> SessionOperations<'session> {
         // SAFETY: valid session and CID pointers; a null event queue uses the
         // owning session's event delivery mode.
         let rc = unsafe {
-            ffi::blpapi_Session_generateToken(*self.ptr, &mut cid_ffi, std::ptr::null_mut())
+            sdk().blpapi_Session_generateToken(*self.ptr, &mut cid_ffi, std::ptr::null_mut())
         };
         check_result(rc, "blpapi_Session_generateToken")?;
         Ok(CorrelationId::from_ffi(&cid_ffi))
@@ -163,7 +167,7 @@ impl<'session> SessionOperations<'session> {
         // SAFETY: valid borrowed handles and CID out-parameter; the null event
         // queue routes authorization events through the owning session.
         let rc = unsafe {
-            ffi::blpapi_Session_sendAuthorizationRequest(
+            sdk().blpapi_Session_sendAuthorizationRequest(
                 *self.ptr,
                 request.as_ptr(),
                 identity.as_ptr(),

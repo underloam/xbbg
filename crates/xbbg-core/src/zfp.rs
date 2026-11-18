@@ -1,6 +1,7 @@
 use crate::errors::{BlpError, Result};
-use crate::ffi;
+
 use crate::options::SessionOptions;
+use crate::sdk;
 use crate::tls::TlsOptions;
 
 const REMOTE_8194: i32 = 8194;
@@ -50,7 +51,7 @@ pub fn configure_zfp_options(
     remote: ZfpRemote,
 ) -> Result<()> {
     let rc = unsafe {
-        ffi::blpapi_ZfpUtil_getOptionsForLeasedLines(
+        sdk().blpapi_ZfpUtil_getOptionsForLeasedLines(
             options.as_raw(),
             tls.as_ptr(),
             remote.to_raw(),

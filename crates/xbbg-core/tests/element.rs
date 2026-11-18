@@ -5,6 +5,16 @@
 use xbbg_core::test_support::TestEvent;
 use xbbg_core::{Value, ffi};
 
+#[ctor::ctor(unsafe)]
+fn load_sdk() {
+    xbbg_core::load(
+        xbbg_sdk::Platform::host()
+            .and_then(xbbg_sdk::locate::from_env)
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("tests need a Bloomberg runtime");
+}
+
 #[test]
 fn checked_and_cached_dispatch_preserve_scalar_values() {
     let schema = r#"<ServiceDefinition name="xbbg.test.scalars" version="1.0.0.0">

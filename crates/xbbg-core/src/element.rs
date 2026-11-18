@@ -26,7 +26,7 @@
 //! comparable to xbbg's own per-value work. Cache datatypes, avoid
 //! `get_by_str` in loops, and keep per-value builder work minimal.
 
-use crate::{DataType, HighPrecisionDatetime, Name, ffi};
+use crate::{DataType, HighPrecisionDatetime, Name, ffi, sdk};
 use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -99,7 +99,7 @@ impl<'a> Element<'a> {
         // SAFETY: blpapi_Element_getElement writes a valid pointer on success (rc==0).
         // MaybeUninit avoids zero-initialization overhead.
         let rc = unsafe {
-            ffi::blpapi_Element_getElement(
+            sdk().blpapi_Element_getElement(
                 self.ptr,
                 out.as_mut_ptr(),
                 std::ptr::null(),
@@ -144,7 +144,7 @@ impl<'a> Element<'a> {
     pub fn get_at(&self, i: usize) -> Option<Element<'a>> {
         let mut out = MaybeUninit::uninit();
         // SAFETY: blpapi_Element_getElementAt writes a valid pointer on success (rc==0).
-        let rc = unsafe { ffi::blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i) };
         (rc == 0).then(|| Element::new(unsafe { out.assume_init() }))
     }
 
@@ -161,7 +161,7 @@ impl<'a> Element<'a> {
         let mut out = MaybeUninit::uninit();
         // SAFETY: self.ptr is a live element handle and `out` is writable; the
         // return code is deliberately ignored per this function's contract.
-        unsafe { ffi::blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i) };
+        unsafe { sdk().blpapi_Element_getElementAt(self.ptr, out.as_mut_ptr(), i) };
         // SAFETY: the caller guarantees `i` is a valid child index, so the call
         // above succeeded and initialized `out`.
         Element::new(unsafe { out.assume_init() })
@@ -172,9 +172,9 @@ impl<'a> Element<'a> {
     pub fn name(&self) -> Name {
         // SAFETY: blpapi_Element_name returns a valid Name pointer.
         // We duplicate it to get an owned Name.
-        let ptr = unsafe { ffi::blpapi_Element_name(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Element_name(self.ptr) };
         // SAFETY: blpapi_Name_duplicate returns a valid pointer
-        unsafe { Name::from_raw(NonNull::new(ffi::blpapi_Name_duplicate(ptr)).unwrap()) }
+        unsafe { Name::from_raw(NonNull::new(sdk().blpapi_Name_duplicate(ptr)).unwrap()) }
     }
 
     /// Element name as a borrowed string without duplicating the Bloomberg `Name`.
@@ -186,8 +186,8 @@ impl<'a> Element<'a> {
     pub fn name_str(&self) -> &'a str {
         // SAFETY: blpapi_Element_name returns a valid interned Name pointer for
         // this element; blpapi_Name_string returns a null-terminated field name.
-        let name = unsafe { ffi::blpapi_Element_name(self.ptr) };
-        let ptr = unsafe { ffi::blpapi_Name_string(name) };
+        let name = unsafe { sdk().blpapi_Element_name(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Name_string(name) };
         unsafe { CStr::from_ptr(ptr) }
             .to_str()
             .expect("Bloomberg Element name contained invalid UTF-8")
@@ -200,13 +200,13 @@ impl<'a> Element<'a> {
     /// current message/event, not as a serialized identifier.
     #[inline(always)]
     pub fn name_key(&self) -> usize {
-        unsafe { ffi::blpapi_Element_name(self.ptr) as usize }
+        unsafe { sdk().blpapi_Element_name(self.ptr) as usize }
     }
 
     /// Check if element name matches (O(1) pointer comparison, no allocation).
     #[inline(always)]
     pub fn name_eq(&self, other: &Name) -> bool {
-        let ptr = unsafe { ffi::blpapi_Element_name(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Element_name(self.ptr) };
         ptr == other.as_ptr()
     }
 
@@ -216,7 +216,7 @@ impl<'a> Element<'a> {
     /// provided interned names without duplicating or allocating a [`Name`].
     #[inline(always)]
     pub fn name_index(&self, names: &[Name]) -> Option<usize> {
-        let ptr = unsafe { ffi::blpapi_Element_name(self.ptr) };
+        let ptr = unsafe { sdk().blpapi_Element_name(self.ptr) };
         names.iter().position(|name| ptr == name.as_ptr())
     }
 
@@ -224,14 +224,14 @@ impl<'a> Element<'a> {
     #[inline(always)]
     pub fn datatype(&self) -> DataType {
         // SAFETY: blpapi_Element_datatype returns a valid type code.
-        DataType::from_raw(unsafe { ffi::blpapi_Element_datatype(self.ptr) })
+        DataType::from_raw(unsafe { sdk().blpapi_Element_datatype(self.ptr) })
     }
 
     /// Number of values (for arrays).
     #[inline(always)]
     pub fn len(&self) -> usize {
         // SAFETY: blpapi_Element_numValues returns a valid count.
-        unsafe { ffi::blpapi_Element_numValues(self.ptr) }
+        unsafe { sdk().blpapi_Element_numValues(self.ptr) }
     }
 
     /// Check if element is empty (has no values).
@@ -244,21 +244,21 @@ impl<'a> Element<'a> {
     #[inline(always)]
     pub fn num_children(&self) -> usize {
         // SAFETY: blpapi_Element_numElements returns a valid count.
-        unsafe { ffi::blpapi_Element_numElements(self.ptr) }
+        unsafe { sdk().blpapi_Element_numElements(self.ptr) }
     }
 
     /// Check if element is null.
     #[inline(always)]
     pub fn is_null(&self) -> bool {
         // SAFETY: blpapi_Element_isNull returns 0 (false) or non-zero (true).
-        unsafe { ffi::blpapi_Element_isNull(self.ptr) != 0 }
+        unsafe { sdk().blpapi_Element_isNull(self.ptr) != 0 }
     }
 
     /// Check if element is an array.
     #[inline(always)]
     pub fn is_array(&self) -> bool {
         // SAFETY: blpapi_Element_isArray returns 0 (false) or non-zero (true).
-        unsafe { ffi::blpapi_Element_isArray(self.ptr) != 0 }
+        unsafe { sdk().blpapi_Element_isArray(self.ptr) != 0 }
     }
 
     // ===== Typed Getters =====
@@ -280,7 +280,7 @@ impl<'a> Element<'a> {
         let mut v = MaybeUninit::uninit();
         // SAFETY: blpapi_Element_getValueAsFloat64 writes to the pointer on success.
         // MaybeUninit avoids zero-init overhead.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsFloat64(self.ptr, v.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsFloat64(self.ptr, v.as_mut_ptr(), i) };
         (rc == 0).then(|| unsafe { v.assume_init() })
     }
 
@@ -292,7 +292,7 @@ impl<'a> Element<'a> {
     pub fn get_i64(&self, i: usize) -> Option<i64> {
         let mut v = MaybeUninit::uninit();
         // SAFETY: blpapi_Element_getValueAsInt64 writes to the pointer on success.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsInt64(self.ptr, v.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsInt64(self.ptr, v.as_mut_ptr(), i) };
         (rc == 0).then(|| unsafe { v.assume_init() })
     }
 
@@ -304,7 +304,7 @@ impl<'a> Element<'a> {
     pub fn get_i32(&self, i: usize) -> Option<i32> {
         let mut v = MaybeUninit::uninit();
         // SAFETY: blpapi_Element_getValueAsInt32 writes to the pointer on success.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsInt32(self.ptr, v.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsInt32(self.ptr, v.as_mut_ptr(), i) };
         (rc == 0).then(|| unsafe { v.assume_init() })
     }
 
@@ -317,7 +317,7 @@ impl<'a> Element<'a> {
         let mut v = MaybeUninit::<i32>::uninit();
         // SAFETY: blpapi_Element_getValueAsBool writes to the pointer on success.
         // Bloomberg returns 0 for false, non-zero for true.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsBool(self.ptr, v.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsBool(self.ptr, v.as_mut_ptr(), i) };
         (rc == 0).then(|| unsafe { v.assume_init() != 0 })
     }
 
@@ -332,7 +332,7 @@ impl<'a> Element<'a> {
     pub fn get_char(&self, i: usize) -> Option<u8> {
         let mut v = MaybeUninit::<std::os::raw::c_char>::uninit();
         // SAFETY: blpapi_Element_getValueAsChar writes to the pointer on success.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsChar(self.ptr, v.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsChar(self.ptr, v.as_mut_ptr(), i) };
         (rc == 0).then(|| unsafe { v.assume_init() } as u8)
     }
 
@@ -350,7 +350,7 @@ impl<'a> Element<'a> {
         let mut ptr = MaybeUninit::<*const i8>::uninit();
         // SAFETY: blpapi_Element_getValueAsString writes a C string pointer on success.
         // The string is valid for the lifetime of the message/event.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsString(self.ptr, ptr.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsString(self.ptr, ptr.as_mut_ptr(), i) };
         if rc == 0 {
             let ptr = unsafe { ptr.assume_init() };
             if ptr.is_null() {
@@ -373,10 +373,13 @@ impl<'a> Element<'a> {
     #[must_use]
     #[inline(always)]
     pub fn get_datetime(&self, i: usize) -> Option<HighPrecisionDatetime> {
-        let mut v = MaybeUninit::uninit();
-        // SAFETY: blpapi_Element_getValueAsHighPrecisionDatetime writes the datetime struct on success.
+        let mut v = MaybeUninit::<ffi::blpapi_HighPrecisionDatetime_t>::uninit();
+        // SAFETY: blpapi_Element_getValueAsHighPrecisionDatetime writes the datetime struct on
+        // success. The buffer is cast from the local `blpapi_HighPrecisionDatetime_t` to the SDK's
+        // own type: both are `repr(C)` with identical size, alignment and field offsets, which
+        // the const assertions in `ffi.rs` check.
         let rc = unsafe {
-            ffi::blpapi_Element_getValueAsHighPrecisionDatetime(self.ptr, v.as_mut_ptr(), i)
+            sdk().blpapi_Element_getValueAsHighPrecisionDatetime(self.ptr, v.as_mut_ptr().cast(), i)
         };
         (rc == 0).then(|| HighPrecisionDatetime(unsafe { v.assume_init() }))
     }
@@ -399,7 +402,7 @@ impl<'a> Element<'a> {
     pub fn get_element(&self, i: usize) -> Option<Element<'a>> {
         let mut out = MaybeUninit::uninit();
         // SAFETY: blpapi_Element_getValueAsElement writes a valid pointer on success.
-        let rc = unsafe { ffi::blpapi_Element_getValueAsElement(self.ptr, out.as_mut_ptr(), i) };
+        let rc = unsafe { sdk().blpapi_Element_getValueAsElement(self.ptr, out.as_mut_ptr(), i) };
         (rc == 0).then(|| Element::new(unsafe { out.assume_init() }))
     }
 

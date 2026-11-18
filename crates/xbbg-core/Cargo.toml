@@ -22,18 +22,25 @@ name = "xbbg_core"
 
 [features]
 default = ["live"]
-# `live` gates the FFI dependency. Every `pub use blpapi_sys::…` in src/ffi.rs is
-# unconditional, so a non-live build cannot compile; src/lib.rs raises an
-# explicit compile_error! so that failure is legible instead of surfacing as a
-# wall of unresolved imports.
-live = ["dep:blpapi-sys"]
+# `live` gates the FFI dependencies. The function table in src/ffi.rs and the
+# loader in src/loader.rs are unconditional, so a non-live build cannot compile;
+# src/lib.rs raises an explicit compile_error! so that failure is legible instead
+# of surfacing as a wall of unresolved imports.
+live = ["dep:blpapi-sys", "dep:libloading"]
 # SDK-created events for downstream regression tests; not enabled in production.
 test-support = ["live"]
 
 [dependencies]
 thiserror = { workspace = true }
 blpapi-sys = { workspace = true, optional = true }
+libloading = { workspace = true, optional = true }
 rustc-hash = { workspace = true }  # Fast non-cryptographic hashing for Name cache
+
+[dev-dependencies]
+# Loads the Bloomberg runtime before main in this crate's test binaries and examples, finding it
+# with xbbg-sdk's environment lookup. Path-only, so it is stripped when the crate is published.
+ctor = { workspace = true }
+xbbg-sdk = { workspace = true }
 
 # Benchmarks have been consolidated into crates/xbbg-bench.
 # Run with: cargo bench --package xbbg-bench

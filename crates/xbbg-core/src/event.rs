@@ -7,7 +7,7 @@
 //! Messages borrow the [`MessageIterator`] that yields them and are valid only
 //! until it advances or is dropped.
 
-use crate::{Message, ffi};
+use crate::{Message, ffi, sdk};
 use std::marker::PhantomData;
 use std::rc::Rc;
 
@@ -61,7 +61,7 @@ impl Event {
     pub fn event_type(&self) -> EventType {
         // SAFETY: blpapi_Event_eventType returns integer event type.
         // The pointer is valid because we own it and haven't dropped yet.
-        let ty = unsafe { ffi::blpapi_Event_eventType(self.ptr) };
+        let ty = unsafe { sdk().blpapi_Event_eventType(self.ptr) };
         EventType::from_raw(ty)
     }
 
@@ -87,7 +87,7 @@ impl Event {
         // SAFETY: blpapi_MessageIterator_create returns valid iterator or null.
         // The iterator is valid for the lifetime of the event.
         // We pass ownership of the iterator pointer to MessageIterator.
-        let iter_ptr = unsafe { ffi::blpapi_MessageIterator_create(self.ptr) };
+        let iter_ptr = unsafe { sdk().blpapi_MessageIterator_create(self.ptr) };
         MessageIterator {
             ptr: iter_ptr,
             _life: PhantomData,
@@ -112,7 +112,7 @@ impl Drop for Event {
         // blpapi_Event_release decrements the refcount and frees if zero.
         // The pointer is valid because we haven't released it yet.
         unsafe {
-            ffi::blpapi_Event_release(self.ptr);
+            sdk().blpapi_Event_release(self.ptr);
         }
     }
 }
@@ -274,7 +274,7 @@ impl MessageIterator<'_> {
         // SAFETY: `self.ptr` came from blpapi_MessageIterator_create and is
         // destroyed only in Drop. The call returns 0 and writes a message
         // pointer when another message is available, non-zero otherwise.
-        let rc = unsafe { ffi::blpapi_MessageIterator_next(self.ptr, &mut msg_ptr) };
+        let rc = unsafe { sdk().blpapi_MessageIterator_next(self.ptr, &mut msg_ptr) };
         if rc == 0 && !msg_ptr.is_null() {
             // SAFETY: Bloomberg keeps this message valid until the iterator
             // advances or is destroyed (blpapi_event.h, MessageIterator::message).
@@ -293,7 +293,7 @@ impl<'a> Drop for MessageIterator<'a> {
         // blpapi_MessageIterator_destroy frees the iterator.
         // The pointer is valid because we haven't destroyed it yet.
         unsafe {
-            ffi::blpapi_MessageIterator_destroy(self.ptr);
+            sdk().blpapi_MessageIterator_destroy(self.ptr);
         }
     }
 }

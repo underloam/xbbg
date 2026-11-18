@@ -3,9 +3,9 @@
 use std::ffi::CString;
 use std::ptr::{self, NonNull};
 
-use blpapi_sys as sdk;
+use blpapi_sys as sys;
 
-use crate::{BlpError, CorrelationId, Event, EventType, Name, Result};
+use crate::{BlpError, CorrelationId, Event, EventType, Name, Result, sdk};
 
 /// Keeps a test event's deserialized schema alive until after the event is released.
 pub struct TestEvent {
@@ -121,7 +121,7 @@ impl TestEvent {
             // SAFETY: schema is readable for its stated length; the output is initialized on success.
             check_result(
                 unsafe {
-                    sdk::blpapi_TestUtil_deserializeService(
+                    sdk().blpapi_TestUtil_deserializeService(
                         schema.as_ptr().cast(),
                         schema.len(),
                         &mut service,
@@ -133,7 +133,7 @@ impl TestEvent {
             // SAFETY: service and name remain alive while the borrowed definition is used.
             check_result(
                 unsafe {
-                    sdk::blpapi_Service_getEventDefinition(
+                    sdk().blpapi_Service_getEventDefinition(
                         service.0.as_ptr(),
                         &mut definition,
                         ptr::null(),
@@ -147,7 +147,7 @@ impl TestEvent {
             // SAFETY: the SDK owns its built-in definitions; name remains live for the call.
             check_result(
                 unsafe {
-                    sdk::blpapi_TestUtil_getAdminMessageDefinition(&mut definition, name.as_ptr())
+                    sdk().blpapi_TestUtil_getAdminMessageDefinition(&mut definition, name.as_ptr())
                 },
                 "test administrative definition",
             )?;
@@ -157,7 +157,7 @@ impl TestEvent {
         let mut raw_event = ptr::null_mut();
         // SAFETY: the successful call transfers one owned event reference.
         check_result(
-            unsafe { sdk::blpapi_TestUtil_createEvent(&mut raw_event, event_type.to_raw()) },
+            unsafe { sdk().blpapi_TestUtil_createEvent(&mut raw_event, event_type.to_raw()) },
             "create test event",
         )?;
         let raw_event = checked_pointer(raw_event, "create test event")?;
@@ -184,14 +184,14 @@ impl TestEvent {
         // SAFETY: this fixture keeps its service alive; built-in definitions are SDK-owned.
         let result = unsafe {
             if let Some(service) = &self._service {
-                sdk::blpapi_Service_getEventDefinition(
+                sdk().blpapi_Service_getEventDefinition(
                     service.0.as_ptr(),
                     &mut definition,
                     ptr::null(),
                     name.as_ptr(),
                 )
             } else {
-                sdk::blpapi_TestUtil_getAdminMessageDefinition(&mut definition, name.as_ptr())
+                sdk().blpapi_TestUtil_getAdminMessageDefinition(&mut definition, name.as_ptr())
             }
         };
         assert_eq!(result, 0, "test message definition");
@@ -204,8 +204,8 @@ impl TestEvent {
     }
 
     fn append_raw(
-        event: NonNull<sdk::blpapi_Event_t>,
-        definition: *mut sdk::blpapi_SchemaElementDefinition_t,
+        event: NonNull<sys::blpapi_Event_t>,
+        definition: *mut sys::blpapi_SchemaElementDefinition_t,
         correlation_ids: &[i64],
         format: impl FnOnce(&mut TestMessageFormatter),
     ) {
@@ -217,15 +217,15 @@ impl TestEvent {
     }
 
     fn try_append_raw(
-        event: NonNull<sdk::blpapi_Event_t>,
-        definition: *mut sdk::blpapi_SchemaElementDefinition_t,
+        event: NonNull<sys::blpapi_Event_t>,
+        definition: *mut sys::blpapi_SchemaElementDefinition_t,
         correlation_ids: &[i64],
         format: impl FnOnce(&mut TestMessageFormatter) -> Result<()>,
     ) -> Result<()> {
         let mut properties = ptr::null_mut();
         // SAFETY: properties is an initialized output pointer.
         check_result(
-            unsafe { sdk::blpapi_MessageProperties_create(&mut properties) },
+            unsafe { sdk().blpapi_MessageProperties_create(&mut properties) },
             "create test message properties",
         )?;
         let properties =
@@ -238,7 +238,7 @@ impl TestEvent {
             // SAFETY: the SDK copies these initialized IDs into the live properties.
             check_result(
                 unsafe {
-                    sdk::blpapi_MessageProperties_setCorrelationIds(
+                    sdk().blpapi_MessageProperties_setCorrelationIds(
                         properties.0.as_ptr(),
                         correlation_ids.as_ptr(),
                         correlation_ids.len(),
@@ -251,7 +251,7 @@ impl TestEvent {
         // SAFETY: the event owner, schema owner and properties outlive this formatter.
         check_result(
             unsafe {
-                sdk::blpapi_TestUtil_appendMessage(
+                sdk().blpapi_TestUtil_appendMessage(
                     &mut formatter,
                     event.as_ptr(),
                     definition,
@@ -272,21 +272,21 @@ impl TestEvent {
     }
 }
 
-struct TestService(NonNull<sdk::blpapi_Service_t>);
+struct TestService(NonNull<sys::blpapi_Service_t>);
 
 impl Drop for TestService {
     fn drop(&mut self) {
         // SAFETY: TestUtil gave this owner one service reference; the event drops first.
-        unsafe { sdk::blpapi_Service_release(self.0.as_ptr()) };
+        unsafe { sdk().blpapi_Service_release(self.0.as_ptr()) };
     }
 }
 
-struct TestMessageProperties(NonNull<sdk::blpapi_MessageProperties_t>);
+struct TestMessageProperties(NonNull<sys::blpapi_MessageProperties_t>);
 
 impl Drop for TestMessageProperties {
     fn drop(&mut self) {
         // SAFETY: this owns the successfully created properties pointer.
-        unsafe { sdk::blpapi_MessageProperties_destroy(self.0.as_ptr()) };
+        unsafe { sdk().blpapi_MessageProperties_destroy(self.0.as_ptr()) };
     }
 }
 
@@ -297,7 +297,7 @@ enum FormattingMode {
 }
 
 pub struct TestMessageFormatter {
-    raw: NonNull<sdk::blpapi_MessageFormatter_t>,
+    raw: NonNull<sys::blpapi_MessageFormatter_t>,
     mode: FormattingMode,
 }
 
@@ -324,7 +324,7 @@ impl TestMessageFormatter {
         // SAFETY: formatter is live and value is a valid C string for the call.
         check_result(
             unsafe {
-                sdk::blpapi_MessageFormatter_FormatMessageJson(self.raw.as_ptr(), value.as_ptr())
+                sdk().blpapi_MessageFormatter_FormatMessageJson(self.raw.as_ptr(), value.as_ptr())
             },
             "format test JSON",
         )
@@ -343,20 +343,20 @@ impl TestMessageFormatter {
         // SAFETY: typed mode is allowed and the formatter/name remain live.
         let result = unsafe {
             match value {
-                Some(value) => sdk::blpapi_MessageFormatter_setValueChar(
+                Some(value) => sdk().blpapi_MessageFormatter_setValueChar(
                     self.raw.as_ptr(),
                     field.as_ptr(),
                     value as std::ffi::c_char,
                 ),
                 None => {
-                    sdk::blpapi_MessageFormatter_setValueNull(self.raw.as_ptr(), field.as_ptr())
+                    sdk().blpapi_MessageFormatter_setValueNull(self.raw.as_ptr(), field.as_ptr())
                 }
             }
         };
         check_result(result, "format test Char")
     }
 
-    pub fn datetime(&mut self, field: &str, value: &sdk::blpapi_HighPrecisionDatetime_t) {
+    pub fn datetime(&mut self, field: &str, value: &sys::blpapi_HighPrecisionDatetime_t) {
         self.try_datetime(field, value)
             .expect("format test datetime");
     }
@@ -365,7 +365,7 @@ impl TestMessageFormatter {
     pub fn try_datetime(
         &mut self,
         field: &str,
-        value: &sdk::blpapi_HighPrecisionDatetime_t,
+        value: &sys::blpapi_HighPrecisionDatetime_t,
     ) -> Result<()> {
         self.begin_typed()?;
         let field = Name::new(field).ok_or_else(|| BlpError::InvalidArgument {
@@ -374,7 +374,7 @@ impl TestMessageFormatter {
         // SAFETY: typed mode is allowed and formatter/name/datetime remain live.
         check_result(
             unsafe {
-                sdk::blpapi_MessageFormatter_setValueHighPrecisionDatetime(
+                sdk().blpapi_MessageFormatter_setValueHighPrecisionDatetime(
                     self.raw.as_ptr(),
                     field.as_ptr(),
                     value,
@@ -398,7 +398,7 @@ impl TestMessageFormatter {
 impl Drop for TestMessageFormatter {
     fn drop(&mut self) {
         // SAFETY: this owns the formatter created by appendMessage.
-        unsafe { sdk::blpapi_MessageFormatter_destroy(self.raw.as_ptr()) };
+        unsafe { sdk().blpapi_MessageFormatter_destroy(self.raw.as_ptr()) };
     }
 }
 

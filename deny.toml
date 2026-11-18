@@ -107,7 +107,10 @@ deny = [
     # features apart, so the wheel and addon size budgets (scripts/check_*.py) are what stops one
     # of them enabling `provision`. Only the entry points of the downloader stack can be
     # confined: the other uv/rattler crates depend on each other.
-    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk", "pyo3-xbbg-runtime", "napi-xbbg-runtime"] },
+    # xbbg_core, xbbg-async, xbbg-recipes and xbbg-bench use the resolver's environment lookup
+    # (`locate`) to load the runtime in tests, examples and benchmarks: dev-dependencies only,
+    # except xbbg-bench (never published).
+    { name = "xbbg-sdk", wrappers = ["jni-xbbg-sdk", "pyo3-xbbg-runtime", "napi-xbbg-runtime", "xbbg_core", "xbbg-async", "xbbg-recipes", "xbbg-bench"] },
     { name = "uv-client", wrappers = ["xbbg-sdk"] },
     { name = "rattler_repodata_gateway", wrappers = ["xbbg-sdk"] },
     # Python frameworks stay in the Python binding or their own ecosystem.

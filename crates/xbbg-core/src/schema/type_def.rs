@@ -8,6 +8,7 @@ use std::rc::Rc;
 use crate::datatype::DataType;
 use crate::ffi;
 use crate::name::Name;
+use crate::sdk;
 
 use super::SchemaStatus;
 use super::constant::ConstantList;
@@ -41,7 +42,7 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     /// Get the type name.
     pub fn name(&self) -> Option<Name> {
         unsafe {
-            let name_ptr = ffi::blpapi_SchemaTypeDefinition_name(self.ptr);
+            let name_ptr = sdk().blpapi_SchemaTypeDefinition_name(self.ptr);
             NonNull::new(name_ptr).map(|ptr| Name::from_raw(ptr))
         }
     }
@@ -49,11 +50,11 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     /// Get the type name as a string.
     pub fn name_str(&self) -> &str {
         unsafe {
-            let name_ptr = ffi::blpapi_SchemaTypeDefinition_name(self.ptr);
+            let name_ptr = sdk().blpapi_SchemaTypeDefinition_name(self.ptr);
             if name_ptr.is_null() {
                 return "";
             }
-            let str_ptr = ffi::blpapi_Name_string(name_ptr);
+            let str_ptr = sdk().blpapi_Name_string(name_ptr);
             if str_ptr.is_null() {
                 return "";
             }
@@ -64,7 +65,7 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     /// Get a human-readable description of this type.
     pub fn description(&self) -> &str {
         unsafe {
-            let desc_ptr = ffi::blpapi_SchemaTypeDefinition_description(self.ptr);
+            let desc_ptr = sdk().blpapi_SchemaTypeDefinition_description(self.ptr);
             if desc_ptr.is_null() {
                 return "";
             }
@@ -75,29 +76,29 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     /// Get the underlying data type.
     pub fn datatype(&self) -> DataType {
         unsafe {
-            let dt = ffi::blpapi_SchemaTypeDefinition_datatype(self.ptr);
+            let dt = sdk().blpapi_SchemaTypeDefinition_datatype(self.ptr);
             DataType::from_raw(dt)
         }
     }
 
     /// Check if this is a complex type (sequence or choice).
     pub fn is_complex_type(&self) -> bool {
-        unsafe { ffi::blpapi_SchemaTypeDefinition_isComplexType(self.ptr) != 0 }
+        unsafe { sdk().blpapi_SchemaTypeDefinition_isComplexType(self.ptr) != 0 }
     }
 
     /// Check if this is a simple type.
     pub fn is_simple_type(&self) -> bool {
-        unsafe { ffi::blpapi_SchemaTypeDefinition_isSimpleType(self.ptr) != 0 }
+        unsafe { sdk().blpapi_SchemaTypeDefinition_isSimpleType(self.ptr) != 0 }
     }
 
     /// Check if this is an enumeration type.
     pub fn is_enumeration_type(&self) -> bool {
-        unsafe { ffi::blpapi_SchemaTypeDefinition_isEnumerationType(self.ptr) != 0 }
+        unsafe { sdk().blpapi_SchemaTypeDefinition_isEnumerationType(self.ptr) != 0 }
     }
 
     /// Get the number of child element definitions.
     pub fn num_element_definitions(&self) -> usize {
-        unsafe { ffi::blpapi_SchemaTypeDefinition_numElementDefinitions(self.ptr) }
+        unsafe { sdk().blpapi_SchemaTypeDefinition_numElementDefinitions(self.ptr) }
     }
 
     /// Get a child element definition by index.
@@ -107,7 +108,8 @@ impl<'owner> SchemaTypeDefinition<'owner> {
         }
 
         unsafe {
-            let elem_ptr = ffi::blpapi_SchemaTypeDefinition_getElementDefinitionAt(self.ptr, index);
+            let elem_ptr =
+                sdk().blpapi_SchemaTypeDefinition_getElementDefinitionAt(self.ptr, index);
             SchemaElementDefinition::from_raw(elem_ptr)
         }
     }
@@ -119,7 +121,7 @@ impl<'owner> SchemaTypeDefinition<'owner> {
         }
 
         unsafe {
-            let list_ptr = ffi::blpapi_SchemaTypeDefinition_enumeration(self.ptr);
+            let list_ptr = sdk().blpapi_SchemaTypeDefinition_enumeration(self.ptr);
             ConstantList::from_raw(list_ptr)
         }
     }
@@ -136,7 +138,7 @@ impl<'owner> SchemaTypeDefinition<'owner> {
     /// Get the deprecation status of this type.
     pub fn status(&self) -> SchemaStatus {
         unsafe {
-            let status = ffi::blpapi_SchemaTypeDefinition_status(self.ptr);
+            let status = sdk().blpapi_SchemaTypeDefinition_status(self.ptr);
             SchemaStatus::from_raw(status)
         }
     }

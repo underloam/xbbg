@@ -27,6 +27,7 @@ use delivery_common::Config;
 use serde_json::json;
 
 fn main() {
+    xbbg_bench::load_sdk();
     let config = Config::parse();
     let timer = delivery_common::timer_overhead();
     let runtime = tokio::runtime::Builder::new_current_thread()

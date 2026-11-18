@@ -1,6 +1,7 @@
 //! Identity for authenticated Bloomberg sessions
 
 use crate::errors::{BlpError, Result};
+use crate::sdk;
 
 /// Identity handle for authenticated Bloomberg sessions.
 ///
@@ -41,7 +42,7 @@ impl Identity {
     }
 
     pub fn is_authorized(&self, service: &crate::Service<'_>) -> bool {
-        let rc = unsafe { crate::ffi::blpapi_Identity_isAuthorized(self.ptr, service.as_ptr()) };
+        let rc = unsafe { sdk().blpapi_Identity_isAuthorized(self.ptr, service.as_ptr()) };
         rc != 0
     }
 
@@ -56,7 +57,7 @@ impl Identity {
     pub fn has_entitlements(&self, service: &crate::Service<'_>, eids: &[i32]) -> Result<bool> {
         let mut failed_count: i32 = 0;
         let rc = unsafe {
-            crate::ffi::blpapi_Identity_hasEntitlements(
+            sdk().blpapi_Identity_hasEntitlements(
                 self.ptr,
                 service.as_ptr(),
                 std::ptr::null(),
@@ -84,7 +85,7 @@ impl Identity {
         let mut failed = vec![0_i32; eids.len()];
         let mut failed_count: i32 = eids.len() as i32;
         let rc = unsafe {
-            crate::ffi::blpapi_Identity_hasEntitlements(
+            sdk().blpapi_Identity_hasEntitlements(
                 self.ptr,
                 service.as_ptr(),
                 std::ptr::null(),
@@ -110,7 +111,7 @@ impl Identity {
 
     pub fn seat_type(&self) -> Result<SeatType> {
         let mut raw: i32 = -1;
-        let rc = unsafe { crate::ffi::blpapi_Identity_getSeatType(self.ptr, &mut raw) };
+        let rc = unsafe { sdk().blpapi_Identity_getSeatType(self.ptr, &mut raw) };
         if rc != 0 {
             return Err(BlpError::Internal {
                 detail: format!("getSeatType failed: rc={rc}"),
@@ -162,7 +163,7 @@ impl Drop for Identity {
             // reference (the C++ `Identity(handle)` ctor takes ownership without
             // addRef and its destructor calls release; blpapi_identity.h:279-290).
             // Releasing exactly once here balances that reference.
-            unsafe { crate::ffi::blpapi_Identity_release(self.ptr) };
+            unsafe { sdk().blpapi_Identity_release(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }

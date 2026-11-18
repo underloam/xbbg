@@ -30,6 +30,10 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+# Loads the Bloomberg runtime before main in the live tests, finding it with xbbg-sdk's
+# environment lookup. Path-only, so it is stripped when the crate is published.
+ctor = { workspace = true }
+xbbg-sdk = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 
 [features]

@@ -204,12 +204,12 @@ build it without the Bloomberg SDK.
 
 `xbbg-blpapi-sys`, `xbbg_core`, `xbbg-async`, and `xbbg-recipes` do **not** build on
 docs.rs. The BLPAPI SDK is proprietary and the docs.rs sandbox has no network to
-fetch it, so bindgen has no headers. `xbbg_core/src/ffi.rs` re-exports the BLPAPI
-symbols unconditionally, so the failure propagates to everything above it.
+fetch it, so bindgen has no headers. `xbbg_core` calls the function table that
+`xbbg-blpapi-sys` generates, so the failure propagates to everything above it.
 
 An empty-stub build script was evaluated and rejected: it makes only the `-sys`
-crate green, and with an empty API page, while `xbbg_core` still fails with 29
-unresolved imports. `build.rs` therefore detects `DOCS_RS` and fails with an
+crate green, and with an empty API page, while `xbbg_core` still fails to
+compile. `build.rs` therefore detects `DOCS_RS` and fails with an
 explicit message so the docs.rs log states the real reason.
 
 Making docs.rs green requires committing a pregenerated binding surface to the
@@ -428,7 +428,7 @@ PyPI rejects duplicate versions. To fix:
 
 ### Local Build Fails
 
-1. Ensure `BLPAPI_ROOT` points to the Bloomberg SDK directory (must contain `include/` and `lib/`)
+1. Ensure `BLPAPI_ROOT` points to the Bloomberg SDK directory (it must contain `include/`; the runtime library is only needed to run tests, which load it from `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` by path)
 2. Ensure Rust toolchain is installed (`rustup show`)
 3. For bindgen issues, set `LIBCLANG_PATH` (see `.cargo/config.toml` comments)
 4. CI uses pregenerated bindings (`BLPAPI_PREGENERATED_BINDINGS`) to skip bindgen entirely

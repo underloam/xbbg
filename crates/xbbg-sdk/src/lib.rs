@@ -5,7 +5,8 @@
 //!
 //! # Features
 //!
-//! * **default (none): the resolver.** Platform library names, the cache root, the
+//! * **default (none): the resolver.** Platform library names, the SDK directory layouts and the
+//!   environment lookup ([`locate`]), the cache root, the
 //!   `provenance.json` record and the verification of an installed runtime. It returns an
 //!   absolute library path and nothing more: no networking, no download, and only `serde`,
 //!   `serde_json`, `sha2` and `hex` as dependencies, so a base package can embed it in a few
@@ -50,6 +51,7 @@
 //! read.
 
 mod cache;
+pub mod locate;
 mod platform;
 mod provenance;
 

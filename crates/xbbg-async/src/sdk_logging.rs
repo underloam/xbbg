@@ -1,6 +1,8 @@
 use std::ffi::CStr;
 use std::sync::Once;
 
+use crate::errors::BlpAsyncError;
+
 static INIT: Once = Once::new();
 
 fn severity_name(severity: i32) -> &'static str {
@@ -105,14 +107,24 @@ impl std::str::FromStr for SdkLogLevel {
     }
 }
 
-pub fn register_sdk_logging(level: SdkLogLevel) {
+/// Routes the Bloomberg SDK's own log lines into `xbbg_log` at `level` (once per process).
+///
+/// # Errors
+///
+/// [`BlpAsyncError::SdkNotLoaded`] if the Bloomberg runtime has not been loaded with
+/// `xbbg_core::load`: the SDK is what the callback is registered with.
+pub fn register_sdk_logging(level: SdkLogLevel) -> Result<(), BlpAsyncError> {
     if level == SdkLogLevel::Off {
-        return;
+        return Ok(());
+    }
+    if xbbg_core::loaded_sdk_path().is_none() {
+        return Err(BlpAsyncError::SdkNotLoaded);
     }
 
     INIT.call_once(|| {
+        // SAFETY: `sdk_callback` has the signature the SDK expects and never unwinds.
         let rc = unsafe {
-            xbbg_core::ffi::blpapi_Logging_registerCallback(
+            xbbg_core::sdk().blpapi_Logging_registerCallback(
                 Some(sdk_callback),
                 level.to_raw() as xbbg_core::ffi::blpapi_Logging_Severity_t,
             )
@@ -123,4 +135,5 @@ pub fn register_sdk_logging(level: SdkLogLevel) {
             xbbg_log::info!(level = ?level, "Bloomberg SDK logging callback registered");
         }
     });
+    Ok(())
 }

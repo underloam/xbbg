@@ -23,6 +23,16 @@ use xbbg_async::engine::{
     Engine, EngineConfig, ExtractorType, RequestParams, ServerAddr, Transport,
 };
 
+#[ctor::ctor(unsafe)]
+fn load_sdk() {
+    xbbg_core::load(
+        xbbg_sdk::Platform::host()
+            .and_then(xbbg_sdk::locate::from_env)
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("tests need a Bloomberg runtime");
+}
+
 // =============================================================================
 // Test Helpers
 // =============================================================================
@@ -37,7 +47,7 @@ fn init_tracing() {
             .try_init();
         // Suppress noisy BLPAPI WARN logs in tests
         unsafe {
-            let _ = xbbg_core::ffi::blpapi_Logging_registerCallback(
+            let _ = xbbg_core::sdk().blpapi_Logging_registerCallback(
                 None,
                 xbbg_core::ffi::blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_ERROR
                     as xbbg_core::ffi::blpapi_Logging_Severity_t,

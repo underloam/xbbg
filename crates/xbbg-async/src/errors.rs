@@ -14,6 +14,16 @@ pub enum BlpAsyncError {
     #[error("configuration error: {detail}")]
     ConfigError { detail: String },
 
+    /// The Bloomberg runtime has not been loaded into this process.
+    ///
+    /// Nothing here links it: the host calls `xbbg_core::load` with the library path it chose,
+    /// right after its native module loads, before any engine starts.
+    #[error(
+        "the Bloomberg runtime is not loaded: call xbbg_core::load with the path of the BLPAPI \
+         library before starting an engine"
+    )]
+    SdkNotLoaded,
+
     #[error("channel closed")]
     ChannelClosed,
 

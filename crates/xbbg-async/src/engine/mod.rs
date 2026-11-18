@@ -885,8 +885,16 @@ pub struct Engine {
 
 impl Engine {
     /// Create and start a new Engine with worker pools.
+    ///
+    /// # Errors
+    ///
+    /// [`BlpAsyncError::SdkNotLoaded`] if the Bloomberg runtime has not been loaded with
+    /// `xbbg_core::load`.
     pub fn start(config: EngineConfig) -> Result<Self, BlpAsyncError> {
-        crate::sdk_logging::register_sdk_logging(config.sdk_log_level);
+        if xbbg_core::loaded_sdk_path().is_none() {
+            return Err(BlpAsyncError::SdkNotLoaded);
+        }
+        crate::sdk_logging::register_sdk_logging(config.sdk_log_level)?;
         config.validate()?;
 
         let config = Arc::new(config);

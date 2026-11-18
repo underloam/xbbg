@@ -4,6 +4,7 @@ use std::ffi::CString;
 
 use crate::correlation::CorrelationId;
 use crate::errors::{BlpError, Result};
+use crate::sdk;
 
 /// Subscription list for market data subscriptions.
 ///
@@ -49,7 +50,7 @@ impl SubscriptionList {
     /// Add subscriptions with `add()` before passing to `Session::subscribe()`.
     pub fn new() -> Self {
         // SAFETY: We're calling the Bloomberg API to create a subscription list
-        let ptr = unsafe { crate::ffi::blpapi_SubscriptionList_create() };
+        let ptr = unsafe { sdk().blpapi_SubscriptionList_create() };
 
         // Note: Bloomberg API may return null on failure, but we'll handle that gracefully
         Self { ptr }
@@ -122,7 +123,7 @@ impl SubscriptionList {
         // - field_ptrs and option_ptrs are valid arrays
         // - cid_ffi is a valid correlation ID
         let rc = unsafe {
-            crate::ffi::blpapi_SubscriptionList_add(
+            sdk().blpapi_SubscriptionList_add(
                 self.ptr,
                 c_topic.as_ptr(),
                 &cid_ffi,
@@ -159,7 +160,7 @@ impl Drop for SubscriptionList {
         if !self.ptr.is_null() {
             // SAFETY: We're calling the Bloomberg API to destroy the subscription list
             unsafe {
-                crate::ffi::blpapi_SubscriptionList_destroy(self.ptr);
+                sdk().blpapi_SubscriptionList_destroy(self.ptr);
             }
             self.ptr = std::ptr::null_mut();
         }

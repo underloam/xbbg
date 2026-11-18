@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::element::Element;
 use crate::errors::{BlpError, Result};
 use crate::name::Name;
+use crate::sdk;
 
 /// Request object for sending to Bloomberg services.
 ///
@@ -62,7 +63,7 @@ impl Request {
     pub fn bloomberg_request_id(&self) -> Option<Arc<str>> {
         let mut request_id = std::ptr::null();
         // SAFETY: the request and output pointer are non-null and valid.
-        let rc = unsafe { crate::ffi::blpapi_Request_getRequestId(self.ptr, &mut request_id) };
+        let rc = unsafe { sdk().blpapi_Request_getRequestId(self.ptr, &mut request_id) };
         if rc != 0 || request_id.is_null() {
             return None;
         }
@@ -80,7 +81,7 @@ impl Request {
         // SAFETY: We're calling the Bloomberg API with a valid pointer
         // The returned element is valid for the lifetime of the Request
         unsafe {
-            let elem_ptr = crate::ffi::blpapi_Request_elements(self.ptr);
+            let elem_ptr = sdk().blpapi_Request_elements(self.ptr);
             Element::new(elem_ptr)
         }
     }
@@ -122,7 +123,7 @@ impl Request {
         // - c_value is a valid C string
         // - BLPAPI_ELEMENT_INDEX_END indicates append operation
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setValueString(
+            sdk().blpapi_Element_setValueString(
                 array_elem.as_ptr(),
                 c_value.as_ptr(),
                 crate::ffi::BLPAPI_ELEMENT_INDEX_END as usize,
@@ -164,7 +165,7 @@ impl Request {
         // SAFETY: array_elem.as_ptr() is valid, c_value is a valid C string.
         // BLPAPI_ELEMENT_INDEX_END indicates append operation.
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setValueString(
+            sdk().blpapi_Element_setValueString(
                 array_elem.as_ptr(),
                 c_value.as_ptr(),
                 crate::ffi::BLPAPI_ELEMENT_INDEX_END as usize,
@@ -204,7 +205,7 @@ impl Request {
 
         // SAFETY: We're calling the Bloomberg API with valid pointers
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementString(
+            sdk().blpapi_Element_setElementString(
                 root.as_ptr(),
                 c_name.as_ptr(),
                 std::ptr::null(),
@@ -234,7 +235,7 @@ impl Request {
         // SAFETY: root and name are valid handles; nameString is null because
         // the interned Name pointer identifies the element.
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementString(
+            sdk().blpapi_Element_setElementString(
                 root.as_ptr(),
                 std::ptr::null(),
                 name.as_ptr(),
@@ -277,13 +278,15 @@ impl Request {
             detail: format!("invalid name: {}", e),
         })?;
 
-        // SAFETY: We're calling the Bloomberg API with valid pointers
+        // SAFETY: We're calling the Bloomberg API with valid pointers. `&dt` is cast from the
+        // local `blpapi_Datetime_t` to the SDK's own type: both are `repr(C)` with identical size,
+        // alignment and field offsets, which the const assertions in `ffi.rs` check.
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementDatetime(
+            sdk().blpapi_Element_setElementDatetime(
                 root.as_ptr(),
                 c_name.as_ptr(),
                 std::ptr::null(),
-                &dt,
+                (&raw const dt).cast(),
             )
         };
 
@@ -313,7 +316,7 @@ impl Request {
 
         // SAFETY: We're calling the Bloomberg API with valid pointers
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementInt32(
+            sdk().blpapi_Element_setElementInt32(
                 root.as_ptr(),
                 c_name.as_ptr(),
                 std::ptr::null(),
@@ -356,9 +359,8 @@ impl Request {
     ) -> Result<*mut crate::ffi::blpapi_Element_t> {
         let mut appended = std::mem::MaybeUninit::uninit();
 
-        let rc = unsafe {
-            crate::ffi::blpapi_Element_appendElement(array_element, appended.as_mut_ptr())
-        };
+        let rc =
+            unsafe { sdk().blpapi_Element_appendElement(array_element, appended.as_mut_ptr()) };
 
         if rc != 0 {
             return Err(BlpError::Internal {
@@ -394,7 +396,7 @@ impl Request {
 
         // SAFETY: element is a valid pointer from get_or_create_element/append_element
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementString(
+            sdk().blpapi_Element_setElementString(
                 element,
                 c_name.as_ptr(),
                 std::ptr::null(),
@@ -433,7 +435,7 @@ impl Request {
 
         // blpapi_Element_getElement creates the sub-element for sequences/choices if it doesn't exist
         let rc = unsafe {
-            crate::ffi::blpapi_Element_getElement(
+            sdk().blpapi_Element_getElement(
                 root.as_ptr(),
                 out.as_mut_ptr(),
                 c_name.as_ptr(),
@@ -480,7 +482,7 @@ impl Request {
 
             let mut next = std::mem::MaybeUninit::uninit();
             let rc = unsafe {
-                crate::ffi::blpapi_Element_getElement(
+                sdk().blpapi_Element_getElement(
                     current,
                     next.as_mut_ptr(),
                     c_name.as_ptr(),
@@ -507,7 +509,7 @@ impl Request {
         })?;
 
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementString(
+            sdk().blpapi_Element_setElementString(
                 current,
                 c_name.as_ptr(),
                 std::ptr::null(),
@@ -547,7 +549,7 @@ impl Request {
 
             let mut next = std::mem::MaybeUninit::uninit();
             let rc = unsafe {
-                crate::ffi::blpapi_Element_getElement(
+                sdk().blpapi_Element_getElement(
                     current,
                     next.as_mut_ptr(),
                     c_name.as_ptr(),
@@ -571,12 +573,7 @@ impl Request {
         })?;
 
         let rc = unsafe {
-            crate::ffi::blpapi_Element_setElementInt32(
-                current,
-                c_name.as_ptr(),
-                std::ptr::null(),
-                value,
-            )
+            sdk().blpapi_Element_setElementInt32(current, c_name.as_ptr(), std::ptr::null(), value)
         };
 
         if rc != 0 {
@@ -752,7 +749,7 @@ impl Drop for Request {
             // SAFETY: We own this pointer and it's valid.
             // blpapi_Request_destroy releases the request resources.
             unsafe {
-                crate::ffi::blpapi_Request_destroy(self.ptr);
+                sdk().blpapi_Request_destroy(self.ptr);
             }
             self.ptr = std::ptr::null_mut();
         }
@@ -790,7 +787,7 @@ mod tests {
         // SAFETY: the schema bytes and output pointer are valid for the call.
         assert_eq!(
             unsafe {
-                blpapi_sys::blpapi_TestUtil_deserializeService(
+                sdk().blpapi_TestUtil_deserializeService(
                     SCHEMA.as_ptr().cast(),
                     SCHEMA.len(),
                     &mut raw_service,
@@ -806,7 +803,7 @@ mod tests {
         let owned = request.bloomberg_request_id();
         let mut raw_id = std::ptr::null();
         // SAFETY: the synthetic request and output pointer remain valid.
-        let rc = unsafe { crate::ffi::blpapi_Request_getRequestId(request.as_ptr(), &mut raw_id) };
+        let rc = unsafe { sdk().blpapi_Request_getRequestId(request.as_ptr(), &mut raw_id) };
         let expected = if rc == 0 && !raw_id.is_null() {
             // SAFETY: SDK storage is valid while request remains alive.
             unsafe { CStr::from_ptr(raw_id) }
@@ -824,7 +821,7 @@ mod tests {
         );
         drop(request);
         // SAFETY: deserializeService transferred one service reference to this test.
-        unsafe { blpapi_sys::blpapi_Service_release(raw_service) };
+        unsafe { sdk().blpapi_Service_release(raw_service) };
         assert!(
             owned.as_deref() == expected.as_deref(),
             "owned ID survives request destruction"

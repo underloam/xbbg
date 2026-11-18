@@ -10,6 +10,7 @@ use std::rc::Rc;
 use crate::errors::{BlpError, Result};
 use crate::request::Request;
 use crate::schema::Operation;
+use crate::sdk;
 
 /// Service handle for creating requests.
 ///
@@ -66,7 +67,7 @@ impl<'session> Service<'session> {
         // SAFETY: self.ptr is a non-null service pointer borrowed from a live
         // Session, req_ptr is an out-parameter, and c_operation is a valid C string.
         let rc = unsafe {
-            crate::ffi::blpapi_Service_createRequest(self.ptr, &mut req_ptr, c_operation.as_ptr())
+            sdk().blpapi_Service_createRequest(self.ptr, &mut req_ptr, c_operation.as_ptr())
         };
 
         if rc != 0 {
@@ -83,7 +84,7 @@ impl<'session> Service<'session> {
         // SAFETY: the SDK returns a service-owned C string valid while this
         // borrowed service handle remains valid.
         unsafe {
-            let name_ptr = crate::ffi::blpapi_Service_name(self.ptr);
+            let name_ptr = sdk().blpapi_Service_name(self.ptr);
             if name_ptr.is_null() {
                 return "";
             }
@@ -97,7 +98,7 @@ impl<'session> Service<'session> {
         // SAFETY: the SDK returns a service-owned C string valid while this
         // borrowed service handle remains valid.
         unsafe {
-            let desc_ptr = crate::ffi::blpapi_Service_description(self.ptr);
+            let desc_ptr = sdk().blpapi_Service_description(self.ptr);
             if desc_ptr.is_null() {
                 return "";
             }
@@ -107,7 +108,7 @@ impl<'session> Service<'session> {
 
     /// Get the number of operations defined by this service.
     pub fn num_operations(&self) -> usize {
-        let count = unsafe { crate::ffi::blpapi_Service_numOperations(self.ptr) };
+        let count = unsafe { sdk().blpapi_Service_numOperations(self.ptr) };
         count.max(0) as usize
     }
 
@@ -125,7 +126,7 @@ impl<'session> Service<'session> {
 
         let mut op_ptr: *mut crate::ffi::blpapi_Operation_t = std::ptr::null_mut();
 
-        let rc = unsafe { crate::ffi::blpapi_Service_getOperationAt(self.ptr, &mut op_ptr, index) };
+        let rc = unsafe { sdk().blpapi_Service_getOperationAt(self.ptr, &mut op_ptr, index) };
 
         if rc != 0 || op_ptr.is_null() {
             return Err(BlpError::Internal {

@@ -17,6 +17,8 @@ name = "xbbg_bench"
 # `live` is named explicitly because the workspace entries disable default
 # features; these benchmarks previously inherited it.
 xbbg_core = { workspace = true, features = ["live"] }
+# Finds the Bloomberg runtime for `load_sdk` (this crate is never published).
+xbbg-sdk = { workspace = true }
 
 [dev-dependencies]
 xbbg-async = { workspace = true, features = ["bench-internals", "live"] }
