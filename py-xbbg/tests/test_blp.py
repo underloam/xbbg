@@ -525,3 +525,13 @@ def test_sync_wrappers_preserve_original_async_functions(async_name, sync_name):
     assert Path(async_func.__code__.co_filename).name == "_endpoints.py"
     assert sync_func.__wrapped__ is async_func
     assert inspect.signature(sync_func) == inspect.signature(async_func)
+
+
+def test_request_ids_stay_unique_when_the_clock_repeats(monkeypatch):
+    # Windows advances time.time_ns() in coarse ticks, so back-to-back requests
+    # can read the same value.
+    monkeypatch.setattr(blp.time, "time_ns", lambda: 1_000)
+    labels = [blp._next_request_id() for _ in range(3)]
+    assert len(set(labels)) == 3
+    numbers = [int(label.removeprefix("req-")) for label in labels]
+    assert numbers == sorted(numbers)

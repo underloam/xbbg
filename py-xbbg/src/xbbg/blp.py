@@ -18,6 +18,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 import inspect
 import logging
+import threading
 import time
 from typing import TYPE_CHECKING, Any, TypeAlias, cast
 
@@ -576,6 +577,24 @@ def _coerce_server_snapshot(value: Any) -> tuple[tuple[str, int], ...]:
     return tuple(servers)
 
 
+_request_id_lock = threading.Lock()
+_last_request_ns = 0
+
+
+def _next_request_id() -> str:
+    """Return a ``req-<ns>`` label that is unique in this process and follows the wall clock.
+
+    Consecutive ``time.time_ns()`` readings can repeat: Windows advances the
+    system clock in coarse ticks. A repeated or earlier reading takes the
+    nanosecond after the last label instead.
+    """
+    global _last_request_ns
+    now = time.time_ns()
+    with _request_id_lock:
+        _last_request_ns = max(now, _last_request_ns + 1)
+        return f"req-{_last_request_ns}"
+
+
 def _snapshot_request_environment() -> RequestEnvironment:
     scoped = _engine._active_engine.get()
     if scoped is not None:
@@ -912,7 +931,7 @@ async def arequest(
     )
     params.validate()
 
-    request_id = f"req-{time.time_ns()}"
+    request_id = _next_request_id()
     context = RequestContext(
         request_id=request_id,
         params=params,
