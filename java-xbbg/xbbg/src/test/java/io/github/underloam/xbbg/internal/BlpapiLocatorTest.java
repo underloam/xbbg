@@ -88,7 +88,9 @@ class BlpapiLocatorTest {
 
   @Test
   void quotesAndBackslashesInPathsSurviveTheRequest() {
-    Path explicit = temp.resolve("with \"quote\" and \\ backslash");
+    // A Windows path cannot hold a quote, and its separators are backslashes already.
+    boolean windows = java.io.File.separatorChar == '\\';
+    Path explicit = temp.resolve(windows ? "with \\ backslash" : "with \"quote\" and \\ backslash");
     assertEquals(explicit.toString(), parse(locator(explicit).requestJson()).get("explicit"));
   }
 
