@@ -73,7 +73,7 @@ pub fn default_cache_root() -> Option<PathBuf> {
     })
 }
 
-fn cache_root_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+pub(crate) fn cache_root_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
     if let Some(dir) = var("XBBG_CACHE_DIR") {
         return Some(dir);
     }

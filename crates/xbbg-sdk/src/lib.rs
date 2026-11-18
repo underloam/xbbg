@@ -5,13 +5,14 @@
 //!
 //! # Features
 //!
-//! * **default (none): the resolver.** Platform library names, the SDK directory layouts and the
-//!   environment lookup ([`locate`]), the cache root, the
-//!   `provenance.json` record and the verification of an installed runtime. It returns an
-//!   absolute library path and nothing more: no networking, no download, and only `serde`,
-//!   `serde_json`, `sha2` and `hex` as dependencies, so a base package can embed it in a few
-//!   hundred kilobytes. Each language binding keeps its own search order and loads the chosen
-//!   library in its own process.
+//! * **default (none): the resolver.** Platform library names, the one search order for the
+//!   runtime ([`locate`]: explicit path, `BLPAPI_*` variables, vendored SDK, host hints, the
+//!   Terminal, the OS search path, the cache), the cache root, the `provenance.json` record and
+//!   the verification of an installed runtime. It returns candidate library paths and nothing
+//!   more: no networking, no download, and only `serde`, `serde_json`, `sha2` and `hex` as
+//!   dependencies, so a base package can embed it in a few hundred kilobytes. Each language
+//!   binding passes what only it knows to [`locate`] and loads the chosen library in its own
+//!   process.
 //! * **`provision`: the downloader.** Everything below "Provisioning", with the PyPI, conda and
 //!   archive stacks (uv, rattler, reqwest, tokio, archive readers) behind it. Enabling it in a
 //!   resolver-only binding grows that binary by an order of magnitude; the package size budgets

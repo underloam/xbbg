@@ -33,8 +33,8 @@ pub use loader::{SdkLoadError, load, loaded_sdk_path, sdk};
 #[cfg(test)]
 #[ctor::ctor(unsafe)]
 fn load_sdk_for_tests() {
-    let path = xbbg_sdk::Platform::host()
-        .and_then(xbbg_sdk::locate::from_env)
+    let path = xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+        .into_first_path()
         .expect("unit tests need a Bloomberg runtime: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
     if let Err(error) = load(path) {
         panic!("unit tests need a Bloomberg runtime: {error}");

@@ -95,8 +95,8 @@ fn send_and_dump(sess: &Session, req: &xbbg_core::Request) {
 #[allow(clippy::result_large_err)]
 fn main() -> xbbg_core::Result<()> {
     xbbg_core::load(
-        xbbg_sdk::Platform::host()
-            .and_then(xbbg_sdk::locate::from_env)
+        xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+            .into_first_path()
             .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
     )
     .expect("a Bloomberg runtime reachable through BLPAPI_LIB_DIR or BLPAPI_ROOT");

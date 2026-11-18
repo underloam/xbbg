@@ -24,8 +24,8 @@ mod synthetic_subscriptions;
 /// runtime, so xbbg-core panics on the first SDK call until it is loaded. Returns the loaded
 /// library's path.
 pub fn load_sdk() -> std::path::PathBuf {
-    let path = xbbg_sdk::Platform::host()
-        .and_then(xbbg_sdk::locate::from_env)
+    let path = xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+        .into_first_path()
         .expect("benchmarks need the SDK: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
     xbbg_core::load(&path).unwrap_or_else(|error| panic!("benchmarks need the SDK: {error}"));
     path

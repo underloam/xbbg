@@ -8160,6 +8160,7 @@ dependencies = [
  "xbbg-ext",
  "xbbg-log",
  "xbbg-recipes",
+ "xbbg-sdk",
  "xbbg_core",
 ]
 

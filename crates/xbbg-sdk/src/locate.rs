@@ -1,15 +1,68 @@
-//! Where on disk the Bloomberg runtime is, from the environment and SDK directory layouts.
+//! Where on disk the Bloomberg runtime is: the one search order every xbbg host uses.
 //!
-//! Every function returns the absolute path of an existing library file or `None`; nothing here
-//! opens the library. This is the one place that knows the SDK directory layouts, so a search
-//! order built on it (the explicit path, host hint directories, the Terminal, the cache, ...)
-//! shares them.
+//! [`locate`] lists the library files that might be the runtime, best first, and the places it
+//! looked at and refused. It opens nothing: a host (through `xbbg_host::sdk::locate_and_load`)
+//! tries to load each candidate in turn, so a library that exists but cannot be used (too old,
+//! wrong architecture, not Bloomberg's) costs one rejection, not the whole search.
+//!
+//! # The order
+//!
+//! 1. [`LocateRequest::explicit`]: a library file, or a directory that holds one.
+//! 2. `BLPAPI_LIB_DIR`: the directory that holds the library.
+//! 3. `BLPAPI_ROOT`: a Bloomberg C++ SDK root (see below).
+//! 4. `XBBG_DEV_SDK_ROOT`: an SDK root; a relative value is relative to
+//!    [`LocateRequest::repo_root`].
+//! 5. The vendored SDK, `<repo_root>/vendor/blpapi-sdk`, newest version first.
+//! 6. [`LocateRequest::hints`], in the given order: directories only the host knows, such as the
+//!    directory of the `blpapi` Python wheel.
+//! 7. Bloomberg Terminal roots. Windows: `<SYSTEMDRIVE>\blp\DAPI` (and `C:\blp\DAPI`),
+//!    `Bloomberg\Blp\DAPI` under `PROGRAMFILES` and `PROGRAMFILES(X86)` (and the same under
+//!    `<drive>\Program Files`, `<drive>\Program Files (x86)`), and `Bloomberg\DAPI` and
+//!    `Bloomberg\Blp\DAPI` under `LOCALAPPDATA` (else `USERPROFILE\AppData\Local`). Elsewhere:
+//!    `~/blp/DAPI` and `/opt/bloomberg/DAPI`.
+//! 8. The operating system's library search path: `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,
+//!    `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS.
+//! 9. The xbbg cache ([`LocateRequest::cache_root`], else `XBBG_CACHE_DIR`, else the default
+//!    root): verified installs, best first. Installs that fail verification are
+//!    [`Located::rejected`].
+//!
+//! # Layouts
+//!
+//! An *SDK root* (`BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, the vendored directory, an explicit
+//! directory) is searched in the root itself and its usual layouts (`bin`, `lib`, `Lib`, `lib64`,
+//! `lib/win64`, `lib/win32`, `Linux`, `Darwin`, ...), then the same under each subdirectory one
+//! and two levels down, versioned ones (`3.26.5.1`) newest first, so a container of SDKs works as
+//! well as one SDK. Hints and Terminal roots are searched in the directory and its layouts only;
+//! `BLPAPI_LIB_DIR` and the search-path directories only directly.
+//!
+//! # File names
+//!
+//! [`Platform::library_names`] is the only list. Every copy of the old per-host searches
+//! accepted a different subset, so it is their union that makes sense for one platform:
+//! `blpapi3_32.dll` is not on it (a 32-bit library cannot load into the 64-bit processes this
+//! workspace ships), and the `.dll`/`.dylib` names are not tried on other platforms.
+//!
+//! # Environment
+//!
+//! Every variable is read through [`LocateRequest::env`]: a host that already holds an environment
+//! view (Node's `process.env`, a JVM that overlays system properties) passes it; `None` reads the
+//! process environment. Empty variables count as unset. On Windows, names in a given view match
+//! case-insensitively. A relative path is made absolute against the current directory (except
+//! `XBBG_DEV_SDK_ROOT`, see above).
+//!
+//! Candidates are deduplicated by canonical file (case-folded on Windows) and keep the position of
+//! their first occurrence. A directory that was named (explicitly, by a variable or by a hint) but
+//! holds no library is reported in [`Located::rejected`], so "not found" can say what was tried.
 
 use std::cmp::Ordering;
+use std::collections::{BTreeMap, HashSet};
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::cache::compare_versions;
+use serde::{Deserialize, Serialize};
+
+use crate::cache::{cache_root_from, compare_versions, scan_cache};
 use crate::platform::Platform;
 
 /// Directories inside an SDK root that hold the runtime, in the order they are tried: the root
@@ -31,55 +84,408 @@ const SDK_ROOT_SUBDIRS: &[&str] = &[
     "macos",
 ];
 
-/// The runtime named by the environment: `BLPAPI_LIB_DIR`, else `BLPAPI_ROOT`.
+/// What to search and how; every field is optional.
 ///
-/// `BLPAPI_LIB_DIR` is the directory holding the library. `BLPAPI_ROOT` is an SDK root; see
-/// [`in_sdk_root`]. Empty variables count as unset, and relative paths resolve against the current
-/// directory.
-pub fn from_env(platform: Platform) -> Option<PathBuf> {
-    from_dirs(
+/// `LocateRequest::default()` searches everything with the process environment.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
+pub struct LocateRequest {
+    /// A library file or a directory that holds one, from the host's setter or property.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub explicit: Option<PathBuf>,
+    /// Host-only directories, searched after the vendored SDK and before the Terminal.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub hints: Vec<Hint>,
+    /// The host's view of the environment; `None` reads the process environment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub env: Option<BTreeMap<String, String>>,
+    /// The cache root, overriding `XBBG_CACHE_DIR` and the default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_root: Option<PathBuf>,
+    /// A development checkout: enables `<repo_root>/vendor/blpapi-sdk` and is the base of a
+    /// relative `XBBG_DEV_SDK_ROOT`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repo_root: Option<PathBuf>,
+    /// The platform to search for; the host platform by default.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub platform: Option<Platform>,
+}
+
+/// A directory only the host knows about, such as `("blpapi_python", <wheel directory>)`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct Hint {
+    /// What the directory is, for messages; it becomes [`Candidate::detail`].
+    pub label: String,
+    /// The directory.
+    pub dir: PathBuf,
+}
+
+/// Which rule produced a candidate or a rejection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceKind {
+    /// [`LocateRequest::explicit`].
+    Explicit,
+    /// `BLPAPI_LIB_DIR`.
+    BlpapiLibDir,
+    /// `BLPAPI_ROOT`.
+    BlpapiRoot,
+    /// `XBBG_DEV_SDK_ROOT`.
+    DevSdkRoot,
+    /// `<repo_root>/vendor/blpapi-sdk`.
+    Vendored,
+    /// One of [`LocateRequest::hints`].
+    Hint,
+    /// A Bloomberg Terminal installation.
+    Terminal,
+    /// A directory of the operating system's library search path.
+    SearchPath,
+    /// The xbbg cache.
+    Cache,
+}
+
+impl SourceKind {
+    /// The serialized name, e.g. `blpapi_lib_dir`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::BlpapiLibDir => "blpapi_lib_dir",
+            Self::BlpapiRoot => "blpapi_root",
+            Self::DevSdkRoot => "dev_sdk_root",
+            Self::Vendored => "vendored",
+            Self::Hint => "hint",
+            Self::Terminal => "terminal",
+            Self::SearchPath => "search_path",
+            Self::Cache => "cache",
+        }
+    }
+}
+
+impl std::fmt::Display for SourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// A library file that might be the runtime.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Candidate {
+    /// The absolute path of the library file.
+    pub path: PathBuf,
+    /// The rule that found it.
+    pub source: SourceKind,
+    /// What the rule searched: the explicit path, the variable's name, the hint's label, the
+    /// Terminal root, the vendored directory or the cache install directory.
+    pub detail: String,
+    /// The runtime's version when the source records it (cache installs); otherwise `None`.
+    pub version: Option<String>,
+}
+
+/// A place that was searched or a library that was refused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Rejected {
+    /// The directory, library file or cache install directory.
+    pub path: PathBuf,
+    /// The rule that named it.
+    pub source: SourceKind,
+    /// As [`Candidate::detail`].
+    pub detail: String,
+    /// Why it cannot be used, for people.
+    pub reason: String,
+}
+
+/// The result of a search.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Located {
+    /// Library files to try, best first, without duplicates.
+    pub candidates: Vec<Candidate>,
+    /// Places that were named but hold no usable runtime, in the order they were met.
+    pub rejected: Vec<Rejected>,
+}
+
+impl Located {
+    /// The path of the first candidate, for callers (tests, examples) that load it without
+    /// further ceremony.
+    pub fn into_first_path(self) -> Option<PathBuf> {
+        self.candidates.into_iter().next().map(|found| found.path)
+    }
+}
+
+/// Lists the runtime candidates for `request` in the order documented on this module.
+pub fn locate(request: &LocateRequest) -> Located {
+    let platform = request
+        .platform
+        .or_else(Platform::host)
+        .unwrap_or_else(os_family_platform);
+    let env = Env {
+        vars: request.env.as_ref(),
+        ignore_case: platform == Platform::WindowsX86_64,
+    };
+    let mut search = Search {
         platform,
-        env_path("BLPAPI_LIB_DIR").as_deref(),
-        env_path("BLPAPI_ROOT").as_deref(),
-    )
+        found: Located::default(),
+        seen: HashSet::new(),
+    };
+    let repo_root = request.repo_root.as_deref().map(absolute);
+
+    // 1. Explicit.
+    if let Some(explicit) = &request.explicit {
+        let path = absolute(explicit);
+        let detail = path.display().to_string();
+        if path.is_file() {
+            search.push(path, SourceKind::Explicit, &detail, None);
+        } else {
+            search.directory(&path, Layout::SdkTree, SourceKind::Explicit, &detail, true);
+        }
+    }
+
+    // 2..4. The environment.
+    for (var, layout, source) in [
+        ("BLPAPI_LIB_DIR", Layout::Flat, SourceKind::BlpapiLibDir),
+        ("BLPAPI_ROOT", Layout::SdkTree, SourceKind::BlpapiRoot),
+        ("XBBG_DEV_SDK_ROOT", Layout::SdkTree, SourceKind::DevSdkRoot),
+    ] {
+        let Some(value) = env.get(var) else { continue };
+        let dir = match (&repo_root, source) {
+            (Some(base), SourceKind::DevSdkRoot) => base.join(value),
+            _ => absolute(Path::new(&value)),
+        };
+        search.directory(&dir, layout, source, var, true);
+    }
+
+    // 5. The vendored SDK.
+    if let Some(root) = &repo_root {
+        let vendor = root.join("vendor").join("blpapi-sdk");
+        let detail = vendor.display().to_string();
+        search.directory(
+            &vendor,
+            Layout::SdkTree,
+            SourceKind::Vendored,
+            &detail,
+            false,
+        );
+    }
+
+    // 6. Host hints.
+    for hint in &request.hints {
+        let dir = absolute(&hint.dir);
+        if dir.is_file() {
+            search.push(dir, SourceKind::Hint, &hint.label, None);
+        } else {
+            search.directory(&dir, Layout::Sdk, SourceKind::Hint, &hint.label, true);
+        }
+    }
+
+    // 7. Terminal roots.
+    for root in terminal_roots(&env, platform) {
+        let detail = root.display().to_string();
+        search.directory(&root, Layout::Sdk, SourceKind::Terminal, &detail, false);
+    }
+
+    // 8. The operating system's library search path.
+    for var in search_path_vars(platform) {
+        let Some(value) = env.get(var) else { continue };
+        for dir in split_search_path(&value.to_string_lossy(), platform) {
+            search.directory(&dir, Layout::Flat, SourceKind::SearchPath, var, false);
+        }
+    }
+
+    // 9. The cache.
+    let cache_root = request
+        .cache_root
+        .as_deref()
+        .map(absolute)
+        .or_else(|| cache_root_from(|name| env.get(name).map(PathBuf::from)));
+    if let Some(root) = cache_root {
+        search.cache(&root);
+    }
+
+    search.found
 }
 
-/// [`from_env`] with the two directories given instead of read.
-pub fn from_dirs(
+/// The platform whose file names and layouts fit the host operating system when the
+/// architecture is not one xbbg ships for; the search still helps there, loading may not.
+fn os_family_platform() -> Platform {
+    if cfg!(windows) {
+        Platform::WindowsX86_64
+    } else if cfg!(target_os = "macos") {
+        Platform::MacosAarch64
+    } else {
+        Platform::LinuxX86_64
+    }
+}
+
+/// How deep to look inside a directory.
+#[derive(Clone, Copy)]
+enum Layout {
+    /// The library directly in the directory.
+    Flat,
+    /// The directory and its SDK layouts (`bin`, `lib`, `Linux`, ...).
+    Sdk,
+    /// [`Layout::Sdk`] for the directory and for each subdirectory one and two levels down,
+    /// versioned ones newest first.
+    SdkTree,
+}
+
+struct Search {
     platform: Platform,
-    lib_dir: Option<&Path>,
-    sdk_root: Option<&Path>,
-) -> Option<PathBuf> {
-    lib_dir
-        .and_then(|dir| library_in(dir, platform))
-        .or_else(|| sdk_root.and_then(|root| in_sdk_root(root, platform)))
+    found: Located,
+    /// Canonical keys of the candidates so far.
+    seen: HashSet<String>,
 }
 
-/// The library directly inside `dir`, trying the platform's file names in order.
-pub fn library_in(dir: &Path, platform: Platform) -> Option<PathBuf> {
+impl Search {
+    fn push(&mut self, path: PathBuf, source: SourceKind, detail: &str, version: Option<String>) {
+        let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        let mut key = canonical.to_string_lossy().into_owned();
+        if self.platform == Platform::WindowsX86_64 {
+            key = key.to_lowercase();
+        }
+        if self.seen.insert(key) {
+            self.found.candidates.push(Candidate {
+                path,
+                source,
+                detail: detail.to_owned(),
+                version,
+            });
+        }
+    }
+
+    fn reject(&mut self, path: &Path, source: SourceKind, detail: &str, reason: String) {
+        self.found.rejected.push(Rejected {
+            path: path.to_path_buf(),
+            source,
+            detail: detail.to_owned(),
+            reason,
+        });
+    }
+
+    /// Adds the libraries in `dir`; with `report`, a directory with none is a rejection.
+    fn directory(
+        &mut self,
+        dir: &Path,
+        layout: Layout,
+        source: SourceKind,
+        detail: &str,
+        report: bool,
+    ) {
+        let libraries = libraries(dir, layout, self.platform);
+        if libraries.is_empty() {
+            if report {
+                let reason = if !dir.exists() {
+                    "does not exist".to_owned()
+                } else if !dir.is_dir() {
+                    "is not a directory".to_owned()
+                } else {
+                    format!(
+                        "holds no Bloomberg runtime library (expected {})",
+                        self.platform.library_names().join(" or ")
+                    )
+                };
+                self.reject(dir, source, detail, reason);
+            }
+            return;
+        }
+        for library in libraries {
+            self.push(library, source, detail, None);
+        }
+    }
+
+    fn cache(&mut self, root: &Path) {
+        match scan_cache(root, self.platform) {
+            Ok(scan) => {
+                for runtime in scan.runtimes {
+                    let detail = runtime.install_dir.display().to_string();
+                    self.push(
+                        runtime.lib_path,
+                        SourceKind::Cache,
+                        &detail,
+                        Some(runtime.version),
+                    );
+                }
+                for refused in scan.rejected {
+                    let detail = refused.install_dir.display().to_string();
+                    self.reject(
+                        &refused.install_dir,
+                        SourceKind::Cache,
+                        &detail,
+                        refused.reason,
+                    );
+                }
+            }
+            Err(error) => {
+                let detail = root.display().to_string();
+                self.reject(root, SourceKind::Cache, &detail, error.to_string());
+            }
+        }
+    }
+}
+
+/// The host's view of the environment.
+struct Env<'a> {
+    vars: Option<&'a BTreeMap<String, String>>,
+    /// Match names in `vars` regardless of case (Windows).
+    ignore_case: bool,
+}
+
+impl Env<'_> {
+    /// A non-empty variable.
+    fn get(&self, name: &str) -> Option<OsString> {
+        let value = match self.vars {
+            None => std::env::var_os(name),
+            Some(vars) => vars
+                .get(name)
+                .or_else(|| {
+                    self.ignore_case
+                        .then(|| {
+                            vars.iter()
+                                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                                .map(|(_, value)| value)
+                        })
+                        .flatten()
+                })
+                .map(OsString::from),
+        };
+        value.filter(|value| !value.is_empty())
+    }
+}
+
+/// An absolute spelling of `path`: relative paths resolve against the current directory.
+fn absolute(path: &Path) -> PathBuf {
+    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The existing library files for `dir` under `layout`, in search order.
+fn libraries(dir: &Path, layout: Layout, platform: Platform) -> Vec<PathBuf> {
+    match layout {
+        Layout::Flat => library_files(dir, platform),
+        Layout::Sdk => sdk_layouts(dir, platform),
+        Layout::SdkTree => sdk_roots(dir)
+            .iter()
+            .flat_map(|root| sdk_layouts(root, platform))
+            .collect(),
+    }
+}
+
+fn sdk_layouts(root: &Path, platform: Platform) -> Vec<PathBuf> {
+    SDK_ROOT_SUBDIRS
+        .iter()
+        .flat_map(|subdir| library_files(&root.join(subdir), platform))
+        .collect()
+}
+
+/// The library files directly inside `dir`, in the order of the platform's file names.
+fn library_files(dir: &Path, platform: Platform) -> Vec<PathBuf> {
     platform
         .library_names()
         .iter()
         .map(|name| dir.join(name))
-        .find(|candidate| candidate.is_file())
-}
-
-/// The library in an SDK root: in the root itself and the usual layouts under it (`bin/`, `lib/`,
-/// `Linux/`, `Darwin/`, ...), and the same under each versioned directory one or two levels below
-/// (`vendor/blpapi-sdk/3.26.5.1/`), newest version first, so a container of SDKs works as well as
-/// one SDK.
-pub fn in_sdk_root(root: &Path, platform: Platform) -> Option<PathBuf> {
-    sdk_roots(root).into_iter().find_map(|sdk_root| {
-        SDK_ROOT_SUBDIRS
-            .iter()
-            .find_map(|subdir| library_in(&sdk_root.join(subdir), platform))
-    })
-}
-
-/// A non-empty environment variable as an absolute path.
-fn env_path(name: &str) -> Option<PathBuf> {
-    let value = std::env::var_os(name).filter(|value| !value.is_empty())?;
-    std::path::absolute(value).ok()
+        .filter(|candidate| candidate.is_file())
+        .collect()
 }
 
 /// `root`, then its subdirectories, then theirs; each level newest version first.
@@ -130,6 +536,99 @@ fn is_version(name: &str) -> bool {
             .all(|part| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_digit()))
 }
 
+/// The Bloomberg Terminal's `DAPI` directories on this platform, most specific first, without
+/// duplicates (case-folded on Windows).
+fn terminal_roots(env: &Env<'_>, platform: Platform) -> Vec<PathBuf> {
+    let mut roots: Vec<String> = Vec::new();
+    let mut add = |root: String| {
+        let duplicate = if platform == Platform::WindowsX86_64 {
+            roots.iter().any(|known| known.eq_ignore_ascii_case(&root))
+        } else {
+            roots.contains(&root)
+        };
+        if !duplicate {
+            roots.push(root);
+        }
+    };
+    if platform == Platform::WindowsX86_64 {
+        let text = |name: &str| {
+            env.get(name)
+                .map(|value| value.to_string_lossy().into_owned())
+        };
+        let drive = text("SYSTEMDRIVE")
+            .and_then(|value| drive_prefix(&value))
+            .unwrap_or_else(|| "C:".to_owned());
+        add(format!(r"{drive}\blp\DAPI"));
+        add(r"C:\blp\DAPI".to_owned());
+        for (var, fallback) in [
+            ("PROGRAMFILES", "Program Files"),
+            ("PROGRAMFILES(X86)", "Program Files (x86)"),
+        ] {
+            for base in [text(var), Some(format!(r"{drive}\{fallback}"))]
+                .into_iter()
+                .flatten()
+            {
+                add(format!(
+                    r"{}\Bloomberg\Blp\DAPI",
+                    base.trim_end_matches(['\\', '/'])
+                ));
+            }
+        }
+        let local = text("LOCALAPPDATA").or_else(|| {
+            text("USERPROFILE")
+                .map(|home| format!(r"{}\AppData\Local", home.trim_end_matches(['\\', '/'])))
+        });
+        if let Some(local) = local {
+            let local = local.trim_end_matches(['\\', '/']);
+            add(format!(r"{local}\Bloomberg\DAPI"));
+            add(format!(r"{local}\Bloomberg\Blp\DAPI"));
+        }
+    } else {
+        if let Some(home) = env.get("HOME") {
+            add(home.to_string_lossy().trim_end_matches('/').to_owned() + "/blp/DAPI");
+        }
+        add("/opt/bloomberg/DAPI".to_owned());
+    }
+    roots.into_iter().map(PathBuf::from).collect()
+}
+
+/// `D:` from `D:\` or `D:`; `None` for anything else.
+fn drive_prefix(value: &str) -> Option<String> {
+    let mut chars = value.chars();
+    match (chars.next(), chars.next()) {
+        (Some(letter), Some(':')) if letter.is_ascii_alphabetic() => Some(format!("{letter}:")),
+        _ => None,
+    }
+}
+
+/// The variables of the operating system's library search path, in the order they are read.
+fn search_path_vars(platform: Platform) -> &'static [&'static str] {
+    match platform {
+        Platform::WindowsX86_64 => &["PATH"],
+        Platform::LinuxX86_64 => &["LD_LIBRARY_PATH"],
+        Platform::MacosAarch64 => &["DYLD_LIBRARY_PATH", "DYLD_FALLBACK_LIBRARY_PATH"],
+    }
+}
+
+/// The directories of a path list: `;`-separated on Windows (entries trimmed, surrounding double
+/// quotes removed), `:`-separated elsewhere. Empty entries are skipped.
+fn split_search_path(value: &str, platform: Platform) -> Vec<PathBuf> {
+    let windows = platform == Platform::WindowsX86_64;
+    value
+        .split(if windows { ';' } else { ':' })
+        .map(|entry| {
+            let entry = entry.trim();
+            if windows {
+                entry.trim_matches('"').trim()
+            } else {
+                entry
+            }
+        })
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| absolute(Path::new(entry)))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -137,6 +636,19 @@ mod tests {
     fn touch(path: &Path) {
         fs::create_dir_all(path.parent().expect("a file has a directory")).expect("create dirs");
         fs::write(path, b"").expect("create file");
+    }
+
+    /// A request that reads only `vars`, never the process environment or the default cache.
+    fn request(vars: &[(&str, &Path)], platform: Platform) -> LocateRequest {
+        LocateRequest {
+            env: Some(
+                vars.iter()
+                    .map(|(name, value)| ((*name).to_owned(), value.display().to_string()))
+                    .collect(),
+            ),
+            platform: Some(platform),
+            ..LocateRequest::default()
+        }
     }
 
     #[test]
@@ -156,75 +668,22 @@ mod tests {
     }
 
     #[test]
-    fn lib_dir_holds_the_library_directly() {
-        let platform = Platform::LinuxX86_64;
-        let dir = tempfile::tempdir().expect("temp dir");
-        assert_eq!(from_dirs(platform, Some(dir.path()), None), None);
-        let library = dir.path().join("libblpapi3_64.so");
-        touch(&library);
-        assert_eq!(from_dirs(platform, Some(dir.path()), None), Some(library));
-    }
-
-    #[test]
-    fn lib_dir_wins_over_root() {
+    fn lib_dir_then_root() {
         let platform = Platform::LinuxX86_64;
         let lib = tempfile::tempdir().expect("temp dir");
         let root = tempfile::tempdir().expect("temp dir");
         touch(&lib.path().join("libblpapi3_64.so"));
         touch(&root.path().join("Linux/libblpapi3_64.so"));
+        let found = locate(&request(
+            &[("BLPAPI_LIB_DIR", lib.path()), ("BLPAPI_ROOT", root.path())],
+            platform,
+        ));
+        let sources: Vec<_> = found.candidates.iter().map(|c| c.source).collect();
+        assert_eq!(sources, [SourceKind::BlpapiLibDir, SourceKind::BlpapiRoot]);
         assert_eq!(
-            from_dirs(platform, Some(lib.path()), Some(root.path())),
-            Some(lib.path().join("libblpapi3_64.so"))
+            found.candidates[0].path,
+            lib.path().join("libblpapi3_64.so")
         );
-        // A lib dir without the library falls through to the root.
-        let empty = tempfile::tempdir().expect("temp dir");
-        assert_eq!(
-            from_dirs(platform, Some(empty.path()), Some(root.path())),
-            Some(root.path().join("Linux/libblpapi3_64.so"))
-        );
-    }
-
-    #[test]
-    fn root_layouts_cover_the_sdk_archives() {
-        for (platform, relative) in [
-            (Platform::LinuxX86_64, "Linux/libblpapi3_64.so"),
-            (Platform::MacosAarch64, "Darwin/libblpapi3_64.so"),
-            (Platform::MacosAarch64, "lib/libblpapi3_64.dylib"),
-            (Platform::WindowsX86_64, "bin/blpapi3_64.dll"),
-            (Platform::WindowsX86_64, "lib/win64/blpapi3_64.dll"),
-            (Platform::LinuxX86_64, "libblpapi3_64.so"),
-        ] {
-            let root = tempfile::tempdir().expect("temp dir");
-            touch(&root.path().join(relative));
-            assert_eq!(
-                in_sdk_root(root.path(), platform),
-                Some(root.path().join(relative)),
-                "{platform} {relative}"
-            );
-        }
-    }
-
-    #[test]
-    fn root_may_contain_versioned_sdks_newest_first() {
-        let platform = Platform::LinuxX86_64;
-        let root = tempfile::tempdir().expect("temp dir");
-        touch(&root.path().join("3.9.0/Linux/libblpapi3_64.so"));
-        touch(&root.path().join("3.26.5.1/Linux/libblpapi3_64.so"));
-        // One level deeper, as in a container holding a symlinked or nested SDK.
-        touch(&root.path().join("sdk/3.30.0.0/Linux/libblpapi3_64.so"));
-        assert_eq!(
-            in_sdk_root(root.path(), platform),
-            Some(root.path().join("3.26.5.1/Linux/libblpapi3_64.so"))
-        );
-    }
-
-    #[test]
-    fn nothing_found_is_none() {
-        let root = tempfile::tempdir().expect("temp dir");
-        assert_eq!(in_sdk_root(root.path(), Platform::LinuxX86_64), None);
-        assert_eq!(
-            in_sdk_root(&root.path().join("missing"), Platform::LinuxX86_64),
-            None
-        );
+        assert_eq!(found.candidates[0].detail, "BLPAPI_LIB_DIR");
     }
 }

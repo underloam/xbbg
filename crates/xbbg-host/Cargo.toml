@@ -20,6 +20,7 @@ xbbg-async = { workspace = true }
 xbbg-ext = { workspace = true }
 xbbg-log = { workspace = true }
 xbbg-recipes = { workspace = true }
+xbbg-sdk = { workspace = true }
 
 [features]
 default = ["live"]

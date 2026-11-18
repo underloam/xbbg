@@ -42,13 +42,22 @@ impl Platform {
         }
     }
 
-    /// File names of the Bloomberg library, most preferred first. Bloomberg ships the macOS
-    /// library with a `.so` suffix.
+    /// File names of the Bloomberg library, most preferred first.
+    ///
+    /// This is the union of what the xbbg hosts accepted before they shared one search. Bloomberg
+    /// ships the macOS library with a `.so` suffix; `libblpapi3.*` are the unversioned-name
+    /// spellings of packaged SDKs. `blpapi3_32.dll` is absent: a 32-bit library cannot load into
+    /// the 64-bit processes xbbg ships for.
     pub fn library_names(self) -> &'static [&'static str] {
         match self {
             Self::WindowsX86_64 => &["blpapi3_64.dll"],
-            Self::LinuxX86_64 => &["libblpapi3_64.so"],
-            Self::MacosAarch64 => &["libblpapi3_64.so", "libblpapi3_64.dylib"],
+            Self::LinuxX86_64 => &["libblpapi3_64.so", "libblpapi3.so"],
+            Self::MacosAarch64 => &[
+                "libblpapi3_64.so",
+                "libblpapi3_64.dylib",
+                "libblpapi3.so",
+                "libblpapi3.dylib",
+            ],
         }
     }
 }
@@ -140,10 +149,18 @@ mod tests {
     #[test]
     fn libraries_are_named_per_platform() {
         assert_eq!(Platform::WindowsX86_64.library_names(), ["blpapi3_64.dll"]);
-        assert_eq!(Platform::LinuxX86_64.library_names(), ["libblpapi3_64.so"]);
+        assert_eq!(
+            Platform::LinuxX86_64.library_names(),
+            ["libblpapi3_64.so", "libblpapi3.so"]
+        );
         assert_eq!(
             Platform::MacosAarch64.library_names(),
-            ["libblpapi3_64.so", "libblpapi3_64.dylib"]
+            [
+                "libblpapi3_64.so",
+                "libblpapi3_64.dylib",
+                "libblpapi3.so",
+                "libblpapi3.dylib"
+            ]
         );
     }
 }
