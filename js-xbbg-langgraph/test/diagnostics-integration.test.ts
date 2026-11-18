@@ -16,6 +16,14 @@ vi.mock(import("node:module"), async (importOriginal) => {
     extAuctionZeroPriceFields: () => ["SYNTHETIC_AUCTION_FIELD"],
     extImbalanceSide: () => null,
     getLogLevel: () => "off",
+    // @xbbg/core loads the Bloomberg runtime right after the addon; nothing is opened here.
+    loadSdk: () => ({
+      detail: "",
+      path: "synthetic-runtime",
+      rejected: [],
+      source: "explicit",
+      version: "0.0.0.0",
+    }),
     setLogLevel: () => undefined,
   };
 
