@@ -175,7 +175,7 @@ The `xbbg-mcp` binary finds and loads the Bloomberg runtime itself, at startup, 
 8. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS)
 9. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`)
 
-A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried. If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
+A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried. If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
 
 If you install Bloomberg's Python package, the wrapper can usually run without any extra shell configuration:
 

@@ -210,9 +210,9 @@ function xbbg calls) is skipped and the next candidate is tried:
    platform cache directory);
 8. provisioning from a configured source, then step 7 again.
 
-An explicit path that holds no usable runtime no longer stops the search: it is listed among the
-rejected candidates and the search goes on. When nothing loads, `BlpapiNotFoundException` lists
-every candidate that was refused and why.
+An explicit path (step 1) is authoritative: when it holds no usable runtime, nothing else is tried
+and `BlpapiNotFoundException` names it and why. Otherwise, when nothing loads,
+`BlpapiNotFoundException` lists every candidate that was refused and why.
 
 Provisioning only happens when a source is configured, and only when nothing local was found. A
 source is a Python package index, a conda channel, or one package file:
