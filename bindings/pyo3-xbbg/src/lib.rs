@@ -4099,6 +4099,56 @@ mod tests {
     }
 
     #[test]
+    fn dict_to_request_params_reports_missing_and_invalid_members_as_runtime_errors() {
+        Python::initialize();
+        Python::attach(|py| {
+            let request_error = |dict: &Bound<'_, PyDict>| {
+                let error = dict_to_request_params(dict).expect_err("rejected");
+                assert!(error.is_instance_of::<PyRuntimeError>(py));
+                error.value(py).to_string()
+            };
+
+            let dict = PyDict::new(py);
+            assert_eq!(request_error(&dict), "missing required field: service");
+            dict.set_item("service", "//blp/refdata").expect("service");
+            assert_eq!(request_error(&dict), "missing required field: operation");
+            dict.set_item("operation", "ReferenceDataRequest")
+                .expect("operation");
+            dict.set_item("extractor", "nonsense").expect("extractor");
+            assert_eq!(request_error(&dict), "invalid extractor type: nonsense");
+            dict.del_item("extractor").expect("extractor");
+            dict.set_item("on_delayed", "skip").expect("on_delayed");
+            assert_eq!(
+                request_error(&dict),
+                "on_delayed must be warn, raise, or ignore"
+            );
+        });
+    }
+
+    #[test]
+    fn dict_to_request_params_reads_on_delayed_like_the_engine() {
+        Python::initialize();
+        Python::attach(|py| {
+            let dict = PyDict::new(py);
+            dict.set_item("service", "//blp/refdata").expect("service");
+            dict.set_item("operation", "ReferenceDataRequest")
+                .expect("operation");
+            for (value, expected) in [
+                ("Raise", Some(DelayedPolicy::Raise)),
+                (" warn ", Some(DelayedPolicy::Warn)),
+                ("", None),
+            ] {
+                dict.set_item("on_delayed", value).expect("on_delayed");
+                let params = dict_to_request_params(&dict).expect("request params");
+                assert_eq!(params.on_delayed, expected, "{value:?}");
+            }
+            dict.set_item("on_delayed", py.None()).expect("on_delayed");
+            let params = dict_to_request_params(&dict).expect("request params");
+            assert_eq!(params.on_delayed, None);
+        });
+    }
+
+    #[test]
     fn python_subscription_reads_stop_at_the_explicit_batch_limit() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

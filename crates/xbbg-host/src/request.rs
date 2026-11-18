@@ -70,6 +70,7 @@ use serde::{Deserialize, Serialize};
 use xbbg_async::engine::{RequestParams, RequestParamsInput};
 
 use crate::errors::HostError;
+use crate::style::Style;
 
 /// One `{key, value}` pair (TS `StringPair`).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,7 +187,17 @@ impl RequestInput {
     /// a bad payload is VALIDATION with element `jsonElements`. `kwargs` and
     /// `fieldTypes` become maps (a repeated key keeps its last value).
     pub fn into_params_input(self) -> Result<RequestParamsInput, HostError> {
-        if let Some(policy) = self.on_delayed.as_deref()
+        self.into_params_input_as(Style::JavaScript)
+    }
+
+    /// [`Self::into_params_input`] with the policy of `style`.
+    ///
+    /// [`Style::Python`] leaves `on_delayed` to the engine, which trims it,
+    /// ignores case and treats an empty string as unset, and rejects anything
+    /// else with `on_delayed must be warn, raise, or ignore`.
+    pub fn into_params_input_as(self, style: Style) -> Result<RequestParamsInput, HostError> {
+        if !style.lenient_values()
+            && let Some(policy) = self.on_delayed.as_deref()
             && !matches!(policy, "warn" | "raise" | "ignore")
         {
             return Err(HostError::validation(ON_DELAYED_MESSAGE).with_element("onDelayed"));
@@ -245,7 +256,12 @@ impl RequestInput {
     /// [`Self::into_params_input`], then the engine's own normalization and
     /// defaults; its input errors are VALIDATION with the engine's text.
     pub fn into_request_params(self) -> Result<RequestParams, HostError> {
-        self.into_params_input()?
+        self.into_request_params_as(Style::JavaScript)
+    }
+
+    /// [`Self::into_request_params`] with the policy of `style`.
+    pub fn into_request_params_as(self, style: Style) -> Result<RequestParams, HostError> {
+        self.into_params_input_as(style)?
             .into_request_params()
             .map_err(|error| HostError::validation(error.detail()))
     }
@@ -446,6 +462,33 @@ mod tests {
             assert_eq!(error.message, ON_DELAYED_MESSAGE);
             assert_eq!(error.context.element.as_deref(), Some("onDelayed"));
         }
+    }
+
+    #[test]
+    fn python_style_leaves_on_delayed_to_the_engine() {
+        let input = |policy: &str| RequestInput {
+            service: "//blp/refdata".to_owned(),
+            operation: Some("ReferenceDataRequest".to_owned()),
+            on_delayed: Some(policy.to_owned()),
+            ..RequestInput::default()
+        };
+        for (policy, expected) in [
+            ("Raise", Some(xbbg_async::DelayedPolicy::Raise)),
+            (" warn ", Some(xbbg_async::DelayedPolicy::Warn)),
+            ("", None),
+        ] {
+            let params = input(policy)
+                .into_request_params_as(Style::Python)
+                .unwrap_or_else(|error| panic!("{policy:?}: {}", error.message));
+            assert_eq!(params.on_delayed, expected, "{policy:?}");
+        }
+        let error = input("skip")
+            .into_request_params_as(Style::Python)
+            .unwrap_err();
+        assert_eq!(error.kind, HostErrorKind::Validation);
+        assert_eq!(error.message, "on_delayed must be warn, raise, or ignore");
+        // The JavaScript entry point is unchanged.
+        assert!(input("Raise").into_request_params().is_err());
     }
 
     #[test]
