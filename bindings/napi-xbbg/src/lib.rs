@@ -43,6 +43,8 @@ use xbbg_async::{
     SubscribeRequest, SubscriptionHandle, ValidationMode,
 };
 use xbbg_core::BlpError;
+use xbbg_host::errors::{HostError, HostErrorKind};
+use xbbg_host::schema::SchemaJsonCache;
 
 use xbbg_async::subscription_consumer::{
     PendingUpdates, StreamItem as StreamBatchResult, SubscriptionConsumer, SubscriptionDeliveryAck,
@@ -1288,6 +1290,53 @@ fn blp_async_error_to_napi(error: BlpAsyncError) -> Error {
     error_presentation_to_napi(ErrorPresentation::from_async(error, ErrorStyle::JavaScript))
 }
 
+/// Encode a host error as `[XBBG:<KIND>] message`. A non-empty context rides in
+/// the `[XBBG_CONTEXT]` JSON line the js-xbbg adapter decodes and strips.
+fn host_error_to_napi(error: HostError) -> Error {
+    let status = match error.kind {
+        HostErrorKind::Validation | HostErrorKind::Argument => Status::InvalidArg,
+        _ => Status::GenericFailure,
+    };
+    let code = error.kind.name();
+    let context = *error.context;
+    if context.is_empty() {
+        return coded(status, code, error.message);
+    }
+    let mut json = serde_json::Map::new();
+    let mut put = |key: &str, value: Option<String>| {
+        if let Some(value) = value {
+            json.insert(key.to_owned(), value.into());
+        }
+    };
+    put("service", context.service);
+    put("operation", context.operation);
+    put("request_id", context.request_id);
+    put("topic", context.topic);
+    put("detail", context.detail);
+    put("element", context.element);
+    put("suggestion", context.suggestion);
+    put("code", context.code);
+    if let [id] = context.bloomberg_request_ids.as_slice() {
+        json.insert("bloomberg_request_id".to_owned(), id.clone().into());
+    }
+    if !context.bloomberg_request_ids.is_empty() {
+        json.insert(
+            "bloomberg_request_ids".to_owned(),
+            context.bloomberg_request_ids.into(),
+        );
+    }
+    // One JSON line is unambiguous even when messages or ids contain brackets.
+    coded(
+        status,
+        code,
+        format!(
+            "[XBBG_CONTEXT]{}\n{}",
+            serde_json::Value::Object(json),
+            error.message
+        ),
+    )
+}
+
 fn delayed_policy_from_input(on_delayed: Option<&str>) -> napi::Result<DelayedPolicy> {
     on_delayed
         .map(DelayedPolicy::from_str)
@@ -1386,16 +1435,10 @@ pub fn get_log_level() -> String {
     .to_string()
 }
 
-#[derive(Default)]
-struct SchemaJsonCache {
-    services: HashMap<String, String>,
-    operations: HashMap<(String, String), String>,
-}
-
 #[napi]
 pub struct JsEngine {
     engine: Arc<Engine>,
-    schema_json_cache: Arc<StdMutex<SchemaJsonCache>>,
+    schema_json_cache: SchemaJsonCache,
     subscription_batch_items: usize,
 }
 
@@ -1598,59 +1641,20 @@ impl JsEngine {
 
     #[napi]
     pub async fn get_schema(&self, service: String) -> napi::Result<String> {
-        if let Some(cached) = self
-            .schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .services
-            .get(&service)
-            .cloned()
-        {
-            return Ok(cached);
-        }
-
-        let schema = self
-            .engine
-            .get_schema(&service)
-            .await
-            .map_err(blp_async_error_to_napi)?;
-        let serialized = serde_json::to_string(&*schema)
-            .map_err(|e| Error::new(Status::GenericFailure, format!("serialize schema: {e}")))?;
         self.schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .services
-            .insert(service, serialized.clone());
-        Ok(serialized)
+            .schema(&self.engine, &service)
+            .await
+            .map(|json| json.to_string())
+            .map_err(host_error_to_napi)
     }
 
     #[napi]
     pub async fn get_operation(&self, service: String, operation: String) -> napi::Result<String> {
-        let key = (service.clone(), operation.clone());
-        if let Some(cached) = self
-            .schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .operations
-            .get(&key)
-            .cloned()
-        {
-            return Ok(cached);
-        }
-
-        let op = self
-            .engine
-            .get_operation(&service, &operation)
-            .await
-            .map_err(blp_async_error_to_napi)?;
-        let serialized = serde_json::to_string(&op)
-            .map_err(|e| Error::new(Status::GenericFailure, format!("serialize operation: {e}")))?;
         self.schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .operations
-            .insert(key, serialized.clone());
-        Ok(serialized)
+            .operation(&self.engine, &service, &operation)
+            .await
+            .map(|json| json.to_string())
+            .map_err(host_error_to_napi)
     }
 
     #[napi]
@@ -1663,55 +1667,23 @@ impl JsEngine {
 
     #[napi]
     pub fn get_cached_schema(&self, service: String) -> Option<String> {
-        if let Some(cached) = self
-            .schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .services
-            .get(&service)
-            .cloned()
-        {
-            return Some(cached);
-        }
-
-        let serialized = self
-            .engine
-            .get_cached_schema(&service)
-            .and_then(|s| serde_json::to_string(&*s).ok())?;
         self.schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned")
-            .services
-            .insert(service, serialized.clone());
-        Some(serialized)
+            .cached_schema(&self.engine, &service)
+            .map(|json| json.to_string())
     }
 
     #[napi]
     pub fn invalidate_schema(&self, service: String) -> napi::Result<()> {
-        self.engine
-            .invalidate_schema(&service)
-            .map_err(|error| coded(Status::GenericFailure, "INTERNAL", error))?;
-        let mut cache = self
-            .schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned");
-        cache.services.remove(&service);
-        cache
-            .operations
-            .retain(|(cached_service, _), _| cached_service != &service);
-        Ok(())
+        self.schema_json_cache
+            .invalidate(&self.engine, &service)
+            .map_err(host_error_to_napi)
     }
 
     #[napi]
     pub fn clear_schema_cache(&self) -> napi::Result<()> {
-        self.engine
-            .clear_schema_cache()
-            .map_err(|error| coded(Status::GenericFailure, "INTERNAL", error))?;
-        *self
-            .schema_json_cache
-            .lock()
-            .expect("schema JSON cache poisoned") = SchemaJsonCache::default();
-        Ok(())
+        self.schema_json_cache
+            .clear(&self.engine)
+            .map_err(host_error_to_napi)
     }
 
     #[napi]
@@ -2367,7 +2339,7 @@ impl JsEngine {
         let engine = Engine::start(config).map_err(blp_async_error_to_napi)?;
         Ok(Self {
             engine: Arc::new(engine),
-            schema_json_cache: Arc::new(StdMutex::new(SchemaJsonCache::default())),
+            schema_json_cache: SchemaJsonCache::default(),
             subscription_batch_items,
         })
     }
@@ -2387,7 +2359,7 @@ impl JsEngine {
                 .map_err(|error| blp_async_error_to_napi(*error))?;
         Ok(Self {
             engine: Arc::new(engine),
-            schema_json_cache: Arc::new(StdMutex::new(SchemaJsonCache::default())),
+            schema_json_cache: SchemaJsonCache::default(),
             subscription_batch_items,
         })
     }
