@@ -25,9 +25,15 @@
 //!    `~/blp/DAPI` and `/opt/bloomberg/DAPI`.
 //! 8. The operating system's library search path: `PATH` on Windows, `LD_LIBRARY_PATH` on Linux,
 //!    `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS.
-//! 9. The xbbg cache ([`LocateRequest::cache_root`], else `XBBG_CACHE_DIR`, else the default
-//!    root): verified installs, best first. Installs that fail verification are
-//!    [`Located::rejected`].
+//! 9. The operating system's own search for [`Platform::library_name`]: the `ldconfig` cache and
+//!    default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the
+//!    application and system directories on Windows. This is where a runtime was found when it
+//!    was still linked. Only loading can tell which file that is, so it is a loader's step
+//!    (`xbbg_core::load_system`, [`SourceKind::System`]) that [`locate`] never lists.
+//! 10. The xbbg cache ([`LocateRequest::cache_root`], else `XBBG_CACHE_DIR`, else the default
+//!     root): verified installs, best first. Installs that fail verification are
+//!     [`Located::rejected`]. Verifying an install hashes its library, so a loader asks for this
+//!     [`Stage`] only when nothing before it loaded.
 //!
 //! # Layouts
 //!
@@ -112,6 +118,11 @@ pub struct LocateRequest {
     /// The platform to search for; the host platform by default.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub platform: Option<Platform>,
+    /// Leave out rule 9, the operating system's own search. That search follows the process's
+    /// real environment, which no [`Self::env`] view can change, so a caller that must only load
+    /// what the listed rules name (a hermetic test, a locked-down host) turns it off here.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub skip_system: bool,
 }
 
 /// A directory only the host knows about, such as `("blpapi_python", <wheel directory>)`.
@@ -144,6 +155,10 @@ pub enum SourceKind {
     Terminal,
     /// A directory of the operating system's library search path.
     SearchPath,
+    /// The operating system's own search for the library's file name
+    /// (`xbbg_core::load_system`). Only loading finds that file, so [`locate`] never reports this
+    /// kind: a loader does, for the runtime it loaded or the search that found none.
+    System,
     /// The xbbg cache.
     Cache,
 }
@@ -160,6 +175,7 @@ impl SourceKind {
             Self::Hint => "hint",
             Self::Terminal => "terminal",
             Self::SearchPath => "search_path",
+            Self::System => "system",
             Self::Cache => "cache",
         }
     }
@@ -218,12 +234,44 @@ impl Located {
     }
 }
 
+/// A part of the search order, for loaders that try the cheap rules before they pay for the
+/// cache: [`locate_stage`] runs one of them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// Rule 1: the explicit path.
+    Explicit,
+    /// Rules 2 to 8: the environment, the vendored SDK, the hints, the Terminal and the search
+    /// path. They only look at the file system.
+    Local,
+    /// Rule 10: the xbbg cache, whose installs are verified by hashing their libraries.
+    Cache,
+}
+
 /// Lists the runtime candidates for `request` in the order documented on this module.
+///
+/// Rule 9, the operating system's own search, is not on the list: see [`SourceKind::System`].
 pub fn locate(request: &LocateRequest) -> Located {
-    let platform = request
+    search(request, &[Stage::Explicit, Stage::Local, Stage::Cache])
+}
+
+/// Lists the candidates of one [`Stage`] of the search for `request`.
+///
+/// Candidates are deduplicated within the stage only; a loader that walks the stages in order
+/// skips a file it has already tried.
+pub fn locate_stage(request: &LocateRequest, stage: Stage) -> Located {
+    search(request, &[stage])
+}
+
+/// The platform a request is searched for: the one it names, else the host's.
+pub fn platform_of(request: &LocateRequest) -> Platform {
+    request
         .platform
         .or_else(Platform::host)
-        .unwrap_or_else(os_family_platform);
+        .unwrap_or_else(os_family_platform)
+}
+
+fn search(request: &LocateRequest, stages: &[Stage]) -> Located {
+    let platform = platform_of(request);
     let env = Env {
         vars: request.env.as_ref(),
         ignore_case: platform == Platform::WindowsX86_64,
@@ -233,10 +281,11 @@ pub fn locate(request: &LocateRequest) -> Located {
         found: Located::default(),
         seen: HashSet::new(),
     };
-    let repo_root = request.repo_root.as_deref().map(absolute);
 
     // 1. Explicit.
-    if let Some(explicit) = &request.explicit {
+    if stages.contains(&Stage::Explicit)
+        && let Some(explicit) = &request.explicit
+    {
         let path = absolute(explicit);
         let detail = path.display().to_string();
         if path.is_file() {
@@ -246,65 +295,20 @@ pub fn locate(request: &LocateRequest) -> Located {
         }
     }
 
-    // 2..4. The environment.
-    for (var, layout, source) in [
-        ("BLPAPI_LIB_DIR", Layout::Flat, SourceKind::BlpapiLibDir),
-        ("BLPAPI_ROOT", Layout::SdkTree, SourceKind::BlpapiRoot),
-        ("XBBG_DEV_SDK_ROOT", Layout::SdkTree, SourceKind::DevSdkRoot),
-    ] {
-        let Some(value) = env.get(var) else { continue };
-        let dir = match (&repo_root, source) {
-            (Some(base), SourceKind::DevSdkRoot) => base.join(value),
-            _ => absolute(Path::new(&value)),
-        };
-        search.directory(&dir, layout, source, var, true);
+    if stages.contains(&Stage::Local) {
+        search.local(request, &env);
     }
 
-    // 5. The vendored SDK.
-    if let Some(root) = &repo_root {
-        let vendor = root.join("vendor").join("blpapi-sdk");
-        let detail = vendor.display().to_string();
-        search.directory(
-            &vendor,
-            Layout::SdkTree,
-            SourceKind::Vendored,
-            &detail,
-            false,
-        );
-    }
-
-    // 6. Host hints.
-    for hint in &request.hints {
-        let dir = absolute(&hint.dir);
-        if dir.is_file() {
-            search.push(dir, SourceKind::Hint, &hint.label, None);
-        } else {
-            search.directory(&dir, Layout::Sdk, SourceKind::Hint, &hint.label, true);
+    // 10. The cache. (9, the operating system's own search, is a loader's step.)
+    if stages.contains(&Stage::Cache) {
+        let cache_root = request
+            .cache_root
+            .as_deref()
+            .map(absolute)
+            .or_else(|| cache_root_from(|name| env.get(name).map(PathBuf::from)));
+        if let Some(root) = cache_root {
+            search.cache(&root);
         }
-    }
-
-    // 7. Terminal roots.
-    for root in terminal_roots(&env, platform) {
-        let detail = root.display().to_string();
-        search.directory(&root, Layout::Sdk, SourceKind::Terminal, &detail, false);
-    }
-
-    // 8. The operating system's library search path.
-    for var in search_path_vars(platform) {
-        let Some(value) = env.get(var) else { continue };
-        for dir in split_search_path(&value.to_string_lossy(), platform) {
-            search.directory(&dir, Layout::Flat, SourceKind::SearchPath, var, false);
-        }
-    }
-
-    // 9. The cache.
-    let cache_root = request
-        .cache_root
-        .as_deref()
-        .map(absolute)
-        .or_else(|| cache_root_from(|name| env.get(name).map(PathBuf::from)));
-    if let Some(root) = cache_root {
-        search.cache(&root);
     }
 
     search.found
@@ -395,6 +399,62 @@ impl Search {
         }
         for library in libraries {
             self.push(library, source, detail, None);
+        }
+    }
+
+    /// Rules 2 to 8: everything that only looks at the file system.
+    fn local(&mut self, request: &LocateRequest, env: &Env<'_>) {
+        let repo_root = request.repo_root.as_deref().map(absolute);
+
+        // 2..4. The environment.
+        for (var, layout, source) in [
+            ("BLPAPI_LIB_DIR", Layout::Flat, SourceKind::BlpapiLibDir),
+            ("BLPAPI_ROOT", Layout::SdkTree, SourceKind::BlpapiRoot),
+            ("XBBG_DEV_SDK_ROOT", Layout::SdkTree, SourceKind::DevSdkRoot),
+        ] {
+            let Some(value) = env.get(var) else { continue };
+            let dir = match (&repo_root, source) {
+                (Some(base), SourceKind::DevSdkRoot) => base.join(value),
+                _ => absolute(Path::new(&value)),
+            };
+            self.directory(&dir, layout, source, var, true);
+        }
+
+        // 5. The vendored SDK.
+        if let Some(root) = &repo_root {
+            let vendor = root.join("vendor").join("blpapi-sdk");
+            let detail = vendor.display().to_string();
+            self.directory(
+                &vendor,
+                Layout::SdkTree,
+                SourceKind::Vendored,
+                &detail,
+                false,
+            );
+        }
+
+        // 6. Host hints.
+        for hint in &request.hints {
+            let dir = absolute(&hint.dir);
+            if dir.is_file() {
+                self.push(dir, SourceKind::Hint, &hint.label, None);
+            } else {
+                self.directory(&dir, Layout::Sdk, SourceKind::Hint, &hint.label, true);
+            }
+        }
+
+        // 7. Terminal roots.
+        for root in terminal_roots(env, self.platform) {
+            let detail = root.display().to_string();
+            self.directory(&root, Layout::Sdk, SourceKind::Terminal, &detail, false);
+        }
+
+        // 8. The operating system's library search path.
+        for var in search_path_vars(self.platform) {
+            let Some(value) = env.get(var) else { continue };
+            for dir in split_search_path(&value.to_string_lossy(), self.platform) {
+                self.directory(&dir, Layout::Flat, SourceKind::SearchPath, var, false);
+            }
         }
     }
 
@@ -1298,6 +1358,51 @@ mod tests {
     }
 
     #[test]
+    fn stages_split_the_order_so_the_cache_is_only_read_when_asked_for() {
+        let tmp = temp();
+        let cache = tmp.path().join("cache");
+        let installed = install(&cache, "3.26.5.1", "artifact-a", false);
+        let named = tmp.path().join("explicit").join("libblpapi3_64.so");
+        touch(&named);
+        let lib_dir = tmp.path().join("lib-dir");
+        let by_env = lib_dir.join("libblpapi3_64.so");
+        touch(&by_env);
+        let request = LocateRequest {
+            explicit: Some(tmp.path().join("explicit")),
+            cache_root: Some(cache),
+            ..self::request(LINUX, &[("BLPAPI_LIB_DIR", text(&lib_dir))])
+        };
+
+        let sources = |stage| {
+            locate_stage(&request, stage)
+                .candidates
+                .into_iter()
+                .map(|candidate| (candidate.source, candidate.path))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(sources(Stage::Explicit), [(SourceKind::Explicit, named)]);
+        assert_eq!(sources(Stage::Local), [(SourceKind::BlpapiLibDir, by_env)]);
+        assert_eq!(
+            sources(Stage::Cache),
+            [(SourceKind::Cache, installed.join("lib/libblpapi3_64.so"))]
+        );
+        // The whole search is the stages in order, and never lists the system's own search.
+        let all = locate(&request);
+        assert_eq!(
+            all.candidates
+                .iter()
+                .map(|candidate| candidate.source)
+                .collect::<Vec<_>>(),
+            [
+                SourceKind::Explicit,
+                SourceKind::BlpapiLibDir,
+                SourceKind::Cache
+            ]
+        );
+        assert_eq!(SourceKind::System.as_str(), "system");
+    }
+
+    #[test]
     fn requests_and_results_round_trip_as_camel_case_json() {
         let request = LocateRequest {
             explicit: Some(PathBuf::from("lib")),
@@ -1309,6 +1414,7 @@ mod tests {
             cache_root: Some(PathBuf::from("cache")),
             repo_root: Some(PathBuf::from("repo")),
             platform: Some(Platform::MacosAarch64),
+            skip_system: true,
         };
         let json = serde_json::to_value(&request).expect("serialize");
         assert_eq!(
@@ -1320,6 +1426,7 @@ mod tests {
                 "cacheRoot": "cache",
                 "repoRoot": "repo",
                 "platform": "macos-aarch64",
+                "skipSystem": true,
             })
         );
         assert_eq!(

@@ -360,7 +360,10 @@ export interface NativeEngineConstructor {
   connectWithConfig(config: EngineConfig): Promise<NativeEngine>;
 }
 
-/** What a candidate runtime was found by. */
+/**
+ * What a runtime was found by. `system` is the operating system's own library search: only a
+ * load finds its file, so it names a loaded runtime or a refusal, never a listed candidate.
+ */
 export type SdkSourceKind =
   | 'explicit'
   | 'blpapi_lib_dir'
@@ -370,6 +373,7 @@ export type SdkSourceKind =
   | 'hint'
   | 'terminal'
   | 'search_path'
+  | 'system'
   | 'cache';
 
 /** The host's side of the Bloomberg runtime search; every field is optional. */
@@ -384,6 +388,11 @@ export interface SdkLocateRequest {
   cacheRoot?: string;
   /** A development checkout: enables `<repo>/vendor/blpapi-sdk/<newest>`. */
   repoRoot?: string;
+  /**
+   * Leave out the operating system's own library search, which follows the process's real
+   * environment whatever `env` says.
+   */
+  skipSystem?: boolean;
 }
 
 /** A runtime the search order found. */

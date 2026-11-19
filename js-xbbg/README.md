@@ -39,7 +39,7 @@ npm install @xbbg/core
 bun add @xbbg/core
 ```
 
-`@xbbg/core` runs on Node.js 24+ and Bun 1.4+ servers, not in browsers. npm and Bun install the matching prebuilt addon automatically. You also need Bloomberg access (Terminal/DAPI, B-PIPE, SAPI, or ZFP) and Bloomberg's SDK runtime library on the same machine. It is found at import by `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, the standard Terminal folders (for example `C:\blp\DAPI` or `~/blp/DAPI`), the operating system's library search variables, and finally the xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory); the order and the error you get when nothing loads are in [REFERENCE.md](REFERENCE.md#native-addon-and-runtime-discovery).
+`@xbbg/core` runs on Node.js 24+ and Bun 1.4+ servers, not in browsers. npm and Bun install the matching prebuilt addon automatically. You also need Bloomberg access (Terminal/DAPI, B-PIPE, SAPI, or ZFP) and Bloomberg's SDK runtime library on the same machine. It is found at import by `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, the standard Terminal folders (for example `C:\blp\DAPI` or `~/blp/DAPI`), the operating system's library search variables and system-wide installs, and finally the xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), read only when nothing earlier loaded; the order and the error you get when nothing loads are in [REFERENCE.md](REFERENCE.md#native-addon-and-runtime-discovery).
 
 ## Quickstart
 

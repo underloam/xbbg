@@ -60,6 +60,15 @@ impl Platform {
             ],
         }
     }
+
+    /// The name Bloomberg's SDK ships the library under: the first of [`Self::library_names`],
+    /// and the name the operating system's own search is asked for.
+    pub fn library_name(self) -> &'static str {
+        match self {
+            Self::WindowsX86_64 => "blpapi3_64.dll",
+            Self::LinuxX86_64 | Self::MacosAarch64 => "libblpapi3_64.so",
+        }
+    }
 }
 
 impl fmt::Display for Platform {
@@ -162,5 +171,8 @@ mod tests {
                 "libblpapi3.dylib"
             ]
         );
+        for platform in Platform::ALL {
+            assert_eq!(platform.library_name(), platform.library_names()[0]);
+        }
     }
 }

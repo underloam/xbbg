@@ -22,12 +22,14 @@ fn nothing_loadable_lists_every_rejection() {
     let bogus = bogus_library(&bogus_dir);
     let missing = dir.path().join("missing");
 
-    // A view with only two variables: nothing from the process environment can load.
+    // A view with only two variables: nothing from the process environment can load. The
+    // operating system's own search follows the real environment, so it is left out.
     let request = LocateRequest {
         env: Some(BTreeMap::from([
             ("BLPAPI_ROOT".to_owned(), missing.display().to_string()),
             ("BLPAPI_LIB_DIR".to_owned(), bogus_dir.display().to_string()),
         ])),
+        skip_system: true,
         ..LocateRequest::default()
     };
     let error = locate_and_load(&request).expect_err("nothing loads");
@@ -37,6 +39,12 @@ fn nothing_loadable_lists_every_rejection() {
     assert_eq!(error.rejected[0].reason, "does not exist");
     assert_eq!(error.rejected[1].source, SourceKind::BlpapiLibDir);
     assert_eq!(error.rejected[1].path, bogus);
+    // The operating system's own words about the file, not only the call that failed.
+    assert!(
+        !error.rejected[1].reason.ends_with("failed"),
+        "{}",
+        error.rejected[1].reason
+    );
 
     let text = error.to_string();
     assert!(text.contains(&bogus.display().to_string()), "{text}");

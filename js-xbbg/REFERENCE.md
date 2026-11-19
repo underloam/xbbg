@@ -12,7 +12,7 @@ Detailed behavior, options, and examples for `@xbbg/core`. Start with the [READM
 
 If no packaged addon is available for your platform, build from source locally instead.
 
-The engine addon links no Bloomberg library, so it loads on any machine. Right after it loads, `@xbbg/core` finds Bloomberg's runtime library and opens it by absolute path; every Bloomberg call needs it. The search is the Rust crate `xbbg-sdk`'s, the same one the Python, Java and MCP packages use, tried in this order (the first library that opens wins):
+The engine addon links no Bloomberg library, so it loads on any machine. Right after it loads, `@xbbg/core` finds and loads Bloomberg's runtime library; every Bloomberg call needs it. The Rust crates `xbbg-sdk` and `xbbg-host` own the search, the same one the Python, Java and MCP packages use, tried in this order (the first library that opens wins):
 
 1. `BLPAPI_LIB_DIR`: a directory holding the library.
 2. `BLPAPI_ROOT`: an SDK root; the library is looked for in the SDK's own layouts (`lib`, `Linux`, `Darwin`, `bin`, and versioned subdirectories).
@@ -20,7 +20,8 @@ The engine addon links no Bloomberg library, so it loads on any machine. Right a
 4. `vendor/blpapi-sdk/<newest>` inside the repository checkout (development only; a package installed from npm has none).
 5. The Bloomberg Terminal folders: `C:\blp\DAPI` and the other standard Windows locations, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere.
 6. The operating system's library search variables: `PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS.
-7. The xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. Only installs whose library matches the SHA-256 in their `provenance.json` are loaded.
+7. The operating system's own library search, where a system-wide install lives: the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the application and system directories on Windows.
+8. The xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. Only installs whose library matches the SHA-256 in their `provenance.json` are loaded, and the cache is only read when nothing before it loaded.
 
 The environment variables are read from `process.env` when the module is imported and handed to the search, so a value your own code assigned before the first `import` of `@xbbg/core` takes effect under Node, Bun and worker threads alike. The runtime is loaded once per process; assignments made after that do not move it.
 

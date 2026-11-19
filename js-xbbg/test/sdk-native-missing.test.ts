@@ -49,6 +49,9 @@ describe.skipIf(!fs.existsSync(nativePath))(
             USERPROFILE: homeDir,
             XBBG_CACHE_DIR: cacheDir,
           },
+          // The operating system's own search follows this process's real environment, where
+          // CI keeps a runtime on LD_LIBRARY_PATH; the view above cannot hide that.
+          skipSystem: true,
         });
       } catch (error) {
         thrown = error;
