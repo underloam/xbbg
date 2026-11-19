@@ -184,12 +184,30 @@ fn _with_schema_metadata(
     table: PyRef<'_, ArrowTable>,
     metadata: HashMap<String, String>,
 ) -> PyResult<ArrowTable> {
+    const AGGREGATABLE_KEYS: [&str; 3] = [
+        "xbbg.type_misses",
+        "xbbg.bloomberg_request_id",
+        "xbbg.bloomberg_request_ids",
+    ];
     let data = table.table_data();
     let mut batches = data.batches.clone();
     if batches.is_empty() {
         batches.push(arrow_array::RecordBatch::new_empty(data.schema.clone()));
     }
-    batches[0].schema_metadata_mut().extend(metadata);
+    batches[0].schema_metadata_mut().extend(metadata.clone());
+    // Every batch must agree on non-aggregatable schema metadata for
+    // `TableData::try_new`, while replaced aggregatable keys are removed from
+    // trailing batches so their prior values are not summed or unioned back in.
+    for batch in &mut batches[1..] {
+        let batch_meta = batch.schema_metadata_mut();
+        for (key, value) in &metadata {
+            if AGGREGATABLE_KEYS.contains(&key.as_str()) {
+                batch_meta.remove(key);
+            } else {
+                batch_meta.insert(key.clone(), value.clone());
+            }
+        }
+    }
     TableData::try_new(batches)
         .map(ArrowTable::from_data)
         .map_err(core_err_to_py)

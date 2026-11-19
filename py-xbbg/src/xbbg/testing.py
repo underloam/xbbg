@@ -360,7 +360,7 @@ class mock_engine:
     ) -> None:
         self._responses = list(responses)
         self._strict = strict
-        self._middleware = None
+        self._middlewares: list[Any] = []
         self._requests: list[MockRequest] = []
 
     @property
@@ -396,12 +396,15 @@ class mock_engine:
                 raise LookupError(f"No mock response matched {context.params.service}::{context.params.operation}")
             self._record(params_dict, served=False)
             return await call_next(context)
-        self._record(params_dict, served=True)
 
         table = _coerce_mock_table(match)
+        self._record(params_dict, served=True)
         batch = next(iter(table.to_batches()), None)
         if batch is None:
             batch = _arrow_table_class().empty([]).to_batches()[0]
+
+        if context.params.on_delayed == "warn":
+            blp._warn_delayed_data(table)
 
         context.metadata["mocked"] = True
         if isinstance(match, MockResponse):
@@ -421,17 +424,19 @@ class mock_engine:
         async def middleware(context: blp.RequestContext, call_next):
             return await self._handle(context, call_next)
 
-        self._middleware = middleware
+        self._middlewares.append(middleware)
         blp.add_middleware(middleware)
         _engine._mock_engine_entered()
         return self
 
     def __exit__(self, _exc_type, _exc, _tb) -> None:
-        if self._middleware is not None:
+        if self._middlewares:
+            middleware = self._middlewares.pop()
             try:
-                blp.remove_middleware(self._middleware)
+                blp.remove_middleware(middleware)
+            except ValueError:
+                pass
             finally:
-                self._middleware = None
                 _engine._mock_engine_exited()
 
 

@@ -44,8 +44,9 @@ pub(crate) struct SubscribeParams<'a> {
     pub delivery: &'a str,
 }
 
-fn count(value: usize) -> i64 {
-    i64::try_from(value).unwrap_or(i64::MAX)
+fn count(name: &str, value: usize) -> PyResult<i64> {
+    i64::try_from(value)
+        .map_err(|_| pyo3::exceptions::PyOverflowError::new_err(format!("{name} is out of range")))
 }
 
 fn string(value: &str) -> Option<Value> {
@@ -82,9 +83,13 @@ pub(crate) fn prepare(
         delivery: string(delivery),
         options,
         conflate: None,
-        flush_threshold: flush_threshold.map(count),
+        flush_threshold: flush_threshold
+            .map(|value| count("flush_threshold", value))
+            .transpose()?,
         overflow_policy,
-        stream_capacity: stream_capacity.map(count),
+        stream_capacity: stream_capacity
+            .map(|value| count("stream_capacity", value))
+            .transpose()?,
         all_fields: Some(all_fields),
         fields: None,
         aliases: aliases.map(|aliases| {

@@ -464,3 +464,47 @@ def test_mock_engine_releases_the_offline_flag_when_its_body_raises(monkeypatch)
     assert not _engine._mock_engine_active()
     with pytest.raises(AssertionError, match="must not connect"):
         blp.Engine(host="a.example.com", port=8194)
+
+
+def test_reentering_same_mock_engine_cleans_up_middleware_and_depth(monkeypatch):
+    monkeypatch.setattr(xbbg._core, "PyEngine", _RefusesToConnect)
+
+    mock = mock_engine([_refdata_response()])
+    with mock:
+        with mock:
+            blp.bdp("TEST Equity", "PX_LAST", backend="native")
+        assert _engine._mock_engine_active()
+    assert not _engine._mock_engine_active()
+    assert not blp.get_middleware()
+    with pytest.raises(AssertionError, match="must not connect"):
+        blp.Engine(host="a.example.com", port=8194)
+
+
+def test_mock_engine_handles_clear_middleware_and_large_eid_values():
+    response = _refdata_response(eid_data={"TEST Equity": [2**31]})
+    assert response.table.eid_data == {"TEST Equity": [2**31]}
+
+    with mock_engine([response]):
+        blp.clear_middleware()
+    assert not _engine._mock_engine_active()
+
+
+def test_with_schema_metadata_handles_multi_batch_arrow_tables():
+    from xbbg import _core
+
+    first = _refdata_response(type_misses={"FIELD_A": 1}, request_id="old-1").table
+    second = _refdata_response(type_misses={"FIELD_A": 2}, request_id="old-2").table
+    combined = _core.ArrowTable.from_batches([*first.to_batches(), *second.to_batches()])
+
+    updated = _core._with_schema_metadata(
+        combined,
+        _core._encode_result_diagnostics(
+            security_errors=DIAGNOSTICS["security_errors"],
+            type_misses={"FIELD_A": 7},
+            bloomberg_request_id="replaced-id",
+        ),
+    )
+    assert updated.num_rows == 2
+    assert updated.security_errors == DIAGNOSTICS["security_errors"]
+    assert updated.type_misses == {"FIELD_A": 7}
+    assert updated.bloomberg_request_id == "replaced-id"

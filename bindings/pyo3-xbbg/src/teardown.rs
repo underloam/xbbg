@@ -15,6 +15,8 @@
 //! `Py_AtExit` callback waits again after finalization, whose deallocations can
 //! release further engines.
 
+use std::sync::Once;
+
 use pyo3::prelude::*;
 #[cfg(feature = "stub-gen")]
 use pyo3_stub_gen::derive::*;
@@ -55,10 +57,16 @@ extern "C" fn wait_idle_after_finalization() {
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_function(wrap_pyfunction!(_wait_native_teardown, m)?)?;
-    // SAFETY: module initialization runs attached. The callback lives in this
-    // extension, which CPython never unloads, and never touches Python.
-    if unsafe { pyo3::ffi::Py_AtExit(Some(wait_idle_after_finalization)) } != 0 {
-        warn!("Py_AtExit is full; native teardown released during finalization is not awaited");
-    }
+    // PEP 489 multi-phase init can execute this module more than once (for
+    // example after `forget_core` drops a runtime-less import); CPython's
+    // `Py_AtExit` table is capped at 32 entries process-wide, so register once.
+    static AT_EXIT_REGISTERED: Once = Once::new();
+    AT_EXIT_REGISTERED.call_once(|| {
+        // SAFETY: module initialization runs attached. The callback lives in this
+        // extension, which CPython never unloads, and never touches Python.
+        if unsafe { pyo3::ffi::Py_AtExit(Some(wait_idle_after_finalization)) } != 0 {
+            warn!("Py_AtExit is full; native teardown released during finalization is not awaited");
+        }
+    });
     Ok(())
 }

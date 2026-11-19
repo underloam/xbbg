@@ -234,6 +234,15 @@ pub fn config_field_name(field: &str) -> &str {
         "keep_alive_response_timeout_ms" => "keepAliveResponseTimeoutMs",
         "slow_consumer_hi_water_mark" => "slowConsumerHiWaterMark",
         "slow_consumer_lo_water_mark" => "slowConsumerLoWaterMark",
+        "validation_mode" => "validationMode",
+        "overflow_policy" => "overflowPolicy",
+        "key_column" => "keyColumn",
+        "retry_policy.initial_delay_ms" => "retryPolicy.initialDelayMs",
+        "retry_policy.max_delay_ms" => "retryPolicy.maxDelayMs",
+        "request_timeout_ms" => "requestTimeoutMs",
+        "streams_deactivated_warn_ms" => "streamsDeactivatedWarnMs",
+        "reconnect_grace_ms" => "reconnectGraceMs",
+        "sdk_log_level" => "sdkLogLevel",
         other => other,
     }
 }
@@ -353,19 +362,19 @@ impl EngineConfigSpec {
         let validation_mode = parse_member(
             self.validation_mode,
             config.validation_mode,
-            "validationMode",
+            field_name("validation_mode"),
             ValidationMode::from_str,
         )?;
         let overflow_policy = parse_member(
             self.overflow_policy,
             config.overflow_policy,
-            "overflowPolicy",
+            field_name("overflow_policy"),
             OverflowPolicy::from_str,
         )?;
         let key_column = parse_member(
             self.key_column,
             config.key_column,
-            "keyColumn",
+            field_name("key_column"),
             KeyColumn::from_str,
         )?;
 
@@ -422,25 +431,27 @@ impl EngineConfigSpec {
             }
             if let Some(delay) = retry.initial_delay_ms {
                 config.retry_policy.initial_delay_ms =
-                    non_negative_duration(delay, "retryPolicy.initialDelayMs")?;
+                    non_negative_duration(delay, field_name("retry_policy.initial_delay_ms"))?;
             }
             if let Some(factor) = retry.backoff_factor {
                 config.retry_policy.backoff_factor = factor;
             }
             if let Some(delay) = retry.max_delay_ms {
                 config.retry_policy.max_delay_ms =
-                    non_negative_duration(delay, "retryPolicy.maxDelayMs")?;
+                    non_negative_duration(delay, field_name("retry_policy.max_delay_ms"))?;
             }
         }
         if let Some(timeout) = self.request_timeout_ms {
-            config.request_timeout_ms = non_negative_duration(timeout, "requestTimeoutMs")?;
+            config.request_timeout_ms =
+                non_negative_duration(timeout, field_name("request_timeout_ms"))?;
         }
         if let Some(warn) = self.streams_deactivated_warn_ms {
             config.streams_deactivated_warn_ms =
-                non_negative_duration(warn, "streamsDeactivatedWarnMs")?;
+                non_negative_duration(warn, field_name("streams_deactivated_warn_ms"))?;
         }
         if let Some(grace) = self.reconnect_grace_ms {
-            config.reconnect_grace_ms = non_negative_duration(grace, "reconnectGraceMs")?;
+            config.reconnect_grace_ms =
+                non_negative_duration(grace, field_name("reconnect_grace_ms"))?;
         }
         if let Some(enabled) = self.keep_alive_enabled {
             config.keep_alive_enabled = enabled;
@@ -454,7 +465,7 @@ impl EngineConfigSpec {
         config.sdk_log_level = parse_member(
             self.sdk_log_level,
             config.sdk_log_level,
-            "sdkLogLevel",
+            field_name("sdk_log_level"),
             SdkLogLevel::from_str,
         )?;
         config.validation_mode = validation_mode;

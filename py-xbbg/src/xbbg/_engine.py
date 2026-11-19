@@ -544,6 +544,9 @@ def _active_key_column() -> str:
 _ticker_key_column_warned = False
 
 
+_ticker_warning_lock = threading.Lock()
+
+
 def _warn_ticker_key_column(table: Any) -> None:
     """Emit at most one ``FutureWarning`` per process for a result keyed by ``ticker``.
 
@@ -554,18 +557,13 @@ def _warn_ticker_key_column(table: Any) -> None:
     global _ticker_key_column_warned
     if _ticker_key_column_warned or _active_key_column() != "ticker" or "ticker" not in table.column_names:
         return
-    with _engine_lock:
-        if _ticker_key_column_warned:
-            return
-        _ticker_key_column_warned = True
     from .exceptions import _warn_at_user_frame
 
-    try:
+    with _ticker_warning_lock:
+        if _ticker_key_column_warned:
+            return
         _warn_at_user_frame(_TICKER_KEY_COLUMN_WARNING, FutureWarning)
-    except BaseException:
-        with _engine_lock:
-            _ticker_key_column_warned = False
-        raise
+        _ticker_key_column_warned = True
 
 
 def _normalize_engine_exception(exc: Exception) -> Exception:

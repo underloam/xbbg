@@ -212,5 +212,8 @@ def forget_core(core: ModuleType) -> None:
     if sys.modules.get(CORE_MODULE) is core:
         del sys.modules[CORE_MODULE]
     package = sys.modules.get(CORE_MODULE.rpartition(".")[0])
-    if package is not None and vars(package).get("_core") is core:
-        del vars(package)["_core"]
+    if package is not None:
+        if vars(package).get("_core") is core:
+            del vars(package)["_core"]
+        if vars(package).get("_core_module") is core:
+            vars(package)["_core_module"] = None

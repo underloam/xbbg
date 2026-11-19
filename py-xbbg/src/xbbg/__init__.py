@@ -79,6 +79,17 @@ def _import_core():
     _core_import_state.active = True
     try:
         core = importlib.import_module("xbbg._core")
+        # Another thread inside _core_guard.import_without_runtime() can briefly
+        # publish xbbg._core in sys.modules before the runtime is loaded; finish
+        # loading before caching _core_module so callers never see a runtime-less
+        # extension.
+        loaded_sdk = getattr(core, "loaded_sdk", None)
+        if callable(loaded_sdk) and loaded_sdk() is None:
+            try:
+                _load_runtime(core)
+            except ImportError:
+                _core_guard.forget_core(core)
+                raise
     finally:
         _core_import_state.active = False
     _core_module = core
