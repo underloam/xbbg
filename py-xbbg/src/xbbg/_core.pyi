@@ -1285,6 +1285,16 @@ class PySubscription:
         """
     def __repr__(self) -> builtins.str: ...
 
+@typing.final
+class _LogBridgeConsumer:
+    r"""
+    Handle bound to one enabled log-bridge session so an abandoned consumer
+    thread can only ever drain or discard its own closed queue.
+    """
+    def next_batch(self, timeout: builtins.float, max_records: builtins.int) -> tuple[builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, builtins.int, builtins.float, builtins.str]], builtins.int, builtins.bool]: ...
+    def discard(self) -> builtins.int: ...
+    def count_dropped(self, count: builtins.int) -> None: ...
+
 def _decode_field_exceptions(raw: builtins.str) -> typing.Any: ...
 
 def _encode_result_diagnostics(*, eid_data: typing.Optional[typing.Any] = None, security_errors: typing.Optional[typing.Any] = None, field_exceptions: typing.Optional[typing.Any] = None, delayed: typing.Optional[typing.Any] = None, type_misses: typing.Optional[typing.Any] = None, field_errors: typing.Optional[typing.Any] = None, bloomberg_request_id: typing.Optional[builtins.str] = None) -> builtins.dict[builtins.str, builtins.str]:
@@ -1345,6 +1355,18 @@ def _log_bridge_next_batch(timeout: builtins.float, max_records: builtins.int) -
     thread_name)` tuples in emission order (empty on timeout); `dropped` counts
     the records lost since the previous batch; `closed` means capture is off and
     the queue is empty.
+    """
+
+def _log_bridge_open(capacity: builtins.int) -> typing.Optional[_LogBridgeConsumer]:
+    r"""
+    Start capturing log events into a native queue of `capacity` records and
+    return a session-scoped consumer, or `None` if capture was already on.
+    """
+
+def _log_bridge_reset_after_fork() -> None:
+    r"""
+    Reset log bridge state in a forked child without locking or touching the
+    parent's queue.
     """
 
 def _signal_interpreter_shutdown() -> None: ...

@@ -161,8 +161,9 @@ where
 // Initialization
 // ---------------------------------------------------------------------------
 
-/// Build the subscriber: the stderr layer, plus the [`bridge`] layer that takes
-/// over while the bridge is enabled. Both sit behind [`AtomicLevelFilter`].
+/// Build the subscriber: a single routing layer behind [`AtomicLevelFilter`]
+/// that sends each event to the [`bridge`] while capture is active and to
+/// `writer` (stderr) otherwise.
 fn build_subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync
 where
     W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
@@ -178,8 +179,7 @@ where
         .with_line_number(true);
 
     tracing_subscriber::registry()
-        .with(fmt_layer.with_filter(bridge::StderrFilter))
-        .with(bridge::BridgeLayer.with_filter(bridge::BridgeFilter))
+        .with(bridge::RoutingLayer::new(fmt_layer).with_filter(AtomicLevelFilter))
 }
 
 /// Initialize the global tracing subscriber.

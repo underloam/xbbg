@@ -23,6 +23,7 @@ import atexit
 import contextlib
 import logging
 import math
+import os
 import sys
 import threading
 import traceback
@@ -35,45 +36,67 @@ _POLL_SECONDS = 0.1
 _BATCH_SIZE = 256
 
 _DEFAULT_QUEUE_SIZE = 10_000
+_MAX_QUEUE_SIZE = 16_777_216
 _TRACE_LEVEL = 5
 
 _DROP_LOGGER_NAME = "xbbg.logging"
 
 
 class _Forwarder:
-    """One running bridge: its queue size, consumer thread and abandon flag."""
+    """One running bridge: its queue size, session consumer, thread and abandon state."""
 
-    def __init__(self, core: Any, queue_size: int) -> None:
+    def __init__(self, core: Any, consumer: Any, queue_size: int) -> None:
         self.queue_size = queue_size
         self.abandoned = threading.Event()
         self._core = core
+        self._consumer = consumer
+        self._batch_lock = threading.Lock()
+        self._remaining_in_batch = 0
         self.thread = threading.Thread(
             target=self._run,
             name="xbbg-python-logging",
             daemon=True,
         )
 
+    def abandon(self) -> None:
+        """Stop delivering further records and account for all undelivered ones."""
+        with self._batch_lock:
+            self.abandoned.set()
+            undelivered = self._remaining_in_batch
+            self._remaining_in_batch = 0
+        if undelivered:
+            self._consumer.count_dropped(undelivered)
+        self._consumer.discard()
+
     def _run(self) -> None:
-        core = self._core
+        consumer = self._consumer
         abandoned = self.abandoned
         loggers: dict[str, logging.Logger] = {}
         # LogRecord.relativeCreated counts from logging's own start time, which
-        # is private; derive its offset from a record created right now.
-        reference = logging.makeLogRecord({})
+        # is private; construct LogRecord directly so a custom LogRecord factory
+        # that expects non-None name/level cannot abort the forwarder.
+        reference = logging.LogRecord("", 0, "", 0, "", (), None)
         relative_offset = reference.relativeCreated - reference.created * 1000.0
 
         while not abandoned.is_set():
-            records, dropped, closed = core._log_bridge_next_batch(_POLL_SECONDS, _BATCH_SIZE)
+            records, dropped, closed = consumer.next_batch(_POLL_SECONDS, _BATCH_SIZE)
+            with self._batch_lock:
+                if abandoned.is_set():
+                    if records:
+                        consumer.count_dropped(len(records))
+                    return
+                self._remaining_in_batch = len(records)
             if dropped:
                 _guarded(
                     logging.getLogger(_DROP_LOGGER_NAME).warning,
                     "dropped %d xbbg log records: queue full",
                     dropped,
                 )
-            for index, record in enumerate(records):
-                if abandoned.is_set():
-                    core._log_bridge_count_dropped(len(records) - index)
-                    return
+            for record in records:
+                with self._batch_lock:
+                    if abandoned.is_set():
+                        return
+                    self._remaining_in_batch -= 1
                 _guarded(_deliver, loggers, relative_offset, record)
             if closed:
                 return
@@ -103,7 +126,7 @@ def _deliver(
         return
     record = logger.makeRecord(name, levelno, pathname, lineno, message, (), None)
     record.created = created
-    record.msecs = int((created - int(created)) * 1000) + 0.0
+    record.msecs = math.floor((created - math.floor(created)) * 1000.0) + 0.0
     record.relativeCreated = created * 1000.0 + relative_offset
     record.threadName = thread_name
     logger.handle(record)
@@ -113,11 +136,41 @@ _lock = threading.RLock()
 _forwarder: _Forwarder | None = None
 
 
+def _at_fork_before() -> None:
+    _lock.acquire()
+
+
+def _at_fork_parent() -> None:
+    _lock.release()
+
+
+def _at_fork_child() -> None:
+    global _lock, _forwarder
+    _lock = threading.RLock()
+    _forwarder = None
+    atexit.unregister(_atexit_disable)
+    core = sys.modules.get("xbbg._core")
+    if core is not None:
+        reset = getattr(core, "_log_bridge_reset_after_fork", None)
+        if reset is not None:
+            reset()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(
+        before=_at_fork_before,
+        after_in_parent=_at_fork_parent,
+        after_in_child=_at_fork_child,
+    )
+
+
 def _validate_queue_size(queue_size: int) -> int:
     if isinstance(queue_size, bool) or not isinstance(queue_size, int):
         raise TypeError(f"queue_size must be an int, got {type(queue_size).__name__}")
     if queue_size < 1:
         raise ValueError(f"queue_size must be at least 1, got {queue_size}")
+    if queue_size > _MAX_QUEUE_SIZE:
+        raise ValueError(f"queue_size must be at most {_MAX_QUEUE_SIZE}, got {queue_size}")
     return queue_size
 
 
@@ -183,14 +236,15 @@ def enable_python_logging(*, queue_size: int = _DEFAULT_QUEUE_SIZE) -> None:
         if logging.getLevelName(_TRACE_LEVEL) == f"Level {_TRACE_LEVEL}":
             logging.addLevelName(_TRACE_LEVEL, "TRACE")
 
-        if not _core._log_bridge_enable(queue_size):
+        consumer = _core._log_bridge_open(queue_size)
+        if consumer is None:
             raise RuntimeError("the native log bridge is already active")
-        forwarder = _Forwarder(_core, queue_size)
+        forwarder = _Forwarder(_core, consumer, queue_size)
         try:
             forwarder.thread.start()
         except BaseException:
             _core._log_bridge_disable()
-            _core._log_bridge_discard()
+            consumer.discard()
             raise
         _forwarder = forwarder
         atexit.register(_atexit_disable)
@@ -228,12 +282,21 @@ def disable_python_logging(*, timeout: float = 1.0) -> None:
         atexit.unregister(_atexit_disable)
 
         core = forwarder._core
+        if timeout == 0:
+            # Abandon before stopping capture so the forwarder does not deliver
+            # another batch, then discard anything enqueued in the gap.
+            forwarder.abandon()
+            core._log_bridge_disable()
+            forwarder._consumer.discard()
+            return
         core._log_bridge_disable()
-        forwarder.thread.join(timeout)
-        if forwarder.thread.is_alive():
-            # Stuck or slow handler: stop it between records, drop the rest.
-            forwarder.abandoned.set()
-            core._log_bridge_discard()
+
+    # Release _lock before joining so handlers or concurrent callers cannot
+    # deadlock against it.
+    forwarder.thread.join(timeout)
+    if forwarder.thread.is_alive():
+        # Stuck or slow handler: stop it between records, drop the rest.
+        forwarder.abandon()
 
 
 def python_logging_dropped() -> int:
@@ -245,9 +308,10 @@ def python_logging_dropped() -> int:
     when no later record arrives to trigger the ``xbbg.logging`` warning, and
     is ``0`` if forwarding was never enabled.
     """
-    from . import _core
-
-    return _core._log_bridge_dropped()
+    core = sys.modules.get("xbbg._core")
+    if core is None:
+        return 0
+    return core._log_bridge_dropped()
 
 
 def _atexit_disable() -> None:

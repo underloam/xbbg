@@ -62,6 +62,47 @@ fn to_py_record(record: LogRecord) -> PyRecord {
     )
 }
 
+/// Handle bound to one enabled log-bridge session so an abandoned consumer
+/// thread can only ever drain or discard its own closed queue.
+#[cfg_attr(feature = "stub-gen", gen_stub_pyclass)]
+#[pyclass(name = "_LogBridgeConsumer", frozen)]
+struct PyLogBridgeConsumer {
+    inner: bridge::Consumer,
+}
+
+#[cfg_attr(feature = "stub-gen", gen_stub_pymethods)]
+#[pymethods]
+impl PyLogBridgeConsumer {
+    fn next_batch(
+        &self,
+        py: Python<'_>,
+        timeout: f64,
+        max_records: usize,
+    ) -> PyResult<(Vec<PyRecord>, u64, bool)> {
+        let timeout = Duration::try_from_secs_f64(timeout)
+            .map_err(|_| PyValueError::new_err("timeout must be a finite, non-negative number"))?;
+        let batch = py.detach(|| self.inner.next_batch(timeout, max_records));
+        let records = batch.records.into_iter().map(to_py_record).collect();
+        Ok((records, batch.dropped, batch.closed))
+    }
+
+    fn discard(&self) -> usize {
+        self.inner.discard()
+    }
+
+    fn count_dropped(&self, count: u64) {
+        self.inner.count_dropped(count);
+    }
+}
+
+/// Start capturing log events into a native queue of `capacity` records and
+/// return a session-scoped consumer, or `None` if capture was already on.
+#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+#[pyfunction]
+fn _log_bridge_open(capacity: usize) -> Option<PyLogBridgeConsumer> {
+    bridge::enable_session(capacity).map(|inner| PyLogBridgeConsumer { inner })
+}
+
 /// Start capturing log events into a native queue of `capacity` records.
 ///
 /// While capture is on, events go to the queue instead of stderr. Returns
@@ -71,6 +112,14 @@ fn to_py_record(record: LogRecord) -> PyRecord {
 #[pyfunction]
 fn _log_bridge_enable(capacity: usize) -> bool {
     bridge::enable(capacity)
+}
+
+/// Reset log bridge state in a forked child without locking or touching the
+/// parent's queue.
+#[cfg_attr(feature = "stub-gen", gen_stub_pyfunction)]
+#[pyfunction]
+fn _log_bridge_reset_after_fork() {
+    bridge::reset_after_fork();
 }
 
 /// Stop capturing and wake the waiting consumer; events go to stderr again.
@@ -152,11 +201,14 @@ fn _log_bridge_dropped() -> u64 {
 }
 
 pub(crate) fn register(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    m.add_class::<PyLogBridgeConsumer>()?;
+    m.add_function(wrap_pyfunction!(_log_bridge_open, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_enable, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_disable, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_next_batch, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_discard, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_count_dropped, m)?)?;
+    m.add_function(wrap_pyfunction!(_log_bridge_reset_after_fork, m)?)?;
     #[cfg(feature = "test-support")]
     m.add_function(wrap_pyfunction!(_test_log_fixture, m)?)?;
     m.add_function(wrap_pyfunction!(_log_bridge_dropped, m)?)?;

@@ -48,12 +48,19 @@ use std::time::{Duration, Instant, SystemTime};
 
 use arc_swap::ArcSwapOption;
 use crossbeam_queue::ArrayQueue;
+use tracing::span;
 use tracing::{Event, Subscriber};
 use tracing_core::field::{Field, Visit};
-use tracing_subscriber::layer::{Context, Filter, Layer};
+use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 use crate::Level;
+
+/// Upper bound on queue capacity accepted by [`enable`] / [`enable_session`].
+///
+/// Keeps `ArrayQueue::new` well away from `usize::MAX / 2` power-of-two
+/// overflow and prevents accidental multi-gigabyte allocations.
+pub const MAX_QUEUE_CAPACITY: usize = 1 << 24;
 
 /// One captured log event, owned and independent of the emitting thread.
 ///
@@ -90,64 +97,238 @@ pub struct LogBatch {
     pub closed: bool,
 }
 
-/// One enabled run of the bridge: its queue and whether capture has stopped.
+/// One enabled run of the bridge: its queue, wake-up state and per-session
+/// drop counter.
+///
+/// Owning the wake-up and unreported-drop state per channel isolates each
+/// consumer from any later [`enable`] / [`enable_session`] run even if an
+/// abandoned consumer thread is still exiting.
 struct Channel {
     queue: ArrayQueue<LogRecord>,
     /// Capture was switched off; the queue may still hold records to drain.
     closed: AtomicBool,
+    /// The consumer's wake-up mutex and condition variable. Emitters touch them
+    /// only when [`Self::sleeping`] is set.
+    wake: Mutex<()>,
+    ready: Condvar,
+    /// Set by the consumer when it is asleep or about to sleep.
+    sleeping: AtomicBool,
+    /// Records dropped on this channel since the previous batch was taken.
+    dropped_unreported: AtomicU64,
 }
 
-/// The current channel. It stays published after [`disable`] so the consumer
-/// can drain it, and is replaced by the next [`enable`].
+impl Channel {
+    fn new(capacity: usize) -> Self {
+        Self {
+            queue: ArrayQueue::new(capacity.clamp(1, MAX_QUEUE_CAPACITY)),
+            closed: AtomicBool::new(false),
+            wake: Mutex::new(()),
+            ready: Condvar::new(),
+            sleeping: AtomicBool::new(false),
+            dropped_unreported: AtomicU64::new(0),
+        }
+    }
+
+    fn wake_consumer(&self) {
+        drop(lock(&self.wake));
+        self.ready.notify_all();
+    }
+
+    fn record_drop(&self, count: u64, report_unreported: bool) {
+        if count == 0 {
+            return;
+        }
+        DROPPED_TOTAL.fetch_add(count, Ordering::Relaxed);
+        if report_unreported {
+            self.dropped_unreported.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+
+    fn discard_all(&self, report_unreported: bool) -> usize {
+        let mut count = 0;
+        while self.queue.pop().is_some() {
+            count += 1;
+        }
+        if count > 0 {
+            self.record_drop(count as u64, report_unreported);
+        }
+        count
+    }
+
+    fn try_take(self: &Arc<Self>, max_records: usize) -> Option<LogBatch> {
+        // Read the flag first: records pushed before capture stopped are
+        // then all visible to the emptiness check below.
+        let closed = self.closed.load(Ordering::SeqCst);
+        let mut records = Vec::new();
+        while records.len() < max_records {
+            match self.queue.pop() {
+                Some(record) => records.push(record),
+                None => break,
+            }
+        }
+        let drained_and_closed = closed && self.queue.is_empty();
+        let has_dropped = self.dropped_unreported.load(Ordering::Relaxed) > 0;
+        if records.is_empty() && !drained_and_closed && !has_dropped {
+            return None;
+        }
+        let dropped = self.dropped_unreported.swap(0, Ordering::Relaxed);
+        if drained_and_closed {
+            release_if_current(self);
+        }
+        Some(LogBatch {
+            records,
+            dropped,
+            closed: drained_and_closed,
+        })
+    }
+
+    fn next_batch(self: &Arc<Self>, timeout: Duration, max_records: usize) -> LogBatch {
+        let deadline = Instant::now().checked_add(timeout);
+        let max_records = max_records.max(1);
+        loop {
+            if let Some(batch) = self.try_take(max_records) {
+                return batch;
+            }
+            let remaining = match deadline {
+                Some(deadline) => deadline.saturating_duration_since(Instant::now()),
+                None => Duration::from_secs(3600),
+            };
+            if remaining.is_zero() {
+                return LogBatch {
+                    records: Vec::new(),
+                    dropped: self.dropped_unreported.swap(0, Ordering::Relaxed),
+                    closed: false,
+                };
+            }
+
+            // Sleep protocol. Consumer: announce, fence, re-check, wait.
+            // Emitter: push, fence, read the announcement, notify. Because of
+            // the two fences either the re-check sees the record (or the closed
+            // flag) or the emitter sees `sleeping`; and the emitter's notify
+            // takes `wake`, which the consumer holds from announcing until
+            // `wait` has released it.
+            let guard = lock(&self.wake);
+            self.sleeping.store(true, Ordering::SeqCst);
+            fence(Ordering::SeqCst);
+            if let Some(batch) = self.try_take(max_records) {
+                self.sleeping.store(false, Ordering::SeqCst);
+                return batch;
+            }
+            drop(
+                self.ready
+                    .wait_timeout(guard, remaining)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+            self.sleeping.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn push(&self, record: LogRecord) -> bool {
+        if self.closed.load(Ordering::Acquire) {
+            return false;
+        }
+        if self.queue.push(record).is_err() {
+            self.record_drop(1, true);
+            fence(Ordering::SeqCst);
+            if self.sleeping.swap(false, Ordering::SeqCst) {
+                drop(lock(&self.wake));
+                self.ready.notify_one();
+            }
+            return true;
+        }
+        fence(Ordering::SeqCst);
+        // Only the first emitter after the consumer went to sleep notifies.
+        if self.sleeping.swap(false, Ordering::SeqCst) {
+            drop(lock(&self.wake));
+            self.ready.notify_one();
+        }
+        true
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        // Count any straggler record that slipped in after the consumer exited.
+        let mut stranded = 0u64;
+        while self.queue.pop().is_some() {
+            stranded += 1;
+        }
+        if stranded > 0 {
+            DROPPED_TOTAL.fetch_add(stranded, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Handle bound to one [`enable_session`] run.
+///
+/// Using a `Consumer` guarantees that an abandoned or slow consumer thread
+/// can only drain or discard its own closed channel and never steals records
+/// or wakeups from a subsequent [`enable_session`] run.
+#[derive(Clone)]
+pub struct Consumer {
+    channel: Arc<Channel>,
+}
+
+impl Consumer {
+    /// Wait up to `timeout` for queued records from this session's queue.
+    pub fn next_batch(&self, timeout: Duration, max_records: usize) -> LogBatch {
+        self.channel.next_batch(timeout, max_records)
+    }
+
+    /// Drop everything still queued in this session's queue and add it to
+    /// [`dropped_total`] without generating a spurious `"queue full"` report
+    /// for a later session.
+    pub fn discard(&self) -> usize {
+        let count = self.channel.discard_all(false);
+        if self.channel.closed.load(Ordering::Acquire) && self.channel.queue.is_empty() {
+            release_if_current(&self.channel);
+        }
+        self.channel.wake_consumer();
+        count
+    }
+
+    /// Count `count` records that this consumer took from a batch but did not
+    /// deliver (for example when abandoned on disable timeout).
+    pub fn count_dropped(&self, count: u64) {
+        if count > 0 {
+            DROPPED_TOTAL.fetch_add(count, Ordering::Relaxed);
+        }
+    }
+}
+
+/// The current channel. It stays published after [`disable`] until drained or
+/// replaced, then clears to `None` so its pre-allocated queue memory is freed.
 static CHANNEL: ArcSwapOption<Channel> = ArcSwapOption::const_empty();
-/// Serializes [`enable`], [`disable`] and [`discard_queued`] with one another.
-/// Emitting threads never take it.
+/// Serializes [`enable`], [`enable_session`], [`disable`], [`discard_queued`]
+/// and channel release. Emitting threads never take it.
 static CONTROL: Mutex<()> = Mutex::new(());
-/// The consumer's wake-up mutex and condition variable. Emitters touch them
-/// only when [`SLEEPING`] is set.
-static WAKE: Mutex<()> = Mutex::new(());
-static READY: Condvar = Condvar::new();
-/// Set by the consumer when it is asleep or about to sleep.
-static SLEEPING: AtomicBool = AtomicBool::new(false);
-/// Mirrors "a channel is open" so the filters read it without loading the channel.
+/// Mirrors "a channel is open" so emitters read it with `Acquire` before
+/// loading [`CHANNEL`].
 static ENABLED: AtomicBool = AtomicBool::new(false);
 /// Records dropped since the process started.
 static DROPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
-/// Records dropped since the last batch was handed to the consumer.
-static DROPPED_UNREPORTED: AtomicU64 = AtomicU64::new(0);
+/// Drops reported via [`count_dropped`] when no channel is published.
+static UNREPORTED_IDLE: AtomicU64 = AtomicU64::new(0);
 
-fn lock(mutex: &'static Mutex<()>) -> std::sync::MutexGuard<'static, ()> {
+fn lock(mutex: &Mutex<()>) -> std::sync::MutexGuard<'_, ()> {
     // The guarded data is `()`, so a poisoned lock is still usable.
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-fn add_dropped(count: u64) {
-    DROPPED_TOTAL.fetch_add(count, Ordering::Relaxed);
-    DROPPED_UNREPORTED.fetch_add(count, Ordering::Relaxed);
-}
-
-/// Pop everything from `channel` and count it as dropped; returns how many.
-fn discard_all(channel: &Channel) -> usize {
-    let mut count = 0;
-    while channel.queue.pop().is_some() {
-        count += 1;
+fn release_if_current(channel: &Arc<Channel>) {
+    let _control = lock(&CONTROL);
+    if CHANNEL.load().as_ref().is_some_and(|current| {
+        Arc::ptr_eq(current, channel)
+            && current.closed.load(Ordering::Acquire)
+            && current.queue.is_empty()
+    }) {
+        CHANNEL.store(None);
     }
-    if count > 0 {
-        add_dropped(count as u64);
-    }
-    count
-}
-
-/// Wake the consumer whether or not it announced that it sleeps; for control
-/// operations, which are not on the emit path.
-fn wake_consumer() {
-    drop(lock(&WAKE));
-    READY.notify_all();
 }
 
 /// Whether capture is active.
 pub fn is_enabled() -> bool {
-    ENABLED.load(Ordering::Relaxed)
+    ENABLED.load(Ordering::Acquire)
 }
 
 /// Total number of records dropped since the process started, whether the
@@ -157,41 +338,52 @@ pub fn dropped_total() -> u64 {
 }
 
 /// Start capturing into a queue that holds at most `capacity` records
-/// (a capacity of 0 is treated as 1).
+/// (clamped to `1..=MAX_QUEUE_CAPACITY`), returning a [`Consumer`] bound to
+/// this run's channel.
+///
+/// Returns `None` if capture is already active. Leftovers from a previous run
+/// that nobody drained are discarded and counted in [`dropped_total`] before
+/// the new queue opens.
+pub fn enable_session(capacity: usize) -> Option<Consumer> {
+    let _control = lock(&CONTROL);
+    if ENABLED.load(Ordering::Relaxed) {
+        return None;
+    }
+    if let Some(previous) = CHANNEL.load().as_ref() {
+        previous.discard_all(false);
+    }
+    UNREPORTED_IDLE.store(0, Ordering::Relaxed);
+    let channel = Arc::new(Channel::new(capacity));
+    CHANNEL.store(Some(Arc::clone(&channel)));
+    ENABLED.store(true, Ordering::Release);
+    Some(Consumer { channel })
+}
+
+/// Start capturing into a queue that holds at most `capacity` records
+/// (clamped to `1..=MAX_QUEUE_CAPACITY`).
 ///
 /// Returns `true` if capture was started, `false` if it was already active; in
 /// that case the existing queue and its capacity are left untouched. Records
 /// left over from a previous run that nobody drained are discarded (and counted
 /// as dropped) before the new queue opens.
 pub fn enable(capacity: usize) -> bool {
-    let _control = lock(&CONTROL);
-    if ENABLED.load(Ordering::Relaxed) {
-        return false;
-    }
-    if let Some(previous) = CHANNEL.load().as_ref() {
-        discard_all(previous);
-    }
-    CHANNEL.store(Some(Arc::new(Channel {
-        queue: ArrayQueue::new(capacity.max(1)),
-        closed: AtomicBool::new(false),
-    })));
-    ENABLED.store(true, Ordering::Relaxed);
-    true
+    enable_session(capacity).is_some()
 }
 
 /// Stop capturing and wake a waiting consumer.
 ///
-/// Already queued records stay available to [`next_batch`]; once they are
-/// consumed the consumer receives a batch with [`LogBatch::closed`] set.
-/// Events emitted from now on go to stderr again.
+/// Already queued records stay available to [`next_batch`] /
+/// [`Consumer::next_batch`]; once they are consumed the consumer receives a
+/// batch with [`LogBatch::closed`] set. Events emitted from now on go to stderr
+/// again.
 pub fn disable() {
     let _control = lock(&CONTROL);
-    ENABLED.store(false, Ordering::Relaxed);
+    ENABLED.store(false, Ordering::Release);
     if let Some(channel) = CHANNEL.load().as_ref() {
         channel.closed.store(true, Ordering::SeqCst);
+        fence(Ordering::SeqCst);
+        channel.wake_consumer();
     }
-    fence(Ordering::SeqCst);
-    wake_consumer();
 }
 
 /// Drop everything still queued and count it as dropped; returns how many.
@@ -199,20 +391,60 @@ pub fn disable() {
 /// For a consumer that did not finish draining after [`disable`].
 pub fn discard_queued() -> usize {
     let _control = lock(&CONTROL);
-    let count = CHANNEL
-        .load()
-        .as_ref()
-        .map_or(0, |channel| discard_all(channel));
-    wake_consumer();
+    let Some(channel) = CHANNEL.load_full() else {
+        return 0;
+    };
+    // Only bound the loop if capture is still active, avoiding livelock under
+    // continuous concurrent emission.
+    let count = if channel.closed.load(Ordering::Acquire) {
+        channel.discard_all(true)
+    } else {
+        let limit = channel.queue.capacity();
+        let mut popped = 0;
+        while popped < limit && channel.queue.pop().is_some() {
+            popped += 1;
+        }
+        if popped > 0 {
+            channel.record_drop(popped as u64, true);
+        }
+        popped
+    };
+    channel.wake_consumer();
     count
 }
 
 /// Count `count` records that the consumer took but did not deliver, e.g.
 /// the rest of a batch it abandoned. They are reported like any other drop.
 pub fn count_dropped(count: u64) {
-    if count > 0 {
-        add_dropped(count);
+    if count == 0 {
+        return;
     }
+    if let Some(channel) = CHANNEL.load().as_ref() {
+        channel.record_drop(count, true);
+        fence(Ordering::SeqCst);
+        if channel.sleeping.swap(false, Ordering::SeqCst) {
+            drop(lock(&channel.wake));
+            channel.ready.notify_one();
+        }
+    } else {
+        DROPPED_TOTAL.fetch_add(count, Ordering::Relaxed);
+        UNREPORTED_IDLE.fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Reset bridge state in a forked child process without acquiring mutexes or
+/// inspecting the pre-fork queue.
+///
+/// In a forked child the parent's consumer thread no longer exists, and a
+/// vanished parent thread could have held `CONTROL`, `Channel::wake`, or been
+/// mid-push inside `ArrayQueue`. Disabling capture and detaching the old
+/// channel restores stderr logging immediately and lets a later [`enable`]
+/// start a fresh channel safely.
+pub fn reset_after_fork() {
+    ENABLED.store(false, Ordering::Release);
+    let previous = CHANNEL.swap(None);
+    std::mem::forget(previous);
+    UNREPORTED_IDLE.store(0, Ordering::Relaxed);
 }
 
 /// Wait up to `timeout` for queued records and take at most `max_records`.
@@ -226,164 +458,104 @@ pub fn count_dropped(count: u64) {
 /// Blocks the calling thread, and must be called from one consumer thread at
 /// a time. Emitting threads never wait for it.
 pub fn next_batch(timeout: Duration, max_records: usize) -> LogBatch {
-    let deadline = Instant::now().checked_add(timeout);
-    let max_records = max_records.max(1);
-    loop {
-        if let Some(batch) = try_take(max_records) {
-            return batch;
-        }
-        let remaining = match deadline {
-            Some(deadline) => deadline.saturating_duration_since(Instant::now()),
-            None => Duration::from_secs(3600),
+    let Some(channel) = CHANNEL.load_full() else {
+        return LogBatch {
+            records: Vec::new(),
+            dropped: UNREPORTED_IDLE.swap(0, Ordering::Relaxed),
+            closed: true,
         };
-        if remaining.is_zero() {
-            return LogBatch {
-                records: Vec::new(),
-                dropped: DROPPED_UNREPORTED.swap(0, Ordering::Relaxed),
-                closed: false,
-            };
-        }
-
-        // Sleep protocol. Consumer: announce, fence, re-check, wait.
-        // Emitter: push, fence, read the announcement, notify. Because of the
-        // two fences either the re-check sees the record (or the closed flag)
-        // or the emitter sees `SLEEPING`; and the emitter's notify takes
-        // `WAKE`, which the consumer holds from announcing until `wait` has
-        // released it, so the notify cannot fall between re-check and wait.
-        let guard = lock(&WAKE);
-        SLEEPING.store(true, Ordering::SeqCst);
-        fence(Ordering::SeqCst);
-        if let Some(batch) = try_take(max_records) {
-            SLEEPING.store(false, Ordering::SeqCst);
-            return batch;
-        }
-        drop(
-            READY
-                .wait_timeout(guard, remaining)
-                .unwrap_or_else(PoisonError::into_inner),
-        );
-        SLEEPING.store(false, Ordering::SeqCst);
-    }
+    };
+    channel.next_batch(timeout, max_records)
 }
 
-/// Take up to `max_records`; `None` when there is nothing to report yet
-/// (no records and capture not closed).
-fn try_take(max_records: usize) -> Option<LogBatch> {
+/// Try to format and queue `event` into the active channel. Returns `true` if
+/// the bridge handled the event (either queued or counted as queue-full drop),
+/// or `false` if capture is off/closed and the caller should emit to stderr.
+fn try_capture(event: &Event<'_>) -> bool {
     let channel = CHANNEL.load();
-    let mut records = Vec::new();
-    let closed = match channel.as_ref() {
-        // Never enabled: nothing will arrive.
-        None => true,
-        Some(channel) => {
-            // Read the flag first: records pushed before capture stopped are
-            // then all visible to the emptiness check below.
-            let closed = channel.closed.load(Ordering::SeqCst);
-            while records.len() < max_records {
-                match channel.queue.pop() {
-                    Some(record) => records.push(record),
-                    None => break,
-                }
-            }
-            closed && channel.queue.is_empty()
-        }
+    let Some(channel) = channel.as_ref() else {
+        return false;
     };
-    if records.is_empty() && !closed {
-        return None;
+    if channel.closed.load(Ordering::Acquire) {
+        return false;
     }
-    Some(LogBatch {
-        records,
-        dropped: DROPPED_UNREPORTED.swap(0, Ordering::Relaxed),
-        closed,
+
+    let meta = event.metadata();
+    let mut visitor = MessageVisitor::default();
+    event.record(&mut visitor);
+
+    let thread = std::thread::current();
+    let thread_name = match thread.name() {
+        Some(name) => name.to_owned(),
+        None => format!("{:?}", thread.id()),
+    };
+
+    channel.push(LogRecord {
+        message: visitor.buf,
+        level: *meta.level(),
+        target: meta.target(),
+        file: meta.file(),
+        line: meta.line(),
+        timestamp: SystemTime::now(),
+        thread_name,
     })
 }
 
-/// Try to queue a record without taking a lock; a full queue drops it and
-/// counts it.
-fn push(record: LogRecord) {
-    let channel = CHANNEL.load();
-    let Some(channel) = channel.as_ref() else {
-        return;
-    };
-    if channel.closed.load(Ordering::Relaxed) {
-        // Capture was switched off after the filter ran. A record that slips
-        // in between this check and the push is discarded, and counted, by
-        // the next `enable` or `discard_queued`.
-        return;
-    }
-    if channel.queue.push(record).is_err() {
-        add_dropped(1);
-        return;
-    }
-    fence(Ordering::SeqCst);
-    // Only the first emitter after the consumer went to sleep notifies.
-    if SLEEPING.swap(false, Ordering::SeqCst) {
-        drop(lock(&WAKE));
-        READY.notify_one();
-    }
-}
-
 // ---------------------------------------------------------------------------
-// Filters and layer
+// Single routing layer
 // ---------------------------------------------------------------------------
 
-/// Per-layer filter of the stderr layer: the level filter, but only while the
-/// bridge is off.
-pub(crate) struct StderrFilter;
+/// Layer that routes each event atomically to either the active bridge channel
+/// or the fallback `stderr` layer, avoiding drop or duplication windows during
+/// enable/disable transitions.
+pub(crate) struct RoutingLayer<F> {
+    stderr: F,
+}
 
-impl<S> Filter<S> for StderrFilter
-where
-    S: Subscriber + for<'a> LookupSpan<'a>,
-{
-    fn enabled(&self, meta: &tracing_core::Metadata<'_>, cx: &Context<'_, S>) -> bool {
-        !is_enabled() && crate::AtomicLevelFilter.enabled(meta, cx)
-    }
-
-    fn max_level_hint(&self) -> Option<tracing_core::LevelFilter> {
-        Some(tracing_core::LevelFilter::TRACE)
+impl<F> RoutingLayer<F> {
+    pub(crate) fn new(stderr: F) -> Self {
+        Self { stderr }
     }
 }
 
-/// Per-layer filter of the bridge layer: the level filter, but only while the
-/// bridge is on.
-pub(crate) struct BridgeFilter;
-
-impl<S> Filter<S> for BridgeFilter
+impl<S, F> Layer<S> for RoutingLayer<F>
 where
     S: Subscriber + for<'a> LookupSpan<'a>,
+    F: Layer<S> + 'static,
 {
-    fn enabled(&self, meta: &tracing_core::Metadata<'_>, cx: &Context<'_, S>) -> bool {
-        is_enabled() && crate::AtomicLevelFilter.enabled(meta, cx)
+    fn on_new_span(&self, attrs: &span::Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_new_span(attrs, id, ctx);
     }
 
-    fn max_level_hint(&self) -> Option<tracing_core::LevelFilter> {
-        Some(tracing_core::LevelFilter::TRACE)
+    fn on_record(&self, span: &span::Id, values: &span::Record<'_>, ctx: Context<'_, S>) {
+        self.stderr.on_record(span, values, ctx);
     }
-}
 
-/// Layer that turns events into [`LogRecord`]s and queues them.
-pub(crate) struct BridgeLayer;
+    fn on_follows_from(&self, span: &span::Id, follows: &span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_follows_from(span, follows, ctx);
+    }
 
-impl<S: Subscriber> Layer<S> for BridgeLayer {
-    fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        let meta = event.metadata();
-        let mut visitor = MessageVisitor::default();
-        event.record(&mut visitor);
+    fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
+        if is_enabled() && try_capture(event) {
+            return;
+        }
+        self.stderr.on_event(event, ctx);
+    }
 
-        let thread = std::thread::current();
-        let thread_name = match thread.name() {
-            Some(name) => name.to_owned(),
-            None => format!("{:?}", thread.id()),
-        };
+    fn on_enter(&self, id: &span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_enter(id, ctx);
+    }
 
-        push(LogRecord {
-            message: visitor.buf,
-            level: *meta.level(),
-            target: meta.target(),
-            file: meta.file(),
-            line: meta.line(),
-            timestamp: SystemTime::now(),
-            thread_name,
-        });
+    fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_exit(id, ctx);
+    }
+
+    fn on_close(&self, id: span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_close(id, ctx);
+    }
+
+    fn on_id_change(&self, old: &span::Id, new: &span::Id, ctx: Context<'_, S>) {
+        self.stderr.on_id_change(old, new, ctx);
     }
 }
 
@@ -404,6 +576,18 @@ impl MessageVisitor {
 }
 
 impl Visit for MessageVisitor {
+    fn record_str(&mut self, field: &Field, value: &str) {
+        self.separate();
+        let _ = match field.name() {
+            "message" => write!(self.buf, "{value}"),
+            name => write!(
+                self.buf,
+                "{}={value:?}",
+                name.strip_prefix("r#").unwrap_or(name)
+            ),
+        };
+    }
+
     fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
         self.separate();
         // Writing into a `String` cannot fail.
@@ -621,7 +805,7 @@ mod tests {
 
         // Drops that happen while the queue is empty-but-full-then-drained
         // are still reported by a timed-out batch.
-        add_dropped(2);
+        count_dropped(2);
         let empty = next_batch(Duration::from_millis(10), 16);
         assert!(empty.records.is_empty());
         assert_eq!(empty.dropped, 2);
@@ -956,5 +1140,76 @@ mod tests {
         assert_eq!(batch.records.len(), 3);
         assert_eq!(batch.dropped, 1);
         assert!(!batch.closed);
+    }
+
+    #[test]
+    fn abandoned_consumer_cannot_steal_records_from_a_new_session() {
+        let _guard = Guard::new();
+        let first = enable_session(16).expect("first session");
+        disable();
+        let second = enable_session(16).expect("second session");
+
+        tracing::subscriber::with_default(build_subscriber(SharedBuf::default()), || {
+            crate::error!("belongs to second");
+        });
+
+        let stale = first.next_batch(Duration::ZERO, 16);
+        assert!(stale.records.is_empty());
+        assert!(stale.closed);
+        assert_eq!(stale.dropped, 0);
+
+        let fresh = second.next_batch(Duration::ZERO, 16);
+        assert_eq!(fresh.records.len(), 1);
+        assert_eq!(fresh.records[0].message, "belongs to second");
+        assert!(!fresh.closed);
+    }
+
+    #[test]
+    fn previous_session_discards_do_not_report_as_queue_full_in_next_session() {
+        let _guard = Guard::new();
+        let first = enable_session(16).expect("first session");
+        tracing::subscriber::with_default(build_subscriber(SharedBuf::default()), || {
+            crate::error!("abandoned 1");
+            crate::error!("abandoned 2");
+        });
+        disable();
+        assert_eq!(first.discard(), 2);
+
+        let second = enable_session(16).expect("second session");
+        tracing::subscriber::with_default(build_subscriber(SharedBuf::default()), || {
+            crate::error!("fresh");
+        });
+        let batch = second.next_batch(Duration::ZERO, 16);
+        assert_eq!(batch.records.len(), 1);
+        assert_eq!(batch.records[0].message, "fresh");
+        assert_eq!(batch.dropped, 0);
+    }
+
+    #[test]
+    fn closed_and_drained_channel_is_released_from_global_slot() {
+        let _guard = Guard::new();
+        let consumer = enable_session(16).expect("session");
+        tracing::subscriber::with_default(build_subscriber(SharedBuf::default()), || {
+            crate::error!("drain me");
+        });
+        disable();
+        let batch = consumer.next_batch(Duration::ZERO, 16);
+        assert!(batch.closed);
+        assert!(CHANNEL.load().is_none());
+    }
+
+    #[test]
+    fn reset_after_fork_restores_stderr_without_locking() {
+        let _guard = Guard::new();
+        let _consumer = enable_session(16).expect("session");
+        reset_after_fork();
+        assert!(!is_enabled());
+        assert!(CHANNEL.load().is_none());
+
+        let stderr = SharedBuf::default();
+        tracing::subscriber::with_default(build_subscriber(stderr.clone()), || {
+            crate::error!("child stderr");
+        });
+        assert!(stderr.contents().contains("child stderr"));
     }
 }

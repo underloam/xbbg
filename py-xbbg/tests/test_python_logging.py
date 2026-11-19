@@ -252,6 +252,8 @@ def test_enable_is_idempotent_and_queue_size_change_is_rejected():
 def test_argument_validation():
     with pytest.raises(ValueError, match="at least 1"):
         xbbg.enable_python_logging(queue_size=0)
+    with pytest.raises(ValueError, match="at most"):
+        xbbg.enable_python_logging(queue_size=100_000_000)
     with pytest.raises(TypeError, match="int"):
         xbbg.enable_python_logging(queue_size="10")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="non-negative"):
@@ -323,6 +325,53 @@ def test_disable_with_a_stuck_handler_times_out_and_counts_leftovers(probe, emit
     release.set()
     assert wait_for(lambda: not forwarder_threads())
     assert collector.messages() == ["held by the handler"]
+
+
+def test_reenable_while_abandoned_forwarder_is_blocked_does_not_steal_or_warn(probe, caplog, emit):
+    release = threading.Event()
+    first_collector = probe(Collector(block_first=release), level=logging.INFO)
+    caplog.set_level(logging.WARNING, logger="xbbg.logging")
+    xbbg.enable_python_logging(queue_size=16)
+
+    emit("info", "held in first session")
+    assert first_collector.entered.wait(WAIT_S)
+    emit("info", "discarded from first session")
+
+    # Abandon the blocked forwarder and immediately start a new session.
+    xbbg.disable_python_logging(timeout=0.05)
+    xbbg.enable_python_logging(queue_size=16)
+    emit("info", "belongs to second session")
+
+    # Unblock the abandoned first forwarder; it must exit without stealing or warning.
+    release.set()
+    assert wait_for(lambda: "belongs to second session" in first_collector.messages())
+    assert "discarded from first session" not in first_collector.messages()
+    assert not [r for r in caplog.records if r.name == "xbbg.logging"]
+
+
+def test_custom_log_record_factory_requiring_name_and_level_works(probe, emit):
+    original_factory = logging.getLogRecordFactory()
+
+    def strict_factory(name, level, *args, **kwargs):
+        if not isinstance(name, str) or not isinstance(level, int):
+            raise TypeError(f"expected (str, int), got ({name!r}, {level!r})")
+        return original_factory(name, level, *args, **kwargs)
+
+    collector = probe(Collector(), level=logging.INFO)
+    logging.setLogRecordFactory(strict_factory)
+    try:
+        xbbg.enable_python_logging()
+        emit("info", "custom factory event")
+        assert wait_for(lambda: collector.messages() == ["custom factory event"])
+    finally:
+        xbbg.disable_python_logging()
+        logging.setLogRecordFactory(original_factory)
+
+
+def test_python_logging_dropped_does_not_import_core(monkeypatch):
+    monkeypatch.delitem(sys.modules, "xbbg._core", raising=False)
+    assert xbbg.python_logging_dropped() == 0
+    assert "xbbg._core" not in sys.modules
 
 
 def test_disable_drains_queued_records_before_stopping(probe, emit):
