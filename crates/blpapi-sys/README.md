@@ -55,14 +55,10 @@ This crate does not build on docs.rs: the SDK is proprietary and the docs.rs san
 
 ## Dev / CI usage
 
-**Dev (quickest)**: run the SDK tool from the repo root, then build:
+**Dev (quickest)**: run the `xbbg-sdk` CLI from the repo root (works on macOS, Linux, and Windows; requires no pre-installed Bloomberg headers), then build:
 
 ```bash
-bash ./scripts/sdktool.sh
-```
-
-```powershell
-.\scripts\sdktool.ps1            # downloads and extracts SDK
+cargo run -p xbbg-sdk --features provision -- cpp
 ```
 
 The build script scans versioned subdirs under `BLPAPI_ROOT`, so pointing it at

@@ -119,7 +119,7 @@ Supported Python versions: **3.11 through 3.15**. Free-threaded CPython 3.14t/3.
 Requirements and notes:
 
 - You need an authorized Bloomberg environment: local Terminal/DAPI, SAPI/B-PIPE, or ZFP, depending on your setup.
-- If you build from source, stage the Bloomberg C++ SDK with `bash ./scripts/sdktool.sh` on macOS/Linux or `.\\scripts\\sdktool.ps1` on Windows PowerShell.
+- If you build from source, stage the Bloomberg C++ SDK with `cargo run -p xbbg-sdk --features provision -- cpp` (works on macOS, Linux and Windows; installed packages also expose `xbbg-sdk cpp`, `python -m xbbg.sdk cpp`, `npx xbbg-sdk cpp`, and `xbbg-mcp sdk cpp`).
 - xbbg loads the Bloomberg runtime when `xbbg._core` is first imported (the native extension itself links no Bloomberg code), using the first of these that loads. The same search order, written once in Rust, serves the Python, Node, Java and MCP packages:
   1. `xbbg.set_sdk_path(...)`: a directory holding the runtime library;
   2. `BLPAPI_LIB_DIR`: that directory, from the environment;
@@ -129,7 +129,7 @@ Requirements and notes:
   6. Bloomberg Terminal/DAPI: `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` on Windows, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere;
   7. the operating system's library search path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
   8. the operating system's own library search, where a system-wide install lives: the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, and on Windows the application and system directories and those added with `os.add_dll_directory`;
-  9. a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. The cache is only read when nothing before it loaded. The Java package's `BlpapiSdk` command fills that cache (see [the Java runtime docs](java-xbbg/README.md#the-bloomberg-runtime)), and one install serves Python, Node, Java and the MCP server.
+  9. a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. The cache is only read when nothing before it loaded. Every language host can fill that cache before any Bloomberg runtime is installed: Python (`xbbg.provision_sdk(...)`, `xbbg.set_sdk_source(...)`, `xbbg-sdk` / `python -m xbbg.sdk`), Node (`@xbbg/core/sdk` `provisionSdk(...)`, `npx xbbg-sdk`), MCP (`xbbg-mcp sdk`), Java (`BlpapiSdk`, see [the Java runtime docs](java-xbbg/README.md#the-bloomberg-runtime)), or automatically via `XBBG_SDK_SOURCE` when no explicit path is set. One install serves all four.
 
   A candidate that fails to load (for example a runtime older than the one xbbg needs) is skipped and the search goes on, except a path given to `xbbg.set_sdk_path(...)`, which is used or refused on its own (`ValueError`); if nothing loads, `import xbbg._core` raises an `ImportError` that lists every place that was refused and why, naming the functions an old runtime lacks. A process loads one runtime for its lifetime, so `xbbg.set_sdk_path(...)` must run before anything else uses xbbg. `xbbg.get_sdk_info()` lists each source found (`manual`, `sdk_lib_dir`, `sdk_env`, `dev_sdk_root`, `blpapi_python`, `dapi`, `search_path`, `system`, `xbbg_cache`), the cached installs it skipped and why, and which one is `active`.
 - Linux wheels are `manylinux_2_28` (x86_64): any distro with glibc ≥ 2.28 works — RHEL/Alma/Rocky 8+, Debian 10+, Ubuntu 20.04+, Amazon Linux 2023.
@@ -894,9 +894,8 @@ When reporting issues, include:
 Set up the development environment with [pixi](https://pixi.sh/):
 
 ```bash
-# Stage an authorized Bloomberg SDK locally under vendor/blpapi-sdk/
-bash ./scripts/sdktool.sh               # macOS/Linux
-# .\scripts\sdktool.ps1                # Windows PowerShell
+# Stage an authorized Bloomberg C++ SDK locally under vendor/blpapi-sdk/ (macOS, Linux, Windows)
+cargo run -p xbbg-sdk --features provision -- cpp
 
 # Install the environment and compile the Rust extension (rerun `pixi run install`
 # after pulling; xbbg warns when the extension was built from another commit)

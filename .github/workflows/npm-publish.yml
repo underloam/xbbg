@@ -198,6 +198,11 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
 
+      # napi-xbbg enables xbbg-host/provision whose TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
       - name: Install JS package dependencies
         run: npm ci --prefix js-xbbg
 
@@ -212,7 +217,7 @@ jobs:
         shell: bash
         run: |
           py="$(command -v python3 || command -v python)"
-          "$py" scripts/check_napi_addon_links.py "${{ matrix.package_dir }}/napi_xbbg.node"
+          "$py" scripts/check_native_links.py --addon "${{ matrix.package_dir }}/napi_xbbg.node"
 
       - name: Upload staged native package artifact
         uses: actions/upload-artifact@v7

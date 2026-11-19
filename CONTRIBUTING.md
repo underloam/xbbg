@@ -21,13 +21,9 @@ Contributors must obtain and use the Bloomberg SDK under their own Bloomberg agr
    cd xbbg
    ```
 
-2. Set up a Bloomberg SDK you are authorized to use:
+2. Set up a Bloomberg C++ SDK you are authorized to use (macOS, Linux, Windows):
    ```bash
-   # macOS/Linux
-   bash ./scripts/sdktool.sh
-
-   # Windows PowerShell
-   # .\scripts\sdktool.ps1
+   cargo run -p xbbg-sdk --features provision -- cpp
    ```
 
 3. Install dependencies and build:

@@ -176,7 +176,9 @@ The `xbbg-mcp` binary finds and loads the Bloomberg runtime itself, at startup, 
 9. the operating system's own library search, where a system-wide install lives (the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the directory of `xbbg-mcp.exe` and the system directory on Windows)
 10. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`), read only when nothing before them loaded
 
-A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried. If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
+If nothing loads and `XBBG_MCP_LIB_DIR` is not set, setting `XBBG_SDK_SOURCE` (and optionally `XBBG_SDK_VERSION`) provisions a runtime into the shared xbbg cache automatically before starting the server. You can also manage the cache directly before any Bloomberg runtime exists with `xbbg-mcp sdk --source <spec>` or `xbbg-mcp sdk --installed`.
+
+A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried (including `XBBG_SDK_SOURCE`). If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
 
 If you install Bloomberg's Python package, the wrapper can usually run without any extra shell configuration:
 
@@ -201,7 +203,7 @@ The server writes only to stderr, which MCP hosts such as Claude Desktop capture
 ## Build from source
 
 ```bash
-bash ./scripts/sdktool.sh
+cargo run -p xbbg-sdk --features provision -- cpp
 cargo build --release -p xbbg-mcp --locked
 ./scripts/xbbg-mcp
 ```

@@ -104,10 +104,12 @@ deny = [
     # `xbbg_host::sdk::locate_and_load` right after its module loads.
     { name = "xbbg-host", wrappers = ["jni-xbbg", "pyo3-xbbg", "napi-xbbg", "xbbg-mcp"] },
     # The Bloomberg runtime resolver and downloader live in xbbg-sdk, the downloader behind its
-    # `provision` feature. xbbg-host uses the default features; cargo-deny cannot tell
-    # features apart, so the dependency-tree checks in CI (`cargo tree` on the bindings) are what
-    # stop one of them enabling `provision`. Only the entry points of the downloader stack can be
-    # confined: the other uv/rattler crates depend on each other.
+    # `provision` feature. Default xbbg-host and jni-xbbg stay resolver-only (Java keeps the
+    # downloader in its separate xbbg_sdk_jni library), while pyo3-xbbg, napi-xbbg and xbbg-mcp
+    # opt into `xbbg-host/provision` so every surface can populate the shared xbbg cache.
+    # CI checks (`cargo tree`) verify jni-xbbg and default xbbg-host/xbbg-sdk stay free of the
+    # downloader stack. Only the entry points of the downloader stack can be confined: the other
+    # uv/rattler crates depend on each other.
     # xbbg-host runs the runtime search (`locate`) for every binding and loads the result.
     # xbbg_core, xbbg-async, xbbg-recipes and xbbg-bench use it to load the runtime in tests,
     # examples and benchmarks: dev-dependencies only, except xbbg-bench (never published).

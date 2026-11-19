@@ -361,9 +361,8 @@ The npm Trusted Publisher configuration must match the workflow filename exactly
 ### Build Locally
 
 ```bash
-# Install the SDK into vendor/blpapi-sdk/ and let the build discover it
-bash ./scripts/sdktool.sh
-# Windows PowerShell: .\scripts\sdktool.ps1
+# Install the C++ SDK into vendor/blpapi-sdk/ and let the build discover it (macOS, Linux, Windows)
+cargo run -p xbbg-sdk --features provision -- cpp
 
 # Build wheel (includes Rust extension)
 uv build

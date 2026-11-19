@@ -34,7 +34,13 @@ no Bloomberg runtime library could be found or loaded:
 Set BLPAPI_LIB_DIR to the folder that holds Bloomberg's blpapi runtime (BLPAPI_ROOT also works).
 ```
 
-`@xbbg/core` does not provision a runtime. Fill the cache once with the Java package's command-line provisioner (`java -cp xbbg-<version>.jar io.github.underloam.xbbg.sdk.BlpapiSdk --source <spec>`, see the Java README), and the search finds it.
+`@xbbg/core` can also provision the shared xbbg cache itself before any Bloomberg runtime exists on the machine:
+
+- Programmatically from `@xbbg/core/sdk`: `provisionSdk({ source, version, cacheDir })`, `installedSdks()`, and `defaultSdkCacheDir()`.
+- From the CLI: `npx xbbg-sdk --source <spec>` (or `--installed`).
+- Automatically on first import when no local or cached runtime is found: set `XBBG_SDK_SOURCE` (and optionally `XBBG_SDK_VERSION`). An explicit runtime path is never replaced by a download.
+
+Because Python, Node, Java and `xbbg-mcp` share `<cache>/sdk/<version>/<platform>/`, a runtime provisioned once with any of them serves all four.
 
 Compared with earlier releases, the search is the same on every platform: the Terminal folders, the library search variables and the cache are tried on Linux and macOS as well as Windows, and `@xbbg/core` no longer prepends a directory to `PATH`. The cache is simply the last rule, not a retry after a failed addon load.
 

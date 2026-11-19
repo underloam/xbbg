@@ -290,20 +290,28 @@ jobs:
           cargo clippy -p xbbg-sdk --all-targets -- -D warnings
           cargo test -p xbbg-sdk
 
-      - name: xbbg-sdk with the provisioner (feature provision)
+      - name: xbbg-sdk and xbbg-host with the provisioner (feature provision)
         run: |
           cargo clippy -p xbbg-sdk --all-targets --features provision -- -D warnings
           cargo test -p xbbg-sdk --features provision
+          cargo clippy -p xbbg-host --all-targets --features provision -- -D warnings
+          cargo test -p xbbg-host --features provision
 
-      # Every binding reaches xbbg-sdk through xbbg-host, which uses its default features (the
-      # resolver). The bindings depend on tokio themselves, so only the downloader's entry points
-      # are forbidden.
-      - name: Bindings do not pull in the provisioner
+      # Java keeps the provisioner in its separate xbbg_sdk_jni library, so jni-xbbg and the
+      # default (resolver-only) xbbg-host/xbbg-sdk builds must stay free of downloader crates.
+      # Python, Node and xbbg-mcp opt into xbbg-host/provision so they can fill the shared cache.
+      - name: Resolver-only targets do not pull in the provisioner
         run: |
-          crates=$(cargo tree -p pyo3-xbbg -p napi-xbbg -p jni-xbbg -p xbbg-mcp -e normal --prefix none | awk '{print $1}' | sort -u)
+          crates=$(
+            {
+              cargo tree -p jni-xbbg -e normal --prefix none
+              cargo tree -p xbbg-host --no-default-features --features live -e normal --prefix none
+              cargo tree -p xbbg-sdk --no-default-features -e normal --prefix none
+            } | awk '{print $1}' | sort -u
+          )
           for forbidden in reqwest uv-client rattler_repodata_gateway; do
             if printf '%s\n' "$crates" | grep -qx "$forbidden"; then
-              echo "a binding pulls in $forbidden: xbbg-sdk's provision feature must stay off" >&2
+              echo "a resolver-only target pulls in $forbidden: xbbg-sdk's provision feature must stay opt-in" >&2
               exit 1
             fi
           done
@@ -528,6 +536,11 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: ${{ runner.os }}
 
+      # napi-xbbg enables xbbg-host/provision whose TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
       - name: Install js-xbbg dependencies
         run: npm --prefix js-xbbg ci
 
@@ -548,7 +561,7 @@ jobs:
         shell: bash
         run: |
           py="$(command -v python3 || command -v python)"
-          "$py" scripts/check_napi_addon_links.py "${{ matrix.core_package_dir }}/napi_xbbg.node"
+          "$py" scripts/check_native_links.py --addon "${{ matrix.core_package_dir }}/napi_xbbg.node"
 
       - name: Validate core native package export
         run: |
@@ -1224,7 +1237,7 @@ jobs:
       # would fail to import on exactly the machines where xbbg has to explain what is missing.
       - name: Check xbbg._core links no Bloomberg runtime
         shell: bash
-        run: python scripts/check_wheel_core_links.py dist/*.whl
+        run: python scripts/check_native_links.py --wheel dist/*.whl
 
       - name: Upload wheel
         uses: actions/upload-artifact@v7

@@ -189,6 +189,11 @@ jobs:
           uv run --no-project --isolated --python "$UV_PYTHON" \
             python -I scripts/stamp_workspace_version.py "$RELEASE_VERSION" --check
 
+      # pyo3-xbbg enables xbbg-host/provision whose TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
       - name: Build wheel
         run: uv build --wheel --out-dir build-wheel/
 
@@ -218,7 +223,7 @@ jobs:
       - name: Check xbbg._core in the wheel
         shell: bash
         run: |
-          "$UV_PYTHON" scripts/check_wheel_core_links.py dist/*.whl
+          "$UV_PYTHON" scripts/check_native_links.py --wheel dist/*.whl
           uv run --no-project --isolated --python "$UV_PYTHON" \
             --with ./dist/*.whl \
             python scripts/smoke_core_without_runtime.py
@@ -330,6 +335,11 @@ jobs:
           version: ${{ env.BLPAPI_VERSION }}
           os: macOS
 
+      # xbbg-mcp enables xbbg-host/provision whose TLS stack (rustls with aws-lc-rs) compiles C code.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
       - name: Build xbbg-mcp (Unix)
         if: runner.os != 'Windows'
         run: |
@@ -370,7 +380,7 @@ jobs:
           cp scripts/xbbg-mcp "$PACKAGE_DIR/xbbg-mcp"
           cp target/release/xbbg-mcp "$PACKAGE_DIR/xbbg-mcp-real"
           chmod +x "$PACKAGE_DIR/xbbg-mcp" "$PACKAGE_DIR/xbbg-mcp-real"
-          python3 scripts/check_napi_addon_links.py --executable "$PACKAGE_DIR/xbbg-mcp-real"
+          python3 scripts/check_native_links.py --executable "$PACKAGE_DIR/xbbg-mcp-real"
           if find "$PACKAGE_DIR" -type f \( -name 'libblpapi*' -o -name 'blpapi3*.dll' \) | grep -q .; then
             echo "Unexpected Bloomberg SDK file detected in MCP package payload" >&2
             exit 1
@@ -393,7 +403,7 @@ jobs:
           Remove-Item -Path $packageDir -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
           Copy-Item target\release\xbbg-mcp.exe (Join-Path $packageDir 'xbbg-mcp.exe')
-          python scripts/check_napi_addon_links.py --executable (Join-Path $packageDir 'xbbg-mcp.exe')
+          python scripts/check_native_links.py --executable (Join-Path $packageDir 'xbbg-mcp.exe')
           if ($LASTEXITCODE -ne 0) {
             throw "xbbg-mcp.exe linked a Bloomberg runtime library"
           }
