@@ -38,12 +38,15 @@ class McpProtocolError(RuntimeError):
 
 def find_blpapi_lib_dir() -> Path:
     candidates = sorted(
-        path.parent
-        for path in SDK_ROOT.glob("*/Darwin/libblpapi3_64.so")
-        if path.is_file() and path.parts[-3] != ".cache"
+        {
+            path.parent
+            for pattern in ("*/Darwin/libblpapi3_64.so", "*/Darwin/libblpapi3_64.dylib", "*/Darwin/libblpapi3.dylib")
+            for path in SDK_ROOT.glob(pattern)
+            if path.is_file() and path.parts[-3] != ".cache"
+        }
     )
     if not candidates:
-        raise FileNotFoundError("Could not find libblpapi3_64.so under vendor/blpapi-sdk/<version>/Darwin")
+        raise FileNotFoundError("Could not find a Bloomberg runtime library under vendor/blpapi-sdk/<version>/Darwin")
     return candidates[-1]
 
 

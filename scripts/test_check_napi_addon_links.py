@@ -44,3 +44,13 @@ def test_macho_addon_must_be_relocatable(tmp_path):
         check.check(wrong_name)
     with pytest.raises(check.StageError, match="non-portable"):
         check.check(absolute)
+
+
+def test_executable_mode_allows_missing_install_name_while_rejecting_blpapi(tmp_path):
+    clean = tmp_path / "xbbg-mcp"
+    clean.write_bytes(make_macho("", ["/usr/lib/libSystem.B.dylib"]))
+    linked = tmp_path / "xbbg-mcp-linked"
+    linked.write_bytes(make_macho("", ["@rpath/libblpapi3_64.so"]))
+
+    assert check.main(["--executable", str(clean)]) == 0
+    assert check.main(["--executable", str(linked)]) == 1

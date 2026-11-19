@@ -677,8 +677,7 @@ fn bounded_validation_entry(
     }
     (json_serialized_len(&entry).ok()? <= max_bytes).then_some((entry, entry_truncated))
 }
-#[tokio::main(flavor = "multi_thread", worker_threads = 2)]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Warnings and errors from rmcp and the engine go to stderr (RUST_LOG raises the level).
     // Without a subscriber a transport failure ends the process silently with status 0.
     xbbg_log::init();
@@ -707,47 +706,52 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             std::process::exit(1);
         }
     };
-    let (stdin, stdin_monitor) = stdin::stdin()?;
-    let engine = server.engine_cell();
-    let served = async {
-        let quit_reason = server
-            .serve((stdin, tokio::io::stdout()))
-            .await?
-            .waiting()
-            .await?;
-        Ok::<_, Box<dyn std::error::Error>>(quit_reason)
-    }
-    .await;
-    // The service is done, so this is the last owner of the engine: release it and let its
-    // Bloomberg sessions stop before the process exits.
-    drop(engine);
-    wait_for_engine_teardown().await;
-    let quit_reason = served?;
-    match quit_reason {
-        rmcp::service::QuitReason::Closed => stdin_monitor.ensure_clean_shutdown()?,
-        rmcp::service::QuitReason::Cancelled => {
-            return Err(std::io::Error::other("MCP service was cancelled").into());
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()?;
+    let outcome = rt.block_on(async move {
+        let (stdin, stdin_monitor) = stdin::stdin()?;
+        let engine = server.engine_cell();
+        let served = async {
+            let quit_reason = server
+                .serve((stdin, tokio::io::stdout()))
+                .await?
+                .waiting()
+                .await?;
+            Ok::<_, Box<dyn std::error::Error>>(quit_reason)
         }
-        rmcp::service::QuitReason::JoinError(err) => return Err(err.into()),
-        reason => {
-            return Err(std::io::Error::other(format!(
-                "MCP service stopped unexpectedly: {reason:?}"
-            ))
-            .into());
+        .await;
+        drop(engine);
+        let quit_reason = served?;
+        match quit_reason {
+            rmcp::service::QuitReason::Closed => stdin_monitor.ensure_clean_shutdown()?,
+            rmcp::service::QuitReason::Cancelled => {
+                return Err(std::io::Error::other("MCP service was cancelled").into());
+            }
+            rmcp::service::QuitReason::JoinError(err) => return Err(err.into()),
+            reason => {
+                return Err(std::io::Error::other(format!(
+                    "MCP service stopped unexpectedly: {reason:?}"
+                ))
+                .into());
+            }
         }
-    }
-    Ok(())
+        Ok::<(), Box<dyn std::error::Error>>(())
+    });
+    // Shut the runtime down first so any detached rmcp request tasks still holding
+    // `Arc<XbbgMcpServer>` drop before we wait on the native teardown thread.
+    rt.shutdown_timeout(ENGINE_TEARDOWN_TIMEOUT);
+    wait_for_engine_teardown();
+    outcome
 }
 
 /// How long exit waits for the engine's sessions to stop before giving up on them.
 const ENGINE_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(10);
 
-async fn wait_for_engine_teardown() {
-    // A blocking wait on a condition variable, so it stays off the async workers.
-    let finished = tokio::task::spawn_blocking(|| wait_idle_timeout(ENGINE_TEARDOWN_TIMEOUT))
-        .await
-        .unwrap_or(false);
-    if !finished {
+fn wait_for_engine_teardown() {
+    if !wait_idle_timeout(ENGINE_TEARDOWN_TIMEOUT) {
         xbbg_log::warn!(
             timeout_secs = ENGINE_TEARDOWN_TIMEOUT.as_secs(),
             "Bloomberg sessions were still stopping at exit"

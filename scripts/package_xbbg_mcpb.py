@@ -87,6 +87,10 @@ function Die($message) {
 
 # The directory of the Python blpapi package, found without importing it.
 function Find-PythonBlpapiDir() {
+    # PowerShell 5.1 turns native stderr redirected with `2>$null` into a
+    # terminating NativeCommandError under $ErrorActionPreference = "Stop"
+    # (for example, the WindowsApps python stub or `py` with no Python installed).
+    $ErrorActionPreference = "Continue"
     $pythonScript = @'
 import importlib.util
 from pathlib import Path
@@ -108,9 +112,13 @@ print(Path(origin).resolve().parent)
             continue
         }
 
-        $output = & $python -c $pythonScript 2>$null
-        if ($LASTEXITCODE -eq 0 -and $output) {
-            return ($output | Select-Object -First 1)
+        try {
+            $output = & $python -c $pythonScript 2>$null
+            if ($LASTEXITCODE -eq 0 -and $output) {
+                return ($output | Select-Object -First 1)
+            }
+        } catch {
+            continue
         }
     }
 
@@ -144,7 +152,7 @@ $startInfo = New-Object System.Diagnostics.ProcessStartInfo
 $startInfo.FileName = $realBin
 $startInfo.Arguments = (@($args | ForEach-Object { Format-Argument $_ }) -join ' ')
 $startInfo.UseShellExecute = $false
-if (-not $env:XBBG_MCP_HINT_DIRS) {
+if (-not $env:XBBG_MCP_LIB_DIR -and -not $env:XBBG_MCP_HINT_DIRS) {
     $hintDir = Find-PythonBlpapiDir
     if ($hintDir) {
         $startInfo.EnvironmentVariables["XBBG_MCP_HINT_DIRS"] = $hintDir

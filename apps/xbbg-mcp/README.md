@@ -190,7 +190,7 @@ Windows release assets are attached as `.zip` files, but the convenience install
 
 Claude Desktop and MCPB-aware registries can use the `xbbg-mcp-v<VERSION>.mcpb` asset attached to GitHub Releases. The MCPB currently supports macOS arm64, Linux amd64, and Windows amd64. The raw platform tar/zip assets remain available for manual installs and troubleshooting.
 
-The MCPB does not include Bloomberg SDK files, Bloomberg runtime libraries, credentials, or market data. Configure `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, or install Bloomberg's official Python `blpapi` package so the launcher can find the authorized Bloomberg runtime locally.
+The MCPB does not include Bloomberg SDK files, Bloomberg runtime libraries, credentials, or market data. Configure `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, or install Bloomberg's official Python `blpapi` package so the binary can find the authorized Bloomberg runtime locally.
 
 On Windows the MCPB PowerShell launcher passes the same hint (the Python `blpapi` package directory) and starts `xbbg-mcp.exe` with the standard handles inherited; the binary runs the search above, including `PATH` (a Bloomberg Terminal install puts `C:\blp\DAPI` there). `xbbg-mcp.exe` is 64-bit and needs `blpapi3_64.dll`. It is loaded by absolute path, so no DLL version gate, working-directory or `PATH` rewriting is needed: a runtime that is too old fails to provide a required function and is skipped with that reason in the startup error.
 

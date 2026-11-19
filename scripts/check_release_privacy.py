@@ -39,10 +39,15 @@ EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@(?:[A-Za-z0-9-]+\.)+[A-Za-z]{2,}(?![A-Za-
 ALLOWED_EMAIL_DOMAINS = ("example.com", "example.org", "example.net", "users.noreply.github.com")
 ALLOWED_EMAIL_SUFFIXES = (".example", ".invalid", ".test", ".localhost")
 ALLOWED_EMAIL_LOCAL_PARTS = frozenset({"noreply", "no-reply", "donotreply"})
+# Domains on which generic no-reply local parts (noreply@...) do not identify a private org.
+ALLOWED_NOREPLY_DOMAINS = ("github.com", *ALLOWED_EMAIL_DOMAINS)
 # SSH remotes and the address GitHub signs dependency-bot commits with.
 ALLOWED_EMAILS = frozenset({"git@github.com", "support@github.com"})
 
-HOME_PATH = re.compile(r"(?:/Users/|/home/|\b[A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/))([A-Za-z0-9._-]+)")
+HOME_PATH = re.compile(
+    r"(?:/Users/|/home/|\b[A-Za-z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/))([A-Za-z0-9._-]+)",
+    re.IGNORECASE,
+)
 # Names used as placeholders in docs and by CI runners and containers.
 PLACEHOLDER_USERS = frozenset(
     {
@@ -91,8 +96,8 @@ PATTERN_RULES = (
 # Login names that identify a CI runner or container, not a person.
 GENERIC_LOGINS = frozenset({"admin", "build", "builder", "ci", "dev", "docker", "root", "runner", "ubuntu", "user"})
 
-COMMIT_START = "\x1e"
-FIELD_END = "\x1f"
+COMMIT_START = "\x1eXBBG-PRIVACY-COMMIT\x1e"
+FIELD_END = "\x1fXBBG-PRIVACY-FIELD\x1f"
 LOG_FORMAT = f"{COMMIT_START}%H{FIELD_END}%an{FIELD_END}%ae{FIELD_END}%cn{FIELD_END}%ce{FIELD_END}%B{FIELD_END}"
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
@@ -129,12 +134,15 @@ def identity_pattern(term: str) -> re.Pattern[str]:
 
 
 def email_is_allowed(address: str) -> bool:
-    """Whether an address identifies nobody: reserved, no-reply or GitHub's own."""
+    """Whether an address identifies nobody: reserved, no-reply on public domains, or GitHub's own."""
     address = address.lower()
     local, _, domain = address.rpartition("@")
+    noreply_public = local.split("+")[0] in ALLOWED_EMAIL_LOCAL_PARTS and (
+        domain in ALLOWED_NOREPLY_DOMAINS or any(domain.endswith(f".{allowed}") for allowed in ALLOWED_NOREPLY_DOMAINS)
+    )
     return (
         address in ALLOWED_EMAILS
-        or local.split("+")[0] in ALLOWED_EMAIL_LOCAL_PARTS
+        or noreply_public
         or domain in ALLOWED_EMAIL_DOMAINS
         or domain in {suffix.lstrip(".") for suffix in ALLOWED_EMAIL_SUFFIXES}
         or domain.endswith(ALLOWED_EMAIL_SUFFIXES)
@@ -181,14 +189,26 @@ def scan_text(
         found.extend((rule, match.group()) for match in pattern.finditer(text))
     for pattern in identities:
         found.extend(("local identity", match.group()) for match in pattern.finditer(text))
-    allowed = [value.lower() for value in allow]
+    allowed = [value.lower() for value in allow if value.strip()]
     unique: list[tuple[str, str]] = []
     for rule, value in found:
         lowered = value.lower()
-        if any(entry in lowered or lowered in entry for entry in allowed) or (rule, value) in unique:
+        if _is_allowed_finding(rule, lowered, allowed) or (rule, value) in unique:
             continue
         unique.append((rule, value))
     return unique
+
+
+def _is_allowed_finding(rule: str, lowered: str, allowed: Sequence[str]) -> bool:
+    if not allowed:
+        return False
+    if rule in ("local identity", "private IP address"):
+        return any(lowered == entry for entry in allowed)
+    if rule == "home directory path":
+        return any(
+            lowered == entry or entry.startswith(f"{lowered}/") or entry.startswith(f"{lowered}\\") for entry in allowed
+        )
+    return any(entry in lowered for entry in allowed)
 
 
 def parse_log(output: str) -> Iterator[Commit]:
@@ -286,7 +306,7 @@ def check_range(
     allow: Sequence[str] = (),
 ) -> list[Finding]:
     """Scan every commit in `rev_range`."""
-    output = _git("log", "--no-color", "--no-ext-diff", "-p", "--unified=0", f"--format={LOG_FORMAT}", rev_range)
+    output = _git("log", "-m", "--no-color", "--no-ext-diff", "-p", "--unified=0", f"--format={LOG_FORMAT}", rev_range)
     identities = [identity_pattern(term) for term in sorted(set(terms))]
     findings: list[Finding] = []
     for commit in parse_log(output):

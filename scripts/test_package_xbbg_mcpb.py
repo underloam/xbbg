@@ -17,6 +17,8 @@ def test_windows_launcher_leaves_the_runtime_search_to_the_binary() -> None:
     assert "@UNSUPPORTED_PLATFORM_MESSAGE@" not in launcher and "@MISSING_REAL_BINARY_MESSAGE@" not in launcher
     assert package_xbbg_mcpb.MISSING_REAL_BINARY_MESSAGE in launcher
     assert 'EnvironmentVariables["XBBG_MCP_HINT_DIRS"] = $hintDir' in launcher
+    assert '$ErrorActionPreference = "Continue"' in launcher
+    assert "-not $env:XBBG_MCP_LIB_DIR -and -not $env:XBBG_MCP_HINT_DIRS" in launcher
     assert "find_spec" in launcher
     for removed in (
         "requiredBlpapiVersion",

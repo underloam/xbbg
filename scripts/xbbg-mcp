@@ -90,7 +90,7 @@ find_real_binary() {
 }
 
 export_runtime_hints() {
-    if [ -z "${XBBG_MCP_HINT_DIRS:-}" ]; then
+    if [ -z "${XBBG_MCP_LIB_DIR:-}" ] && [ -z "${XBBG_MCP_HINT_DIRS:-}" ]; then
         hint_dir=$(find_python_blpapi_dir 2>/dev/null) || hint_dir=
         if [ -n "$hint_dir" ]; then
             export XBBG_MCP_HINT_DIRS="$hint_dir"

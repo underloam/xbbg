@@ -30,23 +30,25 @@ _STRIPPED_PREFIXES = ("BLPAPI_", "XBBG_", "DYLD_", "LD_")
 
 def _has_bloomberg_library(directory: str) -> bool:
     try:
-        return any(entry.name.startswith(_LIBRARY_PREFIXES) for entry in os.scandir(directory))
+        return any(entry.name.lower().startswith(_LIBRARY_PREFIXES) for entry in os.scandir(directory))
     except OSError:
         return False
 
 
 def clean_environment(base: Mapping[str, str], scratch: Path) -> dict[str, str]:
     """``base`` without anything that could lead the search to a Bloomberg runtime."""
-    env = {key: value for key, value in base.items() if not key.startswith(_STRIPPED_PREFIXES)}
-    for key in ("HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CACHE_HOME"):
-        env[key] = str(scratch / key.lower())
+    env = {key: value for key, value in base.items() if not key.upper().startswith(_STRIPPED_PREFIXES)}
+    for key in ("HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CACHE_HOME", "PROGRAMFILES", "PROGRAMFILES(X86)"):
+        env[key] = str(scratch / key.lower().replace("(", "_").replace(")", ""))
     env["XBBG_CACHE_DIR"] = str(scratch / "cache")
-    entries = env.get("PATH", "").split(os.pathsep)
-    env["PATH"] = os.pathsep.join(entry for entry in entries if entry and not _has_bloomberg_library(entry))
+    path_key = next((key for key in env if key.upper() == "PATH"), "PATH")
+    entries = env.get(path_key, "").split(os.pathsep)
+    env[path_key] = os.pathsep.join(entry for entry in entries if entry and not _has_bloomberg_library(entry))
     return env
 
 
 def child() -> None:
+    import importlib.machinery
     import importlib.util
 
     import xbbg

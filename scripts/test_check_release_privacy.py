@@ -167,3 +167,16 @@ def test_main_scans_the_range_since_the_latest_tag(repository: Path, capsys: pyt
     assert main(["--no-local-identity", "--range", "HEAD~1"]) == 0
     assert main(["--no-local-identity", "--allow", HOME]) == 0
     assert main(["--no-local-identity", "--range", "HEAD~1", "--term", "a.example.com"]) == 1
+
+
+def test_privacy_scanner_edge_cases() -> None:
+    # Lowercase Windows/macOS home paths are caught case-insensitively.
+    assert rules("set PATH=" + WINDOWS_HOME.lower()) == {"home directory path"}
+    assert rules("path=" + HOME.lower()) == {"home directory path"}
+    # Generic noreply local part on a private org domain is still flagged.
+    assert not email_is_allowed("noreply" + "@" + "private-corp.com")
+    # Empty --allow does not disable checks, and allowing a path does not suppress bare identities.
+    assert scan_text(f"contact {PERSONAL_EMAIL}", allow=[""]) == [("email address", PERSONAL_EMAIL)]
+    terms = [identity_pattern("janedoe")]
+    assert scan_text("written by janedoe", identities=terms, allow=[HOME]) == [("local identity", "janedoe")]
+    assert scan_text(f"ip {PRIVATE_IPS[0]}", allow=[PRIVATE_IPS[0] + "0"]) == [("private IP address", PRIVATE_IPS[0])]

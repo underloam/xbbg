@@ -41,7 +41,7 @@ def dependencies(data: bytes) -> list[str]:
     return list(macho_load_commands(data).dylibs)
 
 
-def check(path: Path) -> None:
+def check(path: Path, *, executable: bool = False) -> None:
     """Raise ``StageError`` when ``path`` references Bloomberg or is not relocatable."""
     data = path.read_bytes()
     deps = dependencies(data)
@@ -50,7 +50,7 @@ def check(path: Path) -> None:
         raise StageError(f"{path.name} must never link the Bloomberg runtime; it references {blpapi}")
     if data[:2] != b"MZ" and data[:4] != b"\x7fELF":
         image = macho_load_commands(data)
-        if image.install_name != f"@rpath/{path.name}":
+        if not executable and image.install_name != f"@rpath/{path.name}":
             raise StageError(f"{path.name} has install name {image.install_name!r}, expected '@rpath/{path.name}'")
         absolute = [value for value in (*image.dylibs, *image.rpaths) if _is_non_portable_darwin_path(value)]
         if absolute:
@@ -60,11 +60,16 @@ def check(path: Path) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("addons", nargs="+", type=Path, help="Engine addons to check")
+    parser.add_argument(
+        "--executable",
+        action="store_true",
+        help="Check a standalone binary (skip the Mach-O shared-library @rpath install_name check)",
+    )
+    parser.add_argument("addons", nargs="+", type=Path, help="Engine addons or binaries to check")
     args = parser.parse_args(argv)
     try:
         for addon in args.addons:
-            check(addon)
+            check(addon, executable=args.executable)
     except (StageError, BinaryFormatError, OSError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

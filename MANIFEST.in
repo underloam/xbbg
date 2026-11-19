@@ -23,7 +23,7 @@ include .cargo/config.toml
 recursive-include py-xbbg/src *.py *.pyi
 
 # Rust workspace crates needed for the build
-recursive-include crates/blpapi-sys *.rs *.toml
+recursive-include crates/blpapi-sys *.rs *.toml *.txt
 recursive-include crates/xbbg-arrow *.rs *.toml
 recursive-include crates/xbbg-core *.rs *.toml
 recursive-include crates/xbbg-async *.rs *.toml

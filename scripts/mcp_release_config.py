@@ -27,13 +27,15 @@ SETTINGS = (
         type="directory",
         title="Bloomberg runtime library directory",
         description=(
-            "Optional directory containing libblpapi3.dylib, libblpapi3.so, libblpapi3_64.so, "
-            "or blpapi3_64.dll. Leave empty to let the launcher try BLPAPI_ROOT, a vendored "
-            "authorized SDK layout, PATH (Windows), or Python blpapi."
+            "Optional authoritative directory containing libblpapi3.dylib, libblpapi3.so, "
+            "libblpapi3_64.so, or blpapi3_64.dll. Leave empty to search BLPAPI_LIB_DIR, "
+            "BLPAPI_ROOT, Python blpapi, a Bloomberg Terminal install, the OS library search, "
+            "and the xbbg cache."
         ),
         registry_description=(
-            "Optional directory containing Bloomberg runtime libraries. Leave unset to use BLPAPI_ROOT, "
-            "an authorized vendored SDK layout, or Python blpapi fallback."
+            "Optional authoritative directory containing Bloomberg runtime libraries. Leave unset "
+            "to search BLPAPI_LIB_DIR, BLPAPI_ROOT, Python blpapi, Terminal DAPI, OS library "
+            "directories, and the xbbg cache."
         ),
     ),
     McpSetting(

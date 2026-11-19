@@ -370,6 +370,7 @@ jobs:
           cp scripts/xbbg-mcp "$PACKAGE_DIR/xbbg-mcp"
           cp target/release/xbbg-mcp "$PACKAGE_DIR/xbbg-mcp-real"
           chmod +x "$PACKAGE_DIR/xbbg-mcp" "$PACKAGE_DIR/xbbg-mcp-real"
+          python3 scripts/check_napi_addon_links.py --executable "$PACKAGE_DIR/xbbg-mcp-real"
           if find "$PACKAGE_DIR" -type f \( -name 'libblpapi*' -o -name 'blpapi3*.dll' \) | grep -q .; then
             echo "Unexpected Bloomberg SDK file detected in MCP package payload" >&2
             exit 1
@@ -392,6 +393,10 @@ jobs:
           Remove-Item -Path $packageDir -Recurse -Force -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
           Copy-Item target\release\xbbg-mcp.exe (Join-Path $packageDir 'xbbg-mcp.exe')
+          python scripts/check_napi_addon_links.py --executable (Join-Path $packageDir 'xbbg-mcp.exe')
+          if ($LASTEXITCODE -ne 0) {
+            throw "xbbg-mcp.exe linked a Bloomberg runtime library"
+          }
           $sdkFiles = Get-ChildItem -Path $packageDir -Recurse -Include 'blpapi3*.dll','libblpapi*' -File
           if ($sdkFiles.Count -gt 0) {
             throw "Unexpected Bloomberg SDK file detected in MCP package payload: $($sdkFiles[0].FullName)"
