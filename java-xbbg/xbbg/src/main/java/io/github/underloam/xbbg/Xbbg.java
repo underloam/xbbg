@@ -81,9 +81,9 @@ public final class Xbbg {
 
   /**
    * Sets where the Bloomberg runtime library is: the library file or a directory (a directory is
-   * also searched as an SDK root). Tried before every other source; a location without a usable
-   * runtime is reported among the rejected candidates and the search goes on. Must be called before
-   * the runtime loads.
+   * also searched as an SDK root). Authoritative: when set, no other location or download source is
+   * tried in its place, and a location without a usable runtime fails with {@link
+   * BlpapiNotFoundException}. Must be called before the runtime loads.
    *
    * @param path the library file or directory, or {@code null} to clear the setting
    * @throws IllegalStateException if the natives are already loaded

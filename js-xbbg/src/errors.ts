@@ -95,7 +95,7 @@ export class BlpInternalError extends BlpError {}
  * `[XBBG:<CODE>] <message>`. Parsed first; the legacy message-pattern
  * heuristics below remain as a fallback for non-coded errors.
  */
-const CODE_PREFIX = /^\[XBBG:([A-Z]+)\]\s*/u;
+const CODE_PREFIX = /^\[XBBG:([A-Z_]+)\]\s*/u;
 
 const wrappedNativeErrors = new WeakMap<Error, BlpError>();
 
@@ -212,7 +212,16 @@ export function wrapError(napiError: unknown): BlpError {
   return cacheWrappedError(napiError, new BlpError(msg));
 }
 
-type TextMember = 'element' | 'suggestion' | 'topic' | 'detail' | 'code';
+type TextMember =
+  | 'service'
+  | 'operation'
+  | 'request_id'
+  | 'bloomberg_request_id'
+  | 'element'
+  | 'suggestion'
+  | 'topic'
+  | 'detail'
+  | 'code';
 
 function textMember(
   parsed: Record<string, unknown>,
@@ -242,15 +251,13 @@ function decodeRequestContext(message: string): {
   }
   const ids = parsed.bloomberg_request_ids;
   const options: DecodedContext = {
-    service: typeof parsed.service === 'string' ? parsed.service : undefined,
-    operation: typeof parsed.operation === 'string' ? parsed.operation : undefined,
-    request_id: typeof parsed.request_id === 'string' ? parsed.request_id : undefined,
-    bloomberg_request_id:
-      typeof parsed.bloomberg_request_id === 'string' ? parsed.bloomberg_request_id : undefined,
-    bloomberg_request_ids:
-      Array.isArray(ids) && ids.every((id): id is string => typeof id === 'string')
-        ? ids
-        : undefined,
+    ...textMember(parsed, 'service'),
+    ...textMember(parsed, 'operation'),
+    ...textMember(parsed, 'request_id'),
+    ...textMember(parsed, 'bloomberg_request_id'),
+    ...(Array.isArray(ids) && ids.every((id): id is string => typeof id === 'string')
+      ? { bloomberg_request_ids: ids }
+      : {}),
     ...textMember(parsed, 'element'),
     ...textMember(parsed, 'suggestion'),
     ...textMember(parsed, 'topic'),

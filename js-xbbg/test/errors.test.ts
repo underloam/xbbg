@@ -133,4 +133,26 @@ describe('host validation context', () => {
     expect(wrapped).toBeInstanceOf(BlpValidationError);
     expect(wrapped.message).toBe('unknown field synthetic');
   });
+
+  it('does not clobber parsed service/operation/request_id when context omits them', () => {
+    const context = { bloomberg_request_ids: ['sdk-req-1'] };
+    const wrapped = wrapError(
+      new Error(
+        `[XBBG:REQUEST] [XBBG_CONTEXT]${JSON.stringify(context)}\nRequest failed on //blp/staticmktdata::ReferenceDataRequest [request_id=req-42]`,
+      ),
+    );
+    expect(wrapped).toBeInstanceOf(BlpRequestError);
+    if (!(wrapped instanceof BlpRequestError)) {
+      throw new Error('expected request error');
+    }
+    expect(wrapped.service).toBe('//blp/staticmktdata');
+    expect(wrapped.operation).toBe('ReferenceDataRequest');
+    expect(wrapped.request_id).toBe('req-42');
+    expect(wrapped.bloomberg_request_ids).toStrictEqual(['sdk-req-1']);
+  });
+
+  it('recognizes underscored native error codes', () => {
+    const wrapped = wrapError(new Error('[XBBG:SDK_NOT_FOUND] runtime missing'));
+    expect(wrapped.message).toBe('runtime missing');
+  });
 });

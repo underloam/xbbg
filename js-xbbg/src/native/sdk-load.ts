@@ -27,7 +27,7 @@ export interface SdkRequestOptions {
   readonly env?: NodeJS.ProcessEnv;
   readonly platform?: NodeJS.Platform;
   /** The development checkout, which enables the vendored SDK rule. */
-  readonly repoRoot: string;
+  readonly repoRoot?: string;
 }
 
 function readEnv(env: NodeJS.ProcessEnv, key: string, ignoreCase: boolean): string | undefined {
@@ -57,7 +57,7 @@ export function sdkLocateRequest(options: SdkRequestOptions): SdkLocateRequest {
       view[key] = value;
     }
   }
-  return { env: view, repoRoot: options.repoRoot };
+  return options.repoRoot === undefined ? { env: view } : { env: view, repoRoot: options.repoRoot };
 }
 
 /** The message of the import-time failure: what the locator reports, then how to fix it. */

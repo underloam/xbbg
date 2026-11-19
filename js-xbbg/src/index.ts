@@ -155,8 +155,14 @@ function isNativeAddon(value: unknown): value is NativeAddon {
     typeof value.extImbalanceSide === 'function' &&
     typeof value.getLogLevel === 'function' &&
     typeof value.setLogLevel === 'function' &&
-    typeof value.loadSdk === 'function'
+    typeof value.loadSdk === 'function' &&
+    typeof value.planRequest === 'function'
   );
+}
+
+function checkoutRepoRoot(): string | undefined {
+  const candidate = path.resolve(__dirname, '..', '..');
+  return fs.existsSync(path.join(candidate, 'vendor', 'blpapi-sdk')) ? candidate : undefined;
 }
 
 function requireNativeAddon(modulePath: string): NativeAddon {
@@ -168,7 +174,8 @@ function requireNativeAddon(modulePath: string): NativeAddon {
       `Native addon ${modulePath} does not expose the expected @xbbg/core surface`,
     );
   }
-  loadBloombergRuntime(loaded, { repoRoot: path.resolve(__dirname, '..', '..') });
+  const repoRoot = checkoutRepoRoot();
+  loadBloombergRuntime(loaded, repoRoot === undefined ? {} : { repoRoot });
   return loaded;
 }
 
@@ -645,6 +652,45 @@ function btaPlanKwargs(kwargs: OverridesMap | undefined): OverridesMap | undefin
   return formatted;
 }
 
+/**
+ * Serialize planner arguments for `xbbg-host`, rejecting non-finite numbers
+ * (`NaN`/`Infinity`) before `JSON.stringify` would silently turn them into `null`
+ * (`None` in Rust), and stringifying `bigint` values cleanly.
+ */
+function stringifyPlanArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args, (key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      const label = key.length > 0 ? key : 'value';
+      throw new BlpValidationError(
+        `${label} must be a finite number`,
+        key.length > 0 ? { element: key } : {},
+      );
+    }
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    return value;
+  });
+}
+
+function validatePlainStringMap(value: unknown, element: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (isPlainObject(value)) {
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (
+      (prototype === Object.prototype || prototype === null) &&
+      Object.values(value).every((entry) => typeof entry === 'string')
+    ) {
+      return;
+    }
+  }
+  throw new BlpValidationError(`${element} must be a plain object mapping strings to strings`, {
+    element,
+  });
+}
+
 /** JSON drops `undefined`, yet an `undefined` study parameter unsets its default: send `null`. */
 function undefinedAsNull(params: Record<string, unknown>): Record<string, unknown> {
   return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, value ?? null]));
@@ -841,7 +887,7 @@ export class Engine {
     const normalized = normalizeBackend(backend);
     let nativeParams: unknown;
     try {
-      nativeParams = JSON.parse(native.planRequest(method, JSON.stringify(args)));
+      nativeParams = JSON.parse(native.planRequest(method, stringifyPlanArgs(args)));
     } catch (error) {
       throw wrapError(error);
     }
@@ -895,7 +941,7 @@ export class Engine {
   public async bds(
     tickers: readonly string[],
     fields: readonly string[],
-    options: Omit<BdpOptions, 'onDelayed'> = {},
+    options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
   ): Promise<unknown> {
     return await this.plannedRequest('bds', options.backend, {
       tickers,
@@ -1656,6 +1702,7 @@ export class Engine {
   ): Promise<Subscription> {
     const { pcsOverrides, ...streamOptions } = options;
     try {
+      validatePlainStringMap(pcsOverrides, 'pcsOverrides');
       const stream = await this.inner.subscribeAuction(
         JSON.stringify({
           securities: toStringArray(securities),
@@ -1837,10 +1884,10 @@ export async function abds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
   overrides?: OverridesInput,
-  options: Omit<BdpOptions, 'onDelayed'> = {},
+  options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
 ): Promise<unknown> {
   const engine = await getConfiguredEngine();
-  const normalizedOptions: Omit<BdpOptions, 'onDelayed'> =
+  const normalizedOptions: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> =
     overrides === undefined
       ? options
       : { ...options, overrides: ovr(options.overrides ?? {}, overrides) };
@@ -1850,7 +1897,7 @@ export async function abds(
 export async function bds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
-  options: Omit<BdpOptions, 'onDelayed'> = {},
+  options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
 ): Promise<unknown> {
   return await abds(tickers, fields, undefined, options);
 }

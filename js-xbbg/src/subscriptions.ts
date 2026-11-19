@@ -73,6 +73,9 @@ export function streamOptionsPayload(options: object): Record<string, unknown> {
   for (const key of STREAM_OPTION_KEYS) {
     const value: unknown = Reflect.get(options, key);
     if (value !== undefined) {
+      if (typeof value === 'number' && !Number.isFinite(value)) {
+        throw new BlpValidationError(`${key} must be a finite number`, { element: key });
+      }
       payload[key] = value;
     }
   }

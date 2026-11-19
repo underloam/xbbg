@@ -236,6 +236,11 @@ export interface RequestInput {
   interval?: number;
   options?: readonly StringPair[];
   fieldTypes?: readonly StringPair[];
+  /**
+   * Include Bloomberg `securityError` refusals in the result instead of failing when all
+   * securities are refused. `long` emits one `__SECURITY_ERROR__` row per refused security;
+   * `semi_long` / `wide` return an empty table carrying `xbbg.security_errors` metadata.
+   */
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
   onDelayed?: StreamOptions['onDelayed'];
@@ -291,6 +296,11 @@ export interface BdpOptions {
   kwargs?: OverridesMap;
   format?: RequestFormat;
   backend?: BackendKind;
+  /**
+   * Include Bloomberg `securityError` refusals in the result instead of failing when all
+   * securities are refused. `long` emits one `__SECURITY_ERROR__` row per refused security;
+   * `semi_long` / `wide` return an empty table carrying `xbbg.security_errors` metadata.
+   */
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
   /**

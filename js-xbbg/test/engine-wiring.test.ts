@@ -1403,4 +1403,48 @@ describe('subscription service option forwarding', () => {
       name: 'BlpValidationError',
     });
   });
+
+  it('rejects non-finite stream and request numbers before JSON serialization', async () => {
+    const subscribe = vi.fn<NativeEngine['subscribe']>();
+    const engine = engineWithNative({ subscribe });
+
+    await expect(
+      engine.subscribe(['SYN'], ['BID'], { flushThreshold: Number.NaN }),
+    ).rejects.toMatchObject({
+      element: 'flushThreshold',
+      name: 'BlpValidationError',
+    });
+    await expect(
+      engine.stream(['SYN'], ['BID'], { streamCapacity: Number.POSITIVE_INFINITY }),
+    ).rejects.toMatchObject({
+      element: 'streamCapacity',
+      name: 'BlpValidationError',
+    });
+    await expect(engine.bdib('SYN', { interval: Number.NaN })).rejects.toMatchObject({
+      element: 'interval',
+      name: 'BlpValidationError',
+    });
+    await expect(
+      engine.bta('SYN', 'SMA', { studyParams: { period: Number.NaN } }),
+    ).rejects.toMatchObject({
+      element: 'period',
+      name: 'BlpValidationError',
+    });
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
+  it('rejects Map pcsOverrides on auction subscriptions before JSON serialization', async () => {
+    const subscribeAuction = vi.fn<NativeEngine['subscribeAuction']>();
+    const engine = engineWithNative({ subscribeAuction });
+
+    await expect(
+      engine.subscribeAuction(['SYN'], {
+        pcsOverrides: new Map([['SYN', 'UP']]) as unknown as Record<string, string>,
+      }),
+    ).rejects.toMatchObject({
+      element: 'pcsOverrides',
+      name: 'BlpValidationError',
+    });
+    expect(subscribeAuction).not.toHaveBeenCalled();
+  });
 });

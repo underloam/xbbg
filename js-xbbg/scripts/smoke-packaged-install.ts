@@ -103,10 +103,13 @@ function smokeMissingRuntime(appDir: string, runtime: string): void {
       'DYLD_FALLBACK_LIBRARY_PATH',
     ]);
     const env: NodeJS.ProcessEnv = {
-      ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !withheld.has(key))),
+      ...Object.fromEntries(
+        Object.entries(process.env).filter(([key]) => !withheld.has(key.toUpperCase())),
+      ),
       BLPAPI_LIB_DIR: libDir,
       HOME: homeDir,
       USERPROFILE: homeDir,
+      LOCALAPPDATA: homeDir,
       XBBG_CACHE_DIR: cacheDir,
     };
     // The search also scans PATH on Windows, where CI puts the SDK's runtime directory.

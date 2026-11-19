@@ -106,31 +106,34 @@ public final class NativeLibraries {
         download = download(locator, cache, rejected);
       }
       Path provisioned = null;
+      boolean finished = false;
       try {
         provisioned = download.await();
+        synchronized (NativeLibraries.class) {
+          if (loaded) {
+            finished = true;
+            return;
+          }
+          Path currentCache = cacheRoot();
+          if (download.startedWith(sdkPath, sdkSource, currentCache)) {
+            // The download installed into the xbbg cache, the last place the search looks.
+            BlpapiLocator locator = BlpapiLocator.forCurrentProcess(sdkPath, currentCache);
+            List<BlpapiLocator.Rejection> rejected = new ArrayList<BlpapiLocator.Rejection>();
+            Path blpapi = loadRuntime(locator, rejected);
+            if (blpapi == null) {
+              throw locator.notFound(rejected);
+            }
+            finishLoad(blpapi);
+            finished = true;
+            return;
+          }
+        }
       } finally {
-        if (provisioned == null) {
+        if (!finished || provisioned == null) {
           forget(download);
         }
       }
-      synchronized (NativeLibraries.class) {
-        if (loaded) {
-          return;
-        }
-        if (download.startedWith(sdkPath, sdkSource)) {
-          // The download installed into the xbbg cache, the last place the search looks.
-          BlpapiLocator locator = BlpapiLocator.forCurrentProcess(sdkPath, cacheRoot());
-          List<BlpapiLocator.Rejection> rejected = new ArrayList<BlpapiLocator.Rejection>();
-          Path blpapi = loadRuntime(locator, rejected);
-          if (blpapi == null) {
-            throw locator.notFound(rejected);
-          }
-          finishLoad(blpapi);
-          return;
-        }
-      }
       // The settings changed during the download: search again with the new ones.
-      forget(download);
     }
   }
 
@@ -222,7 +225,9 @@ public final class NativeLibraries {
     return cacheRoot(
         System.getProperty("xbbg.cache.dir"),
         System.getenv("XBBG_CACHE_DIR"),
-        os.startsWith("windows") ? "windows" : os.startsWith("mac") ? "macos" : "linux",
+        os.startsWith("windows")
+            ? "windows"
+            : (os.startsWith("mac") || os.startsWith("darwin")) ? "macos" : "linux",
         System.getenv("LOCALAPPDATA"),
         System.getenv("USERPROFILE"),
         System.getenv("XDG_CACHE_HOME"),
@@ -473,7 +478,15 @@ public final class NativeLibraries {
       return Paths.get(JsonFields.string(loadedSdk, "path"));
     }
     Map<String, Object> error = JsonFields.obj(outcome, "error");
-    rejected.addAll(BlpapiLocator.parseRejected(JsonFields.list(error, "rejected")));
+    List<BlpapiLocator.Rejection> parsed =
+        BlpapiLocator.parseRejected(JsonFields.list(error, "rejected"));
+    rejected.addAll(parsed);
+    if (parsed.isEmpty()) {
+      String message = JsonFields.optString(error, "message");
+      if (message != null && !message.isEmpty()) {
+        rejected.add(new BlpapiLocator.Rejection("locate", "native", null, message));
+      }
+    }
     return null;
   }
 
@@ -541,7 +554,7 @@ public final class NativeLibraries {
     Provisioning current = provisioning;
     if (current != null
         && current.options.equals(options)
-        && current.startedWith(sdkPath, sdkSource)) {
+        && current.startedWith(sdkPath, sdkSource, cache)) {
       return current;
     }
     // xbbg waits for this result itself, possibly on a thread of the user's callback executor, so
@@ -550,6 +563,7 @@ public final class NativeLibraries {
         new Provisioning(
             sdkPath,
             sdkSource,
+            cache,
             options,
             Callbacks.withInternalCompletions(() -> BlpapiSdk.provision(options)));
     provisioning = current;
@@ -589,23 +603,30 @@ public final class NativeLibraries {
   private static final class Provisioning {
     private final Path sdkPath;
     private final BlpapiSource sdkSource;
+    private final Path cacheDir;
     final ProvisionOptions options;
     private final CompletableFuture<ProvisionResult> result;
 
     Provisioning(
         Path sdkPath,
         BlpapiSource sdkSource,
+        Path cacheDir,
         ProvisionOptions options,
         CompletableFuture<ProvisionResult> result) {
       this.sdkPath = sdkPath;
       this.sdkSource = sdkSource;
+      this.cacheDir = cacheDir;
       this.options = options;
       this.result = result;
     }
 
-    /** Whether the download was started with these {@code setSdkPath}/{@code setSdkSource}. */
-    boolean startedWith(Path path, BlpapiSource source) {
-      return Objects.equals(sdkPath, path) && Objects.equals(sdkSource, source);
+    /**
+     * Whether the download was started with these {@code setSdkPath}/{@code setSdkSource}/cache.
+     */
+    boolean startedWith(Path path, BlpapiSource source, Path cache) {
+      return Objects.equals(sdkPath, path)
+          && Objects.equals(sdkSource, source)
+          && Objects.equals(cacheDir, cache);
     }
 
     /** Waits for the download; rethrows its failure unwrapped. */
