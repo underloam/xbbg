@@ -1,9 +1,9 @@
 //! A synchronous [`Provisioner`](crate::Provisioner) for callers without an async runtime.
 
+use crate::Platform;
 use crate::error::{Error, Result};
 use crate::install::Provisioned;
-use crate::options::ProvisionOptions;
-use crate::platform::{Platform, VersionSpec};
+use crate::options::{ProvisionOptions, VersionSpec};
 use crate::provisioner::Resolved;
 use crate::source::Source;
 

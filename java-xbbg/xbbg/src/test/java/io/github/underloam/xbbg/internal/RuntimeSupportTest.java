@@ -24,8 +24,34 @@ class RuntimeSupportTest {
             + " supported platforms: windows-x86_64, linux-x86_64, macos-aarch64",
         error.getMessage());
     assertThrows(UnsatisfiedLinkError.class, () -> Platform.detect("FreeBSD", "amd64"));
-    assertEquals("blpapi3_64.dll", Platform.WINDOWS_X86_64.blpapiLibraryNames().get(0));
-    assertEquals("libblpapi3_64.so", Platform.MACOS_AARCH64.blpapiLibraryNames().get(0));
+  }
+
+  @Test
+  void detectsTheSpellingsOtherJvmsReport() {
+    assertEquals(Platform.MACOS_AARCH64, Platform.detect("Darwin", "arm64"));
+    assertEquals(Platform.LINUX_X86_64, Platform.detect("Linux", "x86-64"));
+    assertThrows(UnsatisfiedLinkError.class, () -> Platform.detect("Linux", "aarch64"));
+  }
+
+  @Test
+  void aLoadFailureNamesAClassLoaderConflict() {
+    UnsatisfiedLinkError conflict =
+        NativeLibraries.loadFailure(
+            new UnsatisfiedLinkError(
+                "Native Library libxbbg_jni already loaded in another classloader"),
+            "cannot load xbbg_jni");
+    assertTrue(
+        conflict.getMessage().startsWith("xbbg is already loaded by another class loader"),
+        conflict.getMessage());
+    assertEquals(
+        "cannot load xbbg_jni",
+        NativeLibraries.loadFailure(
+                new UnsatisfiedLinkError("no such file"), "cannot load xbbg_jni")
+            .getMessage());
+    assertEquals(
+        "cannot load xbbg_jni",
+        NativeLibraries.loadFailure(new UnsatisfiedLinkError(), "cannot load xbbg_jni")
+            .getMessage());
   }
 
   @Test

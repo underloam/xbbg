@@ -307,9 +307,10 @@ public final class RequestSpec {
   }
 
   /**
-   * Returns whether per-security errors are returned as metadata, or empty (false).
+   * Returns whether to report refused securities, or empty (false); see {@link
+   * Builder#includeSecurityErrors(boolean)}.
    *
-   * @return whether per-security errors are returned as metadata, or empty (false)
+   * @return whether to report refused securities, or empty (false)
    */
   public Optional<Boolean> includeSecurityErrors() {
     return Optional.ofNullable(includeSecurityErrors);
@@ -832,7 +833,11 @@ public final class RequestSpec {
     }
 
     /**
-     * Returns per-security errors as result metadata instead of failing.
+     * Reports the securities Bloomberg refused. The long formats add one {@code __SECURITY_ERROR__}
+     * row per refused security; {@link Format#SEMI_LONG} leaves them out of its rows. Every format
+     * carries each refusal's details in the {@code xbbg.security_errors} result metadata. When set,
+     * a request in which every security is refused returns (an empty table in {@code SEMI_LONG})
+     * instead of throwing {@link BlpRequestException}.
      *
      * @param value the flag
      * @return this builder

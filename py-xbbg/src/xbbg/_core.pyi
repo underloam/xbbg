@@ -27,6 +27,7 @@ __all__ = [
     "PySubscription",
     "apresent_historical",
     "ashape_bqr",
+    "default_sdk_cache_dir",
     "enable_sdk_logging",
     "ext_auction_field_groups",
     "ext_auction_zero_price_fields",
@@ -67,6 +68,8 @@ __all__ = [
     "ext_parse_date",
     "ext_parse_ticker",
     "ext_pivot_to_wide",
+    "ext_plan_auction",
+    "ext_plan_etf_inav",
     "ext_previous_cdx_series",
     "ext_rename_dividend_columns",
     "ext_rename_etf_columns",
@@ -74,7 +77,15 @@ __all__ = [
     "ext_session_times_to_utc",
     "ext_set_exchange_override",
     "ext_validate_generic_ticker",
+    "ext_validated_auction_venues",
+    "ext_validated_inav_tickers",
     "get_log_level",
+    "installed_sdks",
+    "load_sdk",
+    "loaded_sdk",
+    "locate_sdk",
+    "normalize_subscription_options",
+    "provision_sdk",
     "recipe_active_cdx",
     "recipe_active_futures",
     "recipe_adjust_ccy",
@@ -101,8 +112,11 @@ __all__ = [
     "recipe_turnover",
     "recipe_vol_surface",
     "recipe_yas",
+    "run_sdk_cli",
+    "sdk_bloomberg_pypi_index",
     "sdk_version",
     "set_log_level",
+    "validate_subscription_controls",
     "version",
 ]
 
@@ -489,8 +503,8 @@ class PyEngine:
         r"""
         Get service schema (from cache or introspect).
         
-        Returns a dictionary with schema information including operations.
-        First checks disk cache; if not cached, introspects the service.
+        Returns a JSON string with schema information including operations.
+        First checks memory/disk cache; if not cached, introspects the service.
         """
     def get_operation(self, service: builtins.str, operation: builtins.str) -> typing.Any:
         r"""
@@ -603,6 +617,13 @@ class PyEngine:
         it runs.
         """
     def worker_health(self) -> builtins.list[tuple[builtins.int, builtins.str]]: ...
+    def connections(self) -> builtins.list[dict]:
+        r"""
+        Servers each Bloomberg session is connected to, without credentials.
+        
+        One dict per session (`pool`, `worker`, `servers`): request workers
+        first, then subscription workers.
+        """
     def is_connected(self) -> builtins.bool:
         r"""
         Check if the Bloomberg connection is healthy.
@@ -1003,6 +1024,20 @@ class PyEngineConfig:
         0 disables. Default: 30_000.
         """
     @property
+    def reconnect_grace_ms(self) -> builtins.int:
+        r"""
+        How long a request session may stay without any server connection before
+        its in-flight requests are failed, in ms; 0 fails them as soon as the
+        last connection drops. Default: 10_000.
+        """
+    @reconnect_grace_ms.setter
+    def reconnect_grace_ms(self, value: builtins.int) -> None:
+        r"""
+        How long a request session may stay without any server connection before
+        its in-flight requests are failed, in ms; 0 fails them as soon as the
+        last connection drops. Default: 10_000.
+        """
+    @property
     def keep_alive_enabled(self) -> builtins.bool:
         r"""
         Enable BLPAPI keep-alive pings. SDK default: True.
@@ -1255,7 +1290,89 @@ class PySubscription:
         """
     def __repr__(self) -> builtins.str: ...
 
+@typing.final
+class _LogBridgeConsumer:
+    r"""
+    Handle bound to one enabled log-bridge session so an abandoned consumer
+    thread can only ever drain or discard its own closed queue.
+    """
+    def next_batch(self, timeout: builtins.float, max_records: builtins.int) -> tuple[builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, builtins.int, builtins.float, builtins.str]], builtins.int, builtins.bool]: ...
+    def discard(self) -> builtins.int: ...
+    def count_dropped(self, count: builtins.int) -> None: ...
+
 def _decode_field_exceptions(raw: builtins.str) -> typing.Any: ...
+
+def _encode_result_diagnostics(*, eid_data: typing.Optional[typing.Any] = None, security_errors: typing.Optional[typing.Any] = None, field_exceptions: typing.Optional[typing.Any] = None, delayed: typing.Optional[typing.Any] = None, type_misses: typing.Optional[typing.Any] = None, field_errors: typing.Optional[typing.Any] = None, bloomberg_request_id: typing.Optional[builtins.str] = None) -> builtins.dict[builtins.str, builtins.str]:
+    r"""
+    Encode result diagnostics as the `xbbg.*` schema metadata the engine attaches.
+    
+    Every argument is optional and takes the shape its `ArrowTable` accessor
+    returns: `security_errors` (`{security: {category, code, subcategory,
+    message}}`), `field_exceptions` (`{security: [{field, category, code,
+    subcategory, message}, ...]}`), `delayed` (`{security: {delayed,
+    delay_minutes}}`), `type_misses` (`{field: count}`), `field_errors` (`{id:
+    {category, code, subcategory, message, source?}}`), `eid_data` (`{security:
+    [eid, ...]}`) and `bloomberg_request_id`. Empty or `None` arguments leave
+    their key absent.
+    
+    Returns:
+        The schema-metadata map, key to value, exactly as engine results carry it.
+    """
+
+def _log_bridge_count_dropped(count: builtins.int) -> None:
+    r"""
+    Count `count` records the consumer took from a batch but did not deliver.
+    """
+
+def _log_bridge_disable() -> None:
+    r"""
+    Stop capturing and wake the waiting consumer; events go to stderr again.
+    
+    Records already queued stay available to `_log_bridge_next_batch`, whose
+    last batch then reports `closed`.
+    """
+
+def _log_bridge_discard() -> builtins.int:
+    r"""
+    Drop whatever is still queued, count it as dropped, and return how many.
+    """
+
+def _log_bridge_dropped() -> builtins.int:
+    r"""
+    Total log records dropped by the bridge since the process started.
+    """
+
+def _log_bridge_enable(capacity: builtins.int) -> builtins.bool:
+    r"""
+    Start capturing log events into a native queue of `capacity` records.
+    
+    While capture is on, events go to the queue instead of stderr. Returns
+    `True` if capture started and `False` if it was already on (the queue and
+    its capacity are left as they were).
+    """
+
+def _log_bridge_next_batch(timeout: builtins.float, max_records: builtins.int) -> tuple[builtins.list[tuple[builtins.int, builtins.str, builtins.str, builtins.str, builtins.int, builtins.float, builtins.str]], builtins.int, builtins.bool]:
+    r"""
+    Wait up to `timeout` seconds for queued records and take at most `max_records`.
+    
+    Releases the interpreter while waiting. Returns `(records, dropped, closed)`:
+    `records` are `(levelno, logger_name, message, pathname, lineno, created,
+    thread_name)` tuples in emission order (empty on timeout); `dropped` counts
+    the records lost since the previous batch; `closed` means capture is off and
+    the queue is empty.
+    """
+
+def _log_bridge_open(capacity: builtins.int) -> typing.Optional[_LogBridgeConsumer]:
+    r"""
+    Start capturing log events into a native queue of `capacity` records and
+    return a session-scoped consumer, or `None` if capture was already on.
+    """
+
+def _log_bridge_reset_after_fork() -> None:
+    r"""
+    Reset log bridge state in a forked child without locking or touching the
+    parent's queue.
+    """
 
 def _signal_interpreter_shutdown() -> None: ...
 
@@ -1266,6 +1383,14 @@ def _wait_native_teardown() -> None:
     
     Returns at once when nothing is pending and releases the interpreter while
     waiting. Interpreter exit already waits; other callers rarely need this.
+    """
+
+def _with_schema_metadata(table: ArrowTable, metadata: typing.Mapping[builtins.str, builtins.str]) -> ArrowTable:
+    r"""
+    Return `table` with `metadata` added to its schema metadata.
+    
+    Keys already present are replaced; rows are shared, not copied. An
+    empty table gains an empty batch to carry the metadata.
     """
 
 def apresent_historical(data: typing.Any, show_date: typing.Optional[builtins.bool], date_format: typing.Optional[builtins.str], sort: typing.Optional[builtins.str], periodicity: typing.Optional[builtins.str], key_column: builtins.str) -> typing.Any:
@@ -1309,6 +1434,11 @@ def ashape_bqr(data: typing.Any, ticker: builtins.str, key_column: builtins.str,
     
     Returns:
         An awaitable resolving to an ArrowTable.
+    """
+
+def default_sdk_cache_dir() -> typing.Optional[builtins.str]:
+    r"""
+    Default shared xbbg cache root (`XBBG_CACHE_DIR` or platform user cache).
     """
 
 def enable_sdk_logging(level: builtins.str) -> None: ...
@@ -1594,6 +1724,21 @@ def ext_pivot_to_wide(batch: ArrowRecordBatch) -> typing.Any:
     Output: ArrowRecordBatch with the input's key column, then one column per field
     """
 
+def ext_plan_auction(securities: typing.Sequence[builtins.str], aliases_given: builtins.bool) -> builtins.list[builtins.str]:
+    r"""
+    Check auction inputs before venue resolution and return them de-duplicated
+    in first-seen order.
+    
+    `aliases_given` is whether the caller passed an `aliases` option at all:
+    auction aliases are always derived from the inputs, so any value is rejected.
+    """
+
+def ext_plan_etf_inav(etfs: typing.Sequence[builtins.str]) -> builtins.list[builtins.str]:
+    r"""
+    Check ETF inputs before relationship resolution and return them trimmed, in
+    input order.
+    """
+
 def ext_previous_cdx_series(ticker: builtins.str) -> typing.Optional[builtins.str]:
     r"""
     Get the previous series ticker for a CDX index.
@@ -1629,9 +1774,81 @@ def ext_validate_generic_ticker(ticker: builtins.str) -> None:
     Validate that a ticker is generic (not specific).
     """
 
+def ext_validated_auction_venues(inputs: typing.Sequence[builtins.str], table: typing.Any) -> dict:
+    r"""
+    Validate a venue-resolution table against the planned inputs.
+    
+    Returns `{venue_topic: input}` in input order: the trimmed venue topics to
+    subscribe and the labels they carry back to the inputs.
+    """
+
+def ext_validated_inav_tickers(etfs: typing.Sequence[builtins.str], table: typing.Any) -> builtins.list[builtins.str]:
+    r"""
+    Validate an ETF NAV relationship table against the planned ETFs and return
+    one iNAV ticker per ETF.
+    """
+
 def get_log_level() -> builtins.str:
     r"""
     Get the current Rust log level as a string.
+    """
+
+def installed_sdks(cache_dir: typing.Optional[builtins.str] = None, platform: typing.Optional[builtins.str] = None) -> list:
+    r"""
+    List valid Bloomberg SDK runtimes installed in the shared xbbg cache.
+    """
+
+def load_sdk(request: typing.Optional[dict] = None, sdk_source: typing.Optional[builtins.str] = None) -> dict:
+    r"""
+    Load the Bloomberg runtime into this process and describe it.
+    
+    `request` holds the optional keys of `LocateRequest` (`explicit`, `hints`, `env`,
+    `cacheRoot`, `repoRoot`, `platform`); `None` searches everything with the process
+    environment. Candidates are tried in the single search order; one that fails to load
+    (including a runtime too old for xbbg) is reported and the next is tried. When no
+    explicit path is set and no local or cached runtime loads, `sdk_source` (or
+    `XBBG_SDK_SOURCE`) provisions one into the shared xbbg cache and loads it. A runtime
+    that is already loaded is returned unchanged.
+    
+    Returns `{"path", "source", "detail", "version", "rejected"}`. Raises `ImportError`
+    listing every rejected candidate when no runtime loads.
+    """
+
+def loaded_sdk() -> typing.Optional[dict]:
+    r"""
+    The Bloomberg runtime loaded into this process, or `None` before `load_sdk` succeeded.
+    
+    Returns `{"path", "source", "detail", "version", "rejected"}`. A runtime loaded without
+    `load_sdk` (a test harness) reports its `path` and `version` with `source` `None`.
+    """
+
+def locate_sdk(request: typing.Optional[dict] = None) -> dict:
+    r"""
+    Search for the Bloomberg runtime without loading it.
+    
+    Takes the same `request` as `load_sdk`. Returns `{"candidates", "rejected"}`: the library
+    files the search found, in order (`path`, `source`, `detail`, `version`), and the places
+    refused with the reason (`path`, `source`, `detail`, `reason`).
+    """
+
+def normalize_subscription_options(options: typing.Optional[typing.Sequence[builtins.str]], conflate: builtins.bool = False, service: typing.Optional[builtins.str] = None) -> typing.Optional[builtins.list[builtins.str]]:
+    r"""
+    Normalize high-level subscription options before they go to Bloomberg.
+    
+    Options are trimmed, a leading `&` is stripped and empties dropped. With
+    `conflate`, `conflate` is appended once; that is rejected for any service but
+    `//blp/mktdata` and when an `interval` option is present. Returns `None` when
+    no options were given and `conflate` is false.
+    """
+
+def provision_sdk(options_json: builtins.str) -> dict:
+    r"""
+    Provision a Bloomberg C++ SDK runtime into the shared xbbg cache without requiring
+    any Bloomberg runtime to be loaded first.
+    
+    `options_json` is a camelCase JSON object matching `xbbg_sdk::request::ProvisionRequest`.
+    Returns a dict with `version`, `platform`, `libraryPath`, `licensePaths`, `source`,
+    `artifactUrl`, `artifactSha256`, `libSha256`, and `cacheHit`.
     """
 
 def recipe_active_cdx(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, lookback_days: typing.Optional[builtins.int] = None, versionless: builtins.bool = False) -> typing.Any:
@@ -1918,7 +2135,24 @@ def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields:
         request_options: Normalized overrides, elements, options, types, format, timezones, EIDs, and validation controls
     """
 
-def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]: ...
+def run_sdk_cli(prog: builtins.str, args: typing.Sequence[builtins.str], env: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> tuple[builtins.int, builtins.str, builtins.str]:
+    r"""
+    Run the shared xbbg SDK cache provisioning CLI without requiring a Bloomberg runtime.
+    
+    Returns `(exit_code, stdout, stderr)`.
+    """
+
+def sdk_bloomberg_pypi_index() -> builtins.str:
+    r"""
+    Bloomberg's public PyPI simple index URL.
+    """
+
+def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]:
+    r"""
+    The loaded runtime's version, `(major, minor, patch, build)`.
+    
+    Raises `RuntimeError` when no runtime is loaded.
+    """
 
 def set_log_level(level: builtins.str) -> None:
     r"""
@@ -1929,6 +2163,15 @@ def set_log_level(level: builtins.str) -> None:
     
     This sets an atomic integer — no GIL is held on the logging hot path.
     For per-crate control, use the RUST_LOG environment variable instead.
+    """
+
+def validate_subscription_controls(*, delivery: builtins.str = 'deltas', rows: builtins.bool = True, flush_threshold: typing.Optional[builtins.int] = None, stream_capacity: typing.Optional[builtins.int] = None, overflow_policy: typing.Optional[builtins.str] = None) -> None:
+    r"""
+    Check the stream controls `asubscribe` validates before it needs an engine.
+    
+    Raises `ValueError` for an unknown `delivery` or `overflow_policy`, for
+    `delivery="state"` combined with `rows=False` or explicit queue controls, and
+    for a `flush_threshold` or `stream_capacity` below 1.
     """
 
 def version() -> builtins.str: ...

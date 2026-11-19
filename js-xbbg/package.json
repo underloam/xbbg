@@ -26,6 +26,9 @@
     "url": "git+https://github.com/underloam/xbbg.git",
     "directory": "js-xbbg"
   },
+  "bin": {
+    "xbbg-sdk": "./dist/sdk-cli.js"
+  },
   "files": [
     "dist/**",
     "README.md",
@@ -39,6 +42,11 @@
       "types": "./dist/index.d.ts",
       "require": "./dist/index.js",
       "default": "./dist/index.js"
+    },
+    "./sdk": {
+      "types": "./dist/sdk.d.ts",
+      "require": "./dist/sdk.js",
+      "default": "./dist/sdk.js"
     },
     "./package.json": "./package.json"
   },

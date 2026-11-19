@@ -154,7 +154,6 @@ runs:
         lib_dir="$GITHUB_WORKSPACE/$LIB_REL_DIR"
         {
           echo "BLPAPI_ROOT=$sdk_root"
-          echo "LIBRARY_PATH=$lib_dir${LIBRARY_PATH:+:$LIBRARY_PATH}"
           if [[ "$SDK_OS" == "Linux" ]]; then
             echo "LD_LIBRARY_PATH=$lib_dir${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
           else

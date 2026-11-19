@@ -4,10 +4,12 @@ use std::path::{Path, PathBuf};
 
 mod libclang;
 
+/// The checked-in allowlist of BLPAPI C functions the workspace calls.
+const FUNCTIONS_FILE: &str = "functions.txt";
+
 fn main() {
     // Ensure rebuilds when env changes
     println!("cargo:rerun-if-env-changed=BLPAPI_INCLUDE_DIR");
-    println!("cargo:rerun-if-env-changed=BLPAPI_LIB_DIR");
     println!("cargo:rerun-if-env-changed=BLPAPI_ROOT");
     println!("cargo:rerun-if-env-changed=BLPAPI_PREGENERATED_BINDINGS");
     println!("cargo:rerun-if-env-changed=BLPAPI_BINDINGS_EXPORT_PATH");
@@ -18,19 +20,19 @@ fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=libclang.rs");
     println!("cargo:rerun-if-changed=Cargo.toml");
+    println!("cargo:rerun-if-changed={FUNCTIONS_FILE}");
     println!("cargo:rerun-if-env-changed=DOCS_RS");
 
     // docs.rs has no Bloomberg SDK and no network access, so header discovery and
     // bindgen cannot run there and this crate cannot be documented on docs.rs.
     //
     // Emitting an empty stub here was tried and rejected: it makes THIS crate build
-    // green with an empty API page, while xbbg_core/src/ffi.rs re-exports ~150
-    // BLPAPI symbols unconditionally and still fails with 29 unresolved imports,
-    // taking xbbg-async and xbbg-recipes down with it. Fixing docs.rs properly
-    // requires committing a pregenerated binding surface, and the Bloomberg SDK
-    // license permits distributing copies but not "modifying, adapting", which
-    // makes redistributing bindgen-derived declarations a licensing decision rather
-    // than a build-script one.
+    // green with an empty API page, while xbbg-core calls the generated function
+    // table everywhere and still fails, taking xbbg-async and xbbg-recipes down
+    // with it. Fixing docs.rs properly requires committing a pregenerated binding
+    // surface, and the Bloomberg SDK license permits distributing copies but not
+    // "modifying, adapting", which makes redistributing bindgen-derived
+    // declarations a licensing decision rather than a build-script one.
     //
     // So fail, but fail legibly: the docs.rs log states the real reason instead of
     // an opaque "SDK root does not exist" from the resolver below.
@@ -43,12 +45,10 @@ fn main() {
         );
     }
 
-    // Resolve include and lib directories from environment (precedence order)
-    let (include_dir, lib_dir) =
-        resolve_include_and_lib_dirs().unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
+    // The headers are the only SDK input: the runtime library is opened by path at
+    // run time, so nothing here links it or searches for it.
+    let include_dir = resolve_include_dir().unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
 
-    // Emit link search path
-    println!("cargo:rustc-link-search=native={}", lib_dir.display());
     // Consumers use Cargo's resolved SDK rather than maintaining another locator.
     println!(
         "cargo:rustc-env=XBBG_SDK_INCLUDE_DIR={}",
@@ -58,30 +58,18 @@ fn main() {
             .display()
     );
 
-    // Enforce mutually exclusive static/dynamic features
-    let want_static = env::var_os("CARGO_FEATURE_STATIC").is_some();
-    let want_dynamic = env::var_os("CARGO_FEATURE_DYNAMIC").is_some() || !want_static;
-    if want_static && want_dynamic {
-        panic!("Features 'static' and 'dynamic' are mutually exclusive");
-    }
-
-    // Determine library base name based on target platform and architecture
-    let lib_name = detect_link_lib_name(&lib_dir);
-
-    // Emit link type
-    if want_static {
-        println!("cargo:rustc-link-lib=static={}", lib_name);
-    } else {
-        println!("cargo:rustc-link-lib=dylib={}", lib_name);
-    }
-
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let bindings_out = out_dir.join("bindings.rs");
 
-    // Track SDK headers and link inputs so an in-place SDK replacement rebuilds
-    // dependent artifacts rather than stamping new provenance onto old bytes.
+    // The allowlist is also compiled in as `FUNCTION_NAMES`, so a loader can say which
+    // functions a runtime lacks: the generated `from_library` only reports that one is missing.
+    let functions = read_function_allowlist().unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
+    write_function_names(&functions, &out_dir.join("function_names.rs"))
+        .unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
+
+    // Track SDK headers so an in-place SDK replacement rebuilds dependent
+    // artifacts rather than stamping new provenance onto old bytes.
     println!("cargo:rerun-if-changed={}", include_dir.display());
-    println!("cargo:rerun-if-changed={}", lib_dir.display());
 
     if let Some(pregenerated_bindings) = env::var_os("BLPAPI_PREGENERATED_BINDINGS") {
         let pregenerated_bindings = PathBuf::from(pregenerated_bindings);
@@ -92,6 +80,24 @@ fn main() {
             );
         }
         println!("cargo:rerun-if-changed={}", pregenerated_bindings.display());
+
+        // Bindings generated for another allowlist would compile until the first call of a
+        // function they lack; say so here instead.
+        let pregenerated = fs::read_to_string(&pregenerated_bindings).unwrap_or_else(|e| {
+            panic!(
+                "blpapi-sys: Failed to read {}: {}",
+                pregenerated_bindings.display(),
+                e
+            )
+        });
+        let missing = functions_missing_from(&pregenerated, &functions);
+        if !missing.is_empty() {
+            panic!(
+                "blpapi-sys: BLPAPI_PREGENERATED_BINDINGS ({}) was generated for another {FUNCTIONS_FILE}; it lacks: {}",
+                pregenerated_bindings.display(),
+                missing.join(", ")
+            );
+        }
 
         copy_bindings(&pregenerated_bindings, &bindings_out)
             .unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
@@ -118,31 +124,120 @@ fn main() {
         .parse::<bindgen::RustTarget>()
         .expect("blpapi-sys: rust-version must be a valid bindgen Rust target");
 
-    let builder = bindgen::Builder::default()
+    let mut builder = bindgen::Builder::default()
         .rust_target(rust_target)
         .rust_edition(bindgen::RustEdition::Edition2024)
         .header_contents("wrapper.h", &wrapper)
         .clang_arg(format!("-I{}", include_dir.display()))
-        .allowlist_function("^blpapi_.*")
         .allowlist_type("^blpapi_.*")
-        .allowlist_var("^(BLPAPI_.*|BLPAPI_SDK_VERSION.*|g_blpapi.*)")
+        .allowlist_var("^(BLPAPI_.*|BLPAPI_SDK_VERSION.*)")
+        // One struct of function pointers, resolved from a library opened at run
+        // time. `require_all` makes the constructor fail at load for a function the
+        // library lacks, instead of panicking at the first call; the allowlist
+        // below is what keeps that set to the functions actually called.
+        .dynamic_library_name("Blpapi")
+        .dynamic_link_require_all(true)
         .ctypes_prefix("cty")
         .use_core()
         .layout_tests(false)
         .derive_default(false)
         .generate_comments(false)
         .formatter(bindgen::Formatter::Rustfmt);
+    for function in &functions {
+        builder = builder.allowlist_function(format!("^{function}$"));
+    }
 
     // Generate and write
     let bindings = builder
         .generate()
         .expect("Unable to generate blpapi bindings via bindgen");
 
+    // bindgen drops an allowlisted name the headers do not declare without a word.
+    // Left alone, a typo or a function an SDK removed would only surface as a
+    // missing method at the first call site, or never.
+    let missing = functions_missing_from(&bindings.to_string(), &functions);
+    if !missing.is_empty() {
+        panic!(
+            "blpapi-sys: {FUNCTIONS_FILE} names functions the SDK headers in {} do not declare: {}",
+            include_dir.display(),
+            missing.join(", ")
+        );
+    }
+
     bindings
         .write_to_file(&bindings_out)
         .unwrap_or_else(|e| panic!("Failed to write bindings: {}", e));
 
     export_bindings_if_requested(&bindings_out);
+}
+
+/// The names in `functions` that `bindings` does not declare as a field of the function table.
+///
+/// Compared without whitespace: without rustfmt (CI containers may lack it) bindgen writes
+/// `pub blpapi_X :` rather than `pub blpapi_X:`.
+fn functions_missing_from<'a>(bindings: &str, functions: &'a [String]) -> Vec<&'a str> {
+    let generated: String = bindings.split_whitespace().collect();
+    functions
+        .iter()
+        .map(String::as_str)
+        .filter(|function| !generated.contains(&format!("pub{function}:")))
+        .collect()
+}
+
+/// Writes `FUNCTION_NAMES`, the allowlist as C strings, for `src/lib.rs` to include.
+fn write_function_names(functions: &[String], path: &Path) -> Result<(), String> {
+    let mut source = String::from(
+        "/// The BLPAPI C functions the function table [`Blpapi`] resolves, as listed in\n\
+         /// `functions.txt`: every one must exist in a runtime for it to load.\n\
+         pub const FUNCTION_NAMES: &[&::core::ffi::CStr] = &[\n",
+    );
+    for function in functions {
+        source.push_str(&format!("    c\"{function}\",\n"));
+    }
+    source.push_str("];\n");
+    fs::write(path, source).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
+}
+
+/// The function names in [`FUNCTIONS_FILE`]: one per line, blank lines and `#` comments skipped.
+fn read_function_allowlist() -> Result<Vec<String>, String> {
+    let manifest_dir = env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR not set");
+    let path = Path::new(&manifest_dir).join(FUNCTIONS_FILE);
+    let text = fs::read_to_string(&path)
+        .map_err(|e| format!("Failed to read {}: {}", path.display(), e))?;
+
+    let mut functions: Vec<String> = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let valid = line.starts_with("blpapi_")
+            && line
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_');
+        if !valid {
+            return Err(format!(
+                "{}:{}: `{}` is not a blpapi_* function name",
+                path.display(),
+                index + 1,
+                line
+            ));
+        }
+        if functions.iter().any(|existing| existing == line) {
+            return Err(format!(
+                "{}:{}: `{}` is listed twice",
+                path.display(),
+                index + 1,
+                line
+            ));
+        }
+        functions.push(line.to_string());
+    }
+
+    if functions.is_empty() {
+        return Err(format!("{} lists no functions", path.display()));
+    }
+    Ok(functions)
 }
 
 fn export_bindings_if_requested(bindings: &Path) {
@@ -196,15 +291,12 @@ fn resolve_env_path(value: std::ffi::OsString) -> PathBuf {
     path
 }
 
-fn resolve_include_and_lib_dirs() -> Result<(PathBuf, PathBuf), String> {
-    // 1) Explicit include/lib
-    let include = env::var_os("BLPAPI_INCLUDE_DIR");
-    let lib = env::var_os("BLPAPI_LIB_DIR");
-    if let (Some(inc), Some(lib)) = (include, lib) {
-        let inc = resolve_env_path(inc);
-        let lib = resolve_env_path(lib);
-        validate_header_exists(&inc)?;
-        return Ok((inc, lib));
+fn resolve_include_dir() -> Result<PathBuf, String> {
+    // 1) Explicit include directory
+    if let Some(include) = env::var_os("BLPAPI_INCLUDE_DIR") {
+        let include = resolve_env_path(include);
+        validate_header_exists(&include)?;
+        return Ok(include);
     }
 
     // 2) Root
@@ -212,20 +304,18 @@ fn resolve_include_and_lib_dirs() -> Result<(PathBuf, PathBuf), String> {
         let root = resolve_env_path(root);
         // Adding a newer version beneath a container must invalidate discovery.
         println!("cargo:rerun-if-changed={}", root.display());
-        let (inc, lib) = resolve_sdk_layout(&root)?;
-        validate_header_exists(&inc)?;
-        return Ok((inc, lib));
+        return resolve_sdk_include(&root);
     }
 
-    Err("Cannot locate Bloomberg SDK. Set BLPAPI_INCLUDE_DIR/BLPAPI_LIB_DIR or BLPAPI_ROOT.".into())
+    Err("Cannot locate Bloomberg SDK headers. Set BLPAPI_INCLUDE_DIR or BLPAPI_ROOT.".into())
 }
 
-fn resolve_sdk_layout(root: &Path) -> Result<(PathBuf, PathBuf), String> {
+fn resolve_sdk_include(root: &Path) -> Result<PathBuf, String> {
     let mut last_error = None;
 
     for candidate in candidate_sdk_roots(root)? {
-        match derive_include_lib(&candidate) {
-            Ok(layout) => return Ok(layout),
+        match derive_include(&candidate) {
+            Ok(include_dir) => return Ok(include_dir),
             Err(err) => last_error = Some(err),
         }
     }
@@ -316,122 +406,14 @@ fn parse_version_components(value: &str) -> Option<Vec<u32>> {
     }
 }
 
-fn derive_include_lib(root: &Path) -> Result<(PathBuf, PathBuf), String> {
-    let include_candidates = [root.join("include"), root.join("Include")];
-
-    for include_dir in include_candidates {
-        if !include_dir.is_dir() || validate_header_exists(&include_dir).is_err() {
-            continue;
-        }
-
-        for lib_dir in library_dir_candidates(root) {
-            if lib_dir.is_dir() && contains_linkable_blpapi_lib(&lib_dir) {
-                return Ok((include_dir.clone(), lib_dir));
-            }
+fn derive_include(root: &Path) -> Result<PathBuf, String> {
+    for include_dir in [root.join("include"), root.join("Include")] {
+        if include_dir.is_dir() && validate_header_exists(&include_dir).is_ok() {
+            return Ok(include_dir);
         }
     }
 
-    Err(format!(
-        "Could not derive include/lib under {}.",
-        root.display()
-    ))
-}
-
-fn library_dir_candidates(root: &Path) -> Vec<PathBuf> {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    let mut candidates = vec![
-        root.join("lib"),
-        root.join("Lib"),
-        root.join("lib64"),
-        root.join("bin"),
-    ];
-
-    if target_os == "windows" {
-        let win_lib_subdir = if target_arch == "x86" {
-            "win32"
-        } else {
-            "win64"
-        };
-        candidates.push(root.join("lib").join(win_lib_subdir));
-    } else if target_os == "linux" {
-        candidates.push(root.join("Linux"));
-        candidates.push(root.join("linux"));
-    } else if target_os == "macos" {
-        candidates.push(root.join("Darwin"));
-        candidates.push(root.join("darwin"));
-        candidates.push(root.join("MacOS"));
-        candidates.push(root.join("macos"));
-    }
-
-    candidates
-}
-
-fn contains_linkable_blpapi_lib(lib_dir: &Path) -> bool {
-    expected_library_files()
-        .iter()
-        .any(|file_name| lib_dir.join(file_name).is_file())
-}
-
-fn detect_link_lib_name(lib_dir: &Path) -> String {
-    if lib_dir.join("blpapi3_64.lib").is_file()
-        || lib_dir.join("blpapi3_64.dll").is_file()
-        || lib_dir.join("libblpapi3_64.so").is_file()
-        || lib_dir.join("libblpapi3_64.dylib").is_file()
-        || lib_dir.join("libblpapi3_64.a").is_file()
-    {
-        return "blpapi3_64".to_string();
-    }
-
-    if lib_dir.join("blpapi3_32.lib").is_file()
-        || lib_dir.join("blpapi3_32.dll").is_file()
-        || lib_dir.join("libblpapi3_32.so").is_file()
-        || lib_dir.join("libblpapi3_32.dylib").is_file()
-        || lib_dir.join("libblpapi3_32.a").is_file()
-    {
-        return "blpapi3_32".to_string();
-    }
-
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-    if target_os == "windows" {
-        if target_arch == "x86" {
-            "blpapi3_32".to_string()
-        } else {
-            "blpapi3_64".to_string()
-        }
-    } else {
-        "blpapi3".to_string()
-    }
-}
-
-fn expected_library_files() -> Vec<&'static str> {
-    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let target_arch = env::var("CARGO_CFG_TARGET_ARCH").unwrap_or_default();
-
-    if target_os == "windows" {
-        if target_arch == "x86" {
-            vec!["blpapi3_32.lib", "blpapi3_32.dll"]
-        } else {
-            vec!["blpapi3_64.lib", "blpapi3_64.dll"]
-        }
-    } else if target_os == "macos" {
-        vec![
-            "libblpapi3.so",
-            "libblpapi3_64.so",
-            "libblpapi3.dylib",
-            "libblpapi3_64.dylib",
-            "libblpapi3.a",
-            "libblpapi3_64.a",
-        ]
-    } else {
-        vec![
-            "libblpapi3.so",
-            "libblpapi3_64.so",
-            "libblpapi3.a",
-            "libblpapi3_64.a",
-        ]
-    }
+    Err(format!("Could not find include/ under {}.", root.display()))
 }
 
 fn validate_header_exists(include_dir: &Path) -> Result<(), String> {

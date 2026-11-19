@@ -142,8 +142,14 @@ class RequestParams:
             into ``value_f64``, ``value_i64``, ``value_str``, ``value_bool``,
             ``value_date`` (Date32), ``value_ts`` (UTC timestamp), and
             ``value_time`` (Time64 microseconds, with no date or timezone).
-        include_security_errors: When True for ReferenceData requests, include
-            ``__SECURITY_ERROR__`` rows for securities that failed.
+        include_security_errors: When True for ReferenceData requests, report the
+            securities Bloomberg refused. The long formats add one
+            ``__SECURITY_ERROR__`` row per refused security;
+            ``Format.SEMI_LONG`` leaves refused securities out of its rows. Every
+            format carries each refusal's details in ``xbbg.security_errors``
+            result metadata. With this option a request in which every security
+            is refused returns (the long rows, or an empty table in
+            ``SEMI_LONG``) instead of raising ``BlpRequestError``.
         return_eids: When True for ReferenceDataRequest (including BDS bulk
             data), HistoricalDataRequest, IntradayBarRequest, and
             IntradayTickRequest, ask Bloomberg to return EID entitlement

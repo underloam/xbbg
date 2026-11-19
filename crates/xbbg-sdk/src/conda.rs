@@ -8,17 +8,35 @@ use std::path::{Component, Path, PathBuf};
 use rattler_conda_types::package::{IndexJson, PackageFile, PathsJson};
 use rattler_conda_types::{
     Channel, ChannelConfig as CondaChannelConfig, MatchSpec, ParseMatchSpecOptions, RepoDataRecord,
+    Subdir,
 };
 use rattler_repodata_gateway::fetch::CacheAction;
 use rattler_repodata_gateway::{
     ChannelConfig as GatewayChannelConfig, ChannelRelationsMode, Gateway, SourceConfig,
 };
 
+use crate::Platform;
 use crate::error::{Error, Result, chain};
 use crate::http::Http;
 use crate::install::rename;
-use crate::platform::Platform;
 use crate::wheel::{Extracted, safe_relative};
+
+/// The conda subdir that holds `platform`'s packages.
+pub(crate) fn subdir(platform: Platform) -> Subdir {
+    match platform {
+        Platform::WindowsX86_64 => Subdir::Win64,
+        Platform::LinuxX86_64 => Subdir::Linux64,
+        Platform::MacosAarch64 => Subdir::OsxArm64,
+    }
+}
+
+/// Directories, relative to a conda package root, that hold `platform`'s shared libraries.
+fn library_dirs(platform: Platform) -> &'static [&'static str] {
+    match platform {
+        Platform::WindowsX86_64 => &["Library/bin"],
+        Platform::LinuxX86_64 | Platform::MacosAarch64 => &["lib"],
+    }
+}
 
 /// The gateway and channel-name resolution of one provisioner.
 pub(crate) struct Conda {
@@ -77,7 +95,7 @@ impl Conda {
         })?;
         let output = self
             .gateway
-            .query([channel.clone()], [platform.conda_subdir()], [spec])
+            .query([channel.clone()], [subdir(platform)], [spec])
             .recursive(false)
             .channel_relations(ChannelRelationsMode::Disabled)
             .execute()
@@ -85,7 +103,7 @@ impl Conda {
             .map_err(|err| {
                 Error::Network(format!(
                     "reading {} repodata of {} failed: {}",
-                    platform.conda_subdir().as_str(),
+                    subdir(platform).as_str(),
                     channel.canonical_name(),
                     chain(&err)
                 ))
@@ -106,7 +124,7 @@ impl Conda {
                     "{} has no {package}{} for {}",
                     channel.canonical_name(),
                     version.map(|v| format!(" {v}")).unwrap_or_default(),
-                    platform.conda_subdir().as_str()
+                    subdir(platform).as_str()
                 ))
             })
     }
@@ -141,8 +159,7 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
         .library_names()
         .iter()
         .flat_map(|name| {
-            platform
-                .conda_library_dirs()
+            library_dirs(platform)
                 .iter()
                 .map(move |dir| Path::new(dir).join(name))
         })
@@ -156,11 +173,13 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
             Error::InvalidArtifact(format!(
                 "the package contains no {} library in {}",
                 platform.library_names().join(" or "),
-                platform.conda_library_dirs().join(" or ")
+                library_dirs(platform).join(" or ")
             ))
         })?;
     let source = package.join(&entry.relative_path);
     let shown = entry.relative_path.display();
+    ensure_no_ancestor_symlinks(package, &entry.relative_path)
+        .map_err(|reason| Error::InvalidArtifact(format!("{shown} {reason}")))?;
     let metadata = fs::symlink_metadata(&source)
         .map_err(|err| Error::io(format!("reading {}", source.display()), err))?;
     if !metadata.is_file() {
@@ -168,6 +187,7 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
             "{shown} is not a regular file in the package"
         )));
     }
+    ensure_within_package(package, &source, &shown.to_string())?;
     let expected = entry
         .sha256
         .ok_or_else(|| Error::Integrity(format!("info/paths.json has no sha256 for {shown}")))?;
@@ -198,8 +218,12 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
     move_into(&source, &staging.join(&lib))?;
 
     let mut licenses = Vec::new();
-    let package_licenses = package.join("info").join("licenses");
-    if fs::symlink_metadata(&package_licenses).is_ok_and(|meta| meta.is_dir()) {
+    let licenses_rel = Path::new("info").join("licenses");
+    let package_licenses = package.join(&licenses_rel);
+    if ensure_no_ancestor_symlinks(package, &licenses_rel).is_ok()
+        && fs::symlink_metadata(&package_licenses).is_ok_and(|meta| meta.is_dir())
+        && ensure_within_package(package, &package_licenses, "info/licenses").is_ok()
+    {
         let staged_licenses = staging.join("licenses");
         move_into(&package_licenses, &staged_licenses)?;
         collect_files(&staged_licenses, &staged_licenses, &mut licenses)?;
@@ -210,6 +234,41 @@ pub(crate) fn stage(package: &Path, platform: Platform, staging: &Path) -> Resul
         lib_sha256: hex::encode(actual),
         licenses,
     })
+}
+
+/// Ensures no intermediate directory between `package` and `package.join(relative)` is a symlink.
+fn ensure_no_ancestor_symlinks(
+    package: &Path,
+    relative: &Path,
+) -> std::result::Result<(), &'static str> {
+    let mut cursor = package.to_path_buf();
+    let components: Vec<_> = relative.components().collect();
+    if components.len() <= 1 {
+        return Ok(());
+    }
+    for component in &components[..components.len() - 1] {
+        cursor.push(component);
+        let meta = fs::symlink_metadata(&cursor)
+            .map_err(|_| "has an unreadable parent directory in the package")?;
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err("traverses a symlinked parent directory in the package");
+        }
+    }
+    Ok(())
+}
+
+/// Ensures the canonicalized target stays inside the canonicalized `package` root.
+fn ensure_within_package(package: &Path, target: &Path, shown: &str) -> Result<()> {
+    let root = fs::canonicalize(package)
+        .map_err(|err| Error::io(format!("resolving {}", package.display()), err))?;
+    let resolved = fs::canonicalize(target)
+        .map_err(|err| Error::io(format!("resolving {}", target.display()), err))?;
+    if !resolved.starts_with(&root) {
+        return Err(Error::InvalidArtifact(format!(
+            "{shown} escapes the unpacked package directory"
+        )));
+    }
+    Ok(())
 }
 
 /// Renames within the cache's `tmp/` directory (same volume).
@@ -389,6 +448,25 @@ mod tests {
         assert!(fs::symlink_metadata(staging.join("licenses").join("key")).is_err());
         assert!(fs::symlink_metadata(staging.join("licenses").join("dir")).is_err());
         assert_eq!(fs::read(secrets.join("id_rsa")).unwrap(), b"private key");
+    }
+
+    #[test]
+    fn symlinked_parent_directory_for_library_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let outside = root.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("libblpapi3_64.so"), b"fake blpapi").unwrap();
+
+        let pkg = package(root.path(), "parent-link");
+        let lib_dir = pkg.join("lib");
+        fs::remove_dir_all(&lib_dir).unwrap();
+        if !symlink(&outside, &lib_dir) {
+            return;
+        }
+        let error = stage(&pkg, Platform::LinuxX86_64, &root.path().join("staging"))
+            .expect_err("symlinked parent directory must be refused");
+        assert_eq!(error.code(), "INVALID_ARTIFACT", "{error}");
+        assert!(outside.join("libblpapi3_64.so").is_file());
     }
 
     #[test]

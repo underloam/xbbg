@@ -381,6 +381,25 @@ impl ResponseMetadata {
         }
     }
 
+    /// Metadata built from already-collected diagnostics, for callers that
+    /// hold the values rather than a wire response.
+    pub(crate) fn from_diagnostics(
+        eid_data: BTreeMap<String, Vec<i64>>,
+        security_errors: BTreeMap<String, SecurityErrorMeta>,
+        field_exceptions: FieldExceptions,
+        delayed: BTreeMap<String, DelayedMeta>,
+        type_misses: BTreeMap<String, u64>,
+        bloomberg_request_id: Option<Arc<str>>,
+    ) -> Self {
+        let mut metadata = Self::with_bloomberg_request_ids(bloomberg_request_id);
+        metadata.eid_data = eid_data;
+        metadata.security_errors = security_errors;
+        metadata.field_exceptions = field_exceptions;
+        metadata.delayed = delayed;
+        metadata.type_misses = type_misses;
+        metadata
+    }
+
     /// Collect all diagnostics before callers decide whether to skip a security.
     /// This also preserves field exceptions accompanying a security error.
     pub(super) fn record_security<'a>(
@@ -629,6 +648,12 @@ fn parse_flag_text(text: &str) -> Option<bool> {
 /// syntactically valid `RESPONSE` event. Without this guard the state machines
 /// simply find no `securityData`/payload and return an empty batch, hiding the
 /// actual vendor error.
+///
+/// `service` is the operation's default service, not necessarily the one the
+/// request was sent to (`ReferenceDataRequest` also runs on
+/// `//blp/staticmktdata`): the response state cannot know it. The request layer
+/// replaces it with the service the request was sent to when it enriches the
+/// error, so callers never see this literal for a request sent elsewhere.
 pub(crate) fn top_level_response_error(
     msg: &Message<'_>,
     service: &'static str,

@@ -163,13 +163,22 @@ GitHub release assets include only the launcher wrapper and compiled xbbg binary
 
 GitHub Release tar/zip assets remain the raw binary channel. The MCPB asset is the directory and one-click local connector channel for MCPB-aware clients and registries.
 
-The wrapper locates the Bloomberg runtime in this order:
+The `xbbg-mcp` binary finds and loads the Bloomberg runtime itself, at startup, before it serves anything; the launcher script only passes what the binary cannot know (the directory of the Python `blpapi` package, and the checkout it runs from). The search order is the one every xbbg host shares:
 
-1. `XBBG_MCP_LIB_DIR`
+1. `XBBG_MCP_LIB_DIR` (a runtime directory or library file)
 2. `BLPAPI_LIB_DIR`
 3. `BLPAPI_ROOT`
-4. locally staged authorized SDK under `vendor/blpapi-sdk/`
-5. the official Python `blpapi` package
+4. `XBBG_DEV_SDK_ROOT` (relative to the checkout when the launcher runs from one)
+5. locally staged authorized SDK under `vendor/blpapi-sdk/` (checkout only)
+6. hint directories: `XBBG_MCP_HINT_DIRS`, an OS path list the launcher sets to the official Python `blpapi` package directory
+7. a Bloomberg Terminal install (`~/blp/DAPI`, `/opt/bloomberg/DAPI`; the usual `DAPI` directories on Windows)
+8. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS)
+9. the operating system's own library search, where a system-wide install lives (the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the directory of `xbbg-mcp.exe` and the system directory on Windows)
+10. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`), read only when nothing before them loaded
+
+If nothing loads and `XBBG_MCP_LIB_DIR` is not set, setting `XBBG_SDK_SOURCE` (and optionally `XBBG_SDK_VERSION`) provisions a runtime into the shared xbbg cache automatically before starting the server. You can also manage the cache directly before any Bloomberg runtime exists with `xbbg-mcp sdk --source <spec>` or `xbbg-mcp sdk --installed`.
+
+A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried (including `XBBG_SDK_SOURCE`). If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
 
 If you install Bloomberg's Python package, the wrapper can usually run without any extra shell configuration:
 
@@ -183,9 +192,9 @@ Windows release assets are attached as `.zip` files, but the convenience install
 
 Claude Desktop and MCPB-aware registries can use the `xbbg-mcp-v<VERSION>.mcpb` asset attached to GitHub Releases. The MCPB currently supports macOS arm64, Linux amd64, and Windows amd64. The raw platform tar/zip assets remain available for manual installs and troubleshooting.
 
-The MCPB does not include Bloomberg SDK files, Bloomberg runtime libraries, credentials, or market data. Configure `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, or install Bloomberg's official Python `blpapi` package so the launcher can find the authorized Bloomberg runtime locally.
+The MCPB does not include Bloomberg SDK files, Bloomberg runtime libraries, credentials, or market data. Configure `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, or install Bloomberg's official Python `blpapi` package so the binary can find the authorized Bloomberg runtime locally.
 
-On Windows the MCPB PowerShell launcher follows the same order, then also scans `PATH` (a Bloomberg Terminal install puts `C:\blp\DAPI` there) before falling back to the Python package. `xbbg-mcp.exe` is 64-bit and needs `blpapi3_64.dll`; a runtime whose version cannot be read, or which is too old to export the entry points the binary imports, is skipped with a diagnostic. The minimum, currently Bloomberg API 3.20.0, is derived from imported symbol versions when the bundle is packaged; packaging fails rather than silently disabling the gate if derivation is impossible. The launcher makes the validated directory both the child's working directory and the first `PATH` entry, and refuses a higher-priority DLL beside the executable or in a Windows system directory that would shadow it. It starts `xbbg-mcp.exe` with inherited standard handles, so the MCP host talks to the binary directly rather than through PowerShell. Loader-status diagnostics name the selected Bloomberg runtime without claiming that it caused every direct or transitive loader failure.
+On Windows the MCPB PowerShell launcher passes the same hint (the Python `blpapi` package directory) and starts `xbbg-mcp.exe` with the standard handles inherited; the binary runs the search above, including `PATH` (a Bloomberg Terminal install puts `C:\blp\DAPI` there). `xbbg-mcp.exe` is 64-bit and needs `blpapi3_64.dll`. It is loaded by absolute path, so no DLL version gate, working-directory or `PATH` rewriting is needed: a runtime that is too old fails to provide a required function and is skipped with that reason in the startup error.
 
 ## Troubleshooting
 
@@ -194,7 +203,7 @@ The server writes only to stderr, which MCP hosts such as Claude Desktop capture
 ## Build from source
 
 ```bash
-bash ./scripts/sdktool.sh
+cargo run -p xbbg-sdk --features provision -- cpp
 cargo build --release -p xbbg-mcp --locked
 ./scripts/xbbg-mcp
 ```
@@ -267,6 +276,8 @@ Supported auth methods:
 - `directory`
 - `manual`
 - `token`
+
+The settings above are checked at startup by the configuration rules every xbbg binding shares (`xbbg-host`). A setting the engine would reject (for example `XBBG_MCP_REQUEST_POOL_SIZE=0`, or an auth method without the value it needs) stops the server before it serves anything: it prints `xbbg-mcp: invalid configuration: …` to stderr, naming the variable that set the value, and exits with status 1. On shutdown the server waits up to 10 seconds for the engine's Bloomberg sessions to stop before it exits.
 
 ### BQL client context
 

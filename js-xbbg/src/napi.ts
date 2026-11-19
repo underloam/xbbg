@@ -14,9 +14,9 @@ import type {
   RequestInput,
   SeatType,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
-  StreamOptions,
   StringPair,
   SubscriptionEvent,
   SubscriptionDeliveryMode,
@@ -215,36 +215,14 @@ export interface NativeEngine {
   listCachedSchemas(): string[];
   getEnumValues(service: string, operation: string, element: string): Promise<string[] | null>;
   listValidElements(service: string, operation: string): Promise<string[] | null>;
-  subscribe(
-    tickers: readonly string[],
-    fields: readonly string[],
-    allFields: boolean | undefined,
-    aliases?: Readonly<Record<string, string>>,
-    onDelayed?: StreamOptions['onDelayed'],
-    isolated?: boolean,
-    rows?: boolean,
-    onFieldError?: string,
-    zeroAsNull?: readonly string[],
-    delivery?: StreamOptions['delivery'],
-  ): Promise<NativeSubscription>;
-  subscribeWithOptions(
-    service: string,
-    tickers: readonly string[],
-    fields: readonly string[],
-    options: readonly string[] | undefined,
-    flushThreshold: number | undefined,
-    overflowPolicy: string | undefined,
-    streamCapacity: number | undefined,
-    allFields: boolean | undefined,
-    aliases?: Readonly<Record<string, string>>,
-    onDelayed?: StreamOptions['onDelayed'],
-    isolated?: boolean,
-    rows?: boolean,
-    onFieldError?: string,
-    zeroAsNull?: readonly string[],
-    delivery?: StreamOptions['delivery'],
-  ): Promise<NativeSubscription>;
+  /** Host `SubscribeArgs` JSON: `{service?, tickers, fields, rawOptions?, options?}`. */
+  subscribe(args: string): Promise<NativeSubscription>;
+  /** Host `AuctionSubscribeArgs` JSON: `{securities, pcsOverrides?, streamAuction?, options?}`. */
+  subscribeAuction(args: string): Promise<NativeSubscription>;
+  /** Host `EtfInavSubscribeArgs` JSON: `{tickers, options?}`. */
+  subscribeEtfInav(args: string): Promise<NativeSubscription>;
   subscriptionFeeds(): FeedInfo[];
+  connections(): SessionConnections[];
   signalShutdown(): void;
   isAvailable(): boolean;
 
@@ -382,10 +360,128 @@ export interface NativeEngineConstructor {
   connectWithConfig(config: EngineConfig): Promise<NativeEngine>;
 }
 
+/**
+ * What a runtime was found by. `system` is the operating system's own library search: only a
+ * load finds its file, so it names a loaded runtime or a refusal, never a listed candidate.
+ */
+export type SdkSourceKind =
+  | 'explicit'
+  | 'blpapi_lib_dir'
+  | 'blpapi_root'
+  | 'dev_sdk_root'
+  | 'vendored'
+  | 'hint'
+  | 'terminal'
+  | 'search_path'
+  | 'system'
+  | 'cache';
+
+/** The host's side of the Bloomberg runtime search; every field is optional. */
+export interface SdkLocateRequest {
+  /** A runtime directory or library file that outranks every other rule. */
+  explicit?: string;
+  /** Host-only directories tried after the vendored SDK, in order. */
+  hints?: readonly { label: string; dir: string }[];
+  /** The host's view of the environment; omitted means the operating system's. */
+  env?: Readonly<Record<string, string>>;
+  /** Overrides `XBBG_CACHE_DIR` and the default cache location. */
+  cacheRoot?: string;
+  /** A development checkout: enables `<repo>/vendor/blpapi-sdk/<newest>`. */
+  repoRoot?: string;
+  /**
+   * Leave out the operating system's own library search, which follows the process's real
+   * environment whatever `env` says.
+   */
+  skipSystem?: boolean;
+  /** Optional provisioning source spec (overrides `XBBG_SDK_SOURCE`). */
+  sdkSource?: string;
+  /** Optional provisioning version (overrides `XBBG_SDK_VERSION`). */
+  sdkVersion?: string;
+}
+
+/** One verified Bloomberg runtime installed in the shared xbbg cache. */
+export interface ProvisionSdkResult {
+  readonly version: string;
+  readonly platform: string;
+  readonly libraryPath: string;
+  readonly licensePaths: readonly string[];
+  readonly source: string;
+  readonly artifactUrl: string;
+  readonly artifactSha256: string;
+  readonly libSha256: string;
+  readonly cacheHit: boolean;
+}
+
+/** Output of the shared `xbbg-sdk` CLI runner. */
+export interface SdkCliOutput {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
+}
+
+/** A runtime the search order found. */
+export interface SdkCandidate {
+  path: string;
+  source: SdkSourceKind;
+  /** The environment variable, hint label, Terminal root or cache install directory. */
+  detail: string;
+  version?: string | null;
+}
+
+/** A candidate that was refused, and why. */
+export interface SdkRejected {
+  path: string;
+  source: SdkSourceKind;
+  detail: string;
+  reason: string;
+}
+
+export interface LocatedSdk {
+  candidates: SdkCandidate[];
+  rejected: SdkRejected[];
+}
+
+/** The runtime loaded into the process. */
+export interface LoadedSdk {
+  path: string;
+  source: SdkSourceKind;
+  detail: string;
+  /** `major.minor.patch.build`. */
+  version: string;
+  /** Candidates tried and refused before this one. */
+  rejected: SdkRejected[];
+}
+
 export interface NativeAddon {
   JsEngine: NativeEngineConstructor;
   setLogLevel: (level: string) => void;
   getLogLevel: () => string;
+
+  // Bloomberg runtime: the shared search order (crates/xbbg-sdk) and the loader.
+  /** Find a runtime and load it into the process; throws with every refusal listed. */
+  loadSdk: (request?: SdkLocateRequest) => LoadedSdk;
+  /** List the candidates the search order finds, without loading anything. */
+  locateSdk: (request?: SdkLocateRequest) => LocatedSdk;
+  /** The runtime this process loaded, or null before one is loaded. */
+  loadedSdk: () => LoadedSdk | null;
+  /** The loaded runtime's `major.minor.patch.build`, or null before one is loaded. */
+  sdkVersion: () => string | null;
+  /** Download, verify and install a Bloomberg runtime into the shared xbbg cache. */
+  provisionSdk?: (optionsJson: string) => Promise<ProvisionSdkResult>;
+  /** List verified Bloomberg runtime installs in the shared xbbg cache. */
+  installedSdks?: (cacheDir?: string, platform?: string) => ProvisionSdkResult[];
+  /** Default shared xbbg cache root directory, or null when no home directory is known. */
+  defaultSdkCacheDir?: () => string | null;
+  /** Bloomberg's public PyPI simple index URL. */
+  sdkBloombergPypiIndex?: () => string;
+  /** Run the shared `xbbg-sdk` CLI command. */
+  runSdkCli?: (prog: string, args: string[], env?: Record<string, string>) => SdkCliOutput;
+
+  /**
+   * Plan a typed request (`bdp`, `bdh`, `bta`, ...) with the host planner. `args` is the
+   * planner's JSON argument object; returns the planned `RequestInput` as JSON.
+   */
+  planRequest: (method: string, args: string) => string;
 
   // Auction utilities
   extAuctionFieldGroup: (name: string) => string[] | null;

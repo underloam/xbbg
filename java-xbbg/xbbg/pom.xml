@@ -19,9 +19,11 @@
     <xbbg.hostNativesCheck.skip>true</xbbg.hostNativesCheck.skip>
     <xbbg.releaseNativesCheck.skip>true</xbbg.releaseNativesCheck.skip>
     <!-- -Pcoverage minimums: measured on JDK 21 with native and subscription fixture tests
-         (line 63.4%, branch 57.2%), rounded down. Raise them as coverage grows. -->
+         (line 63.3%, branch 56.7%), rounded down. Raise them as coverage grows. Branch coverage
+         was 57.2% until the Bloomberg runtime search moved from BlpapiLocator to Rust
+         (xbbg_sdk::locate, tested there), taking its well-covered branches with it. -->
     <xbbg.coverage.line>0.63</xbbg.coverage.line>
-    <xbbg.coverage.branch>0.57</xbbg.coverage.branch>
+    <xbbg.coverage.branch>0.56</xbbg.coverage.branch>
   </properties>
 
   <dependencies>

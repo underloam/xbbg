@@ -225,6 +225,7 @@ fn run(schedule: &[i64], limit: usize) -> Outcome {
 }
 
 fn main() {
+    xbbg_bench::load_sdk();
     let limits = limits();
     let mut report = Vec::new();
     for scenario in scenarios() {

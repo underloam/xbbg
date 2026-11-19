@@ -357,6 +357,75 @@ async fn retiring_a_failed_feed_cannot_unsubscribe_the_feed_that_reused_its_key(
 }
 
 #[tokio::test]
+async fn add_fields_never_addresses_a_retired_feed_whose_slot_was_reused() {
+    let (hub, _) = hub();
+    let mut owner_request = request(&["OWNER ONLY", "KEEP LIVE"], &["BID"]);
+    owner_request.delayed_policy = DelayedPolicy::Raise;
+    let mut owner = hub.subscribe(owner_request).await.unwrap();
+    let (session, owner_key) = test_feed(&hub, "OWNER ONLY");
+    // A concurrent `latest()` keeps the feed object alive past its retirement.
+    let retired = feed_for_label(&owner, "OWNER ONLY");
+    // The consumer rejects the topic locally; Bloomberg never ends it.
+    data(&session, owner_key, r#"{"BID":1,"IS_DELAYED_STREAM":true}"#);
+    assert_eq!(owner.topics(), vec!["KEEP LIVE"]);
+    cleanup(&hub).await;
+    assert_eq!(session.unsubscribes.load(Ordering::Relaxed), 1);
+    assert_eq!(hub.feeds().len(), 1, "only KEEP LIVE remains registered");
+    // The same handle adds a topic; the worker hands it the freed slot.
+    owner.add(vec!["OTHER LIVE".into()], vec![]).await.unwrap();
+    let (other_session, other_key) = test_feed(&hub, "OTHER LIVE");
+    assert!(Arc::ptr_eq(&session, &other_session));
+    assert_eq!(
+        other_key, owner_key,
+        "precondition: the worker reused the slot"
+    );
+    owner.add_fields(vec!["ASK".into()]).await.unwrap();
+    // KEEP LIVE and OTHER LIVE grew once each; the retired OWNER ONLY feed
+    // neither re-fielded nor resubscribed the slot it no longer owns.
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 2);
+    assert_eq!(retired.state.lock().fields, vec!["BID".to_string()]);
+    assert!(
+        retired.upstream_key().is_err(),
+        "a retired feed must not keep a worker key"
+    );
+    data(&session, other_key, r#"{"BID":4,"ASK":5}"#);
+    let row = next(&mut owner);
+    assert_eq!(row.topic.as_ref(), "OTHER LIVE");
+    assert!(matches!(value(&row, "ASK"), Some(UpdateValue::F64(5.0))));
+    let (_, keep_key) = test_feed(&hub, "KEEP LIVE");
+    data(&session, keep_key, r#"{"ASK":6}"#);
+    let row = next(&mut owner);
+    assert_eq!(row.topic.as_ref(), "KEEP LIVE");
+    assert!(matches!(value(&row, "ASK"), Some(UpdateValue::F64(6.0))));
+}
+
+#[tokio::test]
+async fn add_fields_succeeds_for_healthy_topics_after_a_sibling_topic_failed() {
+    let (hub, _) = hub();
+    let mut stream = hub
+        .subscribe(request(&["OWNER ONLY", "KEEP LIVE"], &["BID"]))
+        .await
+        .unwrap();
+    let (session, owner_key) = test_feed(&hub, "OWNER ONLY");
+    session.status(owner_key, "SubscriptionFailure");
+    assert_eq!(stream.topics(), vec!["KEEP LIVE"]);
+    // The failed topic is reported through status; it is not an add_fields error.
+    stream.add_fields(vec!["ASK".into()]).await.unwrap();
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 1);
+    let (_, keep_key) = test_feed(&hub, "KEEP LIVE");
+    data(&session, keep_key, r#"{"ASK":7}"#);
+    assert!(matches!(
+        value(&next(&mut stream), "ASK"),
+        Some(UpdateValue::F64(7.0))
+    ));
+    // Once cleanup retired the failed feed, its dead membership is still skipped.
+    cleanup(&hub).await;
+    stream.add_fields(vec!["LAST_PRICE".into()]).await.unwrap();
+    assert_eq!(session.resubscribes.load(Ordering::Relaxed), 2);
+    assert_eq!(stream.topics(), vec!["KEEP LIVE"]);
+}
+
+#[tokio::test]
 async fn delayed_policies_and_known_delayed_attach_are_consumer_local() {
     let (hub, _) = hub();
     let mut warn = hub

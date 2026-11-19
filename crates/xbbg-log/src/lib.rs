@@ -13,6 +13,20 @@
 //!   → stderr
 //! ```
 //!
+//! # Opt-in bridge to a host language's logging
+//!
+//! The [`bridge`] module can capture events into a bounded queue instead of
+//! writing them to stderr, for a consumer thread owned by the host binding
+//! (xbbg's Python package forwards them to `logging`). It is off by default;
+//! while it is off the path above is unchanged.
+//!
+//! ```text
+//! tracing::debug!("...")
+//!   → AtomicLevelFilter
+//!   → bridge::BridgeLayer (format, try-push; a full queue drops and counts)
+//!   → consumer thread → bridge::next_batch()
+//! ```
+//!
 //! # Usage from Python
 //!
 //! ```python
@@ -42,8 +56,11 @@ use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU8, Ordering};
 
 use tracing_core::{LevelFilter, Metadata};
+use tracing_subscriber::fmt::MakeWriter;
 use tracing_subscriber::layer::{Context, Filter};
 use tracing_subscriber::registry::LookupSpan;
+
+pub mod bridge;
 
 // Re-export tracing macros so other crates depend only on xbbg-log.
 pub use tracing::{debug, error, info, trace, warn};
@@ -144,6 +161,27 @@ where
 // Initialization
 // ---------------------------------------------------------------------------
 
+/// Build the subscriber: a single routing layer behind [`AtomicLevelFilter`]
+/// that sends each event to the [`bridge`] while capture is active and to
+/// `writer` (stderr) otherwise.
+fn build_subscriber<W>(writer: W) -> impl tracing::Subscriber + Send + Sync
+where
+    W: for<'w> MakeWriter<'w> + Send + Sync + 'static,
+{
+    use tracing_subscriber::fmt;
+    use tracing_subscriber::prelude::*;
+
+    let fmt_layer = fmt::layer()
+        .with_writer(writer)
+        .with_target(true)
+        .with_thread_ids(true)
+        .with_file(true)
+        .with_line_number(true);
+
+    tracing_subscriber::registry()
+        .with(bridge::RoutingLayer::new(fmt_layer).with_filter(AtomicLevelFilter))
+}
+
 /// Initialize the global tracing subscriber.
 ///
 /// Call this **once** from the PyO3 module init (`_core`).
@@ -151,31 +189,25 @@ where
 /// # Behaviour
 ///
 /// `RUST_LOG` may set the initial global level when it contains a simple level
-/// string. Output goes directly to stderr; the logging path remains GIL-free.
+/// string. Output goes directly to stderr, unless the opt-in [`bridge`] is
+/// enabled; the logging path remains GIL-free.
 pub fn init() {
-    use tracing_subscriber::fmt;
-    use tracing_subscriber::prelude::*;
-
     if let Ok(level) = std::env::var("RUST_LOG")
         && let Some(level) = parse_level(&level)
     {
         set_level(level);
     }
 
-    let fmt_layer = fmt::layer()
-        .with_writer(std::io::stderr)
-        .with_target(true)
-        .with_thread_ids(true)
-        .with_file(true)
-        .with_line_number(true);
-
-    let subscriber = tracing_subscriber::registry().with(fmt_layer.with_filter(AtomicLevelFilter));
-    let _ = tracing::subscriber::set_global_default(subscriber);
+    let _ = tracing::subscriber::set_global_default(build_subscriber(std::io::stderr));
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// Serializes tests that touch the process-global level or bridge.
+#[cfg(test)]
+pub(crate) static TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[cfg(test)]
 mod tests {
@@ -209,6 +241,7 @@ mod tests {
 
     #[test]
     fn set_and_get_level() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         set_level(Level::DEBUG);
         assert_eq!(current_level(), Level::DEBUG);
         set_level(Level::WARN);

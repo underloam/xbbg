@@ -19,6 +19,7 @@ from ._exports import (
     MODULE_EXPORTS,
     PACKAGE_BLP_EXPORTS,
     PACKAGE_EXPORTS,
+    PYTHON_LOGGING_EXPORTS,
     SCHEMA_LOOKUP_EXPORTS,
     SDK_EXPORTS,
     SERVICE_EXPORTS,
@@ -32,13 +33,24 @@ except ImportError:  # sources that were never built or installed
     _distribution_version = None
 __version__ = _distribution_version or "0+unknown"
 
+
+def _load_runtime(core: ModuleType) -> None:
+    # Imported on first use, so a plain `import xbbg` stays cheap; the guard itself never
+    # imports _sdk, which imports the guard.
+    from . import _sdk
+
+    _sdk.load_runtime(core)
+
+
 # Every import of the native extension, including `from xbbg._core import X`
 # (which bypasses __getattr__), checks that it was built for this xbbg and
-# first prepares the Bloomberg SDK library it links against.
-_core_guard.install(_distribution_version)
+# then loads the Bloomberg SDK runtime into the process (see _sdk.load_runtime).
+_core_guard.install(_distribution_version, load_runtime=_load_runtime)
 
 # Lazy import of the Rust module to avoid import errors when it's not built
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from . import _core
 
 # Same-thread re-entry detection only. Other threads importing concurrently wait
@@ -52,7 +64,11 @@ __all__ = list(PACKAGE_EXPORTS)
 
 
 def _import_core():
-    """Import and cache the native extension with a friendlier DLL error."""
+    """Import and cache the native extension.
+
+    The import guard (``_core_guard``) loads the Bloomberg runtime right after the extension
+    imports and raises an ``ImportError`` listing every place it looked when none loads.
+    """
     global _core_module
     core = _core_module
     if core is not None:
@@ -63,26 +79,17 @@ def _import_core():
     _core_import_state.active = True
     try:
         core = importlib.import_module("xbbg._core")
-    except ImportError as e:
-        msg = str(e)
-        if (
-            "DLL load failed" in msg  # Windows
-            or "cannot open shared object" in msg  # Linux
-            or "Library not loaded" in msg  # macOS dlopen
-            or "image not found" in msg  # older macOS dlopen
-        ):
-            raise ImportError(
-                f"{e}\n\n"
-                "The xbbg native extension requires the Bloomberg C++ SDK shared library.\n"
-                "Supported platforms: Linux x64, macOS arm64/x64, Windows x64/x86\n\n"
-                "You can provide the SDK from any of these sources:\n"
-                "  1. blpapi Python package: pip install blpapi --index-url "
-                "https://blpapi.bloomberg.com/repository/releases/python/simple/\n"
-                "  2. Bloomberg Terminal (DAPI) - automatically detected if installed\n"
-                "  3. Bloomberg C++ SDK: set BLPAPI_ROOT environment variable\n"
-                "  4. xbbg.set_sdk_path('/path/to/sdk') - manually set SDK path"
-            ) from e
-        raise
+        # Another thread inside _core_guard.import_without_runtime() can briefly
+        # publish xbbg._core in sys.modules before the runtime is loaded; finish
+        # loading before caching _core_module so callers never see a runtime-less
+        # extension.
+        loaded_sdk = getattr(core, "loaded_sdk", None)
+        if callable(loaded_sdk) and loaded_sdk() is None:
+            try:
+                _load_runtime(core)
+            except ImportError:
+                _core_guard.forget_core(core)
+                raise
     finally:
         _core_import_state.active = False
     _core_module = core
@@ -97,6 +104,7 @@ def _build_lazy_attr_exports() -> dict[str, tuple[str, str]]:
     module_groups = (
         ("_sdk", SDK_EXPORTS),
         ("_core", CORE_EXPORTS),
+        ("_python_logging", PYTHON_LOGGING_EXPORTS),
         ("blp", PACKAGE_BLP_EXPORTS),
         ("backend", BACKEND_EXPORTS),
         ("field_cache", FIELD_CACHE_EXPORTS),

@@ -19,11 +19,12 @@ import java.util.concurrent.Executor;
  * shared by the {@link Blp} functions, and helpers for futures.
  *
  * <p>Native libraries load on the first call that needs them. The Bloomberg runtime (blpapi) is
- * found from, in order: {@link #setSdkPath(Path)} or {@code -Dxbbg.blpapi.path}; {@code
- * BLPAPI_LIB_DIR}, {@code BLPAPI_ROOT}, {@code XBBG_DEV_SDK_ROOT}; a Bloomberg Terminal (DAPI)
- * install and, on Windows, {@code PATH}; a runtime provisioned into the xbbg cache; and finally a
- * download from {@link #setSdkSource(BlpapiSource)} or {@code -Dxbbg.sdk.source}/{@code
- * XBBG_SDK_SOURCE}.
+ * loaded at run time, by the search order every xbbg host shares: {@link #setSdkPath(Path)} or
+ * {@code -Dxbbg.blpapi.path}; {@code BLPAPI_LIB_DIR}; {@code BLPAPI_ROOT}; {@code
+ * XBBG_DEV_SDK_ROOT}; a Bloomberg Terminal (DAPI) install; the operating system's library search
+ * path variables; a runtime provisioned into the xbbg cache; and finally a download from {@link
+ * #setSdkSource(BlpapiSource)} or {@code -Dxbbg.sdk.source}/{@code XBBG_SDK_SOURCE}. A candidate
+ * that cannot be opened or is too old is skipped.
  */
 public final class Xbbg {
   private static final Object LOCK = new Object();
@@ -80,8 +81,9 @@ public final class Xbbg {
 
   /**
    * Sets where the Bloomberg runtime library is: the library file or a directory (a directory is
-   * also searched as an SDK root). Takes precedence over every other source; a location without a
-   * runtime is an error. Must be called before the natives load.
+   * also searched as an SDK root). Authoritative: when set, no other location or download source is
+   * tried in its place, and a location without a usable runtime fails with {@link
+   * BlpapiNotFoundException}. Must be called before the runtime loads.
    *
    * @param path the library file or directory, or {@code null} to clear the setting
    * @throws IllegalStateException if the natives are already loaded

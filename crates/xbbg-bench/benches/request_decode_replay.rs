@@ -442,6 +442,7 @@ fn run(case: &Case, fixture: &Fixture, shape: &Shape) -> Outcome {
 }
 
 fn main() {
+    xbbg_bench::load_sdk();
     let shape = Shape::from_env();
     let build = Instant::now();
     let fixtures = [

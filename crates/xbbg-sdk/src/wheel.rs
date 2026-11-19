@@ -14,8 +14,8 @@ use uv_normalize::PackageName;
 use uv_pep440::Version;
 use uv_platform_tags::{AbiTag, Arch, BinaryFormat, LanguageTag, PlatformTag};
 
+use crate::Platform;
 use crate::error::{Error, Result};
-use crate::platform::Platform;
 use crate::pypi::IndexFile;
 
 /// Platform rank of a wheel (lower is better); `None` if it does not run on `platform`.
@@ -331,26 +331,11 @@ fn extract_verified(
     Ok(hex::encode(actual))
 }
 
-/// A member-derived relative path as `/`-separated plain segments (zip-slip guard).
-///
-/// `\` separates segments on every platform, as in zip's `enclosed_name`: a Unix host would
-/// otherwise accept `x\..\..\.bashrc` as one harmless name and then write it through a path that,
-/// once normalized, climbs out of the staging directory. Empty, `.` and `..` segments (so also
-/// roots and UNC paths) and segments with `:` (drive prefixes, alternate data streams) are
-/// rejected.
+/// A member-derived relative path as `/`-separated plain segments (zip-slip guard); see
+/// [`crate::safe_relative`] for the rule.
 pub(crate) fn safe_relative(relative: &str) -> Result<String> {
-    let normalized = relative.replace('\\', "/");
-    let plain = !normalized.is_empty()
-        && normalized
-            .split('/')
-            .all(|segment| !matches!(segment, "" | "." | "..") && !segment.contains(':'));
-    if plain {
-        Ok(normalized)
-    } else {
-        Err(Error::InvalidArtifact(format!(
-            "unsafe archive path {relative}"
-        )))
-    }
+    crate::safe_relative(relative)
+        .ok_or_else(|| Error::InvalidArtifact(format!("unsafe archive path {relative}")))
 }
 
 #[cfg(test)]
@@ -396,39 +381,14 @@ mod tests {
     }
 
     #[test]
-    fn backslashes_separate_segments_on_every_platform() {
-        for (relative, expected) in [
-            ("License.txt", "License.txt"),
-            (
-                "cpp-licenses/LICENSE.openssl",
-                "cpp-licenses/LICENSE.openssl",
-            ),
-            (
-                "cpp-licenses\\LICENSE.openssl",
-                "cpp-licenses/LICENSE.openssl",
-            ),
-        ] {
-            assert_eq!(safe_relative(relative).unwrap(), expected);
-        }
-        for relative in [
-            "",
-            "..",
-            "a/../b",
-            "a\\..\\..\\x",
-            "x\\..\\..\\..\\..\\..\\..\\.bashrc",
-            "./a",
-            "a//b",
-            "a/",
-            "dir\\",
-            "/etc/passwd",
-            "\\\\server\\share\\x",
-            "C:\\x",
-            "C:x",
-            "notes.txt:stream",
-        ] {
-            let error = safe_relative(relative).expect_err(relative);
-            assert_eq!(error.code(), "INVALID_ARTIFACT", "{relative}");
-        }
+    fn unsafe_member_paths_are_invalid_artifacts() {
+        assert_eq!(
+            safe_relative("cpp-licenses\\LICENSE").unwrap(),
+            "cpp-licenses/LICENSE"
+        );
+        let error = safe_relative("a/../b").unwrap_err();
+        assert_eq!(error.code(), "INVALID_ARTIFACT");
+        assert!(error.to_string().contains("a/../b"));
     }
 
     #[test]

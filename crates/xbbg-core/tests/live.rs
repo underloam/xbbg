@@ -11,6 +11,16 @@
 use std::time::{Duration, Instant};
 use xbbg_core::{EventType, Name, Session, SessionOptions};
 
+#[ctor::ctor(unsafe)]
+fn load_sdk() {
+    xbbg_core::load(
+        xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+            .into_first_path()
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("tests need a Bloomberg runtime");
+}
+
 // ============================================================================
 // Test Helpers
 // ============================================================================

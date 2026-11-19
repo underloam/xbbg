@@ -1,235 +1,25 @@
 //! The JSON exchanged with `io.github.underloam.xbbg.sdk` (built by
 //! `ProvisionOptions.toRequest`, decoded by `ProvisionResult.fromNative`).
 //!
-//! Request:
-//! ```json
-//! {"source": {"kind": "pypi", "url": "…", "project": "blpapi"}
-//!          | {"kind": "conda", "channel": "…", "package": "libblpapi"}
-//!          | {"kind": "artifact", "location": "…", "sha256": "…"},
-//!  "version": "3.26.9.1", "platform": "windows-x86_64", "cacheDir": "…", "offline": false,
-//!  "proxy": {"mode": "system"} | {"mode": "direct"} | {"mode": "explicit", "url": "…", "noProxy": ["…"]},
-//!  "credentials": [{"host": "…", "username": "…", "password": "…"} | {"host": "…", "token": "…"}],
-//!  "netrc": "…", "extraCaPem": "…", "connectTimeoutMillis": 10000, "readTimeoutMillis": 60000,
-//!  "retries": 3, "requireArtifactHash": true}
-//! ```
-//! Only `source` and `cacheDir` are required; unknown fields are rejected.
-//!
-//! Result (also each element of the `installed` array):
-//! `{"version", "platform", "libraryPath", "licensePaths": [], "source", "artifactUrl",
-//! "artifactSha256", "libSha256", "cacheHit"}`.
+//! Delegates to [`xbbg_sdk::request`] with `require_cache_dir = true` so Java's
+//! JSON contract stays shared with every other xbbg host.
 
-use std::path::PathBuf;
-use std::time::Duration;
-
-use serde::{Deserialize, Serialize};
-use xbbg_sdk::{
-    Credential, Platform, ProvisionOptions, Provisioned, ProxyConfig, Source, TlsConfig,
-    VersionSpec,
-};
-
-/// A parsed `provision` request.
-pub(crate) struct Request {
-    pub(crate) options: ProvisionOptions,
-    pub(crate) source: Source,
-    pub(crate) platform: Platform,
-    pub(crate) version: VersionSpec,
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct RequestJson {
-    source: SourceJson,
-    version: Option<String>,
-    platform: Option<String>,
-    cache_dir: String,
-    #[serde(default)]
-    offline: bool,
-    proxy: Option<ProxyJson>,
-    #[serde(default)]
-    credentials: Vec<CredentialJson>,
-    netrc: Option<String>,
-    extra_ca_pem: Option<String>,
-    connect_timeout_millis: Option<u64>,
-    read_timeout_millis: Option<u64>,
-    retries: Option<u32>,
-    require_artifact_hash: Option<bool>,
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
-enum SourceJson {
-    Pypi {
-        url: String,
-        project: Option<String>,
-    },
-    Conda {
-        channel: String,
-        package: Option<String>,
-    },
-    Artifact {
-        location: String,
-        sha256: Option<String>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(tag = "mode", rename_all = "camelCase", deny_unknown_fields)]
-enum ProxyJson {
-    System,
-    Direct,
-    #[serde(rename_all = "camelCase")]
-    Explicit {
-        url: String,
-        #[serde(default)]
-        no_proxy: Vec<String>,
-    },
-}
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct CredentialJson {
-    host: String,
-    username: Option<String>,
-    password: Option<String>,
-    token: Option<String>,
-}
+pub(crate) use xbbg_sdk::request::{ProvisionRequest as Request, result_json, results_json};
 
 /// Parses and validates a request; the error is the message of an ARGUMENT failure.
 pub(crate) fn parse(json: &str) -> Result<Request, String> {
-    let request: RequestJson =
-        serde_json::from_str(json).map_err(|err| format!("invalid provisioning request: {err}"))?;
-    let platform = match request.platform.as_deref() {
-        Some(name) => name.parse::<Platform>().map_err(|err| err.to_string())?,
-        None => Platform::host().ok_or_else(|| {
-            format!(
-                "this platform has no Bloomberg runtime; pass one of: {}",
-                Platform::ALL.map(Platform::as_str).join(", ")
-            )
-        })?,
-    };
-    let version = match request.version {
-        Some(version) if version.trim().is_empty() => {
-            return Err("version must not be blank".into());
-        }
-        Some(version) if version.trim() != "latest" => VersionSpec::exact(version.trim()),
-        _ => VersionSpec::Latest,
-    };
-    let source = match request.source {
-        SourceJson::Pypi { url, project } => Source::PypiIndex {
-            url,
-            project: project.unwrap_or_else(|| xbbg_sdk::DEFAULT_PYPI_PROJECT.into()),
-        },
-        SourceJson::Conda { channel, package } => Source::CondaChannel {
-            channel,
-            package: package.unwrap_or_else(|| xbbg_sdk::DEFAULT_CONDA_PACKAGE.into()),
-        },
-        SourceJson::Artifact { location, sha256 } => Source::Artifact { location, sha256 },
-    };
-    if request.cache_dir.trim().is_empty() {
-        return Err("cacheDir must not be blank".into());
-    }
-
-    let mut options = ProvisionOptions::new(PathBuf::from(request.cache_dir));
-    let network = &mut options.network;
-    network.offline = request.offline;
-    network.proxy = match request.proxy {
-        None | Some(ProxyJson::System) => ProxyConfig::System,
-        Some(ProxyJson::Direct) => ProxyConfig::Direct,
-        Some(ProxyJson::Explicit { url, no_proxy }) => ProxyConfig::Explicit { url, no_proxy },
-    };
-    for credential in request.credentials {
-        let secret = match (credential.username, credential.password, credential.token) {
-            (Some(username), Some(password), None) => Credential::Basic { username, password },
-            (None, None, Some(token)) => Credential::Bearer { token },
-            _ => {
-                return Err(format!(
-                    "credential for {} needs either username and password or a token",
-                    credential.host
-                ));
-            }
-        };
-        network.credentials.push((credential.host, secret));
-    }
-    network.netrc = request.netrc.map(PathBuf::from);
-    network.tls = TlsConfig::System {
-        extra_ca_pem: request.extra_ca_pem.map(PathBuf::from),
-    };
-    if let Some(millis) = request.connect_timeout_millis {
-        network.connect_timeout = positive(millis, "connectTimeoutMillis")?;
-    }
-    if let Some(millis) = request.read_timeout_millis {
-        network.read_timeout = positive(millis, "readTimeoutMillis")?;
-    }
-    if let Some(retries) = request.retries {
-        network.retries = retries;
-    }
-    if let Some(require) = request.require_artifact_hash {
-        options.require_artifact_hash = require;
-    }
-    Ok(Request {
-        options,
-        source,
-        platform,
-        version,
-    })
-}
-
-fn positive(millis: u64, name: &str) -> Result<Duration, String> {
-    if millis == 0 {
-        Err(format!("{name} must be positive"))
-    } else {
-        Ok(Duration::from_millis(millis))
-    }
-}
-
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct ResultJson<'a> {
-    version: &'a str,
-    platform: &'static str,
-    library_path: String,
-    license_paths: Vec<String>,
-    source: &'a str,
-    artifact_url: &'a str,
-    artifact_sha256: &'a str,
-    lib_sha256: &'a str,
-    cache_hit: bool,
-}
-
-impl<'a> From<&'a Provisioned> for ResultJson<'a> {
-    fn from(installed: &'a Provisioned) -> Self {
-        Self {
-            version: &installed.version,
-            platform: installed.platform.as_str(),
-            library_path: installed.lib_path.to_string_lossy().into_owned(),
-            license_paths: installed
-                .license_paths
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            source: &installed.source,
-            artifact_url: &installed.artifact_url,
-            artifact_sha256: &installed.artifact_sha256,
-            lib_sha256: &installed.lib_sha256,
-            cache_hit: installed.cache_hit,
-        }
-    }
-}
-
-/// One install as a JSON object.
-pub(crate) fn result_json(installed: &Provisioned) -> String {
-    serde_json::to_string(&ResultJson::from(installed))
-        .unwrap_or_else(|err| format!("{{\"error\":\"{err}\"}}"))
-}
-
-/// Installs as a JSON array.
-pub(crate) fn results_json(installed: &[Provisioned]) -> String {
-    let results: Vec<ResultJson<'_>> = installed.iter().map(ResultJson::from).collect();
-    serde_json::to_string(&results).unwrap_or_else(|_| "[]".into())
+    xbbg_sdk::request::parse_json(json, true)
 }
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    use xbbg_sdk::{
+        Credential, Platform, Provisioned, ProxyConfig, Source, TlsConfig, VersionSpec,
+    };
+
     use super::*;
 
     #[test]

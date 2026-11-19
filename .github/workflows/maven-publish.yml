@@ -291,7 +291,7 @@ jobs:
         run: |
           timestamp=$(git log -1 --format=%cI)
           ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
-          python3 -c 'import pathlib, re, sys; p = pathlib.Path("pom.xml"); p.write_text(re.sub(r"<project\.build\.outputTimestamp>[^<]+</project\.build\.outputTimestamp>", f"<project.build.outputTimestamp>{sys.argv[1]}</project.build.outputTimestamp>", p.read_text(), count=1), encoding="utf-8")' "$timestamp"
+          python3 ../scripts/stamp_maven_timestamp.py "$timestamp"
 
       # The publish job rebuilds from the same inputs; the commit time pins jar entry
       # timestamps so both builds produce identical jars.
@@ -511,7 +511,7 @@ jobs:
         run: |
           timestamp=$(git log -1 --format=%cI)
           ./mvnw -B versions:set -DnewVersion="$VERSION" < /dev/null
-          python3 -c 'import pathlib, re, sys; p = pathlib.Path("pom.xml"); p.write_text(re.sub(r"<project\.build\.outputTimestamp>[^<]+</project\.build\.outputTimestamp>", f"<project.build.outputTimestamp>{sys.argv[1]}</project.build.outputTimestamp>", p.read_text(), count=1), encoding="utf-8")' "$timestamp"
+          python3 ../scripts/stamp_maven_timestamp.py "$timestamp"
 
       # -Prelease: release-version and release-natives guards, BouncyCastle signing from
       # MAVEN_GPG_KEY, then one Central Portal bundle. -DskipUpload=true: nothing leaves the

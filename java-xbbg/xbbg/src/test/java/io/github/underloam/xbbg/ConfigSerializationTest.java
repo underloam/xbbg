@@ -70,6 +70,7 @@ class ConfigSerializationTest {
                     .build())
             .requestTimeoutMs(5000)
             .streamsDeactivatedWarnMs(0)
+            .reconnectGraceMs(2500)
             .keepAliveEnabled(true)
             .keepAliveInactivityMs(20000)
             .keepAliveResponseTimeoutMs(10000)
@@ -97,8 +98,9 @@ class ConfigSerializationTest {
             + "\"numStartAttempts\":1,\"autoRestartOnDisconnection\":false,"
             + "\"retryPolicy\":{\"maxRetries\":2,\"initialDelayMs\":10,\"backoffFactor\":1.5,"
             + "\"maxDelayMs\":100},"
-            + "\"requestTimeoutMs\":5000,\"streamsDeactivatedWarnMs\":0,\"keepAliveEnabled\":true,"
-            + "\"keepAliveInactivityMs\":20000,\"keepAliveResponseTimeoutMs\":10000,"
+            + "\"requestTimeoutMs\":5000,\"streamsDeactivatedWarnMs\":0,\"reconnectGraceMs\":2500,"
+            + "\"keepAliveEnabled\":true,\"keepAliveInactivityMs\":20000,"
+            + "\"keepAliveResponseTimeoutMs\":10000,"
             + "\"slowConsumerHiWaterMark\":0.75,\"slowConsumerLoWaterMark\":0.5,"
             + "\"sdkLogLevel\":\"warn\",\"socks5\":{\"host\":\"proxy\",\"port\":1080}}",
         config.toJson().text());

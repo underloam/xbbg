@@ -263,7 +263,8 @@ enum UpstreamSlot {
     Unassigned,
     /// The worker slot holds this feed's upstream subscription.
     Assigned(SlabKey),
-    /// The worker freed the slot (topic failure/termination or session end).
+    /// The feed gave up the slot: the worker freed it (topic failure,
+    /// termination or session end) or retirement consumed it to unsubscribe.
     Released,
 }
 
@@ -281,6 +282,11 @@ impl UpstreamSlot {
             Self::Assigned(key) => Some(key),
             Self::Unassigned | Self::Released => None,
         }
+    }
+
+    /// Give up the slot for good, returning the key still owed an unsubscribe.
+    fn release(&mut self) -> Option<SlabKey> {
+        std::mem::replace(self, Self::Released).key()
     }
 }
 
@@ -1743,8 +1749,7 @@ impl FeedSession {
     fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
-            test.enable_all_fields(key);
-            return Ok(());
+            return test.enable_all_fields(key);
         }
         self.command()?.enable_all_fields(key)
     }
@@ -1756,8 +1761,7 @@ impl FeedSession {
     ) -> Result<(), BlpAsyncError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
-            test.seed_kinds(key, kinds);
-            return Ok(());
+            return test.seed_kinds(key, kinds);
         }
         self.command()?.seed_kinds(key, kinds)
     }
@@ -2125,6 +2129,17 @@ impl SubscriptionHandle {
             }
             let changed = {
                 let mut state = feed.state.lock();
+                // A rejected, failed or retired topic has nothing to grow, and a
+                // retired feed no longer owns the worker slot it once held.
+                let owner = Arc::downgrade(&self.inner);
+                if matches!(state.lifecycle, "failed" | "closed")
+                    || !state
+                        .consumers
+                        .iter()
+                        .any(|consumer| consumer.active && consumer.owner.ptr_eq(&owner))
+                {
+                    continue;
+                }
                 let changed = grow_union(&mut state, &new_fields);
                 seed_image_kinds(&mut state, &kinds);
                 state.revision = state.revision.saturating_add(1);
@@ -2806,6 +2821,12 @@ impl SharedSubscriptions {
                         (feed, true)
                     }
                 };
+                if !created && matches!(feed.state.lock().lifecycle, "failed" | "closed") {
+                    return Err(BlpAsyncError::Blp(BlpError::SubscriptionFailure {
+                        cid: None,
+                        label: Some("upstream feed ended while attaching".into()),
+                    }));
+                }
                 if !created && !kinds.is_empty() {
                     feed.session.seed_kinds(feed.upstream_key()?, &kinds)?;
                 }
@@ -2977,10 +2998,13 @@ impl SharedSubscriptions {
         if !removed {
             return Ok(());
         }
+        // Consume the key with the lifecycle change: once the unsubscribe frees
+        // the slot the next topic may reuse it, and a handle that still holds
+        // this feed must find nothing to address.
         let key = {
             let mut state = feed.state.lock();
             state.lifecycle = "closed";
-            state.upstream.key()
+            state.upstream.release()
         };
         feed.session.feeds.lock().remove(&feed.status_topic);
         let result = key.map_or(Ok(()), |key| feed.session.unsubscribe(key));

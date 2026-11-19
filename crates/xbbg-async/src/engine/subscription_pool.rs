@@ -18,8 +18,8 @@ use xbbg_core::{AsyncSession, BlpError, CorrelationId, EventType, SubscriptionLi
 
 use super::dispatch::DispatchKey;
 use super::session_lifecycle::{
-    PendingServiceOpen, PendingServiceOpens, PendingWaiter, StartupLatch, start_concurrently,
-    worker_start_error,
+    ConnectionSet, PendingServiceOpen, PendingServiceOpens, PendingWaiter, SessionConnections,
+    SessionPool, StartupLatch, connection_server, start_concurrently, worker_start_error,
 };
 use super::state::{
     FieldKind, MessageOutcome, SubscriptionForwarder, SubscriptionMetrics, SubscriptionSender,
@@ -280,6 +280,9 @@ struct SubscriptionWorkerState {
     status: Option<SharedSubscriptionStatus>,
     last_streams_warn_us: HashMap<SlabKey, i64>,
     pending_service_opens: PendingServiceOpens,
+    /// Servers the session reports connected. Informational: reported through
+    /// `Engine::connections`, never used to fail or resubscribe anything.
+    connections: ConnectionSet,
 }
 
 struct SubscriptionWorkerShared {
@@ -316,6 +319,15 @@ impl SubscriptionWorkerShared {
 
     fn shutdown_requested(&self) -> bool {
         self.shutdown.load(Ordering::Acquire)
+    }
+
+    /// This session's connected servers, in the order they connected.
+    fn connections(&self) -> SessionConnections {
+        SessionConnections {
+            pool: SessionPool::Subscription,
+            worker_id: self.id,
+            servers: self.state.lock().connections.servers(),
+        }
     }
 
     fn ensure_running(&self) -> Result<(), BlpAsyncError> {
@@ -523,6 +535,7 @@ impl SubscriptionWorkerState {
             status: None,
             last_streams_warn_us: HashMap::new(),
             pending_service_opens: PendingServiceOpens::default(),
+            connections: ConnectionSet::default(),
         }
     }
 
@@ -1108,6 +1121,7 @@ impl SubscriptionWorkerState {
                 // We just record state for diagnostics; do NOT drain subscriptions and
                 // do NOT resubscribe on the subsequent Up.
                 let reason = extract_reason_description(msg);
+                self.connections.down(connection_server(msg).as_deref());
                 let context = SubscriptionSessionEvent::ConnectionDown
                     .log_context(shared.shutdown_requested());
                 log_subscription_session_event(
@@ -1140,6 +1154,7 @@ impl SubscriptionWorkerState {
                 // re-auth flow, so drain subs, mark Dead, and let the pool spawn
                 // a fresh worker that re-auths during startup.
                 let reason = extract_reason_description(msg);
+                self.connections.clear();
                 xbbg_log::error!(
                     worker_id = self.id,
                     active_subs = self.subs.len(),
@@ -1185,6 +1200,7 @@ impl SubscriptionWorkerState {
             }
             "SessionTerminated" => {
                 let reason = extract_reason_description(msg);
+                self.connections.clear();
                 let context =
                     SubscriptionSessionEvent::Terminated.log_context(shared.shutdown_requested());
                 shared.startup.resolve(Err(session_start_error(
@@ -1231,6 +1247,7 @@ impl SubscriptionWorkerState {
                 // SubscriptionStreams{Activated,Deactivated} events report whether
                 // individual subscriptions become active again.
                 let reason = extract_reason_description(msg);
+                self.connections.up(connection_server(msg).as_deref());
                 xbbg_log::info!(
                     worker_id = self.id,
                     active_subs = self.subs.len(),
@@ -2425,6 +2442,18 @@ impl SubscriptionSessionPool {
         workers
     }
 
+    /// Servers each registered subscription session is connected to, one
+    /// entry per session in id order.
+    pub(crate) fn connections(&self) -> Vec<SessionConnections> {
+        let mut connections: Vec<_> = self
+            .registered_workers()
+            .iter()
+            .map(|worker| worker.shared.connections())
+            .collect();
+        connections.sort_by_key(|entry| entry.worker_id);
+        connections
+    }
+
     fn drain_available(&self) {
         let available = {
             let mut locked = self.available.lock();
@@ -2527,375 +2556,11 @@ impl Drop for SessionClaim {
     }
 }
 
-/// SDK-backed worker adapter for deterministic shared-feed tests and benchmarks.
-/// Exercises the real CID dispatch and extraction without starting a session.
 #[cfg(any(test, feature = "test-support"))]
-pub(super) struct TestSubscriptionSession {
-    shared: SubscriptionWorkerShared,
-    #[cfg(test)]
-    pub(super) subscribes: AtomicUsize,
-    #[cfg(test)]
-    pub(super) resubscribes: AtomicUsize,
-    #[cfg(test)]
-    pub(super) unsubscribes: AtomicUsize,
-    #[cfg(test)]
-    pub(super) fail_resubscribe: Mutex<HashSet<SlabKey>>,
-}
+mod test_session;
 
 #[cfg(any(test, feature = "test-support"))]
-impl TestSubscriptionSession {
-    pub(super) fn new(config: Arc<EngineConfig>) -> Arc<Self> {
-        Arc::new(Self {
-            shared: SubscriptionWorkerShared::new(
-                0,
-                config,
-                Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
-            ),
-            #[cfg(test)]
-            subscribes: AtomicUsize::new(0),
-            #[cfg(test)]
-            resubscribes: AtomicUsize::new(0),
-            #[cfg(test)]
-            unsubscribes: AtomicUsize::new(0),
-            #[cfg(test)]
-            fail_resubscribe: Mutex::new(HashSet::new()),
-        })
-    }
-
-    pub(super) fn subscribe(
-        &self,
-        service: &str,
-        registrations: Vec<FeedRegistration>,
-        fields: Vec<String>,
-        field_kinds: HashMap<String, FieldKind>,
-        all_fields: bool,
-        status: SharedSubscriptionStatus,
-    ) -> Result<Vec<SlabKey>, BlpAsyncError> {
-        self.shared.set_status(status.clone());
-        self.shared
-            .record_service_ready_if_already_open(service, true);
-        let (_, keys, metrics, topics) =
-            self.shared
-                .register_subscriptions(SubscriptionRegistrationRequest {
-                    service: service.into(),
-                    registrations,
-                    fields,
-                    field_kinds,
-                    all_fields,
-                    options: Vec::new(),
-                    overflow_policy: Some(OverflowPolicy::DropNewest),
-                    forwarder: None,
-                })?;
-        status.update_topics(&keys, |next| next.add_active(&topics, &keys, metrics));
-        #[cfg(test)]
-        self.subscribes.fetch_add(keys.len(), Ordering::Relaxed);
-        Ok(keys)
-    }
-
-    pub(super) fn resubscribe(
-        &self,
-        key: SlabKey,
-        fields: &[String],
-        kinds: &HashMap<String, FieldKind>,
-    ) -> Result<(), BlpAsyncError> {
-        #[cfg(test)]
-        self.resubscribes.fetch_add(1, Ordering::Relaxed);
-        #[cfg(test)]
-        if self.fail_resubscribe.lock().contains(&key) {
-            return Err(BlpAsyncError::ConfigError {
-                detail: "synthetic resubscribe failure".into(),
-            });
-        }
-        let mut worker = self.shared.state.lock();
-        worker.subs[key].add_fields(fields);
-        worker.subs[key].seed_kinds(kinds);
-        Ok(())
-    }
-
-    pub(super) fn enable_all_fields(&self, key: SlabKey) {
-        self.shared.state.lock().subs[key].enable_all_fields();
-    }
-
-    pub(super) fn seed_kinds(&self, key: SlabKey, kinds: &HashMap<String, FieldKind>) {
-        self.shared.state.lock().subs[key].seed_kinds(kinds);
-    }
-
-    pub(super) fn unsubscribe(
-        &self,
-        key: SlabKey,
-        _status: &SharedSubscriptionStatus,
-    ) -> Result<(), BlpAsyncError> {
-        let (_, count) = self.shared.build_unsubscribe_list(vec![key]);
-        #[cfg(test)]
-        self.unsubscribes.fetch_add(count, Ordering::Relaxed);
-        if count != 0 {
-            self.status(key, "SubscriptionTerminated");
-        }
-        Ok(())
-    }
-
-    fn cid(key: SlabKey) -> i64 {
-        match DispatchKey::from_slab_key(key).to_correlation_id() {
-            CorrelationId::Int(value) => value,
-            _ => unreachable!("slab dispatch uses integer CIDs"),
-        }
-    }
-
-    pub(super) fn publish_json(&self, key: SlabKey, json: &str) -> Result<(), BlpAsyncError> {
-        use std::fmt::Write;
-
-        let value: serde_json::Value =
-            serde_json::from_str(json).map_err(|error| BlpAsyncError::ConfigError {
-                detail: format!("invalid synthetic update JSON: {error}"),
-            })?;
-        let values = value
-            .as_object()
-            .ok_or_else(|| BlpAsyncError::ConfigError {
-                detail: "synthetic update must be a JSON object".into(),
-            })?;
-        let layout = self
-            .shared
-            .state
-            .lock()
-            .subs
-            .get(key)
-            .map(SubscriptionState::layout)
-            .ok_or_else(|| BlpAsyncError::ConfigError {
-                detail: "synthetic subscription is no longer registered".into(),
-            })?;
-        let mut fields = String::new();
-        for (name, value) in values {
-            if name.chars().any(|character| {
-                !matches!(
-                    character,
-                    '\u{9}' | '\u{a}' | '\u{d}'
-                        | '\u{20}'..='\u{d7ff}'
-                        | '\u{e000}'..='\u{fffd}'
-                        | '\u{10000}'..='\u{10ffff}'
-                )
-            }) {
-                return Err(BlpAsyncError::ConfigError {
-                    detail: "synthetic field names contain XML 1.0-forbidden characters".into(),
-                });
-            }
-            let kind = match value {
-                serde_json::Value::String(_) => "String",
-                serde_json::Value::Bool(_) => "Boolean",
-                serde_json::Value::Number(_) => "Float64",
-                serde_json::Value::Null if name.starts_with("MKTDATA_") => "String",
-                serde_json::Value::Null if name == "IS_DELAYED_STREAM" => "Boolean",
-                serde_json::Value::Null => {
-                    match layout
-                        .fields
-                        .iter()
-                        .find(|field| field.name.as_ref() == name)
-                    {
-                        Some(field) => match field.kind {
-                            FieldKind::Bool => "Boolean",
-                            FieldKind::I32 => "Int32",
-                            FieldKind::I64 => "Int64",
-                            FieldKind::Str => "String",
-                            FieldKind::Date32 => "Date",
-                            FieldKind::Time64Micros => "Time",
-                            FieldKind::TimestampMicros => "Datetime",
-                            FieldKind::Unknown | FieldKind::F64 => "Float64",
-                        },
-                        None => "Float64",
-                    }
-                }
-                serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                    return Err(BlpAsyncError::ConfigError {
-                        detail: "synthetic update fields must be scalar values".into(),
-                    });
-                }
-            };
-            fields.push_str("<element name=\"");
-            for character in name.chars() {
-                match character {
-                    '&' => fields.push_str("&amp;"),
-                    '<' => fields.push_str("&lt;"),
-                    '>' => fields.push_str("&gt;"),
-                    '"' => fields.push_str("&quot;"),
-                    '\'' => fields.push_str("&apos;"),
-                    '\t' => fields.push_str("&#x9;"),
-                    '\n' => fields.push_str("&#xA;"),
-                    '\r' => fields.push_str("&#xD;"),
-                    character if !character.is_ascii() => {
-                        write!(&mut fields, "&#x{:X};", u32::from(character))
-                            .expect("writing synthetic field name to a String");
-                    }
-                    character => fields.push(character),
-                }
-            }
-            write!(&mut fields, r#"" type="{kind}" minOccurs="0"/>"#)
-                .expect("writing synthetic schema to a String");
-        }
-        self.try_data(key, &fields, json)
-    }
-
-    #[cfg(test)]
-    pub(super) fn data(&self, key: SlabKey, fields: &str, json: &str) {
-        self.try_data(key, fields, json)
-            .expect("valid synthetic SDK data");
-    }
-
-    fn try_data(&self, key: SlabKey, fields: &str, json: &str) -> Result<(), BlpAsyncError> {
-        let schema = format!(
-            r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
-            <service name="//xbbg/test" version="1.0.0.0">
-                <event name="MarketDataEvents" eventType="Update"/>
-            </service><schema><sequenceType name="Update">{fields}</sequenceType></schema>
-            </ServiceDefinition>"#
-        );
-        let event = xbbg_core::test_support::TestEvent::try_with_schema(
-            &schema,
-            EventType::SubscriptionData,
-            "MarketDataEvents",
-            &[Self::cid(key)],
-            |formatter| formatter.try_json(json),
-        )?;
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-        Ok(())
-    }
-
-    pub(super) fn status(&self, key: SlabKey, message_type: &str) {
-        let event = xbbg_core::test_support::TestEvent::admin(
-            EventType::SubscriptionStatus,
-            message_type,
-            &[Self::cid(key)],
-            |_| {},
-        );
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-
-    #[cfg(test)]
-    pub(super) fn status_batch(&self, messages: &[(SlabKey, &str, String)]) {
-        let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
-        <service name="//xbbg/test" version="1.0.0.0">
-            <event name="SubscriptionFailure" eventType="Status"/>
-            <event name="SubscriptionTerminated" eventType="Status"/>
-        </service><schema>
-            <sequenceType name="Status"><element name="reason" type="Reason"/></sequenceType>
-            <sequenceType name="Reason"><element name="description" type="String"/></sequenceType>
-        </schema></ServiceDefinition>"#;
-        let (key, message_type, reason) = messages.first().expect("nonempty status batch");
-        let json = serde_json::json!({"reason": {"description": reason}}).to_string();
-        let mut event = xbbg_core::test_support::TestEvent::with_schema(
-            schema,
-            EventType::SubscriptionStatus,
-            message_type,
-            &[Self::cid(*key)],
-            |formatter| formatter.json(&json),
-        );
-        for (key, message_type, reason) in &messages[1..] {
-            let json = serde_json::json!({"reason": {"description": reason}}).to_string();
-            event.append_message(message_type, &[Self::cid(*key)], |formatter| {
-                formatter.json(&json)
-            });
-        }
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-
-    #[cfg(test)]
-    pub(super) fn field_exceptions(&self, key: SlabKey, json: &str) {
-        let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
-        <service name="//xbbg/test" version="1.0.0.0">
-            <event name="SubscriptionStarted" eventType="Started"/>
-        </service><schema>
-            <sequenceType name="Started"><element name="exceptions" type="Exception" maxOccurs="unbounded"/></sequenceType>
-            <sequenceType name="Exception"><element name="fieldId" type="String"/><element name="reason" type="Reason"/></sequenceType>
-            <sequenceType name="Reason">
-                <element name="category" type="String"/><element name="description" type="String"/>
-                <element name="subcategory" type="String"/><element name="errorCode" type="Int32"/>
-                <element name="source" type="String"/>
-            </sequenceType>
-        </schema></ServiceDefinition>"#;
-        let event = xbbg_core::test_support::TestEvent::with_schema(
-            schema,
-            EventType::SubscriptionStatus,
-            "SubscriptionStarted",
-            &[Self::cid(key)],
-            |formatter| formatter.json(json),
-        );
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-
-    pub(super) fn session_event(&self, message_type: &str) {
-        let event = if message_type == "AuthorizationRevoked" {
-            // TestUtil has no built-in authorization schema.
-            let schema = r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
-            <service name="//xbbg/test" version="1.0.0.0">
-                <event name="AuthorizationRevoked" eventType="Revoked"/>
-            </service><schema><sequenceType name="Revoked"/></schema></ServiceDefinition>"#;
-            xbbg_core::test_support::TestEvent::with_schema(
-                schema,
-                EventType::AuthorizationStatus,
-                message_type,
-                &[],
-                |_| {},
-            )
-        } else {
-            xbbg_core::test_support::TestEvent::admin(
-                EventType::SessionStatus,
-                message_type,
-                &[],
-                |_| {},
-            )
-        };
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-
-    #[cfg(test)]
-    pub(super) fn admin_event(&self, message_type: &str) {
-        let event =
-            xbbg_core::test_support::TestEvent::admin(EventType::Admin, message_type, &[], |_| {});
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-
-    #[cfg(test)]
-    pub(super) fn service_event(&self, message_type: &str) {
-        self.service_event_for(message_type, "//blp/mktdata");
-    }
-
-    #[cfg(test)]
-    pub(super) fn service_event_for(&self, message_type: &str, service: &str) {
-        let schema = format!(
-            r#"<ServiceDefinition name="xbbg.test" version="1.0.0.0">
-        <service name="//xbbg/test" version="1.0.0.0"><event name="{message_type}" eventType="Status"/></service>
-        <schema><sequenceType name="Status"><element name="serviceName" type="String"/></sequenceType></schema>
-        </ServiceDefinition>"#
-        );
-        let event = xbbg_core::test_support::TestEvent::with_schema(
-            &schema,
-            EventType::ServiceStatus,
-            message_type,
-            &[],
-            |formatter| formatter.json(&serde_json::json!({"serviceName": service}).to_string()),
-        );
-        self.shared
-            .state
-            .lock()
-            .dispatch_event(event.event(), &self.shared);
-    }
-}
+pub(super) use test_session::TestSubscriptionSession;
 
 #[cfg(test)]
 mod tests {
@@ -3113,6 +2778,93 @@ mod tests {
             old_rx.try_recv(),
             Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
         ));
+    }
+
+    #[test]
+    fn connection_status_is_recorded_per_server_without_touching_health_or_subscriptions() {
+        let shared = SubscriptionWorkerShared::new(
+            7,
+            Arc::new(EngineConfig::default()),
+            Arc::new(AtomicU8::new(WorkerHealth::Healthy as u8)),
+        );
+        let (tx, mut rx) = subscription_channel(1);
+        shared.state.lock().stream_terminator = Some(tx.terminator());
+        let status = |message_type: &str, server: Option<&str>| {
+            let event =
+                TestEvent::admin(EventType::SessionStatus, message_type, &[], |formatter| {
+                    match server {
+                        Some(server) => formatter.json(&format!(r#"{{"server":"{server}"}}"#)),
+                        None => formatter.json("{}"),
+                    }
+                });
+            shared.state.lock().dispatch_event(event.event(), &shared);
+        };
+        let connections = || shared.connections();
+
+        assert_eq!(connections().pool, SessionPool::Subscription);
+        assert_eq!(connections().worker_id, 7);
+        assert!(connections().servers.is_empty());
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        status("SessionConnectionUp", Some("b.example.com:8194"));
+        assert_eq!(
+            connections().servers,
+            ["a.example.com:8194", "b.example.com:8194"]
+        );
+
+        status("SessionConnectionDown", Some("a.example.com:8194"));
+        assert_eq!(connections().servers, ["b.example.com:8194"]);
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        assert_eq!(
+            connections().servers,
+            ["b.example.com:8194", "a.example.com:8194"]
+        );
+
+        // Unnamed connections are not reported, and Down stays informational.
+        status("SessionConnectionUp", None);
+        status("SessionConnectionDown", Some("a.example.com:8194"));
+        status("SessionConnectionDown", Some("b.example.com:8194"));
+        status("SessionConnectionDown", None);
+        assert!(connections().servers.is_empty());
+        assert_eq!(
+            shared.health.load(Ordering::Acquire),
+            WorkerHealth::Healthy as u8
+        );
+        assert!(matches!(
+            rx.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+        ));
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        status("SessionTerminated", None);
+        assert!(connections().servers.is_empty());
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        let auth_schema = r#"<ServiceDefinition name="xbbg.test.auth" version="1.0.0.0">
+            <service name="//xbbg/test/auth" version="1.0.0.0">
+                <event name="AuthorizationRevoked" eventType="AuthorizationRevoked"/>
+            </service>
+            <schema>
+                <sequenceType name="AuthorizationRevoked">
+                    <element name="reason" type="Reason" minOccurs="0"/>
+                </sequenceType>
+                <sequenceType name="Reason">
+                    <element name="description" type="String" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let auth_event = TestEvent::with_schema(
+            auth_schema,
+            EventType::AuthorizationStatus,
+            "AuthorizationRevoked",
+            &[],
+            |formatter| formatter.json("{}"),
+        );
+        shared
+            .state
+            .lock()
+            .dispatch_event(auth_event.event(), &shared);
+        assert!(connections().servers.is_empty());
     }
 
     #[test]

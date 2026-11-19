@@ -16,6 +16,37 @@ vi.mock(import("node:module"), async (importOriginal) => {
     extAuctionZeroPriceFields: () => ["SYNTHETIC_AUCTION_FIELD"],
     extImbalanceSide: () => null,
     getLogLevel: () => "off",
+    // @xbbg/core loads the Bloomberg runtime right after the addon; nothing is opened here.
+    loadSdk: () => ({
+      detail: "",
+      path: "synthetic-runtime",
+      rejected: [],
+      source: "explicit",
+      version: "0.0.0.0",
+    }),
+    // The addon's request planner (xbbg-host), reduced to the two plans these tests send; the
+    // shapes are what the real planner returns for them.
+    planRequest: (method: string, argsJson: string) => {
+      const args = JSON.parse(argsJson) as { fields?: string[]; tickers?: string[] };
+      if (method === "bdp") {
+        return JSON.stringify({
+          service: "//blp/refdata",
+          operation: "ReferenceDataRequest",
+          extractor: "refdata",
+          securities: args.tickers,
+          fields: args.fields,
+          includeSecurityErrors: false,
+        });
+      }
+      if (method === "bflds") {
+        return JSON.stringify({
+          service: "//blp/apiflds",
+          operation: "FieldInfoRequest",
+          fieldIds: args.fields,
+        });
+      }
+      throw new Error(`the addon mock does not plan ${method}`);
+    },
     setLogLevel: () => undefined,
   };
 

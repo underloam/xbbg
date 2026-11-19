@@ -1,184 +1,94 @@
 use std::collections::HashMap;
 
+use pyo3::conversion::FromPyObjectOwned;
 use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
-use xbbg_async::engine::{RequestParams, RequestParamsInput, SecurityOverridePairs};
+use xbbg_async::engine::RequestParams;
+use xbbg_host::request::{RequestInput, SecurityOverride, StringPair};
+use xbbg_host::style::Style;
 
-/// Convert a Python dictionary to Rust RequestParams.
+/// The value stored under `key`, converted to `T`; `None` when the key is absent.
+fn item<'py, T: FromPyObjectOwned<'py>>(
+    dict: &Bound<'py, PyDict>,
+    key: &str,
+) -> PyResult<Option<T>> {
+    dict.get_item(key)?
+        .map(|value| value.extract::<T>().map_err(Into::into))
+        .transpose()
+}
+
+/// A required key: a missing one is a `RuntimeError` naming it.
+fn required(dict: &Bound<'_, PyDict>, key: &str) -> PyResult<String> {
+    item(dict, key)?
+        .ok_or_else(|| PyRuntimeError::new_err(format!("missing required field: {key}")))
+}
+
+fn pairs(values: Vec<(String, String)>) -> Vec<StringPair> {
+    values
+        .into_iter()
+        .map(|(key, value)| StringPair { key, value })
+        .collect()
+}
+
+fn pairs_of_map(values: HashMap<String, String>) -> Vec<StringPair> {
+    pairs(values.into_iter().collect())
+}
+
+/// Convert a Python request dictionary (snake_case keys) to engine `RequestParams`.
+///
+/// The dictionary supplies the generic request members; `xbbg-host` applies the
+/// engine's normalization and defaults. `service` and `operation` must be
+/// present, and every failure is a `RuntimeError` carrying the engine's message.
 pub(crate) fn dict_to_request_params(dict: &Bound<'_, PyDict>) -> PyResult<RequestParams> {
-    // Required fields
-    let service: String = dict
-        .get_item("service")?
-        .ok_or_else(|| PyRuntimeError::new_err("missing required field: service"))?
-        .extract()?;
-
-    let operation: String = dict
-        .get_item("operation")?
-        .ok_or_else(|| PyRuntimeError::new_err("missing required field: operation"))?
-        .extract()?;
-
-    let extractor: Option<String> = dict
-        .get_item("extractor")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let request_operation: Option<String> = dict
-        .get_item("request_operation")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let request_id: Option<String> = dict
-        .get_item("request_id")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    // Optional fields
-    let securities: Option<Vec<String>> = dict
-        .get_item("securities")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let security: Option<String> = dict
-        .get_item("security")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let fields: Option<Vec<String>> = dict.get_item("fields")?.map(|v| v.extract()).transpose()?;
-
-    let overrides: Option<Vec<(String, String)>> = dict
-        .get_item("overrides")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let security_overrides: Option<SecurityOverridePairs> = dict
-        .get_item("security_overrides")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let elements: Option<Vec<(String, String)>> = dict
-        .get_item("elements")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let kwargs: Option<HashMap<String, String>> =
-        dict.get_item("kwargs")?.map(|v| v.extract()).transpose()?;
-
-    let start_date: Option<String> = dict
-        .get_item("start_date")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let end_date: Option<String> = dict
-        .get_item("end_date")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let start_datetime: Option<String> = dict
-        .get_item("start_datetime")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let end_datetime: Option<String> = dict
-        .get_item("end_datetime")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let event_type: Option<String> = dict
-        .get_item("event_type")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let event_types: Option<Vec<String>> = dict
-        .get_item("event_types")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let interval: Option<u32> = dict
-        .get_item("interval")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let options: Option<Vec<(String, String)>> =
-        dict.get_item("options")?.map(|v| v.extract()).transpose()?;
-
-    let field_types: Option<HashMap<String, String>> = dict
-        .get_item("field_types")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let include_security_errors: Option<bool> = dict
-        .get_item("include_security_errors")?
-        .map(|v| v.extract())
-        .transpose()?;
-    let return_eids: Option<bool> = dict
-        .get_item("return_eids")?
-        .map(|v| v.extract())
-        .transpose()?;
-    let on_delayed: Option<String> = dict
-        .get_item("on_delayed")?
-        .map(|v| v.extract::<Option<String>>())
-        .transpose()?
-        .flatten();
-
-    let validate_fields: Option<bool> = dict
-        .get_item("validate_fields")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let search_spec: Option<String> = dict
-        .get_item("search_spec")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let field_ids: Option<Vec<String>> = dict
-        .get_item("field_ids")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    let format: Option<String> = dict.get_item("format")?.map(|v| v.extract()).transpose()?;
-
-    let request_tz: Option<String> = dict
-        .get_item("request_tz")?
-        .map(|v| v.extract())
-        .transpose()?;
-    let output_tz: Option<String> = dict
-        .get_item("output_tz")?
-        .map(|v| v.extract())
-        .transpose()?;
-
-    RequestParamsInput {
+    let service = required(dict, "service")?;
+    let operation = required(dict, "operation")?;
+    RequestInput {
         service,
         operation: Some(operation),
-        request_operation,
-        request_id,
-        extractor,
-        securities,
-        security,
-        fields,
-        overrides,
-        security_overrides,
-        elements,
-        kwargs,
-        start_date,
-        end_date,
-        start_datetime,
-        end_datetime,
-        request_tz,
-        output_tz,
-        event_type,
-        event_types,
-        interval,
-        options,
-        field_types,
-        include_security_errors,
-        return_eids,
-        on_delayed,
-        validate_fields,
-        search_spec,
-        field_ids,
-        format,
+        request_operation: item(dict, "request_operation")?,
+        request_id: item(dict, "request_id")?,
+        extractor: item(dict, "extractor")?,
+        securities: item(dict, "securities")?,
+        security: item(dict, "security")?,
+        fields: item(dict, "fields")?,
+        overrides: item(dict, "overrides")?.map(pairs),
+        security_overrides: item::<Vec<(String, Vec<(String, String)>)>>(
+            dict,
+            "security_overrides",
+        )?
+        .map(|entries| {
+            entries
+                .into_iter()
+                .map(|(security, overrides)| SecurityOverride {
+                    security,
+                    overrides: pairs(overrides),
+                })
+                .collect()
+        }),
+        elements: item(dict, "elements")?.map(pairs),
+        kwargs: item(dict, "kwargs")?.map(pairs_of_map),
+        json_elements: None,
+        start_date: item(dict, "start_date")?,
+        end_date: item(dict, "end_date")?,
+        start_datetime: item(dict, "start_datetime")?,
+        end_datetime: item(dict, "end_datetime")?,
+        request_tz: item(dict, "request_tz")?,
+        output_tz: item(dict, "output_tz")?,
+        event_type: item(dict, "event_type")?,
+        event_types: item(dict, "event_types")?,
+        interval: item(dict, "interval")?,
+        options: item(dict, "options")?.map(pairs),
+        field_types: item(dict, "field_types")?.map(pairs_of_map),
+        include_security_errors: item(dict, "include_security_errors")?,
+        return_eids: item(dict, "return_eids")?,
+        // An explicit None means "not set".
+        on_delayed: item::<Option<String>>(dict, "on_delayed")?.flatten(),
+        validate_fields: item(dict, "validate_fields")?,
+        search_spec: item(dict, "search_spec")?,
+        field_ids: item(dict, "field_ids")?,
+        format: item(dict, "format")?,
     }
-    .into_request_params()
-    .map_err(|err| PyRuntimeError::new_err(err.to_string()))
+    .into_request_params_as(Style::Python)
+    .map_err(|error| PyRuntimeError::new_err(error.message))
 }

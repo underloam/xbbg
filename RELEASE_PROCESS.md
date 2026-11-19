@@ -1,6 +1,6 @@
 # xbbg Release Process
 
-This document explains the release process for xbbg, intended for AI agents and maintainers.
+This document explains the release process for xbbg, intended for AI agents and maintainers. Every release starts with [RELEASE_RULES.md](RELEASE_RULES.md) (Step 0).
 
 ## Overview
 
@@ -32,6 +32,15 @@ Dev builds (untagged commits) automatically get versions like `0.12.1.dev268+g84
 | Build tool | `uv` | Fast package manager and build frontend |
 
 ## Release Workflow
+
+### Step 0: Apply the release rules
+
+Read [RELEASE_RULES.md](RELEASE_RULES.md) and apply it to the release:
+
+1. Run `python scripts/check_release_privacy.py` (commits since the latest `v*` tag) and resolve every finding as the rules describe.
+2. Read the `[Unreleased]` section against the `BREAKING` rule: Arrow type, `xbbg.*` metadata, result-shape, return/raise and Rust API changes are marked, fixes included.
+
+Do not continue to Step 1 with an unresolved finding or an unmarked breaking change.
 
 ### Step 1: Update CHANGELOG.md
 
@@ -169,7 +178,7 @@ in `scripts/mcp_release_config.py`; their schema-specific JSON formats remain se
 
 | Workflow | File | Purpose |
 |----------|------|---------|
-| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15 and free-threaded 3.14t/3.15t), sdist, publish to PyPI, attach to GitHub release |
+| Release | `pypi_upload.yml` | Build wheels (manylinux_2_28 Linux + Windows + macOS × Python 3.11–3.15 and free-threaded 3.14t/3.15t), sdist, standalone `xbbg-mcp` (+ MCPB) and `xbbg-sdk` binaries (manylinux_2_28 Linux amd64, macOS arm64, Windows amd64), publish to PyPI, and attach all assets to the GitHub release |
 | Release | `npm-publish.yml` | Build and publish stable `@xbbg/core` prebuilt native packages for supported platforms, then publish the `@xbbg/core` wrapper and `@xbbg/langgraph` package via npm trusted publishing |
 | Release | `maven-publish.yml` | Build release JNI natives on Linux (manylinux_2_28), Windows and macOS arm64, stamp and assemble `io.github.underloam:xbbg` and `xbbg-jdk17`, run the Maven and Gradle consumers on Java 8–25 on all three platforms against those exact jars, sign and publish to Maven Central, check the published jars are byte-identical, and attach the jars and POMs to the GitHub release |
 
@@ -186,21 +195,23 @@ Published crates (6), in publish order:
 | `xbbg-async` | `xbbg_core`, `xbbg-ext`, `xbbg-log` | |
 | `xbbg-recipes` | `xbbg-async`, `xbbg-ext`, `xbbg-log` | |
 
-Never published (`publish = false`): `xbbg-arrow`, `xbbg-bench`, `pyo3-xbbg`,
-`napi-xbbg`, `xbbg-mcp`. The bindings have no standalone value, and `xbbg-mcp`
-ships as a prebuilt binary on the GitHub Release because `cargo install` cannot
-build it without the Bloomberg SDK.
+Never published (`publish = false`): `xbbg-arrow`, `xbbg-bench`, `xbbg-host`,
+`xbbg-sdk`, `pyo3-xbbg`, `napi-xbbg`, `jni-xbbg`, `jni-xbbg-sdk`, `xbbg-mcp`.
+The bindings have no standalone value, and `xbbg-mcp` and `xbbg-sdk` ship as
+prebuilt release binaries on the GitHub Release (`xbbg-mcp-v<VERSION>-*`,
+`xbbg-sdk-v<VERSION>-{linux-amd64,darwin-arm64}.tar.gz`,
+`xbbg-sdk-v<VERSION>-windows-amd64.zip`).
 
 #### Known limitation: docs.rs
 
 `xbbg-blpapi-sys`, `xbbg_core`, `xbbg-async`, and `xbbg-recipes` do **not** build on
 docs.rs. The BLPAPI SDK is proprietary and the docs.rs sandbox has no network to
-fetch it, so bindgen has no headers. `xbbg_core/src/ffi.rs` re-exports the BLPAPI
-symbols unconditionally, so the failure propagates to everything above it.
+fetch it, so bindgen has no headers. `xbbg_core` calls the function table that
+`xbbg-blpapi-sys` generates, so the failure propagates to everything above it.
 
 An empty-stub build script was evaluated and rejected: it makes only the `-sys`
-crate green, and with an empty API page, while `xbbg_core` still fails with 29
-unresolved imports. `build.rs` therefore detects `DOCS_RS` and fails with an
+crate green, and with an empty API page, while `xbbg_core` still fails to
+compile. `build.rs` therefore detects `DOCS_RS` and fails with an
 explicit message so the docs.rs log states the real reason.
 
 Making docs.rs green requires committing a pregenerated binding surface to the
@@ -352,9 +363,8 @@ The npm Trusted Publisher configuration must match the workflow filename exactly
 ### Build Locally
 
 ```bash
-# Install the SDK into vendor/blpapi-sdk/ and let the build discover it
-bash ./scripts/sdktool.sh
-# Windows PowerShell: .\scripts\sdktool.ps1
+# Install the C++ SDK into vendor/blpapi-sdk/ and let the build discover it (macOS, Linux, Windows)
+cargo run -p xbbg-sdk --features provision -- cpp
 
 # Build wheel (includes Rust extension)
 uv build
@@ -419,7 +429,7 @@ PyPI rejects duplicate versions. To fix:
 
 ### Local Build Fails
 
-1. Ensure `BLPAPI_ROOT` points to the Bloomberg SDK directory (must contain `include/` and `lib/`)
+1. Ensure `BLPAPI_ROOT` points to the Bloomberg SDK directory (it must contain `include/`; the runtime library is only needed to run tests, which load it from `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` by path)
 2. Ensure Rust toolchain is installed (`rustup show`)
 3. For bindgen issues, set `LIBCLANG_PATH` (see `.cargo/config.toml` comments)
 4. CI uses pregenerated bindings (`BLPAPI_PREGENERATED_BINDINGS`) to skip bindgen entirely
@@ -428,15 +438,16 @@ PyPI rejects duplicate versions. To fix:
 
 When asked to create a release:
 
-1. **Review pending changes**: Read `CHANGELOG.md` `[Unreleased]` section
-2. **Check for uncommitted changes**: Run `git status`
-3. **Determine version bump**:
+1. **Apply the release rules**: Read `RELEASE_RULES.md`, run `python scripts/check_release_privacy.py`, and stop and report any finding or unmarked breaking change instead of continuing
+2. **Review pending changes**: Read `CHANGELOG.md` `[Unreleased]` section
+3. **Check for uncommitted changes**: Run `git status`
+4. **Determine version bump**:
    - Breaking changes → `major`
    - New features → `minor`
    - Bug fixes only → `patch`
    - Pre-release → add `alpha`/`beta`/`rc`
-4. **Guide user to GitHub Actions** to trigger the `semantic_version.yml` workflow for the canonical `vX.Y.Z` release
-5. **For GitHub-only JS package assets**, guide the user to `js_github_release.yml` with an explicit version; it builds the supported `@xbbg/core` JS tarballs and tags `js-vX.Y.Z`
+5. **Guide user to GitHub Actions** to trigger the `semantic_version.yml` workflow for the canonical `vX.Y.Z` release
+6. **For GitHub-only JS package assets**, guide the user to `js_github_release.yml` with an explicit version; it builds the supported `@xbbg/core` JS tarballs and tags `js-vX.Y.Z`
 
 **Do NOT manually:**
 - Edit version numbers in code for Python releases (managed by `setuptools_scm` from git tags)
@@ -556,5 +567,6 @@ Before triggering a release, ensure:
 - [ ] Changes are categorized correctly (Added, Changed, Deprecated, Removed, Fixed, Security)
 - [ ] No placeholder text (TODO, FIXME, WIP, TBD) remains
 - [ ] Issue/PR numbers are referenced where applicable
-- [ ] Breaking changes are clearly marked
+- [ ] `RELEASE_RULES.md` has been read for this release, and `python scripts/check_release_privacy.py` reports no unresolved findings
+- [ ] Breaking changes are marked `BREAKING (<area>)` as `RELEASE_RULES.md` defines them, including fixes that change an Arrow type, `xbbg.*` metadata, a result shape or what a call raises
 - [ ] `py-xbbg-langgraph/pyproject.toml` requires an `xbbg` floor that contains every `xbbg` API its tools call (raise it to the version being released when new tools depend on new APIs, for example `xbbg.ext.resolve_venues`). The JS adapter's `@xbbg/core` dependency is stamped to the release version by `js-xbbg/scripts/stamp-version.ts`, so it needs no manual change.

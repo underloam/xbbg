@@ -1,9 +1,10 @@
 //! Request shard planning, ordered execution, and Arrow schema reconciliation.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use arrow_array::{Array, ArrayRef, RecordBatch};
-use arrow_schema::{DataType, SchemaRef, TimeUnit};
+use arrow_schema::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use futures_util::stream::{self, StreamExt};
 
 use super::state::typed_builder::{ArrowType, TypedBuilder};
@@ -186,17 +187,64 @@ fn concat_sharded_batches(batches: Vec<RecordBatch>) -> Result<RecordBatch, BlpA
     // across shards so later shards' entries are not silently dropped.
     let merged_meta = state::ResponseMetadata::union_of(&batches)?;
 
-    let target_schema = first.schema_ref().clone();
+    let target_schema = reconcile_sharded_schema(&batches)?;
     let mut normalized = Vec::with_capacity(batches.len());
-    normalized.push(first.clone());
-    for batch in rest {
-        normalized.push(normalize_batch_to_schema(batch.clone(), &target_schema)?);
+    for batch in batches {
+        normalized.push(normalize_batch_to_schema(batch, &target_schema)?);
     }
     arrow_select::concat::concat_batches(&target_schema, normalized.iter())
         .map(|batch| merged_meta.attach(batch))
         .map_err(|err| {
             BlpAsyncError::Internal(format!("concatenate sharded request batches: {err}"))
         })
+}
+
+/// Reconcile column schemas across shards so an empty or all-null column in an
+/// earlier shard (e.g. an all-refused wide shard defaulted to `Utf8`) adopts
+/// the concrete non-null type observed in a later shard.
+fn reconcile_sharded_schema(batches: &[RecordBatch]) -> Result<SchemaRef, BlpAsyncError> {
+    let first = &batches[0];
+    let first_schema = first.schema_ref();
+    let num_cols = first_schema.fields().len();
+    for batch in &batches[1..] {
+        if batch.num_columns() != num_cols {
+            return Err(BlpAsyncError::Internal(
+                "sharded request produced incompatible column count".to_string(),
+            ));
+        }
+    }
+
+    let mut fields = Vec::with_capacity(num_cols);
+    for idx in 0..num_cols {
+        let base_field = first_schema.field(idx);
+        let expected = base_field.name();
+        let mut chosen_type = base_field.data_type().clone();
+        let mut chosen_concrete = first.column(idx).null_count() < first.column(idx).len();
+        let mut nullable = base_field.is_nullable();
+
+        for batch in &batches[1..] {
+            let source_field = batch.schema_ref().field(idx);
+            let actual = source_field.name();
+            if actual != expected {
+                return Err(BlpAsyncError::Internal(format!(
+                    "sharded request column mismatch at index {idx}: expected {expected}, got {actual}"
+                )));
+            }
+            nullable |= source_field.is_nullable();
+            let array = batch.column(idx);
+            if !chosen_concrete && array.null_count() < array.len() {
+                chosen_type = array.data_type().clone();
+                chosen_concrete = true;
+            }
+        }
+
+        fields.push(Field::new(expected, chosen_type, nullable));
+    }
+
+    Ok(Arc::new(Schema::new_with_metadata(
+        fields,
+        first_schema.metadata().clone(),
+    )))
 }
 
 fn normalize_batch_to_schema(
@@ -992,5 +1040,34 @@ mod tests {
             err.contains("column type mismatch"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn test_concat_sharded_batches_promotes_empty_utf8_first_shard_to_concrete_later_type() {
+        let empty_first = px_last_batch(
+            &[],
+            Arc::new(StringArray::from(Vec::<Option<&str>>::new())) as ArrayRef,
+        );
+        let concrete_second = px_last_batch(
+            &["B"],
+            Arc::new(Float64Array::from(vec![Some(42.5)])) as ArrayRef,
+        );
+        let combined = concat_sharded_batches(vec![empty_first, concrete_second]).unwrap();
+        assert_eq!(combined.num_rows(), 1);
+        assert_eq!(
+            combined
+                .schema_ref()
+                .field_with_name("PX_LAST")
+                .unwrap()
+                .data_type(),
+            &DataType::Float64
+        );
+        let values = combined
+            .column_by_name("PX_LAST")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        assert_eq!(values.value(0), 42.5);
     }
 }

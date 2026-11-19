@@ -1,16 +1,26 @@
 //! Private offline drivers, compiled only with `test-support`: a synthetic
 //! subscription engine, a request-completion driver and async-bridge probes.
 
-use std::sync::Once;
-use std::sync::atomic::AtomicU64;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use arrow_array::{ArrayRef, Int64Array, StringArray};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use xbbg_async::error_presentation::RequestErrorContext;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use tokio::sync::watch;
+use xbbg_async::engine::EngineConfig;
+use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, RequestErrorContext};
 use xbbg_async::testing::SubscriptionFixture;
+use xbbg_host::subscribe::PreparedSubscribe;
 
-use super::*;
+use crate::completion::{record_batch_future, shutdown_safe_future};
+use crate::config::PyEngineConfig;
+use crate::errors::{blp_async_error_to_pyerr, error_presentation_to_pyerr};
+use crate::subscribe::{SubscribeParams, prepare as prepare_subscribe_params};
+use crate::subscriptions::PySubscription;
 
 /// Ticks of the bridge probe task; advances only while a bridge worker is free.
 static BRIDGE_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -27,37 +37,25 @@ impl PySubscriptionFixture {
     fn start_subscribe<'py>(
         &self,
         py: Python<'py>,
-        request: SubscribeRequest,
+        prepared: PreparedSubscribe,
     ) -> PyResult<Bound<'py, PyAny>> {
         let fixture = self.fixture.clone();
         let legacy_read_started = self.legacy_read_started.clone();
-        let batch_items = request.flush_threshold.unwrap_or(self.batch_items);
-        if batch_items == 0 {
-            return Err(PyValueError::new_err(
-                "flush_threshold must be greater than zero",
-            ));
-        }
+        let PreparedSubscribe {
+            request,
+            batch_items,
+        } = prepared;
         shutdown_safe_future(py, async move {
             let stream = fixture
                 .subscribe(request)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
-            let (rx, handle) = stream.into_parts();
-            Ok(PySubscription {
-                legacy_arrow: (!rx.requires_deliveries())
-                    .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
+            Ok(PySubscription::from_test_stream(
+                stream,
                 batch_items,
-                status: handle.status(),
-                deliver_rows: handle.delivers_rows(),
-                overflow_policy: handle.overflow_policy(),
-                consumer: Arc::new(SubscriptionOwner::unhosted(SubscriptionConsumer::new(
-                    rx, handle,
-                ))),
-                engine_shutdown: watch::channel(false).1,
-                tick_dict_keys: Arc::default(),
-                _test_fixture: Some(fixture),
-                _test_legacy_read_started: Some(legacy_read_started),
-            })
+                fixture,
+                legacy_read_started,
+            ))
         })
     }
 }
@@ -127,36 +125,29 @@ impl PySubscriptionFixture {
         session_wait_ms: Option<u64>,
         delivery: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let overflow_policy = overflow_policy
-            .as_deref()
-            .map(|value| {
-                value
-                    .parse::<OverflowPolicy>()
-                    .map_err(PyValueError::new_err)
-            })
-            .transpose()?;
         self.start_subscribe(
             py,
-            SubscribeRequest {
-                service,
-                topics: tickers,
-                fields,
-                all_fields,
-                options: options.unwrap_or_default(),
-                aliases: aliases.unwrap_or_default().into_iter().collect(),
-                delayed_policy: parse_delayed_policy(on_delayed)?,
-                field_error_policy: parse_field_error_policy(on_field_error)?,
-                deliver_rows: rows,
-                delivery: delivery
-                    .parse::<SubscriptionDeliveryMode>()
-                    .map_err(blp_async_error_to_pyerr)?,
-                zero_as_null: zero_as_null.unwrap_or_default(),
-                session_wait: session_wait_ms.map(std::time::Duration::from_millis),
-                isolated,
-                stream_capacity,
-                flush_threshold,
-                overflow_policy,
-            },
+            prepare_subscribe_params(
+                SubscribeParams {
+                    service: Some(service),
+                    tickers,
+                    fields,
+                    options,
+                    flush_threshold,
+                    overflow_policy,
+                    stream_capacity,
+                    all_fields,
+                    aliases,
+                    on_delayed,
+                    isolated,
+                    rows,
+                    on_field_error,
+                    zero_as_null,
+                    session_wait_ms,
+                    delivery,
+                },
+                self.batch_items,
+            )?,
         )
     }
 

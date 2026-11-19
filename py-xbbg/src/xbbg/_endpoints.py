@@ -94,8 +94,13 @@ async def abdp(
             - Format.LONG_WITH_METADATA: ticker, field, value, dtype
         field_types: Manual type overrides for fields (e.g., {'VOLUME': 'int64'}).
             If None, types are auto-resolved from Bloomberg field metadata.
-        include_security_errors: Include ``__SECURITY_ERROR__`` rows for
-            securities that Bloomberg rejected.
+        include_security_errors: Report the securities Bloomberg refused. The long
+            formats add one ``__SECURITY_ERROR__`` row per refused security;
+            ``Format.SEMI_LONG`` leaves refused securities out of its rows. Every
+            format carries each refusal's details in ``xbbg.security_errors``
+            result metadata. With this option a request in which every security
+            is refused returns (the long rows, or an empty table in
+            ``SEMI_LONG``) instead of raising ``BlpRequestError``.
         return_eids: Request EID metadata. Native Arrow results expose
             ``.eid_data``; pandas stores it in ``attrs["xbbg_eid_data"]``;
             PyArrow preserves ``xbbg.eid_data`` in schema metadata.

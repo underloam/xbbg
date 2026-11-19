@@ -711,6 +711,31 @@ abstract class EngineBase {
         });
   }
 
+  /**
+   * Returns the servers each Bloomberg session is connected to: one entry per session, request
+   * workers first, then subscription workers.
+   *
+   * @return an unmodifiable list
+   */
+  public final List<SessionConnections> connections() {
+    return callJsonSync(
+        "connections",
+        JsonValue.EMPTY_OBJECT,
+        value -> {
+          List<Object> items = JsonFields.array(value, "connections result");
+          List<SessionConnections> sessions = new ArrayList<SessionConnections>(items.size());
+          for (Object item : items) {
+            Map<String, Object> session = JsonFields.object(item, "connections item");
+            sessions.add(
+                new SessionConnections(
+                    JsonFields.string(session, "pool"),
+                    JsonFields.longValue(session, "worker"),
+                    JsonFields.strings(session, "servers")));
+          }
+          return Collections.unmodifiableList(sessions);
+        });
+  }
+
   // ------------------------------------------------------------------ shared decoding
 
   private static JsonValue serviceArgs(String service) {

@@ -1,16 +1,10 @@
 /* oxlint-disable import/max-dependencies -- public entry point intentionally consolidates native and helper modules. */
-import type { Table } from 'apache-arrow';
-
-import fs from 'node:fs';
 import { createRequire } from 'node:module';
-import path from 'node:path';
 
 import {
   CDX_INFO_FIELDS as GENERATED_CDX_INFO_FIELDS,
   CDX_PRICING_FIELDS as GENERATED_CDX_PRICING_FIELDS,
   CDX_RISK_FIELDS as GENERATED_CDX_RISK_FIELDS,
-  TA_DEFAULTS,
-  TA_STUDIES,
 } from './_defs_gen';
 import {
   Backend,
@@ -21,7 +15,6 @@ import {
   nativeArrowToBackend,
   nativeRecipeResult,
   normalizeBackend,
-  toArrowTableFromNative,
   warnTickerKeyColumn,
 } from './backends';
 // Date / datetime helpers (#317): isolated module so they can be tested
@@ -38,17 +31,26 @@ import {
   BlpValidationError,
   wrapError,
 } from './errors';
-import type { NativeAddon, NativeArrowZeroCopyBatch, NativeEngine } from './napi';
-import { resolveNativeAddon } from './native/resolve-native';
+import { createExt } from './ext';
+import type { NativeArrowZeroCopyBatch, NativeEngine } from './napi';
+import { loadNativeAddon } from './native/load-addon';
 import { isPlainObject } from './objects';
-import { configureRuntimeSearchPath } from './runtime-search-path';
+import { BLOOMBERG_PYPI_INDEX, defaultSdkCacheDir, installedSdks, provisionSdk } from './sdk';
+import type {
+  InstalledSdksOptions,
+  ProvisionSdkOptions,
+  ProvisionSdkResult,
+  SdkCredentialInput,
+  SdkPlatform,
+  SdkProxyInput,
+  SdkSourceInput,
+} from './sdk';
 import {
   createSubscription,
   MKTDATA_SERVICE,
-  validateDelayedPolicy,
-  validateStreamControls,
+  streamOptionsPayload,
+  Subscription,
 } from './subscriptions';
-import type { Subscription } from './subscriptions';
 import type {
   ActiveCdxOptions,
   AdminStatus,
@@ -113,6 +115,7 @@ import type {
   ServerAddress,
   SecurityOverrideSpec,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
   Socks5Config,
@@ -151,26 +154,6 @@ function parsePackageJsonShape(value: unknown): PackageJsonShape {
   throw new TypeError('@xbbg/core package.json is missing a string version field');
 }
 
-function isNativeAddon(value: unknown): value is NativeAddon {
-  return (
-    isPlainObject(value) &&
-    typeof value.JsEngine === 'function' &&
-    typeof value.extAuctionFieldGroup === 'function' &&
-    typeof value.extAuctionZeroPriceFields === 'function' &&
-    typeof value.extImbalanceSide === 'function' &&
-    typeof value.getLogLevel === 'function' &&
-    typeof value.setLogLevel === 'function'
-  );
-}
-
-function requireNativeAddon(modulePath: string): NativeAddon {
-  const loaded: unknown = nodeRequire(modulePath);
-  if (isNativeAddon(loaded)) {
-    return loaded;
-  }
-  throw new TypeError(`Native addon ${modulePath} does not expose the expected @xbbg/core surface`);
-}
-
 function isBdhOptionsInput(value: DateLike | BdhOptions | undefined): value is BdhOptions {
   return isPlainObject(value) && !(value instanceof Date) && !hasToJSDate(value);
 }
@@ -183,39 +166,7 @@ function isBdibOptionsInput(
 
 const packageJson = parsePackageJsonShape(nodeRequire('../package.json'));
 
-configureRuntimeSearchPath();
-
-function loadNative(): NativeAddon {
-  const root = path.resolve(__dirname, '..', '..');
-
-  const candidates = [
-    path.join(__dirname, 'napi_xbbg.node'),
-    path.join(__dirname, '..', 'napi_xbbg.node'),
-    path.join(__dirname, 'napi-xbbg.node'),
-  ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return requireNativeAddon(candidate);
-    }
-  }
-
-  const { key, packageName, binaryPath } = resolveNativeAddon(root);
-  if (binaryPath !== null) {
-    return requireNativeAddon(binaryPath);
-  }
-  if (packageName === null) {
-    throw new Error(
-      `No packaged @xbbg/core native addon is available for ${key}. Build it locally with "npm run build" from js-xbbg.`,
-    );
-  }
-
-  throw new Error(
-    `Unable to load native napi-xbbg module for ${key}. Install ${packageName} via Bun/npm, or build it locally with "npm run build" from js-xbbg.`,
-  );
-}
-
-const native = loadNative();
+const native = loadNativeAddon();
 
 // ── Constants ───────────────────────────────────────────────────────────
 export { Backend, Format };
@@ -262,193 +213,16 @@ export const CDX_PRICING_FIELDS = Object.freeze([...GENERATED_CDX_PRICING_FIELDS
 
 export const CDX_RISK_FIELDS = Object.freeze([...GENERATED_CDX_RISK_FIELDS]);
 
-type StudyParams = Record<string, PrimitiveValue | undefined>;
-
 // ── Helpers ─────────────────────────────────────────────────────────────
-
-const ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE =
-  'ETF NAV relationship result is not one-to-one with requested ETFs';
-
-function malformedEtfNavRelationship(): BlpValidationError {
-  return new BlpValidationError(ETF_NAV_RELATIONSHIP_NOT_ONE_TO_ONE, { element: 'tickers' });
-}
-
-function firstSeenDuplicates(values: readonly string[]): string[] {
-  const seen = new Set<string>();
-  const duplicates: string[] = [];
-  for (const value of values) {
-    if (seen.has(value)) {
-      if (!duplicates.includes(value)) {
-        duplicates.push(value);
-      }
-    } else {
-      seen.add(value);
-    }
-  }
-  return duplicates;
-}
-
-/**
- * Validate an ETF NAV relationship table and return one iNAV ticker per ETF.
- *
- * Enforces one row per `input_order` with exact ordered `etf_ticker`
- * identity, no iNAV validation errors, no missing iNAV relationships, and an
- * unambiguous iNAV reverse mapping — all before any subscription is opened.
- */
-function validatedInavTickers(etfList: readonly string[], table: Table): string[] {
-  const inputOrder = table.getChild('input_order');
-  const etfTicker = table.getChild('etf_ticker');
-  const inavTicker = table.getChild('inav_ticker');
-  const inavValidationError = table.getChild('inav_validation_error');
-  if (
-    inputOrder === null ||
-    etfTicker === null ||
-    inavTicker === null ||
-    inavValidationError === null
-  ) {
-    throw malformedEtfNavRelationship();
-  }
-  if (table.numRows !== etfList.length) {
-    throw malformedEtfNavRelationship();
-  }
-
-  const rowByOrder = new Map<number, number>();
-  for (let rowIndex = 0; rowIndex < table.numRows; rowIndex += 1) {
-    const order: unknown = inputOrder.get(rowIndex);
-    if (typeof order !== 'number' || rowByOrder.has(order)) {
-      throw malformedEtfNavRelationship();
-    }
-    rowByOrder.set(order, rowIndex);
-  }
-
-  const rows: { etf: string; rowIndex: number }[] = [];
-  for (const [index, etf] of etfList.entries()) {
-    const rowIndex = rowByOrder.get(index);
-    if (rowIndex === undefined || etfTicker.get(rowIndex) !== etf) {
-      throw malformedEtfNavRelationship();
-    }
-    rows.push({ etf, rowIndex });
-  }
-
-  for (const { etf, rowIndex } of rows) {
-    const validationError: unknown = inavValidationError.get(rowIndex);
-    if (typeof validationError === 'string' && validationError.trim().length > 0) {
-      throw new BlpValidationError(`Invalid iNAV relationship for ETF ${etf}: ${validationError}`, {
-        element: 'tickers',
-      });
-    }
-  }
-
-  const pairs = rows.map(({ etf, rowIndex }) => {
-    const raw: unknown = inavTicker.get(rowIndex);
-    const trimmed = typeof raw === 'string' ? raw.trim() : '';
-    return { etf, inav: trimmed.length > 0 ? trimmed : null };
-  });
-
-  const missing = pairs.filter(({ inav }) => inav === null).map(({ etf }) => etf);
-  if (missing.length > 0) {
-    throw new BlpValidationError(
-      `Missing valid iNAV relationship for ETFs: ${missing.join(', ')}`,
-      { element: 'tickers' },
-    );
-  }
-
-  const resolved = pairs.flatMap(({ etf, inav }) => (inav === null ? [] : [{ etf, inav }]));
-  const owners = new Map<string, string[]>();
-  for (const { etf, inav } of resolved) {
-    const list = owners.get(inav);
-    if (list === undefined) {
-      owners.set(inav, [etf]);
-    } else {
-      list.push(etf);
-    }
-  }
-  for (const { inav } of resolved) {
-    const etfs = owners.get(inav);
-    if (etfs !== undefined && etfs.length > 1) {
-      throw new BlpValidationError(
-        `Ambiguous iNAV reverse mapping for ${inav}: ${etfs.join(', ')}`,
-        {
-          element: 'tickers',
-        },
-      );
-    }
-  }
-
-  return resolved.map(({ inav }) => inav);
-}
-
-function validatedAuctionTopics(
-  securities: readonly string[],
-  table: Table,
-): { topics: string[]; aliases: Record<string, string> } {
-  const malformed = (): BlpValidationError =>
-    new BlpValidationError(
-      `Venue resolution is not one-to-one with securities: ${securities.join(', ')}`,
-      { element: 'securities' },
-    );
-  const order = table.getChild('input_order');
-  const security = table.getChild('security');
-  const venue = table.getChild('venue_topic');
-  const status = table.getChild('status');
-  const error = table.getChild('error');
-  if (
-    order === null ||
-    security === null ||
-    venue === null ||
-    status === null ||
-    error === null ||
-    table.numRows !== securities.length
-  ) {
-    throw malformed();
-  }
-  const rows = new Map<number, number>();
-  for (let row = 0; row < table.numRows; row += 1) {
-    const inputOrder: unknown = order.get(row);
-    if (typeof inputOrder !== 'number' || rows.has(inputOrder)) {
-      throw malformed();
-    }
-    rows.set(inputOrder, row);
-  }
-  const topics: string[] = [];
-  const labels = new Map<string, string>();
-  const failures: string[] = [];
-  for (const [index, input] of securities.entries()) {
-    const row = rows.get(index);
-    if (row === undefined || security.get(row) !== input) {
-      throw malformed();
-    }
-    const topic: unknown = venue.get(row);
-    const detail: unknown = error.get(row);
-    const resolution: unknown = status.get(row);
-    if (
-      resolution !== 'resolved' ||
-      typeof topic !== 'string' ||
-      topic.trim().length === 0 ||
-      (typeof detail === 'string' && detail.trim().length > 0)
-    ) {
-      failures.push(`${input}: ${typeof detail === 'string' ? detail : String(resolution)}`);
-      continue;
-    }
-    const normalizedTopic = topic.trim();
-    const previous = labels.get(normalizedTopic);
-    if (previous !== undefined) {
-      failures.push(`Ambiguous venue ${normalizedTopic}: ${previous}, ${input}`);
-    } else {
-      labels.set(normalizedTopic, input);
-      topics.push(normalizedTopic);
-    }
-  }
-  if (failures.length > 0) {
-    throw new BlpValidationError(`Auction preflight failed: ${failures.join('; ')}`, {
-      element: 'securities',
-    });
-  }
-  return { topics, aliases: Object.fromEntries(labels) };
-}
 
 function toRequestString(value: unknown): string {
   return String(value);
+}
+
+function isPlannedRequest(value: unknown): value is RequestInput {
+  return (
+    isPlainObject(value) && typeof value.service === 'string' && typeof value.operation === 'string'
+  );
 }
 
 function getLegacySecurityOverrides(params: RequestInput): unknown {
@@ -456,12 +230,6 @@ function getLegacySecurityOverrides(params: RequestInput): unknown {
     return params.securityOverrides;
   }
   return undefined;
-}
-
-/** Validate a request `onDelayed` policy; true when the host must emit delayed-data warnings. */
-function warnsOnDelayedData(policy: unknown): boolean {
-  validateDelayedPolicy(policy);
-  return policy === 'warn';
 }
 
 function mapObjectToPairs(obj: OverridesMap | undefined): StringPair[] | undefined {
@@ -685,17 +453,6 @@ export function ovr(...sources: OverrideSource[]): OverrideSpec {
   );
 }
 
-function mapOverridesToPairs(input: OverridesInput | undefined): StringPair[] | undefined {
-  if (input === undefined) {
-    return undefined;
-  }
-  const spec = ovr(input);
-  if (spec.toSecurityOverrides().length > 0) {
-    throw new TypeError('Per-security overrides are only supported by bdp(), bdh(), and bds()');
-  }
-  return spec.toPairs();
-}
-
 interface RequestOverrideParts {
   readonly overrides?: StringPair[];
   readonly securityOverrides?: SecurityOverrideSpec[];
@@ -712,45 +469,6 @@ function mapOverridesToRequestParts(input: OverridesInput | undefined): RequestO
     ...(overrides.length === 0 ? {} : { overrides }),
     ...(securityOverrides.length === 0 ? {} : { securityOverrides }),
   };
-}
-
-type BdtickBooleanOption =
-  | 'includeConditionCodes'
-  | 'includeExchangeCodes'
-  | 'includeBrokerCodes'
-  | 'includeRpsCodes'
-  | 'includeBicMicCodes'
-  | 'includeNonPlottableEvents'
-  | 'includeBloombergStandardConditionCodes';
-
-const BDTICK_BOOLEAN_KWARGS: readonly [BdtickBooleanOption, string][] = Object.freeze([
-  ['includeConditionCodes', 'includeConditionCodes'],
-  ['includeExchangeCodes', 'includeExchangeCodes'],
-  ['includeBrokerCodes', 'includeBrokerCodes'],
-  ['includeRpsCodes', 'includeRpsCodes'],
-  ['includeBicMicCodes', 'includeBicMicCodes'],
-  ['includeNonPlottableEvents', 'includeNonPlottableEvents'],
-  ['includeBloombergStandardConditionCodes', 'includeBloombergStandardConditionCodes'],
-]);
-
-function upsertStringPair(pairs: StringPair[], key: string, value: string): void {
-  const existing = pairs.find((pair) => pair.key === key);
-  if (existing === undefined) {
-    pairs.push({ key, value });
-    return;
-  }
-  existing.value = value;
-}
-
-function buildBdtickKwargs(options: BdtickOptions): StringPair[] | undefined {
-  const pairs = mapObjectToPairs(options.kwargs) ?? [];
-  for (const [optionName, requestName] of BDTICK_BOOLEAN_KWARGS) {
-    const typedValue = options[optionName];
-    if (typedValue !== undefined) {
-      upsertStringPair(pairs, requestName, typedValue ? 'true' : 'false');
-    }
-  }
-  return pairs.length > 0 ? pairs : undefined;
 }
 
 function toStringArray(value: string | readonly string[] | null | undefined): string[] {
@@ -852,22 +570,6 @@ function fullDayRange(dt: DateTimeLike): TimeRange {
   };
 }
 
-function normalizeDate(value: DateLike | undefined): string | undefined {
-  return formatDate(value);
-}
-
-function getStudyAttrName(study: string): string {
-  const normalized = study.toLowerCase().replaceAll(/-/gu, '_').replaceAll(/ /gu, '_');
-  const mapped = TA_STUDIES[normalized];
-  if (mapped !== undefined) {
-    return mapped;
-  }
-  if (normalized.endsWith('studyattributes')) {
-    return normalized;
-  }
-  return `${normalized}StudyAttributes`;
-}
-
 interface RawStudy {
   studyType?: string;
   study?: string;
@@ -878,111 +580,65 @@ interface RawStudy {
   [key: string]: PrimitiveValue | undefined;
 }
 
-function buildTaRequest(
-  ticker: string,
-  study: string | RawStudy,
-  options: BtaOptions = {},
-): StringPair[] {
-  const rawStudy: RawStudy = typeof study === 'string' ? { studyType: study } : { ...study };
-  const studyType =
-    rawStudy.studyType ?? rawStudy.study ?? (typeof study === 'string' ? study : '');
-  const attrName = getStudyAttrName(toRequestString(studyType));
+const BTA_DATE_KWARGS = ['startDate', 'start_date', 'endDate', 'end_date'] as const;
 
-  const kwargs: Record<string, PrimitiveValue> = { ...options.kwargs };
-  const startDate = normalizeDate(
-    stringOrUndef(kwargs.startDate) ??
-      stringOrUndef(kwargs.start_date) ??
-      options.startDate ??
-      options.start_date,
-  );
-  const endDate = normalizeDate(
-    stringOrUndef(kwargs.endDate) ??
-      stringOrUndef(kwargs.end_date) ??
-      options.endDate ??
-      options.end_date,
-  );
-  const periodicity = toRequestString(
-    stringOrUndef(kwargs.periodicitySelection) ??
-      stringOrUndef(kwargs.periodicity) ??
-      rawStudy.calcInterval ??
-      options.periodicity ??
-      'DAILY',
-  ).toUpperCase();
-  const interval = kwargs.interval ?? rawStudy.interval ?? options.interval;
-
-  delete kwargs.startDate;
-  delete kwargs.start_date;
-  delete kwargs.endDate;
-  delete kwargs.end_date;
-  delete kwargs.periodicitySelection;
-  delete kwargs.periodicity;
-  delete rawStudy.studyType;
-  delete rawStudy.study;
-  delete rawStudy.calcInterval;
-
-  if (rawStudy.length !== undefined && rawStudy.period === undefined) {
-    rawStudy.period = rawStudy.length;
+/** `bta` kwargs with their date members host-formatted, as the native planner expects. */
+function btaPlanKwargs(kwargs: OverridesMap | undefined): OverridesMap | undefined {
+  if (kwargs === undefined) {
+    return undefined;
   }
-  delete rawStudy.length;
-
-  const params: StudyParams = {
-    ...TA_DEFAULTS[attrName],
-    ...options.studyParams,
-    ...(rawStudy as StudyParams),
-  };
-
-  if (params.length !== undefined && params.period === undefined) {
-    params.period = params.length;
+  const formatted: OverridesMap = { ...kwargs };
+  for (const key of BTA_DATE_KWARGS) {
+    const value = formatted[key];
+    if (typeof value === 'string') {
+      formatted[key] = formatDate(value) ?? '';
+    }
   }
-  delete params.length;
-  delete params.calcInterval;
-
-  const elements: StringPair[] = [
-    { key: 'priceSource.securityName', value: toRequestString(ticker) },
-  ];
-
-  if (periodicity === 'INTRADAY') {
-    const prefix = 'priceSource.dataRange.intraday';
-    if (startDate !== undefined) {
-      elements.push({ key: `${prefix}.startDate`, value: startDate });
-    }
-    if (endDate !== undefined) {
-      elements.push({ key: `${prefix}.endDate`, value: endDate });
-    }
-    elements.push({ key: `${prefix}.eventType`, value: 'TRADE' });
-    if (interval !== undefined) {
-      elements.push({ key: `${prefix}.interval`, value: toRequestString(interval) });
-    }
-  } else {
-    const prefix = 'priceSource.dataRange.historical';
-    if (startDate !== undefined) {
-      elements.push({ key: `${prefix}.startDate`, value: startDate });
-    }
-    if (endDate !== undefined) {
-      elements.push({ key: `${prefix}.endDate`, value: endDate });
-    }
-    elements.push({ key: `${prefix}.periodicitySelection`, value: periodicity });
-  }
-
-  for (const [key, value] of Object.entries(params)) {
-    if (value === undefined) {
-      continue;
-    }
-    elements.push({
-      key: `studyAttributes.${attrName}.${key}`,
-      value: toRequestString(value),
-    });
-  }
-
-  for (const [key, value] of Object.entries(kwargs)) {
-    elements.push({ key: toRequestString(key), value: toRequestString(value) });
-  }
-
-  return elements;
+  return formatted;
 }
 
-function stringOrUndef(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined;
+/**
+ * Serialize planner arguments for `xbbg-host`, rejecting non-finite numbers
+ * (`NaN`/`Infinity`) before `JSON.stringify` would silently turn them into `null`
+ * (`None` in Rust), and stringifying `bigint` values cleanly.
+ */
+function stringifyPlanArgs(args: Record<string, unknown>): string {
+  return JSON.stringify(args, (key, value: unknown) => {
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      const label = key.length > 0 ? key : 'value';
+      throw new BlpValidationError(
+        `${label} must be a finite number`,
+        key.length > 0 ? { element: key } : {},
+      );
+    }
+    if (typeof value === 'bigint') {
+      return value.toString();
+    }
+    return value;
+  });
+}
+
+function validatePlainStringMap(value: unknown, element: string): void {
+  if (value === undefined || value === null) {
+    return;
+  }
+  if (isPlainObject(value)) {
+    const prototype: unknown = Object.getPrototypeOf(value);
+    if (
+      (prototype === Object.prototype || prototype === null) &&
+      Object.values(value).every((entry) => typeof entry === 'string')
+    ) {
+      return;
+    }
+  }
+  throw new BlpValidationError(`${element} must be a plain object mapping strings to strings`, {
+    element,
+  });
+}
+
+/** JSON drops `undefined`, yet an `undefined` study parameter unsets its default: send `null`. */
+function undefinedAsNull(params: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(params).map(([key, value]) => [key, value ?? null]));
 }
 
 // ── Configured engine state ─────────────────────────────────────────────
@@ -1134,7 +790,6 @@ export class Engine {
 
   public async request(params: RequestInput): Promise<unknown> {
     const backend = normalizeBackend(params.backend);
-    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { backend: _discarded, overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -1142,7 +797,12 @@ export class Engine {
         'Use overrides: ovr({ "<SECURITY>": { ... } }) for per-security overrides',
       );
     }
-    const nativeParams = { ...rest, ...mapOverridesToRequestParts(overrides) };
+    return await this.execute(backend, { ...rest, ...mapOverridesToRequestParts(overrides) });
+  }
+
+  /** Run a native request and convert the result for `backend`. */
+  private async execute(backend: BackendKind, nativeParams: RequestInput): Promise<unknown> {
+    const warnDelayed = nativeParams.onDelayed === 'warn';
     try {
       if (backend === Backend.POLARS) {
         const file = await this.inner.requestIpcFile(nativeParams);
@@ -1163,8 +823,26 @@ export class Engine {
     }
   }
 
+  /** Plan a typed request with the host planner (`args` is its JSON argument object), then run it. */
+  private async plannedRequest(
+    method: string,
+    backend: BackendKind | undefined,
+    args: Record<string, unknown>,
+  ): Promise<unknown> {
+    const normalized = normalizeBackend(backend);
+    let nativeParams: unknown;
+    try {
+      nativeParams = JSON.parse(native.planRequest(method, stringifyPlanArgs(args)));
+    } catch (error) {
+      throw wrapError(error);
+    }
+    if (!isPlannedRequest(nativeParams)) {
+      throw new TypeError(`native planner returned an invalid ${method} request`);
+    }
+    return await this.execute(normalized, nativeParams);
+  }
+
   public async requestRaw(params: RequestInput): Promise<Buffer> {
-    const warnDelayed = warnsOnDelayedData(params.onDelayed);
     const { overrides, ...rest } = params;
     const legacySecurityOverrides = getLegacySecurityOverrides(params);
     if (legacySecurityOverrides !== undefined) {
@@ -1177,7 +855,7 @@ export class Engine {
         ...rest,
         ...mapOverridesToRequestParts(overrides),
       });
-      if (warnDelayed) {
+      if (params.onDelayed === 'warn') {
         emitDelayedDataWarnings(ipcSchemaMetadata(ipc));
       }
       warnTickerKeyColumn(this.inner.keyColumn, ipc);
@@ -1192,19 +870,15 @@ export class Engine {
     fields: readonly string[],
     options: BdpOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      extractor: 'refdata',
+    return await this.plannedRequest('bdp', options.backend, {
+      tickers,
       fields,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       includeSecurityErrors: Boolean(options.includeSecurityErrors),
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'ReferenceDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
       validateFields: options.validateFields,
     });
   }
@@ -1212,19 +886,15 @@ export class Engine {
   public async bds(
     tickers: readonly string[],
     fields: readonly string[],
-    options: Omit<BdpOptions, 'onDelayed'> = {},
+    options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      extractor: 'bulk',
+    return await this.plannedRequest('bds', options.backend, {
+      tickers,
       fields,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       returnEids: options.returnEids,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'ReferenceDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
       validateFields: options.validateFields,
     });
   }
@@ -1234,115 +904,83 @@ export class Engine {
     fields: readonly string[],
     options: BdhOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDate: formatDate(options.end),
-      extractor: 'histdata',
+    return await this.plannedRequest('bdh', options.backend, {
+      tickers,
       fields,
+      start: formatDate(options.start),
+      end: formatDate(options.end),
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'HistoricalDataRequest',
-      overrides: options.overrides,
-      securities: tickers,
-      service: '//blp/refdata',
-      startDate: formatDate(options.start),
       validateFields: options.validateFields,
     });
   }
 
   public async bdib(ticker: string, options: BdibOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDatetime: formatDateTime(options.end),
-      eventType: options.eventType ?? 'TRADE',
-      extractor: 'intraday_bar',
-      interval: options.interval ?? 1,
+    return await this.plannedRequest('bdib', options.backend, {
+      ticker,
+      start: formatDateTime(options.start),
+      end: formatDateTime(options.end),
+      requestTz: options.requestTz,
+      outputTz: options.outputTz,
+      eventType: options.eventType,
+      interval: options.interval,
+      kwargs: options.kwargs,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'IntradayBarRequest',
-      outputTz: options.outputTz,
-      requestTz: options.requestTz,
-      security: ticker,
-      service: '//blp/refdata',
-      startDatetime: formatDateTime(options.start),
     });
   }
 
   public async bdtick(ticker: string, options: BdtickOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      endDatetime: formatDateTime(options.end),
-      eventTypes: options.eventTypes ?? ['TRADE'],
-      extractor: 'intraday_tick',
-      kwargs: buildBdtickKwargs(options),
+    return await this.plannedRequest('bdtick', options.backend, {
+      ticker,
+      start: formatDateTime(options.start),
+      end: formatDateTime(options.end),
+      requestTz: options.requestTz,
+      outputTz: options.outputTz,
+      eventTypes: options.eventTypes,
+      includeConditionCodes: options.includeConditionCodes,
+      includeExchangeCodes: options.includeExchangeCodes,
+      includeBrokerCodes: options.includeBrokerCodes,
+      includeRpsCodes: options.includeRpsCodes,
+      includeBicMicCodes: options.includeBicMicCodes,
+      includeNonPlottableEvents: options.includeNonPlottableEvents,
+      includeBloombergStandardConditionCodes: options.includeBloombergStandardConditionCodes,
+      kwargs: options.kwargs,
       returnEids: options.returnEids,
       onDelayed: options.onDelayed,
-      operation: 'IntradayTickRequest',
-      outputTz: options.outputTz,
-      requestTz: options.requestTz,
-      security: ticker,
-      service: '//blp/refdata',
-      startDatetime: formatDateTime(options.start),
     });
   }
 
   public async bql(query: string, options: BqlOptions = {}): Promise<unknown> {
-    let kwargs = mapObjectToPairs(options.kwargs);
-    if (options.appName !== undefined) {
-      kwargs ??= [];
-      upsertStringPair(kwargs, 'clientContext.appName', options.appName);
-    }
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'expression', value: toRequestString(query) }],
-      extractor: 'bql',
+    return await this.plannedRequest('bql', options.backend, {
+      query: toRequestString(query),
+      appName: options.appName,
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs,
-      operation: 'sendQuery',
-      service: '//blp/bqlsvc',
     });
   }
 
   public async beqs(screen: string, options: BeqsOptions = {}): Promise<unknown> {
-    const elements: StringPair[] = [
-      { key: 'screenName', value: toRequestString(screen) },
-      { key: 'screenType', value: toRequestString(options.screenType ?? 'PRIVATE') },
-      { key: 'Group', value: toRequestString(options.group ?? 'General') },
-    ];
-    if (options.asof !== undefined) {
-      const asofFormatted = formatDate(options.asof);
-      if (asofFormatted !== undefined) {
-        elements.push({ key: 'asOfDate', value: asofFormatted });
-      }
-    }
-    return await this.request({
-      backend: options.backend,
-      elements,
-      extractor: 'generic',
+    return await this.plannedRequest('beqs', options.backend, {
+      screen: toRequestString(screen),
+      asof: formatDate(options.asof),
+      screenType: options.screenType,
+      group: options.group,
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'BeqsRequest',
-      overrides: mapOverridesToPairs(options.overrides),
-      service: '//blp/refdata',
     });
   }
 
   public async bsrch(searchSpec: string, options: BsrchOptions = {}): Promise<unknown> {
-    const elements: StringPair[] = [
-      { key: 'Domain', value: toRequestString(searchSpec) },
-      ...(mapOverridesToPairs(options.overrides) ?? []),
-      ...(mapObjectToPairs(options.kwargs) ?? []),
-    ];
-    return await this.request({
-      backend: options.backend,
-      elements,
-      extractor: 'bsrch',
+    return await this.plannedRequest('bsrch', options.backend, {
+      searchSpec: toRequestString(searchSpec),
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      operation: 'ExcelGetGridRequest',
-      service: '//blp/exrsvc',
     });
   }
 
@@ -1351,46 +989,35 @@ export class Engine {
     study: string | RawStudy,
     options: BtaOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: buildTaRequest(ticker, study, options),
-      extractor: 'generic',
+    return await this.plannedRequest('bta', options.backend, {
+      ticker: toRequestString(ticker),
+      study: typeof study === 'string' ? study : undefinedAsNull(study),
+      studyParams:
+        options.studyParams === undefined ? undefined : undefinedAsNull(options.studyParams),
+      kwargs: btaPlanKwargs(options.kwargs),
+      startDate: formatDate(options.startDate ?? options.start_date),
+      endDate: formatDate(options.endDate ?? options.end_date),
+      periodicity: options.periodicity,
+      interval: options.interval,
       format: options.format,
-      operation: 'studyRequest',
-      service: '//blp/tasvc',
     });
   }
 
   public async bflds(options: BfldsOptions = {}): Promise<unknown> {
-    if (options.searchSpec !== undefined) {
-      return await this.request({
-        backend: options.backend,
-        format: options.format,
-        kwargs: mapObjectToPairs(options.kwargs),
-        operation: 'FieldSearchRequest',
-        searchSpec: toRequestString(options.searchSpec),
-        service: '//blp/apiflds',
-      });
-    }
-    const fields = toStringArray(options.fields);
-    return await this.request({
-      backend: options.backend,
-      fieldIds: fields,
+    return await this.plannedRequest('bflds', options.backend, {
+      fields: options.fields === undefined ? undefined : toStringArray(options.fields),
+      searchSpec:
+        options.searchSpec === undefined ? undefined : toRequestString(options.searchSpec),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'FieldInfoRequest',
-      service: '//blp/apiflds',
     });
   }
 
   public async blkp(query: string, options: BlkpOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(query) }],
+    return await this.plannedRequest('blkp', options.backend, {
+      query: toRequestString(query),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'instrumentListRequest',
-      service: '//blp/instruments',
     });
   }
 
@@ -1399,37 +1026,30 @@ export class Engine {
     fields: string | readonly string[],
     options: RequestOptions = {},
   ): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
+    return await this.plannedRequest('bport', options.backend, {
+      portfolio: toRequestString(portfolio),
       fields: Array.isArray(fields) ? fields : [toRequestString(fields)],
+      ...mapOverridesToRequestParts(options.overrides),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'PortfolioDataRequest',
-      overrides: mapOverridesToPairs(options.overrides),
-      security: toRequestString(portfolio),
-      service: '//blp/refdata',
     });
   }
 
+  // The host planners reject overrides for bcurves/bgovts.
+  // This API has always ignored them, so they are deliberately not forwarded.
   public async bcurves(ticker: string, options: RequestOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(ticker) }],
+    return await this.plannedRequest('bcurves', options.backend, {
+      ticker: toRequestString(ticker),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'curveListRequest',
-      service: '//blp/instruments',
     });
   }
 
   public async bgovts(ticker: string, options: RequestOptions = {}): Promise<unknown> {
-    return await this.request({
-      backend: options.backend,
-      elements: [{ key: 'query', value: toRequestString(ticker) }],
+    return await this.plannedRequest('bgovts', options.backend, {
+      ticker: toRequestString(ticker),
+      kwargs: options.kwargs,
       format: options.format,
-      kwargs: mapObjectToPairs(options.kwargs),
-      operation: 'govtListRequest',
-      service: '//blp/instruments',
     });
   }
 
@@ -1542,14 +1162,7 @@ export class Engine {
     fields: readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    return await createSubscription(
-      this.inner,
-      MKTDATA_SERVICE,
-      tickers,
-      fields,
-      options,
-      'default',
-    );
+    return await createSubscription(this.inner, MKTDATA_SERVICE, tickers, fields, options);
   }
 
   public async subscribeWithOptions(
@@ -1588,12 +1201,20 @@ export class Engine {
         zeroAsNull,
         delivery,
       },
-      'raw',
+      true,
     );
   }
 
   public subscriptionFeeds(): FeedInfo[] {
     return this.inner.subscriptionFeeds();
+  }
+
+  /**
+   * Servers each Bloomberg session is connected to: one entry per session,
+   * request workers first, then subscription workers. Contains no credentials.
+   */
+  public connections(): SessionConnections[] {
+    return this.inner.connections();
   }
 
   public signalShutdown(): void {
@@ -1999,53 +1620,46 @@ export class Engine {
     );
   }
 
-  /** Resolve every input before opening a single, venue-only subscription. */
+  /**
+   * Resolve every input before opening a single, venue-only subscription.
+   *
+   * The native host layer validates the inputs and stream options, resolves the
+   * venues and opens the stream; a failed preflight opens nothing.
+   */
   public async subscribeAuction(
     securities: string | readonly string[],
     options: AuctionStreamOptions = {},
   ): Promise<Subscription> {
-    validateStreamControls(options);
-    if ('aliases' in options && options.aliases !== undefined) {
-      throw new BlpValidationError('Auction aliases are derived from input securities', {
-        element: 'aliases',
-      });
-    }
-    const inputs = [...new Set(toStringArray(securities))];
-    if (inputs.length === 0) {
-      throw new BlpValidationError('securities must not be empty', { element: 'securities' });
-    }
-    const { fields, pcsOverrides, zeroAsNull, ...streamOptions } = options;
-    const requestedFields =
-      fields === undefined || fields.length === 0 ? AuctionFields.default : fields;
-    let venues: Table;
-    try {
-      venues = toArrowTableFromNative(await this.inner.recipeResolveVenues(inputs, pcsOverrides));
-    } catch (error) {
-      throw wrapError(error);
-    }
-    const { topics, aliases } = validatedAuctionTopics(inputs, venues);
-    return await this.subscribe(topics, requestedFields, {
-      ...streamOptions,
-      aliases,
-      zeroAsNull:
-        zeroAsNull ??
-        AuctionFields.zeroPriceFields.filter((field) => requestedFields.includes(field)),
-    });
+    return await this.openAuction(securities, options, false);
   }
 
   public async streamAuction(
     securities: string | readonly string[],
     options: Omit<AuctionStreamOptions, 'rows'> = {},
   ): Promise<Subscription> {
-    if ('rows' in options && options.rows !== undefined) {
-      throw new BlpValidationError(
-        'streamAuction always delivers rows; use subscribeAuction for rows=false',
-        {
-          element: 'rows',
-        },
+    return await this.openAuction(securities, options, true);
+  }
+
+  private async openAuction(
+    securities: string | readonly string[],
+    options: AuctionStreamOptions,
+    streamAuction: boolean,
+  ): Promise<Subscription> {
+    const { pcsOverrides, ...streamOptions } = options;
+    try {
+      validatePlainStringMap(pcsOverrides, 'pcsOverrides');
+      const stream = await this.inner.subscribeAuction(
+        JSON.stringify({
+          securities: toStringArray(securities),
+          pcsOverrides,
+          streamAuction,
+          options: streamOptionsPayload(streamOptions),
+        }),
       );
+      return new Subscription(stream);
+    } catch (error) {
+      throw wrapError(error);
     }
-    return await this.subscribeAuction(securities, options);
   }
 
   public async issuerIsins(
@@ -2113,28 +1727,17 @@ export class Engine {
     tickers: string | readonly string[],
     options: StreamOptions = {},
   ): Promise<Subscription> {
-    const etfList = toStringArray(tickers).map((ticker) => ticker.trim());
-    if (etfList.length === 0) {
-      throw new BlpValidationError('etfs must not be empty', { element: 'tickers' });
-    }
-    const duplicates = firstSeenDuplicates(etfList);
-    if (duplicates.length > 0) {
-      throw new BlpValidationError(
-        `Duplicate ETF inputs are not allowed: ${duplicates.join(', ')}`,
-        { element: 'tickers' },
-      );
-    }
-
-    let relationships: Table;
     try {
-      relationships = toArrowTableFromNative(await this.inner.recipeEtfNavRelationships(etfList));
+      const stream = await this.inner.subscribeEtfInav(
+        JSON.stringify({
+          tickers: toStringArray(tickers),
+          options: streamOptionsPayload(options),
+        }),
+      );
+      return new Subscription(stream);
     } catch (error) {
       throw wrapError(error);
     }
-    const inavTickers = validatedInavTickers(etfList, relationships);
-
-    const { fields = ['LAST_PRICE'], ...streamOptions } = options;
-    return await this.subscribe(inavTickers, fields, streamOptions);
   }
 
   public async currencyConversion(
@@ -2226,10 +1829,10 @@ export async function abds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
   overrides?: OverridesInput,
-  options: Omit<BdpOptions, 'onDelayed'> = {},
+  options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
 ): Promise<unknown> {
   const engine = await getConfiguredEngine();
-  const normalizedOptions: Omit<BdpOptions, 'onDelayed'> =
+  const normalizedOptions: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> =
     overrides === undefined
       ? options
       : { ...options, overrides: ovr(options.overrides ?? {}, overrides) };
@@ -2239,7 +1842,7 @@ export async function abds(
 export async function bds(
   tickers: string | readonly string[],
   fields: string | readonly string[],
-  options: Omit<BdpOptions, 'onDelayed'> = {},
+  options: Omit<BdpOptions, 'onDelayed' | 'includeSecurityErrors'> = {},
 ): Promise<unknown> {
   return await abds(tickers, fields, undefined, options);
 }
@@ -2364,71 +1967,22 @@ export const blp = Object.freeze({
   subscribe,
 });
 
-export const ext = Object.freeze({
-  buildCorporateBondsQuery: native.extBuildCorporateBondsQuery,
-
-  buildEarningHeaderRename: native.extBuildEarningHeaderRename,
-  buildEtfHoldingsQuery: native.extBuildEtfHoldingsQuery,
-
-  buildFuturesTicker: native.extBuildFuturesTicker,
-  buildFxPair: native.extBuildFxPair,
-
-  buildPreferredsQuery: native.extBuildPreferredsQuery,
-  buildYasOverrides: native.extBuildYasOverrides,
-  calculateLevelPercentages: native.extCalculateLevelPercentages,
-  cdx: Object.freeze({
-    acdx_info: acdxInfo,
-    acdx_pricing: acdxPricing,
-    acdx_risk: acdxRisk,
-  }),
-  cdxGenToSpecific: native.extCdxGenToSpecific,
-
-  clearExchangeOverride: native.extClearExchangeOverride,
-  contractIndex: native.extContractIndex,
-  currenciesNeedingConversion: native.extCurrenciesNeedingConversion,
-  defaultBqrDatetimes: native.extDefaultBqrDatetimes,
-  defaultTurnoverDates: native.extDefaultTurnoverDates,
-
-  deriveSessions: native.extDeriveSessions,
-  filterCandidatesByCycle: native.extFilterCandidatesByCycle,
-  filterEquityTickers: native.extFilterEquityTickers,
-
-  filterValidContracts: native.extFilterValidContracts,
-  fmtDate: native.extFmtDate,
-  generateFuturesCandidates: native.extGenerateFuturesCandidates,
-
-  getDvdCols: native.extGetDvdCols,
-  getDvdType: native.extGetDvdType,
-
-  getDvdTypes: native.extGetDvdTypes,
-  getEtfCols: native.extGetEtfCols,
-  getExchangeOverride: native.extGetExchangeOverride,
-  getFuturesMonths: native.extGetFuturesMonths,
-  getMarketRule: native.extGetMarketRule,
-  getMonthCode: native.extGetMonthCode,
-  getMonthName: native.extGetMonthName,
-
-  inferTimezone: native.extInferTimezone,
-
-  isLongFormat: native.extIsLongFormat,
-  isSpecificContract: native.extIsSpecificContract,
-
-  listExchangeOverrides: native.extListExchangeOverrides,
-  normalizeTickers: native.extNormalizeTickers,
-  parseCdxTicker: native.extParseCdxTicker,
-
-  parseDate: native.extParseDate,
-  parseTicker: native.extParseTicker,
-
-  pivotToWide: native.extPivotToWide,
-  previousCdxSeries: native.extPreviousCdxSeries,
-  renameDividendColumns: native.extRenameDividendColumns,
-  renameEtfColumns: native.extRenameEtfColumns,
-  sameCurrency: native.extSameCurrency,
-  sessionTimesToUtc: native.extSessionTimesToUtc,
-  setExchangeOverride: native.extSetExchangeOverride,
-  validateGenericTicker: native.extValidateGenericTicker,
+export const ext = createExt(native, {
+  acdx_info: acdxInfo,
+  acdx_pricing: acdxPricing,
+  acdx_risk: acdxRisk,
 });
+
+export { BLOOMBERG_PYPI_INDEX, defaultSdkCacheDir, installedSdks, provisionSdk };
+export type {
+  InstalledSdksOptions,
+  ProvisionSdkOptions,
+  ProvisionSdkResult,
+  SdkCredentialInput,
+  SdkPlatform,
+  SdkProxyInput,
+  SdkSourceInput,
+};
 
 export function version(): string {
   return packageJson.version;
@@ -2516,6 +2070,7 @@ export type {
   ServerAddress,
   SecurityOverrideSpec,
   ServiceStatus,
+  SessionConnections,
   SessionStatus,
   SessionWindowsInfo,
   Socks5Config,

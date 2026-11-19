@@ -124,8 +124,16 @@ impl RefDataState {
 
         // Fixed long output modes bypass ColumnSet entirely; keep ColumnSet hints only
         // for dynamic wide/metadata paths that actually append through ColumnSet.
-        let long_value_type = (format == OutputFormat::Long && long_mode == LongMode::String)
-            .then(|| common_value_type(&fields, &arrow_types));
+        // When `include_security_errors` is set, `__SECURITY_ERROR__` rows always write
+        // string messages into `value`, so a numeric field hint cannot narrow the column.
+        let long_value_type =
+            (format == OutputFormat::Long && long_mode == LongMode::String).then(|| {
+                if include_security_errors {
+                    ArrowType::String
+                } else {
+                    common_value_type(&fields, &arrow_types)
+                }
+            });
         let wide_columns =
             (format == OutputFormat::Wide).then(|| WideColumns::refdata(&fields, &arrow_types));
         let mut columns = ColumnSet::new();
@@ -212,7 +220,11 @@ impl RefDataState {
                 .as_ref()
                 .map_or_else(|| self.columns.row_count(), WideColumns::row_count),
         };
-        if row_count == 0 && !self.failed_securities.is_empty() {
+        // With `include_security_errors` the refusals are the answer: long carries
+        // them as rows, and wide returns its empty table with `xbbg.security_errors`.
+        if row_count == 0 && !self.failed_securities.is_empty() && !self.include_security_errors {
+            // `//blp/refdata` is the operation's default service; the request layer
+            // replaces it with the service the request was sent to.
             let detail = format!(
                 "All securities failed: {}",
                 self.failed_securities.join(", ")
@@ -359,6 +371,9 @@ impl RefDataState {
         subcategory: &str,
         message: &str,
     ) {
+        if self.format != OutputFormat::Long {
+            return;
+        }
         if let Some(long_columns) = self.long_columns.as_mut() {
             let detail = format!(
                 "code={code} category={category} subcategory={subcategory} message={message}"
@@ -915,6 +930,257 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// A ReferenceDataResponse holding one entry per `(security, refused)`: a
+    /// refused security carries `securityError` and `eidData`, an answered one a
+    /// `VALUE` field.
+    fn refusal_response(securities: &[(&str, bool)]) -> TestEvent {
+        let schema = r#"<ServiceDefinition name="xbbg.test.refusals" version="1.0.0.0">
+            <service name="//xbbg/test/refusals" version="1.0.0.0">
+                <event name="ReferenceDataResponse" eventType="Response"/>
+            </service>
+            <schema>
+                <sequenceType name="Response">
+                    <element name="securityData" type="SecurityData" maxOccurs="unbounded"/>
+                </sequenceType>
+                <sequenceType name="SecurityData">
+                    <element name="security" type="String"/>
+                    <element name="fieldData" type="FieldData" minOccurs="0"/>
+                    <element name="eidData" type="Int32" maxOccurs="unbounded" minOccurs="0"/>
+                    <element name="securityError" type="ErrorInfo" minOccurs="0"/>
+                </sequenceType>
+                <sequenceType name="FieldData">
+                    <element name="VALUE" type="Float64" minOccurs="0"/>
+                </sequenceType>
+                <sequenceType name="ErrorInfo">
+                    <element name="category" type="String"/>
+                    <element name="code" type="Int32"/>
+                    <element name="subcategory" type="String"/>
+                    <element name="message" type="String"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let entries: Vec<_> = securities
+            .iter()
+            .map(|(security, refused)| {
+                if *refused {
+                    serde_json::json!({
+                        "security": security,
+                        "eidData": [22],
+                        "securityError": {
+                            "category": "TEST_ERROR", "code": 9,
+                            "subcategory": "SYNTHETIC", "message": "Synthetic refusal"
+                        }
+                    })
+                } else {
+                    serde_json::json!({"security": security, "fieldData": {"VALUE": 1.5}})
+                }
+            })
+            .collect();
+        TestEvent::with_schema(
+            schema,
+            EventType::Response,
+            "ReferenceDataResponse",
+            &[],
+            |formatter| {
+                formatter.json(&serde_json::json!({"securityData": entries}).to_string());
+            },
+        )
+    }
+
+    fn refusal_result(
+        securities: &[(&str, bool)],
+        format: OutputFormat,
+        include_security_errors: bool,
+    ) -> Result<RecordBatch, BlpError> {
+        let event = refusal_response(securities);
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        RefDataState::with_format(
+            vec!["VALUE".into()],
+            format,
+            LongMode::String,
+            None,
+            include_security_errors,
+            sender,
+        )
+        .finish(&message);
+        receiver.try_recv().unwrap()
+    }
+
+    fn strings(batch: &RecordBatch, column: &str) -> Vec<String> {
+        batch
+            .column_by_name(column)
+            .unwrap()
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap()
+            .iter()
+            .map(|value| value.unwrap().to_string())
+            .collect()
+    }
+
+    fn security_error_tickers(batch: &RecordBatch) -> Vec<String> {
+        use super::super::value_utils::METADATA_KEY_SECURITY_ERRORS;
+        let errors: serde_json::Value =
+            serde_json::from_str(&batch.schema_ref().metadata()[METADATA_KEY_SECURITY_ERRORS])
+                .unwrap();
+        errors.as_object().unwrap().keys().cloned().collect()
+    }
+
+    const REFUSED_TWICE: [(&str, bool); 2] = [("REFUSED1 Curncy", true), ("REFUSED2 Curncy", true)];
+
+    #[test]
+    fn all_refused_wide_with_security_errors_returns_the_empty_table_and_metadata() {
+        use super::super::value_utils::{METADATA_KEY_EID_DATA, METADATA_KEY_SECURITY_ERRORS};
+
+        let batch = refusal_result(&REFUSED_TWICE, OutputFormat::Wide, true).unwrap();
+        assert_eq!(batch.num_rows(), 0);
+        let columns: Vec<_> = batch
+            .schema_ref()
+            .fields()
+            .iter()
+            .map(|field| field.name().as_str())
+            .collect();
+        assert_eq!(columns, ["ticker", "VALUE"]);
+        assert_eq!(
+            security_error_tickers(&batch),
+            ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+        );
+        let metadata = batch.schema_ref().metadata();
+        assert!(metadata.contains_key(METADATA_KEY_EID_DATA));
+        let errors: serde_json::Value =
+            serde_json::from_str(&metadata[METADATA_KEY_SECURITY_ERRORS]).unwrap();
+        assert_eq!(errors["REFUSED1 Curncy"]["code"], 9);
+        assert_eq!(errors["REFUSED2 Curncy"]["category"], "TEST_ERROR");
+    }
+
+    #[test]
+    fn all_refused_long_with_security_errors_returns_one_row_per_security() {
+        let wide = refusal_result(&REFUSED_TWICE, OutputFormat::Wide, true).unwrap();
+        let long = refusal_result(&REFUSED_TWICE, OutputFormat::Long, true).unwrap();
+        assert_eq!(
+            strings(&long, "ticker"),
+            ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+        );
+        assert_eq!(
+            strings(&long, "field"),
+            ["__SECURITY_ERROR__", "__SECURITY_ERROR__"]
+        );
+        assert_eq!(
+            strings(&long, "value")[0],
+            "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
+        );
+        assert_eq!(
+            long.schema_ref().metadata(),
+            wide.schema_ref().metadata(),
+            "both formats carry the same response metadata"
+        );
+    }
+
+    #[test]
+    fn all_refused_without_security_errors_still_fails_in_every_format() {
+        for format in [OutputFormat::Long, OutputFormat::Wide] {
+            match refusal_result(&REFUSED_TWICE, format, false) {
+                Err(BlpError::RequestFailure { label, .. }) => assert_eq!(
+                    label.as_deref(),
+                    Some("All securities failed: REFUSED1 Curncy, REFUSED2 Curncy")
+                ),
+                other => panic!("expected request failure for {format:?}, got {other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn partly_refused_wide_keeps_answered_rows_and_lists_refusals_in_metadata() {
+        let securities = [("TEST Equity", false), ("REFUSED1 Curncy", true)];
+        for include_security_errors in [false, true] {
+            let batch =
+                refusal_result(&securities, OutputFormat::Wide, include_security_errors).unwrap();
+            assert_eq!(strings(&batch, "ticker"), ["TEST Equity"]);
+            assert_eq!(security_error_tickers(&batch), ["REFUSED1 Curncy"]);
+        }
+    }
+
+    #[test]
+    fn long_with_numeric_field_types_and_security_errors_keeps_refusal_text() {
+        use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+
+        let event = refusal_response(&[("TEST Equity", false), ("REFUSED1 Curncy", true)]);
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        let field_types = HashMap::from([("VALUE".to_string(), ArrowType::Float64)]);
+        RefDataState::with_format(
+            vec!["VALUE".into()],
+            OutputFormat::Long,
+            LongMode::String,
+            Some(field_types),
+            true,
+            sender,
+        )
+        .finish(&message);
+        let batch = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(
+            strings(&batch, "ticker"),
+            ["TEST Equity", "REFUSED1 Curncy"]
+        );
+        assert_eq!(strings(&batch, "field"), ["VALUE", "__SECURITY_ERROR__"]);
+        assert_eq!(
+            strings(&batch, "value"),
+            [
+                "1.5",
+                "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
+            ]
+        );
+        assert!(
+            !batch
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_TYPE_MISSES),
+            "security error rows must not record type misses"
+        );
+    }
+
+    #[test]
+    fn all_refused_long_typed_and_metadata_with_security_errors_keep_refusal_rows() {
+        for (long_mode, value_col) in [
+            (LongMode::Typed, "value_str"),
+            (LongMode::WithMetadata, "value"),
+        ] {
+            let event = refusal_response(&REFUSED_TWICE);
+            let mut messages = event.event().messages();
+            let message = messages.next().unwrap();
+            let (sender, mut receiver) = oneshot::channel();
+            RefDataState::with_format(
+                vec!["VALUE".into()],
+                OutputFormat::Long,
+                long_mode,
+                Some(HashMap::from([("VALUE".to_string(), ArrowType::Float64)])),
+                true,
+                sender,
+            )
+            .finish(&message);
+            let batch = receiver.try_recv().unwrap().unwrap();
+            assert_eq!(
+                strings(&batch, "ticker"),
+                ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+            );
+            assert_eq!(
+                strings(&batch, "field"),
+                ["__SECURITY_ERROR__", "__SECURITY_ERROR__"]
+            );
+            assert_eq!(
+                strings(&batch, value_col)[0],
+                "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
+            );
+            assert_eq!(
+                security_error_tickers(&batch),
+                ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+            );
         }
     }
 }

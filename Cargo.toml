@@ -9,7 +9,7 @@ members = [
     "crates/xbbg-recipes",
     "crates/xbbg-log",
     "crates/xbbg-bench",
-    # Host-neutral binding glue and Bloomberg SDK provisioning (no blpapi link)
+    # Host-neutral binding glue and the Bloomberg runtime resolver/provisioner (no blpapi link)
     "crates/xbbg-host",
     "crates/xbbg-sdk",
     # Language bindings
@@ -82,17 +82,19 @@ xbbg-host = { path = "crates/xbbg-host", default-features = false }
 xbbg-sdk = { path = "crates/xbbg-sdk" }
 
 # ── Arrow columnar carriers ───────────────────────────────────────────────────
-arrow = { version = "59.2.0", default-features = false }
-arrow-arith = "59.2.0"
+# 59.3.2 is the patched floor for RUSTSEC-2026-0442: published crates must not
+# let a downstream lockfile keep an affected 59.3.0 or 59.3.1.
+arrow = { version = "59.3.2", default-features = false }
+arrow-arith = "59.3.2"
 # arrow-array declares no `default` feature, so disabling defaults is a no-op
 # and simply keeps every member's inherit line uniform.
-arrow-array = { version = "59.2.0", default-features = false }
-arrow-buffer = "59.2.0"
-arrow-cast = "59.2.0"
-arrow-data = "59.2.0"
-arrow-ord = "59.2.0"
-arrow-schema = "59.2.0"
-arrow-select = "59.2.0"
+arrow-array = { version = "59.3.2", default-features = false }
+arrow-buffer = "59.3.2"
+arrow-cast = "59.3.2"
+arrow-data = "59.3.2"
+arrow-ord = "59.3.2"
+arrow-schema = "59.3.2"
+arrow-select = "59.3.2"
 
 # ── Async runtime and concurrency ─────────────────────────────────────────────
 arc-swap = "1.9.2"
@@ -143,6 +145,12 @@ pyo3-async-runtimes = "0.29"
 pyo3-stub-gen = { version = "0.23", default-features = false }
 jni = "0.22.4"
 
+# ── Native library loading ────────────────────────────────────────────────────
+# libloading opens the Bloomberg runtime for crates/blpapi-sys and crates/xbbg-core; libc's
+# dladdr tells xbbg-core which file the dynamic loader actually mapped.
+libloading = "0.9"
+libc = "0.2"
+
 # ── Bloomberg SDK provisioning (crates/xbbg-sdk) ──────────────────────────────
 # uv publishes every crate as 0.0.x with no semver promise, so the uv crates are
 # pinned exactly and move together; rattler crates are pinned for the same reason.
@@ -165,13 +173,16 @@ reqwest-retry = { package = "astral-reqwest-retry", version = "0.9.1" }
 async-trait = "0.1"
 base64 = "0.23"
 csv = "1.4"
+flate2 = "1.1"
 hex = "0.4"
+sha2 = { version = "0.11", default-features = false }
+tar = "0.4"
 http = "1"
 url = "2"
 zip = { version = "9.3", default-features = false }
 
 # ── MCP server ────────────────────────────────────────────────────────────────
-rmcp = "3.5.1"
+rmcp = "3.10.0"
 
 # ── Build-time and dev-only ───────────────────────────────────────────────────
 bindgen = { version = "0.73.2", default-features = false }
@@ -180,6 +191,8 @@ async-channel = "2.5"
 crossbeam-queue = "0.3.14"
 simd-json = "0.18"
 tempfile = "3.27"
+# Loads the Bloomberg runtime before main in test binaries (see xbbg_core::load_from_env).
+ctor = "1.0.13"
 
 # =============================================================================
 # Performance-first Release Profile

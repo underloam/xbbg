@@ -54,6 +54,7 @@ public final class EngineConfig {
   private final RetryPolicy retryPolicy;
   private final Long requestTimeoutMs;
   private final Long streamsDeactivatedWarnMs;
+  private final Long reconnectGraceMs;
   private final Boolean keepAliveEnabled;
   private final Integer keepAliveInactivityMs;
   private final Integer keepAliveResponseTimeoutMs;
@@ -95,6 +96,7 @@ public final class EngineConfig {
     retryPolicy = b.retryPolicy;
     requestTimeoutMs = b.requestTimeoutMs;
     streamsDeactivatedWarnMs = b.streamsDeactivatedWarnMs;
+    reconnectGraceMs = b.reconnectGraceMs;
     keepAliveEnabled = b.keepAliveEnabled;
     keepAliveInactivityMs = b.keepAliveInactivityMs;
     keepAliveResponseTimeoutMs = b.keepAliveResponseTimeoutMs;
@@ -158,6 +160,7 @@ public final class EngineConfig {
     b.retryPolicy = retryPolicy;
     b.requestTimeoutMs = requestTimeoutMs;
     b.streamsDeactivatedWarnMs = streamsDeactivatedWarnMs;
+    b.reconnectGraceMs = reconnectGraceMs;
     b.keepAliveEnabled = keepAliveEnabled;
     b.keepAliveInactivityMs = keepAliveInactivityMs;
     b.keepAliveResponseTimeoutMs = keepAliveResponseTimeoutMs;
@@ -432,6 +435,16 @@ public final class EngineConfig {
   }
 
   /**
+   * Returns how long a request session may stay without a server connection before its in-flight
+   * requests fail, in ms, or empty for 10000.
+   *
+   * @return the reconnect grace in ms, or empty for 10000
+   */
+  public OptionalLong reconnectGraceMs() {
+    return optional(reconnectGraceMs);
+  }
+
+  /**
    * Returns whether keep-alive pings are enabled, or empty for the SDK default (true).
    *
    * @return whether keep-alive pings are enabled, or empty for the SDK default (true)
@@ -534,6 +547,7 @@ public final class EngineConfig {
     json.put("retryPolicy", retryPolicy == null ? null : retryPolicy.toJson());
     json.put("requestTimeoutMs", requestTimeoutMs);
     json.put("streamsDeactivatedWarnMs", streamsDeactivatedWarnMs);
+    json.put("reconnectGraceMs", reconnectGraceMs);
     json.put("keepAliveEnabled", keepAliveEnabled);
     json.put("keepAliveInactivityMs", keepAliveInactivityMs);
     json.put("keepAliveResponseTimeoutMs", keepAliveResponseTimeoutMs);
@@ -638,6 +652,7 @@ public final class EngineConfig {
     private RetryPolicy retryPolicy;
     private Long requestTimeoutMs;
     private Long streamsDeactivatedWarnMs;
+    private Long reconnectGraceMs;
     private Boolean keepAliveEnabled;
     private Integer keepAliveInactivityMs;
     private Integer keepAliveResponseTimeoutMs;
@@ -996,6 +1011,21 @@ public final class EngineConfig {
      */
     public Builder streamsDeactivatedWarnMs(long value) {
       streamsDeactivatedWarnMs = value;
+      return this;
+    }
+
+    /**
+     * Sets how long a request session may stay without a connection to any server before its
+     * in-flight requests fail with a transient error (default 10000). One dropped connection fails
+     * nothing: the SDK carries requests over another connection or finishes them after it
+     * reconnects. 0 fails them as soon as the last connection drops; {@link #requestTimeoutMs}
+     * still applies independently. The engine rejects negative values.
+     *
+     * @param value milliseconds
+     * @return this builder
+     */
+    public Builder reconnectGraceMs(long value) {
+      reconnectGraceMs = value;
       return this;
     }
 

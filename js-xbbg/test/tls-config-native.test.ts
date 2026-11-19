@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
 
+import { BlpValidationError, wrapError } from '../src/errors';
 import type { NativeAddon } from '../src/napi';
 import type { TlsConfig } from '../src/types';
 
@@ -15,7 +16,7 @@ describe.skipIf(!existsSync(nativePath))('native TLS configuration boundaries', 
 
   beforeAll(async () => {
     // Load the optional addon only after skipIf excludes unavailable installs.
-    // The package also sets Windows' DLL search path.
+    // The package entry also loads the Bloomberg runtime into the process.
     await import('../src/index.js');
     native = createRequire(__filename)(nativePath) as NativeAddon;
   });
@@ -47,6 +48,11 @@ describe.skipIf(!existsSync(nativePath))('native TLS configuration boundaries', 
     expect(message).not.toContain('synthetic-secret-password');
     expect(message).not.toContain('fixtures/');
     expect(message).not.toContain(credentials.toString('hex'));
+    expect(message).toMatch(/^\[XBBG:VALIDATION\] /u);
+    const wrapped = wrapError(error);
+    expect(wrapped).toBeInstanceOf(BlpValidationError);
+    expect(wrapped.message).toContain('tls.clientCredentials');
+    expect(wrapped.message).not.toContain('[XBBG');
   });
 
   test.each(['Buffer', 'Uint8Array'] as const)(

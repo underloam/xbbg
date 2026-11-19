@@ -66,8 +66,7 @@ function prepareArtifact(
     profile: 'release',
     rustcVersion: 'rustc 1.90.0',
     rustFlags,
-    schemaVersion: 1,
-    sdkLibrary: { file: 'sdk-link-input', sha256: '0'.repeat(64) },
+    schemaVersion: 3,
     sdkVersion: '3.26.7.1',
     target: fixture.target,
     targetFeatures: [],
@@ -171,13 +170,11 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
     });
   });
 
-  test('selects Cargo-reported target artifacts and SDK link inputs instead of stale conventional paths', () => {
+  test('selects the Cargo-reported target artifact and SDK headers instead of stale conventional paths', () => {
     withNativeRepo((fixture) => {
       const toolDir = path.join(fixture.root, 'tools');
       const sdkRoot = path.join(fixture.root, 'sdk');
       const includeDir = path.join(sdkRoot, 'include');
-      const guessedLibDir = path.join(sdkRoot, 'lib');
-      const actualLibDir = path.join(fixture.root, 'actual-link-input');
       const customTarget = path.join(fixture.root, 'custom-cargo-target');
       const extension =
         process.platform === 'win32' ? 'dll' : process.platform === 'darwin' ? 'dylib' : 'so';
@@ -188,13 +185,9 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
         `napi_xbbg.${extension}`,
       );
       const staleArtifact = path.join(fixture.root, 'target', 'release', `napi_xbbg.${extension}`);
-      const sdkLibrary =
-        process.platform === 'win32' ? 'blpapi3_64.lib' : `libblpapi3_64.${extension}`;
       for (const directory of [
         toolDir,
         includeDir,
-        guessedLibDir,
-        actualLibDir,
         path.dirname(artifactPath),
         path.dirname(staleArtifact),
       ]) {
@@ -202,8 +195,6 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
       }
       fs.writeFileSync(artifactPath, 'current-cargo-artifact');
       fs.writeFileSync(staleArtifact, 'stale-conventional-artifact');
-      fs.writeFileSync(path.join(guessedLibDir, sdkLibrary), 'unlinked-sdk');
-      fs.writeFileSync(path.join(actualLibDir, sdkLibrary), 'actual-sdk-link-input');
       fs.writeFileSync(
         path.join(includeDir, 'blpapi_versionmacros.h'),
         [
@@ -234,11 +225,10 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
           env: Object.entries(buildValues).map(([key, value]) => [`XBBG_BUILD_${key}`, value]),
         },
         {
+          // The blpapi-sys build script links nothing; it only reports the headers it used.
           reason: 'build-script-executed',
           package_id: 'xbbg-blpapi-sys',
           env: [['XBBG_SDK_INCLUDE_DIR', includeDir]],
-          linked_libs: ['dylib=blpapi3_64'],
-          linked_paths: [`native=${actualLibDir}`],
         },
         {
           reason: 'compiler-artifact',
@@ -260,7 +250,6 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
             ...process.env,
             BLPAPI_ROOT: path.join(fixture.root, 'missing-sdk-root'),
             BLPAPI_INCLUDE_DIR: includeDir,
-            BLPAPI_LIB_DIR: actualLibDir,
             CARGO_BUILD_TARGET: fixture.target,
             CARGO_TARGET_DIR: customTarget,
             // Cargo's encoded flags win; launcher RUSTFLAGS are not compiler facts.
@@ -276,12 +265,24 @@ describe.skipIf(process.versions.bun !== undefined)('native artifact provenance'
         'current-cargo-artifact',
       );
       const info = readNativeBuildInfo(path.join(fixture.packageDir, '.native-build-info.json'));
-      expect(info.sdkLibrary.sha256).toBe(
-        createHash('sha256').update('actual-sdk-link-input').digest('hex'),
-      );
+      expect(info).toMatchObject({ schemaVersion: 3, sdkVersion: '3.26.7.1' });
+      expect(info).not.toHaveProperty('sdkLibrary');
+      expect(info).not.toHaveProperty('runtimeAddon');
       const staged = stage(fixture);
       expect(staged).toMatchObject({ status: 0 });
       expect(fs.readFileSync(fixture.stagedArtifact, 'utf8')).toBe('current-cargo-artifact');
+    });
+  });
+
+  test('refuses provenance written before the resolver addon was removed', () => {
+    withNativeRepo((fixture) => {
+      prepareArtifact(fixture, 'portable-release');
+      const infoPath = path.join(fixture.packageDir, '.native-build-info.json');
+      const info = JSON.parse(fs.readFileSync(infoPath, 'utf8')) as Record<string, unknown>;
+      fs.writeFileSync(infoPath, JSON.stringify({ ...info, schemaVersion: 2 }));
+      expect(() => readNativeBuildInfo(infoPath)).toThrow(/incomplete/u);
+      expect(stage(fixture).status).toBe(1);
+      expect(fs.readFileSync(fixture.stagedArtifact, 'utf8')).toBe('previous-artifact');
     });
   });
 });

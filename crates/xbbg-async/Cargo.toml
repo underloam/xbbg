@@ -45,6 +45,10 @@ test-support = ["live", "xbbg_core/test-support"]
 bench-internals = ["test-support"]
 
 [dev-dependencies]
+# Loads the Bloomberg runtime before main in this crate's test binaries, finding it with
+# xbbg-sdk's environment lookup. Path-only, so it is stripped when the crate is published.
+ctor = { workspace = true }
+xbbg-sdk = { workspace = true }
 xbbg_core = { workspace = true, features = ["test-support"] }
 tokio = { workspace = true, features = ["test-util"] }
 tempfile = { workspace = true }

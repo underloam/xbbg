@@ -190,11 +190,7 @@ pub fn is_specific_contract(ticker: &str) -> bool {
     // For 1-digit year, require root prefix of at least 2 chars to avoid
     // misclassifying generic tickers like "UX1" (root=UX, index=1).
     // For 2-digit year, root prefix of 1+ is sufficient (e.g., "WH24").
-    if digit_count == 1 && prefix_len < 2 {
-        return false;
-    }
-
-    true
+    !(digit_count == 1 && prefix_len < 2)
 }
 
 /// Normalize tickers to a list.

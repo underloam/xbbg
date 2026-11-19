@@ -1,12 +1,44 @@
-//! Bloomberg BLPAPI runtime provisioning shared by xbbg surfaces.
+//! Locate and provision the Bloomberg BLPAPI runtime shared by xbbg surfaces.
 //!
 //! This crate must never depend on `xbbg-blpapi-sys` (directly or transitively):
 //! hosts load it before the Bloomberg runtime exists on the machine.
 //!
-//! A [`Provisioner`] installs the Bloomberg native library from one of three [`Source`]s:
+//! # Features
+//!
+//! * **default (none): the resolver.** Platform library names, the one search order for the
+//!   runtime ([`locate`]: explicit path, `BLPAPI_*` variables, vendored SDK, host hints, the
+//!   Terminal, the OS search path, the cache), the cache root, the `provenance.json` record and
+//!   the verification of an installed runtime. It returns candidate library paths and nothing
+//!   more: no networking, no download, and only `serde`, `serde_json`, `sha2` and `hex` as
+//!   dependencies, so a base package can embed it in a few hundred kilobytes. Each language
+//!   binding passes what only it knows to [`locate`] and loads the chosen library in its own
+//!   process.
+//! * **`provision`: the downloader.** Everything below "Provisioning", with the PyPI, conda and
+//!   archive stacks (uv, rattler, reqwest, tokio, archive readers) behind it. Enabling it in a
+//!   resolver-only binding grows that binary by an order of magnitude; the package size budgets
+//!   in CI exist to catch exactly that.
+//!
+//! # The cache
+//!
+//! ```text
+//! <cache>/
+//!   sdk/<version>/<platform>/<pypi|conda|artifact>-<archive sha256[..12]>/
+//!       lib/<blpapi3_64.dll | libblpapi3_64.so>
+//!       licenses/...
+//!       provenance.json   written last; directories without it are incomplete
+//! ```
+//!
+//! An install is usable when `provenance.json` parses, its library path is relative and stays
+//! inside the install directory, the file is a regular file whose SHA-256 matches the recorded
+//! hash, and the platform matches. [`scan_cache`] lists the verified installs best first and the
+//! rest with the reason each was refused; [`resolve_cached`] picks the best one.
+//!
+//! # Provisioning (feature `provision`)
+//!
+//! A `Provisioner` installs the Bloomberg native library from one of three `Source`s:
 //!
 //! * a PyPI simple index (PEP 503 HTML or PEP 691 JSON, read by uv's registry client), such as
-//!   Bloomberg's own [`BLOOMBERG_PYPI_INDEX`]: the library comes out of the `blpapi` wheel;
+//!   Bloomberg's own `BLOOMBERG_PYPI_INDEX`: the library comes out of the `blpapi` wheel;
 //! * a conda channel (rattler's gateway, sharded repodata where offered): the `libblpapi`
 //!   package;
 //! * a single `.whl`, `.conda` or `.tar.bz2` archive.
@@ -15,121 +47,62 @@
 //! publishes (or the one the caller supplies), and the library against the wheel `RECORD` or
 //! the conda `info/paths.json`. Installs are staged under `<cache>/tmp`, committed by an atomic
 //! rename under a per-install file lock, and described by a `provenance.json` written last (see
-//! [`installed`] for the layout readers rely on). Network settings are explicit
-//! ([`NetworkOptions`]): no environment variable is changed or, apart from
-//! [`ProxyConfig::System`], read.
+//! `installed` for the layout readers rely on). Network settings are explicit
+//! (`NetworkOptions`): no environment variable is changed or, apart from `ProxyConfig::System`,
+//! read.
 
-mod conda;
-mod error;
-mod http;
-mod install;
-mod options;
+mod cache;
+pub mod locate;
 mod platform;
+mod provenance;
+
+#[cfg(feature = "provision")]
+pub mod cli;
+#[cfg(feature = "provision")]
+mod conda;
+#[cfg(feature = "provision")]
+pub mod cpp_sdk;
+#[cfg(feature = "provision")]
+mod error;
+#[cfg(feature = "provision")]
+mod http;
+#[cfg(feature = "provision")]
+mod install;
+#[cfg(feature = "provision")]
+mod options;
+#[cfg(feature = "provision")]
 mod provisioner;
+#[cfg(feature = "provision")]
 mod pypi;
+#[cfg(feature = "provision")]
+pub mod request;
+#[cfg(feature = "provision")]
 mod source;
+#[cfg(feature = "provision")]
 mod wheel;
 
+#[cfg(feature = "provision")]
 pub mod blocking;
 
-use std::path::PathBuf;
-
-pub use error::{Error, Result};
-pub use install::{Provisioned, installed};
-pub use options::{Credential, NetworkOptions, ProvisionOptions, ProxyConfig, TlsConfig};
-pub use platform::{Platform, VersionSpec};
-pub use provisioner::{Provisioner, Resolved};
-pub use source::{
-    BLOOMBERG_PYPI_INDEX, DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, MIN_PYPI_VERSION, Source,
-    SourceKind,
+pub use cache::{
+    CacheScan, CachedRuntime, INSTALLS_DIR, Rejected, compare_versions, default_cache_root,
+    resolve_cached, scan_cache, scan_cache_all, verify_install,
 };
+pub use platform::{ParsePlatformError, Platform};
+pub use provenance::{PROVENANCE_FILE, Provenance, safe_relative};
 
-/// The shared xbbg cache root: `XBBG_CACHE_DIR` if set, else `%LOCALAPPDATA%\xbbg` (falling
-/// back to `%USERPROFILE%\AppData\Local\xbbg`) on Windows, `~/Library/Caches/xbbg` on macOS,
-/// and `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere. `None` when no home directory is
-/// known. JVM hosts consult the `xbbg.cache.dir` system property before calling this.
-pub fn default_cache_root() -> Option<PathBuf> {
-    cache_root_from(|name| {
-        std::env::var_os(name)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-    })
-}
-
-fn cache_root_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
-    if let Some(dir) = var("XBBG_CACHE_DIR") {
-        return Some(dir);
-    }
-    if cfg!(windows) {
-        var("LOCALAPPDATA")
-            .or_else(|| var("USERPROFILE").map(|home| home.join("AppData").join("Local")))
-            .map(|base| base.join("xbbg"))
-    } else if cfg!(target_os = "macos") {
-        var("HOME").map(|home| home.join("Library").join("Caches").join("xbbg"))
-    } else {
-        var("XDG_CACHE_HOME")
-            .filter(|dir| dir.is_absolute())
-            .or_else(|| var("HOME").map(|home| home.join(".cache")))
-            .map(|base| base.join("xbbg"))
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::collections::HashMap;
-    use std::path::Path;
-
-    use super::*;
-
-    fn root(vars: &[(&str, &str)]) -> Option<PathBuf> {
-        let vars: HashMap<&str, &str> = vars.iter().copied().collect();
-        cache_root_from(|name| vars.get(name).map(PathBuf::from))
-    }
-
-    #[test]
-    fn explicit_cache_dir_wins() {
-        let dir = Path::new("custom").join("cache");
-        let found = root(&[
-            ("XBBG_CACHE_DIR", dir.to_str().unwrap()),
-            ("LOCALAPPDATA", "x"),
-            ("HOME", "y"),
-        ]);
-        assert_eq!(found, Some(dir));
-    }
-
-    #[test]
-    #[cfg(windows)]
-    fn windows_prefers_local_app_data_then_user_profile() {
-        assert_eq!(
-            root(&[("LOCALAPPDATA", r"C:\Local"), ("USERPROFILE", r"C:\Home")]),
-            Some(PathBuf::from(r"C:\Local\xbbg"))
-        );
-        assert_eq!(
-            root(&[("USERPROFILE", r"C:\Home")]),
-            Some(PathBuf::from(r"C:\Home\AppData\Local\xbbg"))
-        );
-        assert_eq!(root(&[]), None);
-    }
-
-    #[test]
-    #[cfg(all(unix, not(target_os = "macos")))]
-    fn linux_uses_xdg_cache_home_when_absolute() {
-        assert_eq!(
-            root(&[("XDG_CACHE_HOME", "/xdg"), ("HOME", "/home/u")]),
-            Some(PathBuf::from("/xdg/xbbg"))
-        );
-        assert_eq!(
-            root(&[("XDG_CACHE_HOME", "relative"), ("HOME", "/home/u")]),
-            Some(PathBuf::from("/home/u/.cache/xbbg"))
-        );
-    }
-
-    #[test]
-    #[cfg(target_os = "macos")]
-    fn macos_uses_library_caches() {
-        assert_eq!(
-            root(&[("HOME", "/Users/u")]),
-            Some(PathBuf::from("/Users/u/Library/Caches/xbbg"))
-        );
-    }
-}
+#[cfg(feature = "provision")]
+pub use error::{Error, Result};
+#[cfg(feature = "provision")]
+pub use install::{Provisioned, installed};
+#[cfg(feature = "provision")]
+pub use options::{
+    Credential, NetworkOptions, ProvisionOptions, ProxyConfig, TlsConfig, VersionSpec,
+};
+#[cfg(feature = "provision")]
+pub use provisioner::{Provisioner, Resolved};
+#[cfg(feature = "provision")]
+pub use source::{
+    BLOOMBERG_PYPI_INDEX, DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, MIN_PYPI_VERSION,
+    SOURCE_ENV, Source, SourceKind, VERSION_ENV, redact_user_info, validate_sha256_hex,
+};

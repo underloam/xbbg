@@ -38,12 +38,15 @@ class McpProtocolError(RuntimeError):
 
 def find_blpapi_lib_dir() -> Path:
     candidates = sorted(
-        path.parent
-        for path in SDK_ROOT.glob("*/Darwin/libblpapi3.dylib")
-        if path.is_file() and path.parts[-3] != ".cache"
+        {
+            path.parent
+            for pattern in ("*/Darwin/libblpapi3_64.so", "*/Darwin/libblpapi3_64.dylib", "*/Darwin/libblpapi3.dylib")
+            for path in SDK_ROOT.glob(pattern)
+            if path.is_file() and path.parts[-3] != ".cache"
+        }
     )
     if not candidates:
-        raise FileNotFoundError("Could not find libblpapi3.dylib under vendor/blpapi-sdk/<version>/Darwin")
+        raise FileNotFoundError("Could not find a Bloomberg runtime library under vendor/blpapi-sdk/<version>/Darwin")
     return candidates[-1]
 
 
@@ -52,8 +55,7 @@ class McpSession:
 
     def __init__(self, binary: Path, lib_dir: Path) -> None:
         env = dict(os.environ)
-        dyld = env.get("DYLD_LIBRARY_PATH", "")
-        env["DYLD_LIBRARY_PATH"] = f"{lib_dir}{os.pathsep}{dyld}" if dyld else str(lib_dir)
+        env["XBBG_MCP_LIB_DIR"] = str(lib_dir)
         self._proc = subprocess.Popen(
             [str(binary)],
             cwd=REPO_ROOT,

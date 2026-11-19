@@ -227,11 +227,13 @@ impl FieldInfoState {
         let category_array = self.category_builder.finish();
         let id_array = self.id_builder.finish();
         let mut metadata = HashMap::new();
-        if !self.field_errors.is_empty() {
-            let errors =
-                serde_json::to_string(&self.field_errors).map_err(|error| BlpError::Internal {
+        if let Some(errors) =
+            crate::diagnostics::encode_field_errors(&self.field_errors).map_err(|error| {
+                BlpError::Internal {
                     detail: format!("serialize FieldInfo errors: {error}"),
-                })?;
+                }
+            })?
+        {
             metadata.insert(METADATA_KEY_FIELD_ERRORS.to_string(), errors);
         }
 

@@ -1,8 +1,8 @@
 import type { Table } from 'apache-arrow';
+import type { Mock } from 'vitest';
 
 import { DataType, DateUnit, tableFromIPC, tableToIPC, TimeUnit } from 'apache-arrow';
 
-import { TA_DEFAULTS } from '../src/_defs_gen';
 import { tableFromNativeArrowBatch } from '../src/arrow-zero-copy';
 import * as api from '../src/index';
 import type {
@@ -30,6 +30,12 @@ vi.mock(import('node:module'), async (importOriginal) => {
     JsEngine: vi.fn<() => never>(() => {
       throw new Error('engine wiring tests must not instantiate the native engine');
     }),
+    // Planning itself is covered natively (request-plan-native.test.ts).
+    // These tests only need the planned request to carry the delayed-data policy.
+    planRequest: (method: string, args: string) => {
+      const { onDelayed } = JSON.parse(args) as Record<string, unknown>;
+      return JSON.stringify({ service: '//blp/refdata', operation: method, onDelayed });
+    },
     extAuctionFieldGroup: (name: string) =>
       name === 'default'
         ? ['THEO_PRICE', 'INDICATIVE_NEAR', 'ORDER_IMB_BUY_VOLUME']
@@ -38,6 +44,14 @@ vi.mock(import('node:module'), async (importOriginal) => {
     extImbalanceSide: () => null,
     getLogLevel: () => 'off',
     setLogLevel: () => undefined,
+    // The runtime search is covered by sdk-load.test.ts; these tests never reach Bloomberg.
+    loadSdk: () => ({
+      path: 'synthetic-runtime',
+      source: 'explicit',
+      detail: 'engine-wiring mock',
+      version: '0.0.0.0',
+      rejected: [],
+    }),
   };
   // The peer accepts file IPC only; real Arrow decoding exposes its received payload.
   const polars = {
@@ -94,50 +108,6 @@ function engineWithNative(inner: Partial<NativeEngine>): api.Engine {
   return Object.assign(Object.create(api.Engine.prototype) as api.Engine, { inner });
 }
 
-describe('generated study vocabulary', () => {
-  afterEach(() => {
-    vi.restoreAllMocks();
-  });
-
-  it('merges shared study defaults with caller parameters', async () => {
-    const engine = engineWithNative({});
-    const request = vi.spyOn(engine, 'request').mockResolvedValue(undefined);
-    await engine.bta('SYNTHETIC Equity', 'rsi', { studyParams: { period: 7 } });
-    expect(request).toHaveBeenCalledWith({
-      backend: undefined,
-      extractor: 'generic',
-      format: undefined,
-      service: '//blp/tasvc',
-      operation: 'studyRequest',
-      elements: [
-        { key: 'priceSource.securityName', value: 'SYNTHETIC Equity' },
-        { key: 'priceSource.dataRange.historical.periodicitySelection', value: 'DAILY' },
-        ...Object.entries({ ...TA_DEFAULTS.rsiStudyAttributes, period: 7 }).map(([key, value]) => ({
-          key: `studyAttributes.rsiStudyAttributes.${key}`,
-          value: String(value),
-        })),
-      ],
-    });
-  });
-
-  it.each([
-    ['SMA', 'smavgStudyAttributes'],
-    ['Fear Greed', 'fgStudyAttributes'],
-    ['FEAR-GREED', 'fgStudyAttributes'],
-    ['custom', 'customStudyAttributes'],
-    ['customStudyAttributes', 'customstudyattributes'],
-  ])('preserves normalization and custom study fallback for %s', async (study, attr) => {
-    const engine = engineWithNative({});
-    const request = vi.spyOn(engine, 'request').mockResolvedValue(undefined);
-    await engine.bta('SYNTHETIC Equity', study, { studyParams: { period: 7 } });
-    expect(request).toHaveBeenCalledWith(
-      expect.objectContaining({
-        elements: expect.arrayContaining([{ key: `studyAttributes.${attr}.period`, value: '7' }]),
-      }),
-    );
-  });
-});
-
 describe('shared subscription controls', () => {
   afterEach(() => {
     vi.restoreAllMocks();
@@ -149,10 +119,7 @@ describe('shared subscription controls', () => {
       const subscribe = vi
         .fn<NativeEngine['subscribe']>()
         .mockResolvedValue(fakeNativeSubscription());
-      const subscribeWithOptions = vi
-        .fn<NativeEngine['subscribeWithOptions']>()
-        .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({ subscribe, subscribeWithOptions });
+      const engine = engineWithNative({ subscribe });
       const aliases = { 'SYN UN Equity': 'source' };
       await engine[method](['SYN UN Equity'], ['BID'], {
         aliases,
@@ -163,25 +130,29 @@ describe('shared subscription controls', () => {
         zeroAsNull: ['BID'],
         delivery: 'deltas',
       });
-      const call =
-        method === 'subscribe' ? subscribe.mock.calls[0] : subscribeWithOptions.mock.calls[0];
-      expect(call?.slice(-7)).toStrictEqual([
-        aliases,
-        'raise',
-        true,
-        false,
-        'raise',
-        ['BID'],
-        'deltas',
-      ]);
+      expect(subscribeArgs(subscribe)).toStrictEqual({
+        service: '//blp/mktdata',
+        tickers: ['SYN UN Equity'],
+        fields: ['BID'],
+        rawOptions: false,
+        options: {
+          aliases,
+          onDelayed: 'raise',
+          isolated: true,
+          rows: false,
+          onFieldError: 'raise',
+          zeroAsNull: ['BID'],
+          delivery: 'deltas',
+        },
+      });
     },
   );
 
   it('passes policies through module-level subscriptions and option-based subscribe', async () => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions, signalShutdown: () => undefined });
+    const engine = engineWithNative({ subscribe, signalShutdown: () => undefined });
     vi.spyOn(api.Engine, 'connect').mockResolvedValue(engine);
     api.configure({});
     const options = {
@@ -197,76 +168,56 @@ describe('shared subscription controls', () => {
     try {
       await api.asubscribe('SYN', 'BID', options);
       await api.subscribe('SYN', 'BID', options);
-      expect(subscribeWithOptions.mock.calls).toStrictEqual([
-        [
-          '//blp/mktdata',
-          ['SYN'],
-          ['BID'],
-          ['conflate'],
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          options.aliases,
-          'ignore',
-          false,
-          false,
-          'ignore',
-          ['BID'],
-          'deltas',
-        ],
-        [
-          '//blp/mktdata',
-          ['SYN'],
-          ['BID'],
-          ['conflate'],
-          undefined,
-          undefined,
-          undefined,
-          undefined,
-          options.aliases,
-          'ignore',
-          false,
-          false,
-          'ignore',
-          ['BID'],
-          'deltas',
-        ],
+      const expected = {
+        service: '//blp/mktdata',
+        tickers: ['SYN'],
+        fields: ['BID'],
+        rawOptions: false,
+        options,
+      };
+      expect(subscribe.mock.calls.map(([args]) => JSON.parse(args) as unknown)).toStrictEqual([
+        expected,
+        expected,
       ]);
     } finally {
       api.configure();
     }
   });
 
+  it.each([{ onDelayed: 'unknown' }, { delivery: 'state', rows: false }])(
+    'wraps a host rejection of invalid controls: %j',
+    async (options) => {
+      const subscribe = vi
+        .fn<NativeEngine['subscribe']>()
+        .mockRejectedValue(
+          new Error('[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"delivery"}\nsynthetic rejection'),
+        );
+      const engine = engineWithNative({ subscribe });
+      await expect(
+        engine.subscribe(['SYN'], ['BID'], options as api.StreamOptions),
+      ).rejects.toBeInstanceOf(api.BlpValidationError);
+      await expect(
+        engine.stream(['SYN'], ['BID'], options as api.StreamOptions),
+      ).rejects.toBeInstanceOf(api.BlpValidationError);
+      expect(subscribe).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  // JSON would carry a Map as `{}`, silently dropping the aliases, so they never reach the host.
   it.each([
-    { onDelayed: 'unknown' },
-    { isolated: 'true' },
     { aliases: ['label'] },
     { aliases: { SYN: 42 } },
-    { aliases: new Date(0) },
     { aliases: new Map([['SYN', 'label']]) },
-    { aliases: /SYN/u },
-    { aliases: Object.create({ inheritedLabel: 'SYN' }) as unknown },
-    { rows: 'false' },
-    { onFieldError: 'unknown' },
-    { zeroAsNull: 'THEO_PRICE' },
-    { zeroAsNull: ['THEO_PRICE', 7] },
-    { delivery: 'snapshot' },
-    { delivery: 'state', rows: false },
-    { delivery: 'state', overflowPolicy: 'drop_oldest' },
-    { delivery: 'state', streamCapacity: 8 },
-  ])('rejects invalid controls before opening a feed: %j', async (options) => {
+  ])('rejects aliases that are not a plain string map before the host: %o', async (options) => {
     const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const subscribeWithOptions = vi.fn<NativeEngine['subscribeWithOptions']>();
-    const engine = engineWithNative({ subscribe, subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
     await expect(
-      engine.subscribe(['SYN'], ['BID'], options as api.StreamOptions),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
-    await expect(
-      engine.stream(['SYN'], ['BID'], options as api.StreamOptions),
-    ).rejects.toBeInstanceOf(api.BlpValidationError);
+      engine.subscribe(['SYN'], ['BID'], options as unknown as api.StreamOptions),
+    ).rejects.toMatchObject({
+      element: 'aliases',
+      message: expect.stringContaining('aliases must map topic strings to label strings'),
+    });
     expect(subscribe).not.toHaveBeenCalled();
-    expect(subscribeWithOptions).not.toHaveBeenCalled();
   });
 
   it('exposes a live field projection after addFields and keeps labels on add', async () => {
@@ -355,6 +306,13 @@ describe('shared subscription controls', () => {
     ];
     expect(engineWithNative({ subscriptionFeeds: () => feeds }).subscriptionFeeds()).toStrictEqual(
       feeds,
+    );
+    const connections: api.SessionConnections[] = [
+      { pool: 'request', worker: 0, servers: ['a.example.com:8194', 'b.example.com:8194'] },
+      { pool: 'subscription', worker: 0, servers: [] },
+    ];
+    expect(engineWithNative({ connections: () => connections }).connections()).toStrictEqual(
+      connections,
     );
   });
 
@@ -651,124 +609,65 @@ function venueBatch(rows: readonly VenueFixture[]): NativeArrowZeroCopyBatch {
 }
 
 describe('auction preflight and results', () => {
-  it('rejects caller aliases before resolving or opening auction feeds', async () => {
-    const recipeResolveVenues = vi.fn<NativeEngine['recipeResolveVenues']>();
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({ recipeResolveVenues, subscribe });
-    const options = { aliases: { VENUE_A: 'custom' } } as api.AuctionStreamOptions;
-    await expect(engine.subscribeAuction(['SYN_A'], options)).rejects.toMatchObject({
+  // The preflight rules run in xbbg-host, which has its own Rust tests.
+  // These tests pin what the wrapper sends and how it reports a rejection.
+  it.each(['subscribeAuction', 'streamAuction'] as const)(
+    'sends %s inputs and stream options to the native host preflight',
+    async (method) => {
+      const subscribeAuction = vi
+        .fn<NativeEngine['subscribeAuction']>()
+        .mockResolvedValue(fakeNativeSubscription());
+      const engine = engineWithNative({ subscribeAuction });
+      const pcsOverrides = { 'SYNTHETIC EXCHANGE': 'PCS' };
+      const subscription = await engine[method](
+        ['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'],
+        {
+          fields: ['BID'],
+          pcsOverrides,
+          isolated: true,
+          onDelayed: 'raise',
+          delivery: 'state',
+        },
+      );
+      expect(subscription).toBeInstanceOf(api.Subscription);
+      expect(subscribeAuction).toHaveBeenCalledTimes(1);
+      expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+        securities: ['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'],
+        pcsOverrides,
+        streamAuction: method === 'streamAuction',
+        options: { fields: ['BID'], isolated: true, onDelayed: 'raise', delivery: 'state' },
+      });
+    },
+  );
+
+  it('wraps a single security and sends only known, defined stream options', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockResolvedValue(fakeNativeSubscription());
+    const engine = engineWithNative({ subscribeAuction });
+    const options = { rows: undefined, unknownOption: 1 } as api.AuctionStreamOptions;
+    await engine.subscribeAuction('SYN_A', options);
+    expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+      securities: ['SYN_A'],
+      streamAuction: false,
+      options: {},
+    });
+  });
+
+  it('reports a native preflight rejection as a coded validation error', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"aliases"}\nAuction aliases are derived from input securities',
+        ),
+      );
+    const engine = engineWithNative({ subscribeAuction });
+    await expect(engine.subscribeAuction(['SYN_A'])).rejects.toMatchObject({
       name: 'BlpValidationError',
       element: 'aliases',
+      message: 'Auction aliases are derived from input securities',
     });
-    expect(recipeResolveVenues).not.toHaveBeenCalled();
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it.each(['subscribeAuction', 'streamAuction'] as const)(
-    'atomically resolves unique inputs for %s and preserves their labels',
-    async (method) => {
-      const recipe = vi.fn<NativeEngine['recipeResolveVenues']>().mockResolvedValue(
-        venueBatch([
-          { inputOrder: 1, security: 'SYN_B US Equity', topic: 'SYN_B UW Equity' },
-          { inputOrder: 0, security: 'SYN_A US Equity', topic: 'SYN_A UN Equity' },
-        ]),
-      );
-      const subscribe = vi
-        .fn<NativeEngine['subscribe']>()
-        .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({ recipeResolveVenues: recipe, subscribe });
-      const pcsOverrides = { 'SYNTHETIC EXCHANGE': 'PCS' };
-      await engine[method](['SYN_A US Equity', 'SYN_A US Equity', 'SYN_B US Equity'], {
-        fields: ['BID'],
-        pcsOverrides,
-        isolated: true,
-        onDelayed: 'raise',
-        delivery: 'state',
-      });
-      expect(recipe).toHaveBeenCalledWith(['SYN_A US Equity', 'SYN_B US Equity'], pcsOverrides);
-      expect(subscribe).toHaveBeenCalledWith(
-        ['SYN_A UN Equity', 'SYN_B UW Equity'],
-        ['BID'],
-        undefined,
-        { 'SYN_A UN Equity': 'SYN_A US Equity', 'SYN_B UW Equity': 'SYN_B US Equity' },
-        'raise',
-        true,
-        undefined,
-        undefined,
-        [],
-        'state',
-      );
-    },
-  );
-
-  it.each(['unresolved', 'unsupported', 'mismatch'])(
-    'opens no partial stream when any input is %s',
-    async (status) => {
-      const subscribe = vi.fn<NativeEngine['subscribe']>();
-      const engine = engineWithNative({
-        subscribe,
-        recipeResolveVenues: async () =>
-          venueBatch([
-            { inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' },
-            {
-              inputOrder: 1,
-              security: 'SYN_B',
-              topic: 'VENUE_B',
-              status,
-              error: 'venue not validated',
-            },
-          ]),
-      });
-      await expect(engine.subscribeAuction(['SYN_A', 'SYN_B'])).rejects.toMatchObject({
-        name: 'BlpValidationError',
-        element: 'securities',
-        message: expect.stringContaining('SYN_B'),
-      });
-      expect(subscribe).not.toHaveBeenCalled();
-    },
-  );
-
-  it('rejects distinct inputs sharing a venue instead of silently merging their labels', async () => {
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({
-      subscribe,
-      recipeResolveVenues: async () =>
-        venueBatch([
-          { inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' },
-          { inputOrder: 1, security: 'SYN_B', topic: 'VENUE_A' },
-        ]),
-    });
-    await expect(engine.subscribeAuction(['SYN_A', 'SYN_B'])).rejects.toThrow(/SYN_A, SYN_B/u);
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it.each([
-    { rows: [{ inputOrder: 0, security: 'WRONG', topic: 'VENUE_A' }] },
-    { rows: [{ inputOrder: 1, security: 'SYN_A', topic: 'VENUE_A' }] },
-    { rows: [{ inputOrder: 0, security: 'SYN_A', topic: null }] },
-    { rows: [] },
-  ])('rejects incomplete or misidentified recipe rows before subscribing', async ({ rows }) => {
-    const subscribe = vi.fn<NativeEngine['subscribe']>();
-    const engine = engineWithNative({
-      subscribe,
-      recipeResolveVenues: async () => venueBatch(rows),
-    });
-    await expect(engine.subscribeAuction(['SYN_A'])).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(subscribe).not.toHaveBeenCalled();
-  });
-
-  it('rejects empty inputs before resolution and retains default fields for an empty field list', async () => {
-    const recipe = vi
-      .fn<NativeEngine['recipeResolveVenues']>()
-      .mockResolvedValue(venueBatch([{ inputOrder: 0, security: 'SYN_A', topic: 'VENUE_A' }]));
-    const subscribe = vi
-      .fn<NativeEngine['subscribe']>()
-      .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ recipeResolveVenues: recipe, subscribe });
-    await expect(engine.subscribeAuction([])).rejects.toBeInstanceOf(api.BlpValidationError);
-    expect(recipe).not.toHaveBeenCalled();
-    await engine.subscribeAuction('SYN_A', { fields: [] });
-    expect(subscribe.mock.calls[0]?.[1]).toStrictEqual(api.AuctionFields.default);
   });
 
   it('converts resolve and snapshot recipe tables using the requested backend', async () => {
@@ -801,51 +700,49 @@ describe('auction preflight and results', () => {
   });
 
   it.each([
-    { fields: undefined, zeroAsNull: undefined, expected: ['THEO_PRICE', 'INDICATIVE_NEAR'] },
-    { fields: [], zeroAsNull: undefined, expected: ['THEO_PRICE', 'INDICATIVE_NEAR'] },
-    {
-      fields: ['BID', 'REFERENCE_PRICE_RT'],
-      zeroAsNull: undefined,
-      expected: ['REFERENCE_PRICE_RT'],
-    },
-    { fields: ['THEO_PRICE'], zeroAsNull: [], expected: [] },
-    { fields: ['BID'], zeroAsNull: ['BID'], expected: ['BID'] },
+    { zeroAsNull: undefined, expected: {} },
+    { zeroAsNull: [], expected: { zeroAsNull: [] } },
+    { zeroAsNull: ['BID'], expected: { zeroAsNull: ['BID'] } },
   ])(
-    'applies auction zero sentinels only to selected fields: %j',
-    async ({ fields, zeroAsNull, expected }) => {
-      const subscribe = vi
-        .fn<NativeEngine['subscribe']>()
+    'forwards an explicit zeroAsNull choice to the host default rule: %j',
+    async ({ zeroAsNull, expected }) => {
+      const subscribeAuction = vi
+        .fn<NativeEngine['subscribeAuction']>()
         .mockResolvedValue(fakeNativeSubscription());
-      const engine = engineWithNative({
-        subscribe,
-        recipeResolveVenues: async () =>
-          venueBatch([{ inputOrder: 0, security: 'SYN', topic: 'VENUE' }]),
-      });
+      const engine = engineWithNative({ subscribeAuction });
       await engine.subscribeAuction('SYN', {
-        fields,
+        fields: ['THEO_PRICE'],
         zeroAsNull,
         rows: false,
         onFieldError: 'raise',
       });
-      expect(subscribe.mock.calls[0]?.slice(-4)).toStrictEqual([
-        false,
-        'raise',
-        expected,
-        undefined,
-      ]);
+      expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toStrictEqual({
+        securities: ['SYN'],
+        streamAuction: false,
+        options: { fields: ['THEO_PRICE'], rows: false, onFieldError: 'raise', ...expected },
+      });
     },
   );
 
-  it('rejects a row-delivery option on streamAuction before venue resolution', async () => {
-    const recipeResolveVenues = vi.fn<NativeEngine['recipeResolveVenues']>();
-    const engine = engineWithNative({ recipeResolveVenues });
+  it('lets the native preflight reject a row-delivery option on streamAuction', async () => {
+    const subscribeAuction = vi
+      .fn<NativeEngine['subscribeAuction']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"rows"}\nstreamAuction always delivers rows; use subscribeAuction for rows=false',
+        ),
+      );
+    const engine = engineWithNative({ subscribeAuction });
     const options = { fields: ['BID'], rows: false };
     await expect(engine.streamAuction('SYN', options)).rejects.toMatchObject({
       name: 'BlpValidationError',
       element: 'rows',
       message: expect.stringContaining('subscribeAuction'),
     });
-    expect(recipeResolveVenues).not.toHaveBeenCalled();
+    expect(JSON.parse(subscribeAuction.mock.calls[0]?.[0] ?? '') as unknown).toMatchObject({
+      streamAuction: true,
+      options: { rows: false },
+    });
   });
 });
 
@@ -1038,14 +935,19 @@ describe('request delayed-data policy', () => {
     expect(emitted).not.toHaveBeenCalled();
   });
 
-  it('rejects an unknown policy before calling native', async () => {
-    const request = vi.fn<NativeEngine['request']>();
+  it('wraps the native rejection of an unknown policy', async () => {
+    const request = vi
+      .fn<NativeEngine['request']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"onDelayed"}\nonDelayed must be warn, raise, or ignore',
+        ),
+      );
     const engine = engineWithNative({ request });
 
     await expect(
       engine.bdp(['SYN_A Equity'], ['PX_LAST'], { onDelayed: 'WARN' as never }),
     ).rejects.toMatchObject({ name: 'BlpValidationError', element: 'onDelayed' });
-    expect(request).not.toHaveBeenCalled();
   });
 });
 
@@ -1348,6 +1250,11 @@ describe('shared native recipe result adapter', () => {
   });
 });
 
+/** The parsed `SubscribeArgs` JSON of one native `subscribe` call. */
+function subscribeArgs(subscribe: Mock<NativeEngine['subscribe']>, call = 0): unknown {
+  return JSON.parse(subscribe.mock.calls[call]?.[0] ?? 'null') as unknown;
+}
+
 describe('subscription service option forwarding', () => {
   it.each([
     { method: 'stream', service: '//blp/mktdata' },
@@ -1356,10 +1263,10 @@ describe('subscription service option forwarding', () => {
     { method: 'depth', service: '//blp/mktdepthdata' },
     { method: 'chains', service: '//blp/mktlist' },
   ] as const)('forwards every control through $method', async ({ method, service }) => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
     const options: api.StreamOptions = {
       options: [' &interval=1 ', ' '],
       flushThreshold: 5,
@@ -1378,23 +1285,17 @@ describe('subscription service option forwarding', () => {
       ? engine[method](['SYN'], ['BID'], options)
       : engine[method]('SYN', { ...options, fields: ['BID'] }));
 
-    expect(subscribeWithOptions).toHaveBeenCalledWith(
+    // Normalization and validation of the options happen in the host.
+    expect(subscribeArgs(subscribe)).toStrictEqual({
       service,
-      ['SYN'],
-      ['BID'],
-      ['interval=1'],
-      5,
-      'drop_newest',
-      8,
-      true,
-      { SYN: 'label' },
-      'ignore',
-      true,
-      false,
-      'raise',
-      ['BID'],
-      'deltas',
-    );
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: false,
+      options: {
+        ...options,
+        ...(method === 'stream' || method === 'vwap' ? {} : { fields: ['BID'] }),
+      },
+    });
   });
 
   it.each([
@@ -1404,24 +1305,25 @@ describe('subscription service option forwarding', () => {
     { method: 'depth', service: '//blp/mktdepthdata' },
     { method: 'chains', service: '//blp/mktlist' },
   ] as const)('forwards state delivery and batch size through $method', async ({ method }) => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription({ delivery: 'state', requiresDeliveries: true }));
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
     const options: api.StreamOptions = { delivery: 'state', flushThreshold: 5 };
     const subscription = await (method === 'stream' || method === 'vwap'
       ? engine[method](['SYN'], ['BID'], options)
       : engine[method]('SYN', { ...options, fields: ['BID'] }));
     expect(subscription.delivery).toBe('state');
-    expect(subscribeWithOptions.mock.calls[0]?.[4]).toBe(5);
-    expect(subscribeWithOptions.mock.calls[0]?.at(-1)).toBe('state');
+    expect(subscribeArgs(subscribe)).toMatchObject({
+      options: { delivery: 'state', flushThreshold: 5 },
+    });
   });
 
   it('preserves raw positional wire options and native policy strings', async () => {
-    const subscribeWithOptions = vi
-      .fn<NativeEngine['subscribeWithOptions']>()
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
       .mockResolvedValue(fakeNativeSubscription());
-    const engine = engineWithNative({ subscribeWithOptions });
+    const engine = engineWithNative({ subscribe });
 
     await engine.subscribeWithOptions(
       '//blp/mktdata',
@@ -1441,38 +1343,108 @@ describe('subscription service option forwarding', () => {
       'deltas',
     );
 
-    expect(subscribeWithOptions).toHaveBeenCalledWith(
-      '//blp/mktdata',
-      ['SYN'],
-      ['BID'],
-      [' &raw=1 '],
-      5,
-      'native-policy',
-      8,
-      true,
-      { SYN: 'label' },
-      'ignore',
-      true,
-      false,
-      'raise',
-      ['BID'],
-      'deltas',
-    );
+    expect(subscribeArgs(subscribe)).toStrictEqual({
+      service: '//blp/mktdata',
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: true,
+      options: {
+        options: [' &raw=1 '],
+        flushThreshold: 5,
+        overflowPolicy: 'native-policy',
+        streamCapacity: 8,
+        allFields: true,
+        aliases: { SYN: 'label' },
+        onDelayed: 'ignore',
+        isolated: true,
+        rows: false,
+        onFieldError: 'raise',
+        zeroAsNull: ['BID'],
+        delivery: 'deltas',
+      },
+    });
   });
 
-  it('rejects conflicting or unsupported conflation before calling native', async () => {
-    const subscribeWithOptions = vi.fn<NativeEngine['subscribeWithOptions']>();
-    const engine = engineWithNative({ subscribeWithOptions });
+  it('sends only the stream option members the host reads', async () => {
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
+      .mockResolvedValue(fakeNativeSubscription());
+    const engine = engineWithNative({ subscribe });
+
+    await engine.stream(['SYN'], ['BID'], {
+      rows: true,
+      unrelated: 'dropped',
+      backend: 'json',
+    } as api.StreamOptions);
+
+    expect(subscribeArgs(subscribe)).toStrictEqual({
+      service: '//blp/mktdata',
+      tickers: ['SYN'],
+      fields: ['BID'],
+      rawOptions: false,
+      options: { rows: true },
+    });
+  });
+
+  it('surfaces a host rejection as a validation error with its element', async () => {
+    const subscribe = vi
+      .fn<NativeEngine['subscribe']>()
+      .mockRejectedValue(
+        new Error(
+          '[XBBG:VALIDATION] [XBBG_CONTEXT]{"element":"conflate"}\n' +
+            'conflate=true is only supported for //blp/mktdata subscriptions',
+        ),
+      );
+    const engine = engineWithNative({ subscribe });
+
+    await expect(engine.vwap(['SYN'], ['BID'], { conflate: true })).rejects.toMatchObject({
+      element: 'conflate',
+      message: 'conflate=true is only supported for //blp/mktdata subscriptions',
+      name: 'BlpValidationError',
+    });
+  });
+
+  it('rejects non-finite stream and request numbers before JSON serialization', async () => {
+    const subscribe = vi.fn<NativeEngine['subscribe']>();
+    const engine = engineWithNative({ subscribe });
 
     await expect(
-      engine.stream(['SYN'], ['BID'], {
-        conflate: true,
-        options: [' &INTERVAL=1'],
+      engine.subscribe(['SYN'], ['BID'], { flushThreshold: Number.NaN }),
+    ).rejects.toMatchObject({
+      element: 'flushThreshold',
+      name: 'BlpValidationError',
+    });
+    await expect(
+      engine.stream(['SYN'], ['BID'], { streamCapacity: Number.POSITIVE_INFINITY }),
+    ).rejects.toMatchObject({
+      element: 'streamCapacity',
+      name: 'BlpValidationError',
+    });
+    await expect(engine.bdib('SYN', { interval: Number.NaN })).rejects.toMatchObject({
+      element: 'interval',
+      name: 'BlpValidationError',
+    });
+    await expect(
+      engine.bta('SYN', 'SMA', { studyParams: { period: Number.NaN } }),
+    ).rejects.toMatchObject({
+      element: 'period',
+      name: 'BlpValidationError',
+    });
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+
+  it('rejects Map pcsOverrides on auction subscriptions before JSON serialization', async () => {
+    const subscribeAuction = vi.fn<NativeEngine['subscribeAuction']>();
+    const engine = engineWithNative({ subscribeAuction });
+
+    await expect(
+      engine.subscribeAuction(['SYN'], {
+        pcsOverrides: new Map([['SYN', 'UP']]) as unknown as Record<string, string>,
       }),
-    ).rejects.toThrow('conflate=true cannot be combined with interval');
-    await expect(engine.vwap(['SYN'], ['BID'], { conflate: true })).rejects.toThrow(
-      'conflate=true is only supported for //blp/mktdata',
-    );
-    expect(subscribeWithOptions).not.toHaveBeenCalled();
+    ).rejects.toMatchObject({
+      element: 'pcsOverrides',
+      name: 'BlpValidationError',
+    });
+    expect(subscribeAuction).not.toHaveBeenCalled();
   });
 });

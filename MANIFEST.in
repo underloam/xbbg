@@ -23,13 +23,15 @@ include .cargo/config.toml
 recursive-include py-xbbg/src *.py *.pyi
 
 # Rust workspace crates needed for the build
-recursive-include crates/blpapi-sys *.rs *.toml
+recursive-include crates/blpapi-sys *.rs *.toml *.txt
 recursive-include crates/xbbg-arrow *.rs *.toml
 recursive-include crates/xbbg-core *.rs *.toml
 recursive-include crates/xbbg-async *.rs *.toml
 recursive-include crates/xbbg-ext *.rs *.toml
 recursive-include crates/xbbg-recipes *.rs *.toml
 recursive-include crates/xbbg-log *.rs *.toml
+recursive-include crates/xbbg-host *.rs *.toml
+recursive-include crates/xbbg-sdk *.rs *.toml
 recursive-include crates/xbbg-bench *.rs *.toml
 
 # Cargo workspace members outside crates/. Cargo metadata resolves the whole active
@@ -87,4 +89,5 @@ exclude pixi.lock
 exclude CONTRIBUTING.md
 exclude CODE_OF_CONDUCT.md
 exclude RELEASE_PROCESS.md
+exclude RELEASE_RULES.md
 exclude CHANGELOG.md

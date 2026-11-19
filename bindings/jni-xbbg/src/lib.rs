@@ -39,7 +39,7 @@ use crate::bridge::{NativeError, ThrowNative, spawn_call};
 use crate::payload::{Payload, ResultKind};
 
 /// Version of the Java/native call contract; `NativeLibraries.ABI` must match.
-pub(crate) const ABI_VERSION: jint = 1;
+pub(crate) const ABI_VERSION: jint = 2;
 
 /// Initialize logging, the JavaVM singleton and the cached `NativeBridge`
 /// methods. A missing bridge class fails the load with `UnsatisfiedLinkError`.
@@ -149,12 +149,50 @@ pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeXbbg_nativeV
     .resolve::<ThrowNative>()
 }
 
+/// The outcome of [`xbbg_host::sdk::locate_and_load_json`] as one JSON object: `{"loaded": <the
+/// loaded runtime>}` or `{"error": {"message", "rejected"}}`. A failure is a value, not an
+/// exception, so Java formats the not-found message from the rejection list itself.
+fn load_sdk_outcome(request_json: &str) -> String {
+    match xbbg_host::sdk::locate_and_load_json(request_json) {
+        Ok(loaded) => format!("{{\"loaded\":{loaded}}}"),
+        Err(error) => {
+            let error = match serde_json::from_str::<serde_json::Value>(&error) {
+                Ok(value) if value.is_object() => value,
+                _ => serde_json::json!({ "message": error, "rejected": [] }),
+            };
+            serde_json::json!({ "error": error }).to_string()
+        }
+    }
+}
+
+/// Loads the Bloomberg runtime the request locates (see `xbbg_host::sdk`) and returns the outcome
+/// JSON of [`load_sdk_outcome`]. Idempotent once a runtime is loaded.
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeXbbg_loadSdk<'local>(
+    mut env: EnvUnowned<'local>,
+    _class: JClass<'local>,
+    request_json: JString<'local>,
+) -> JString<'local> {
+    env.with_env(|env| -> Result<_, NativeError> {
+        let request = string_arg(env, &request_json, "requestJson")?;
+        Ok(JString::new(env, load_sdk_outcome(&request))?)
+    })
+    .resolve::<ThrowNative>()
+}
+
 #[unsafe(no_mangle)]
 pub extern "system" fn Java_io_github_underloam_xbbg_internal_NativeXbbg_sdkVersion<'local>(
     mut env: EnvUnowned<'local>,
     _class: JClass<'local>,
 ) -> JString<'local> {
     env.with_env(|env| -> Result<_, NativeError> {
+        // `xbbg_core::sdk_version` aborts a release build when nothing is loaded.
+        if xbbg_core::loaded_sdk_path().is_none() {
+            return Err(HostError::sdk_not_found(
+                "the Bloomberg runtime is not loaded; load it with NativeXbbg.loadSdk first",
+            )
+            .into());
+        }
         let (major, minor, patch, build) = xbbg_core::sdk_version();
         Ok(JString::new(
             env,
@@ -450,5 +488,14 @@ mod tests {
         );
         assert_eq!(log_level_name(xbbg_log::parse_level("0").unwrap()), "trace");
         assert!(xbbg_log::parse_level("verbose").is_none());
+    }
+
+    #[test]
+    fn a_malformed_load_request_is_an_error_value() {
+        let outcome: serde_json::Value =
+            serde_json::from_str(&load_sdk_outcome("not json")).unwrap();
+        assert!(outcome.get("loaded").is_none());
+        assert!(outcome["error"]["message"].is_string());
+        assert!(outcome["error"]["rejected"].is_array());
     }
 }

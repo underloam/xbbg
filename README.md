@@ -3,7 +3,7 @@
 
 <p>
   <a href="https://xbbg.org/python/quickstart">
-    <img src=".github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
+    <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-hero-flat.svg" alt="xbbg banner" width="100%">
   </a>
 </p>
 
@@ -68,7 +68,7 @@ Core scope:
 - Java bindings (Java 8+, plus a Java 17+ add-on) in [`java-xbbg`](java-xbbg/README.md)
 
 <p align="center">
-  <img src=".github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
+  <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-architecture.svg" alt="xbbg shared Rust and Arrow architecture" width="720">
 </p>
 
 ## Why xbbg?
@@ -90,7 +90,7 @@ The short version: if all you need is a tiny one-off `bdp()` wrapper, several pa
 | Typed errors, diagnostics, field cache, testing helpers | yes | application-owned | limited | limited | limited |
 
 <p align="center">
-  <img src=".github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
+  <img src="https://raw.githubusercontent.com/underloam/xbbg/main/.github/assets/readme-footprint.svg" alt="xbbg install footprint comparison" width="720">
 </p>
 
 ## Installation
@@ -119,9 +119,19 @@ Supported Python versions: **3.11 through 3.15**. Free-threaded CPython 3.14t/3.
 Requirements and notes:
 
 - You need an authorized Bloomberg environment: local Terminal/DAPI, SAPI/B-PIPE, or ZFP, depending on your setup.
-- If you build from source, stage the Bloomberg C++ SDK with `bash ./scripts/sdktool.sh` on macOS/Linux or `.\\scripts\\sdktool.ps1` on Windows PowerShell.
-- If you manage the SDK yourself, set `BLPAPI_ROOT` or use `xbbg.set_sdk_path(...)`.
-- On Windows Terminal installs, xbbg automatically probes DAPI runtime roots such as `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` before requiring manual configuration.
+- If you build from source, stage the Bloomberg C++ SDK with `cargo run -p xbbg-sdk --features provision -- cpp` (works on macOS, Linux and Windows; prebuilt standalone `xbbg-sdk` binaries for `linux-amd64`, `darwin-arm64` and `windows-amd64` are attached to GitHub Releases, and installed packages also expose `xbbg-sdk cpp`, `python -m xbbg.sdk cpp`, `npx xbbg-sdk cpp`, and `xbbg-mcp sdk cpp`).
+- xbbg loads the Bloomberg runtime when `xbbg._core` is first imported (the native extension itself links no Bloomberg code), using the first of these that loads. The same search order, written once in Rust, serves the Python, Node, Java and MCP packages:
+  1. `xbbg.set_sdk_path(...)`: a directory holding the runtime library;
+  2. `BLPAPI_LIB_DIR`: that directory, from the environment;
+  3. `BLPAPI_ROOT`: the root of a Bloomberg C++ SDK (`lib`, `Linux`, `Darwin`, `bin` and versioned subdirectories are understood);
+  4. `XBBG_DEV_SDK_ROOT`: an absolute SDK root for development checkouts;
+  5. Bloomberg's `blpapi` Python package, found without importing it;
+  6. Bloomberg Terminal/DAPI: `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI` on Windows, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere;
+  7. the operating system's library search path (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` and `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
+  8. the operating system's own library search, where a system-wide install lives: the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, and on Windows the application and system directories and those added with `os.add_dll_directory`;
+  9. a Bloomberg runtime provisioned into the shared xbbg cache (`XBBG_CACHE_DIR`, else the per-user cache directory), after checking the library against the hash recorded at install time. The cache is only read when nothing before it loaded. Every language host can fill that cache before any Bloomberg runtime is installed: Python (`xbbg.provision_sdk(...)`, `xbbg.set_sdk_source(...)`, `xbbg-sdk` / `python -m xbbg.sdk`), Node (`@xbbg/core/sdk` `provisionSdk(...)`, `npx xbbg-sdk`), MCP (`xbbg-mcp sdk`), Java (`BlpapiSdk`, see [the Java runtime docs](java-xbbg/README.md#the-bloomberg-runtime)), or automatically via `XBBG_SDK_SOURCE` when no explicit path is set. One install serves all four.
+
+  A candidate that fails to load (for example a runtime older than the one xbbg needs) is skipped and the search goes on, except a path given to `xbbg.set_sdk_path(...)`, which is used or refused on its own (`ValueError`); if nothing loads, `import xbbg._core` raises an `ImportError` that lists every place that was refused and why, naming the functions an old runtime lacks. A process loads one runtime for its lifetime, so `xbbg.set_sdk_path(...)` must run before anything else uses xbbg. `xbbg.get_sdk_info()` lists each source found (`manual`, `sdk_lib_dir`, `sdk_env`, `dev_sdk_root`, `blpapi_python`, `dapi`, `search_path`, `system`, `xbbg_cache`), the cached installs it skipped and why, and which one is `active`.
 - Linux wheels are `manylinux_2_28` (x86_64): any distro with glibc ≥ 2.28 works — RHEL/Alma/Rocky 8+, Debian 10+, Ubuntu 20.04+, Amazon Linux 2023.
 - Optional dataframe conversions are installed separately: `xbbg[pyarrow]`, `xbbg[pandas]`, `xbbg[polars]`, or `xbbg[duckdb]`.
 
@@ -531,6 +541,8 @@ The engine uses separate worker pools for request/response calls and subscriptio
 
 Use `Engine(...)` when an application needs a scoped engine with its own connection settings instead of mutating global configuration. `Engine(bql_app_name="example-bql-app")` gives that scope its own BQL request default without configuring authentication.
 
+**Dropped connections.** A request session started with several servers holds a connection to each of them. When one connection drops, the Bloomberg SDK carries in-flight requests over the others, or finishes them after it reconnects the dropped one, so a dropped connection alone fails no request. `worker_health()` reports a worker `degraded` only while it has no connection to any server, and new requests go to a worker with a connection up whenever one exists; a degraded worker serves only when none has. `Engine.connections()` (Node `connections()`, Java `connections()`) names the servers each request and subscription session is connected to: one entry per session with `pool` (`"request"` or `"subscription"`), `worker` and `servers` (`host:port`, in the order the connections came up). `reconnect_grace_ms` (default **10000**; Node `reconnectGraceMs`, Java `reconnectGraceMs(...)`) bounds the wait: once a session has had no connection for that long, its in-flight requests fail with a transient, retryable error (requests submitted meanwhile fail on the next one-second scan). `0` fails them as soon as the last connection drops. `request_timeout_ms` (default **0**, disabled) still applies independently to every request.
+
 Engine shutdown closes subscription admission and signals both idle and checked-out sessions, waking pending operations so termination and errors can reach callers. Close subscriptions explicitly before releasing their engine; do not rely on interpreter teardown for application cleanup.
 
 Field-cache snapshots are published atomically. On Windows this uses `FileRenameInfoEx` with POSIX rename semantics, requiring Windows 10 1607+ and a supporting filesystem. Existing readers can finish with the old snapshot while new opens see the complete replacement. Unsupported filesystems report persistence errors and retain the prior snapshot; there is no unsafe replacement fallback.
@@ -549,6 +561,7 @@ Field-cache snapshots are published atomically. On Windows this uses `FileRename
 | Generic requests | `request`, `Service`, `Operation`, `RequestParams`, `OutputMode` |
 | Entitlements and delayed data | `delay_status`, `check_entitlements`, `seat_type`, `identity_is_authorized` |
 | Schema and diagnostics | `bops`, `bschema`, `get_sdk_info`, `enable_sdk_logging`, `print_backend_status` |
+| Logging | `set_log_level`, `get_log_level`, `enable_python_logging`, `disable_python_logging`, `python_logging_dropped` |
 | Testing helpers | `xbbg.testing.create_mock_response`, `xbbg.testing.mock_engine` |
 
 Most sync helpers have async counterparts with an `a` prefix: `bdp` → `abdp`, `bdh` → `abdh`, `bdib` → `abdib`, `request` → `arequest`.
@@ -836,6 +849,7 @@ Connection failures:
 - confirm the host, port, auth method, TLS files, and entitlements for SAPI/B-PIPE/ZFP environments
 - run `print(xbbg.get_sdk_info())` to see how the SDK/runtime was detected
 - enable SDK logging before the first session when debugging low-level connection problems
+- send native and SDK log lines to Python `logging` instead of stderr (see [Logging](#logging))
 
 Timeouts and large responses:
 
@@ -843,6 +857,29 @@ Timeouts and large responses:
 - split large historical/tick requests into smaller date ranges
 - enable opt-in sharding for wide multi-security `bdp`/`bdh` requests with `shard_requests=True`
 - tune `request_pool_size`, `subscription_pool_size`, queue sizes, and keep-alive settings for managed infrastructure
+
+### Logging
+
+The native layer logs to stderr at `warn` by default; `xbbg.set_log_level("debug")` (or `RUST_LOG=debug`) changes what it emits. To have those lines, including Bloomberg SDK lines enabled with `enable_sdk_logging`, arrive through your application's `logging` handlers instead, opt in:
+
+```python
+import logging
+import xbbg
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+xbbg.set_log_level("info")
+xbbg.enable_python_logging(queue_size=10_000)
+
+# Records arrive on loggers named after the Rust target (xbbg_async.engine, ...);
+# SDK lines use xbbg.sdk. They keep the time they were logged, the emitting
+# thread's name, and the Rust file and line.
+logging.getLogger("xbbg_async").setLevel(logging.WARNING)  # ordinary logger filtering
+
+xbbg.python_logging_dropped()   # records lost to a full queue, so far
+xbbg.disable_python_logging()   # drain for up to `timeout` seconds; stderr resumes
+```
+
+Forwarding is automatic and best effort. Native threads never touch Python or wait: they push records into a bounded queue that a daemon thread drains, and when it is full they drop the record. The forwarder then logs a `dropped N xbbg log records: queue full` warning on the `xbbg.logging` logger. Size the queue for the largest burst you expect, such as one warning per refused security in a single request. Calling `enable_python_logging` again with the same `queue_size` does nothing; a different one raises until you call `disable_python_logging()`. Forwarding stops at interpreter exit.
 
 When reporting issues, include:
 
@@ -857,9 +894,8 @@ When reporting issues, include:
 Set up the development environment with [pixi](https://pixi.sh/):
 
 ```bash
-# Stage an authorized Bloomberg SDK locally under vendor/blpapi-sdk/
-bash ./scripts/sdktool.sh               # macOS/Linux
-# .\scripts\sdktool.ps1                # Windows PowerShell
+# Stage an authorized Bloomberg C++ SDK locally under vendor/blpapi-sdk/ (macOS, Linux, Windows)
+cargo run -p xbbg-sdk --features provision -- cpp
 
 # Install the environment and compile the Rust extension (rerun `pixi run install`
 # after pulling; xbbg warns when the extension was built from another commit)
@@ -890,6 +926,40 @@ response = create_mock_response(
 with mock_engine([response]):
     df = blp.bdp("AAPL US Equity", "PX_LAST")
 ```
+
+`create_mock_response` also takes the diagnostics a result carries, as the values the result accessors return: `security_errors`, `field_exceptions`, `delayed`, `type_misses`, `field_errors` (FieldInfo refusals), `eid_data` and `request_id`. They are written as the same `xbbg.*` schema metadata the engine attaches, by the same native code, so the result explains itself through `result.security_errors`, the pyarrow schema metadata and pandas `DataFrame.attrs` exactly as a live one does, and a change to an encoding reaches tests built this way. Shapes the encoder does not accept raise `ValueError` when the response is created.
+
+```python
+response = create_mock_response(
+    service="//blp/refdata",
+    operation="ReferenceDataRequest",
+    data={"TEST Equity": {"PX_LAST": 101.23}},
+    security_errors={
+        "NOTASECURITY1 Curncy": {
+            "category": "BAD_SEC",
+            "code": 15,
+            "subcategory": "INVALID_SECURITY",
+            "message": "Unknown/Invalid Security",
+        }
+    },
+    delayed={"TEST Equity": {"delayed": True, "delay_minutes": 15}},
+    request_id="sdk-request-1",
+)
+
+with mock_engine([response]) as mock:
+    result = blp.bdp("TEST Equity", "PX_LAST", backend="native")
+
+assert result.security_errors["NOTASECURITY1 Curncy"]["code"] == 15
+assert result.bloomberg_request_id == "sdk-request-1"
+```
+
+`mock_engine` records what it served: `mock.requests` lists, in order, a `MockRequest(service, operation, params, served)` for each request it answered and, with `strict=False`, each it passed through (`served=False`). `params` is the dispatch dictionary the engine would have received (`securities`, `fields`, `start_date`, ...).
+
+```python
+assert mock.requests[0].params["securities"] == ["TEST Equity"]
+```
+
+An `Engine` constructed while any `mock_engine` is active makes no connection, so code scoped with `with engine:` runs offline: mocked requests resolve and `shutdown()` is a no-op. What needs Bloomberg (a request no mock response matches in non-strict mode, `worker_health()`, `subscription_feeds()`, `connections()`, subscriptions) raises a `RuntimeError` that names `mock_engine`. Such an engine stays offline after the mock exits, so construct connected engines outside it.
 
 Publishing is handled through GitHub Actions and PyPI Trusted Publishing.
 

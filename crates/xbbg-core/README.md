@@ -9,7 +9,8 @@ This is the core abstraction layer between raw FFI (`xbbg-blpapi-sys`) and the a
 ```
 src/
 ├── lib.rs           Module declarations + public re-exports
-├── ffi.rs           Centralized FFI re-exports from blpapi_sys + local datetime types
+├── loader.rs        Run-time loading of the Bloomberg runtime: load, sdk(), loaded_sdk_path
+├── ffi.rs           FFI types re-exported from blpapi_sys + local datetime types
 │
 ├── Core types
 │   ├── element.rs   Element wrapper — typed field access, iteration
@@ -40,11 +41,32 @@ src/
     └── constant.rs     Constant + ConstantList for enumerations
 ```
 
+## Loading the Bloomberg runtime
+
+Nothing links `libblpapi3_64`. The Bloomberg runtime is opened by absolute path while the process runs, and every BLPAPI call goes through the function table `sdk()` returns:
+
+```rust
+xbbg_core::load("/path/to/libblpapi3_64.so")?; // once, before any other call
+// or, to let the operating system find it as it did when the runtime was linked:
+xbbg_core::load_system("libblpapi3_64.so")?;   // "blpapi3_64.dll" on Windows
+```
+
+| Function | |
+|----------|---|
+| `load(path)` | Opens the library (`RTLD_NOW \| RTLD_LOCAL`; on Windows `LOAD_WITH_ALTERED_SEARCH_PATH`) and resolves the function table. The path must be absolute. The same path again is a no-op; another path is `SdkLoadError::AlreadyLoaded`. The library is never unloaded |
+| `load_system(name)` | Loads the library the operating system finds for a bare file name and returns its path: the dynamic loader's search on Linux (`LD_LIBRARY_PATH`, the `ldconfig` cache, the default directories), `/usr/local/lib` then `/usr/lib` on macOS, the application, system and `AddDllDirectory` directories on Windows. Returns the loaded runtime's path when one is already loaded |
+| `sdk()` | The loaded table; panics, saying so, if nothing is loaded. One atomic load on the hot path |
+| `loaded_sdk_path()` | The path that was loaded, or `None` |
+
+A library that cannot be used is refused with the reason: `SdkLoadError::Open` carries the operating system's message, and `SdkLoadError::MissingSymbol` names the functions the library lacks (a runtime older than this build needs, or no Bloomberg runtime at all).
+
+Choosing the library path is the caller's job. Hosts call `xbbg_host::sdk::locate_and_load`, which runs the shared search order in `xbbg_sdk::locate` (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, `load_system`, the xbbg cache). Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::locate`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
+
 ## Features
 
 | Feature | Description |
 |---------|-------------|
-| `live` (default) | Real Bloomberg SDK via `blpapi-sys` |
+| `live` (default) | The Bloomberg function table (`blpapi-sys`) and the loader (`libloading`) |
 | `test-support` | SDK-backed synthetic message fixtures; no Bloomberg session needed |
 
 The `live` feature is required to build this crate; it selects the SDK, not
@@ -58,7 +80,7 @@ cargo test -p xbbg_core --test live -- --ignored
 
 ## Design principles
 
-- **All FFI goes through `ffi.rs`** — single point of control for unsafe imports
+- **All FFI goes through `sdk()`** — one loaded function table; `ffi.rs` holds only the types
 - **Zero-allocation hot paths** — direct typed access, no JSON serialization
 - **Sub-microsecond field extraction** — SIMD-accelerated where available
 - **Owned vs borrowed** — `Value<'a>` borrows from Element; `OwnedValue` for storage

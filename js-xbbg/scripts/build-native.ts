@@ -15,8 +15,6 @@ interface CargoEvent {
   target?: { name: string; crate_types: readonly string[] };
   filenames?: readonly string[];
   env?: readonly (readonly [string, string])[];
-  linked_libs?: readonly string[];
-  linked_paths?: readonly string[];
   message?: { rendered?: string | null };
 }
 
@@ -48,8 +46,6 @@ function isCargoEvent(value: unknown): value is CargoEvent {
             typeof entry[0] === 'string' &&
             typeof entry[1] === 'string',
         ))) &&
-    (!('linked_libs' in value) || isStringArray(value.linked_libs)) &&
-    (!('linked_paths' in value) || isStringArray(value.linked_paths)) &&
     (!('message' in value) ||
       (typeof value.message === 'object' &&
         value.message !== null &&
@@ -134,23 +130,6 @@ function installNameTool(args: readonly string[], context: string): void {
   runTool('install_name_tool', args, context);
 }
 
-function startsWithPath(value: string, parent: string): boolean {
-  const normalizedValue = path.resolve(value);
-  const normalizedParent = path.resolve(parent);
-  return (
-    normalizedValue === normalizedParent ||
-    normalizedValue.startsWith(`${normalizedParent}${path.sep}`)
-  );
-}
-
-function isSdkBlpapiLibrary(value: string, sdkLibDir: string): boolean {
-  return (
-    path.isAbsolute(value) &&
-    startsWithPath(value, sdkLibDir) &&
-    /^libblpapi3(_64|_32)?\.(so|dylib)$/u.test(path.basename(value))
-  );
-}
-
 function isForbiddenDarwinPath(value: string): boolean {
   if (!path.isAbsolute(value)) {
     return false;
@@ -173,8 +152,9 @@ function verifyDarwinPortableBinary(binaryPath: string): void {
   }
 }
 
-// Keep the published macOS addon relocatable; Bloomberg's runtime remains user-provided.
-function patchDarwinNativeAddon(binaryPath: string, sdkLibDir: string): void {
+// Keep the published macOS addon relocatable. It opens the Bloomberg runtime by path at run time.
+// Nothing links against it, so the only rewrite left is the addon's own install name.
+function patchDarwinNativeAddon(binaryPath: string): void {
   if (process.platform !== 'darwin') {
     return;
   }
@@ -183,40 +163,6 @@ function patchDarwinNativeAddon(binaryPath: string, sdkLibDir: string): void {
     ['-id', `@rpath/${nativeBinaryName}`, binaryPath],
     `Failed to set portable install name for ${binaryPath}`,
   );
-
-  const linkedLibraries = parseDarwinLinkedLibraries(readDarwinLinkedLibraries(binaryPath));
-  for (const linkedLibrary of linkedLibraries) {
-    if (!isSdkBlpapiLibrary(linkedLibrary, sdkLibDir)) {
-      continue;
-    }
-    installNameTool(
-      ['-change', linkedLibrary, `@rpath/${path.basename(linkedLibrary)}`, binaryPath],
-      `Failed to rewrite Bloomberg SDK dependency for ${binaryPath}`,
-    );
-  }
-
-  let rpaths = parseDarwinRpaths(readDarwinLoadCommands(binaryPath));
-  for (const rpath of rpaths) {
-    if (!isForbiddenDarwinPath(rpath)) {
-      continue;
-    }
-    installNameTool(
-      ['-delete_rpath', rpath, binaryPath],
-      `Failed to delete non-portable rpath ${rpath} from ${binaryPath}`,
-    );
-  }
-
-  rpaths = parseDarwinRpaths(readDarwinLoadCommands(binaryPath));
-  for (const rpath of ['@loader_path', '@loader_path/lib']) {
-    if (rpaths.has(rpath)) {
-      continue;
-    }
-    installNameTool(
-      ['-add_rpath', rpath, binaryPath],
-      `Failed to add portable rpath ${rpath} to ${binaryPath}`,
-    );
-  }
-
   verifyDarwinPortableBinary(binaryPath);
 }
 
@@ -322,36 +268,12 @@ function main(): void {
   }
   const rustFlags = buildValue('RUSTFLAGS').split('\u001F').filter(Boolean);
   const codegen = inspectRustCodegen(rustFlags);
-  const libraryPattern = /^(dylib|static)=(blpapi3(?:_(?:32|64))?)$/u;
   const sdkEvent = events.find(
     (event) =>
       event.reason === 'build-script-executed' &&
-      event.linked_libs?.some((library) => libraryPattern.test(library)) === true,
+      event.env?.some(([key]) => key === 'XBBG_SDK_INCLUDE_DIR') === true,
   );
-  const linkedLibrary = sdkEvent?.linked_libs?.find((library) => libraryPattern.test(library));
-  const libraryMatch = linkedLibrary === undefined ? null : libraryPattern.exec(linkedLibrary);
-  const kind = libraryMatch?.[1];
-  const stem = libraryMatch?.[2];
-  if (sdkEvent === undefined || kind === undefined || stem === undefined) {
-    fail('Cargo did not report the Bloomberg SDK link input');
-  }
-  const target = buildValue('TARGET');
-  const libraryNames = target.includes('windows')
-    ? [`${stem}.lib`]
-    : kind === 'static'
-      ? [`lib${stem}.a`]
-      : target.includes('darwin')
-        ? [`lib${stem}.dylib`, `lib${stem}.so`, `lib${stem}.a`]
-        : [`lib${stem}.so`, `lib${stem}.a`];
-  const libraryFile = (sdkEvent.linked_paths ?? [])
-    .filter((directory) => directory.startsWith('native='))
-    .flatMap((directory) => libraryNames.map((name) => path.join(directory.slice(7), name)))
-    .find((file) => fs.existsSync(file));
-  if (libraryFile === undefined) {
-    fail(`Cannot fingerprint the SDK library Cargo linked: ${linkedLibrary}`);
-  }
-  const sdkValues = Object.fromEntries(sdkEvent.env ?? []);
-  const sdkIncludeDir = sdkValues.XBBG_SDK_INCLUDE_DIR;
+  const sdkIncludeDir = Object.fromEntries(sdkEvent?.env ?? []).XBBG_SDK_INCLUDE_DIR;
   if (sdkIncludeDir === undefined || sdkIncludeDir.length === 0) {
     fail('Cargo did not report the Bloomberg SDK headers used by the build');
   }
@@ -359,14 +281,14 @@ function main(): void {
   if (headerVersion === null) {
     fail('The compiled Bloomberg SDK headers do not provide version macros');
   }
-  const sdkLibDir = path.dirname(libraryFile);
+  const target = buildValue('TARGET');
   const preparedOutput = path.join(packageDir, `.${nativeBinaryName}.${process.pid}.build.tmp`);
   const infoPath = path.join(packageDir, '.native-build-info.json');
   const preparedInfo = `${infoPath}.${process.pid}.tmp`;
   try {
     fs.copyFileSync(artifactPath, preparedOutput);
     fs.chmodSync(preparedOutput, 0o755);
-    patchDarwinNativeAddon(preparedOutput, sdkLibDir);
+    patchDarwinNativeAddon(preparedOutput);
     const buildInfo: NativeBuildInfo = {
       allocator: buildValue('ALLOCATOR'),
       artifactSha256: sha256File(preparedOutput),
@@ -376,8 +298,7 @@ function main(): void {
       profile,
       rustcVersion: buildValue('RUSTC_VERSION'),
       rustFlags,
-      schemaVersion: 1,
-      sdkLibrary: { file: path.basename(libraryFile), sha256: sha256File(libraryFile) },
+      schemaVersion: 3,
       sdkVersion: headerVersion,
       target,
       targetCpu: codegen.targetCpu,

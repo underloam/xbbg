@@ -1,4 +1,6 @@
-//! Cache layout, cross-process install locks, atomic commits and the install listing.
+//! Cache layout, cross-process install locks and atomic commits. Reading and verifying the
+//! installs (the provenance record, the library hash, the listing order) is the crate's resolver
+//! (`cache.rs`), which this module builds on.
 //!
 //! ```text
 //! <cache>/
@@ -14,21 +16,19 @@
 //!       sources.json      other source labels that resolved to the same archive (optional)
 //! ```
 
-use std::cmp::Ordering;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::{Duration, SystemTime};
 
-use serde::{Deserialize, Serialize};
-
 use crate::error::{Error, Result};
-use crate::platform::Platform;
 use crate::source::SourceKind;
-use crate::wheel::safe_relative;
+use crate::{
+    CachedRuntime, INSTALLS_DIR, PROVENANCE_FILE, Platform, Provenance, scan_cache, scan_cache_all,
+    verify_install,
+};
 
-const PROVENANCE: &str = "provenance.json";
 /// A JSON array of the source labels besides the provenance's own that resolved to an install's
 /// archive (the same wheel on a mirror and on Bloomberg's index, say). Lookups by source match
 /// them like the provenance label, so each source finds the install offline.
@@ -60,20 +60,20 @@ pub struct Provisioned {
     pub cache_hit: bool,
 }
 
-/// `provenance.json`: the contract between the provisioner and every loader of the cache.
-#[derive(Debug, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub(crate) struct Provenance {
-    pub(crate) version: String,
-    pub(crate) platform: Platform,
-    pub(crate) source: String,
-    pub(crate) artifact_url: String,
-    pub(crate) artifact_sha256: String,
-    /// Relative, `/`-separated.
-    pub(crate) lib: String,
-    pub(crate) lib_sha256: String,
-    /// Relative, `/`-separated.
-    pub(crate) licenses: Vec<String>,
+impl From<CachedRuntime> for Provisioned {
+    fn from(runtime: CachedRuntime) -> Self {
+        Self {
+            version: runtime.version,
+            platform: runtime.platform,
+            lib_path: runtime.lib_path,
+            license_paths: runtime.license_paths,
+            source: runtime.source,
+            artifact_url: runtime.artifact_url,
+            artifact_sha256: runtime.artifact_sha256,
+            lib_sha256: runtime.lib_sha256,
+            cache_hit: true,
+        }
+    }
 }
 
 /// The directories of one cache root.
@@ -87,7 +87,7 @@ impl Layout {
         let root = std::path::absolute(root).map_err(|err| {
             Error::io(format!("resolving cache directory {}", root.display()), err)
         })?;
-        for dir in ["http", "tmp", "locks", "sdk"] {
+        for dir in ["http", "tmp", "locks", INSTALLS_DIR] {
             let path = root.join(dir);
             fs::create_dir_all(&path)
                 .map_err(|err| Error::io(format!("creating {}", path.display()), err))?;
@@ -111,7 +111,7 @@ impl Layout {
         sha256: &str,
     ) -> PathBuf {
         self.root
-            .join("sdk")
+            .join(INSTALLS_DIR)
             .join(file_name_safe(version))
             .join(platform.as_str())
             .join(format!("{}-{}", kind.as_str(), &sha256[..12]))
@@ -153,7 +153,7 @@ impl Layout {
     /// Exclusive cross-process lock for one install directory, held until dropped.
     pub(crate) async fn lock(&self, install_dir: &Path) -> Result<InstallLock> {
         let relative = install_dir
-            .strip_prefix(self.root.join("sdk"))
+            .strip_prefix(self.root.join(INSTALLS_DIR))
             .unwrap_or(install_dir);
         let key = file_name_safe(&relative.to_string_lossy().replace(['/', '\\'], "-"));
         let path = self.root.join("locks").join(format!("{key}.lock"));
@@ -224,49 +224,15 @@ pub(crate) enum InstallState {
     Valid(Provisioned),
 }
 
-/// Reads and verifies an install directory, re-hashing its library.
-pub(crate) fn read_install(dir: &Path) -> InstallState {
+/// Reads and verifies an install directory for `platform`, re-hashing its library.
+pub(crate) fn read_install(dir: &Path, platform: Platform) -> InstallState {
     if !dir.is_dir() {
         return InstallState::Missing;
     }
-    match load(dir) {
-        Some(provisioned) => InstallState::Valid(provisioned),
-        None => InstallState::Invalid,
+    match verify_install(dir, platform) {
+        Ok(runtime) => InstallState::Valid(runtime.into()),
+        Err(_) => InstallState::Invalid,
     }
-}
-
-fn load(dir: &Path) -> Option<Provisioned> {
-    let bytes = fs::read(dir.join(PROVENANCE)).ok()?;
-    let provenance: Provenance = serde_json::from_slice(&bytes).ok()?;
-    // Provenance paths are `/`-separated; join per component for native separators.
-    let join = |relative: &str| {
-        safe_relative(relative).ok().map(|relative| {
-            relative
-                .split('/')
-                .fold(dir.to_path_buf(), |path, part| path.join(part))
-        })
-    };
-    let lib_path = join(&provenance.lib)?;
-    let actual = rattler_digest::compute_file_digest::<rattler_digest::Sha256>(&lib_path).ok()?;
-    if hex::encode(actual) != provenance.lib_sha256 {
-        return None;
-    }
-    let license_paths = provenance
-        .licenses
-        .iter()
-        .map(|license| join(license))
-        .collect::<Option<Vec<_>>>()?;
-    Some(Provisioned {
-        version: provenance.version,
-        platform: provenance.platform,
-        lib_path,
-        license_paths,
-        source: provenance.source,
-        artifact_url: provenance.artifact_url,
-        artifact_sha256: provenance.artifact_sha256,
-        lib_sha256: provenance.lib_sha256,
-        cache_hit: true,
-    })
 }
 
 /// The valid install in `dir` when it holds the archive `sha256`, with `source` recorded as one
@@ -274,10 +240,11 @@ fn load(dir: &Path) -> Option<Provisioned> {
 /// integrity error. The caller holds the [`InstallLock`] for `dir`.
 pub(crate) fn existing_install(
     dir: &Path,
+    platform: Platform,
     sha256: &str,
     source: &str,
 ) -> Result<Option<Provisioned>> {
-    match read_install(dir) {
+    match read_install(dir, platform) {
         InstallState::Valid(existing) => {
             same_archive(dir, &existing, sha256)?;
             add_source(dir, &existing.source, source);
@@ -344,7 +311,7 @@ pub(crate) fn commit(
     final_dir: &Path,
     provenance: &Provenance,
 ) -> Result<Provisioned> {
-    match read_install(final_dir) {
+    match read_install(final_dir, provenance.platform) {
         // Another process committed first; installs are immutable.
         InstallState::Valid(existing) => {
             same_archive(final_dir, &existing, &provenance.artifact_sha256)?;
@@ -361,7 +328,7 @@ pub(crate) fn commit(
     }
     let json = serde_json::to_vec_pretty(provenance)
         .map_err(|err| Error::Internal(format!("serializing provenance: {err}")))?;
-    let provenance_path = staging.path().join(PROVENANCE);
+    let provenance_path = staging.path().join(PROVENANCE_FILE);
     fs::write(&provenance_path, json)
         .map_err(|err| Error::io(format!("writing {}", provenance_path.display()), err))?;
     if let Some(parent) = final_dir.parent() {
@@ -376,7 +343,7 @@ pub(crate) fn commit(
             err,
         ));
     }
-    match read_install(final_dir) {
+    match read_install(final_dir, provenance.platform) {
         InstallState::Valid(installed) => Ok(Provisioned {
             cache_hit: false,
             ..installed
@@ -420,39 +387,20 @@ fn transient_rename_error(err: &io::Error) -> bool {
 /// Every valid install under `cache_root` (optionally for one platform), newest version first.
 /// Incomplete installs and libraries that no longer match their provenance are skipped.
 pub fn installed(cache_root: &Path, platform: Option<Platform>) -> Result<Vec<Provisioned>> {
-    Ok(installs(cache_root, platform)?
+    Ok(scan(cache_root, platform)?
         .into_iter()
-        .map(|(_, provisioned)| provisioned)
+        .map(Provisioned::from)
         .collect())
 }
 
-/// [`installed`] with each install's directory.
-fn installs(cache_root: &Path, platform: Option<Platform>) -> Result<Vec<(PathBuf, Provisioned)>> {
-    let sdk = cache_root.join("sdk");
-    let mut found = Vec::new();
-    for version_dir in subdirectories(&sdk)? {
-        for platform_dir in subdirectories(&version_dir)? {
-            let matches_platform = platform_dir
-                .file_name()
-                .and_then(|name| name.to_str())
-                .and_then(|name| Platform::from_str(name).ok())
-                .is_some_and(|found| platform.is_none_or(|wanted| wanted == found));
-            if !matches_platform {
-                continue;
-            }
-            for install in subdirectories(&platform_dir)? {
-                if let InstallState::Valid(provisioned) = read_install(&install) {
-                    found.push((install, provisioned));
-                }
-            }
-        }
-    }
-    found.sort_by(|(a_dir, a), (b_dir, b)| {
-        compare_versions(&b.version, &a.version)
-            .then(a.platform.cmp(&b.platform))
-            .then(a_dir.cmp(b_dir))
-    });
-    Ok(found)
+/// The verified installs under `cache_root`, best first.
+fn scan(cache_root: &Path, platform: Option<Platform>) -> Result<Vec<CachedRuntime>> {
+    let scan = match platform {
+        Some(platform) => scan_cache(cache_root, platform),
+        None => scan_cache_all(cache_root),
+    };
+    scan.map(|scan| scan.runtimes)
+        .map_err(|err| Error::io("reading the install cache", err))
 }
 
 /// The newest valid install from `source` for `platform` (exactly `version` if given, and not
@@ -464,18 +412,20 @@ pub(crate) fn find_by_source(
     version: Option<&str>,
     minimum: Option<&uv_pep440::Version>,
 ) -> Result<Option<Provisioned>> {
-    Ok(installs(cache_root, Some(platform))?
+    Ok(scan(cache_root, Some(platform))?
         .into_iter()
-        .find(|(dir, install)| {
+        .find(|install| {
             version.is_none_or(|version| same_version(&install.version, version))
                 && minimum.is_none_or(|minimum| {
                     uv_pep440::Version::from_str(&install.version)
                         .is_ok_and(|version| version >= *minimum)
                 })
                 && (install.source == source
-                    || extra_sources(dir).iter().any(|known| known == source))
+                    || extra_sources(&install.install_dir)
+                        .iter()
+                        .any(|known| known == source))
         })
-        .map(|(_, install)| install))
+        .map(Provisioned::from))
 }
 
 /// The directory and install of the archive with `sha256` for `platform`.
@@ -486,46 +436,35 @@ pub(crate) fn find_by_archive(
     sha256: &str,
 ) -> Result<Option<(PathBuf, Provisioned)>> {
     let prefix = format!("{}-{}", kind.as_str(), &sha256[..12]);
-    for version_dir in subdirectories(&cache_root.join("sdk"))? {
-        let dir = version_dir.join(platform.as_str()).join(&prefix);
-        if let InstallState::Valid(install) = read_install(&dir)
+    let versions = cache_root.join(INSTALLS_DIR);
+    let entries = match fs::read_dir(&versions) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(Error::io(format!("listing {}", versions.display()), err)),
+    };
+    for entry in entries {
+        let entry =
+            entry.map_err(|err| Error::io(format!("listing {}", versions.display()), err))?;
+        let dir = entry.path().join(platform.as_str()).join(&prefix);
+        if let Ok(install) = verify_install(&dir, platform)
             && install.artifact_sha256 == sha256
         {
-            return Ok(Some((dir, install)));
+            return Ok(Some((dir, install.into())));
         }
     }
     Ok(None)
 }
 
-fn subdirectories(dir: &Path) -> Result<Vec<PathBuf>> {
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(Error::io(format!("listing {}", dir.display()), err)),
-    };
-    let mut dirs = Vec::new();
-    for entry in entries {
-        let entry = entry.map_err(|err| Error::io(format!("listing {}", dir.display()), err))?;
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            dirs.push(entry.path());
-        }
-    }
-    Ok(dirs)
-}
-
-/// PEP 440 order where both sides parse (PyPI and conda-forge versions do), else text order.
-pub(crate) fn compare_versions(a: &str, b: &str) -> Ordering {
-    match (
-        uv_pep440::Version::from_str(a),
-        uv_pep440::Version::from_str(b),
-    ) {
-        (Ok(a), Ok(b)) => a.cmp(&b),
-        _ => a.cmp(b),
-    }
-}
-
+/// Equal versions: the same text, or the same PEP 440 version where both parse.
 fn same_version(installed: &str, wanted: &str) -> bool {
-    installed == wanted || compare_versions(installed, wanted) == Ordering::Equal
+    installed == wanted
+        || matches!(
+            (
+                uv_pep440::Version::from_str(installed),
+                uv_pep440::Version::from_str(wanted)
+            ),
+            (Ok(installed), Ok(wanted)) if installed == wanted
+        )
 }
 
 /// Replaces characters that are unsafe in file names (and never yields `.` or `..`).
@@ -552,11 +491,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn versions_order_by_pep440_then_text() {
-        assert_eq!(compare_versions("3.26.10.1", "3.26.9.1"), Ordering::Greater);
-        assert_eq!(compare_versions("3.26.9.1", "3.26.9.1.0"), Ordering::Equal);
+    fn versions_match_by_pep440_then_text() {
+        assert!(same_version("3.26.9.1", "3.26.9.1.0"));
         assert!(same_version("3.26.9.1", "3.26.09.1"));
         assert!(!same_version("3.26.9.1", "3.26.9"));
+        assert!(same_version("local-build", "local-build"));
+        assert!(!same_version("local-build", "other-build"));
     }
 
     #[test]

@@ -19,9 +19,9 @@ pub use errors::BlpAsyncError;
 // Worker-pool Engine — the primary API
 pub use engine::{
     DelayedPolicy, Engine, EngineConfig, FeedInfo, FieldErrorPolicy, KeyColumn, OverflowPolicy,
-    RequestStream, SlabKey, SubscribeRequest, SubscriptionDeliveries, SubscriptionDelivery,
-    SubscriptionDeliveryMode, SubscriptionGap, SubscriptionHandle, SubscriptionStream,
-    ValidationMode,
+    RequestStream, SessionConnections, SessionPool, SlabKey, SubscribeRequest,
+    SubscriptionDeliveries, SubscriptionDelivery, SubscriptionDeliveryMode, SubscriptionGap,
+    SubscriptionHandle, SubscriptionStream, ValidationMode,
 };
 
 #[cfg(feature = "test-support")]
@@ -32,6 +32,10 @@ pub use engine::testing;
 // Engine::check_entitlements.
 pub use xbbg_core::{EntitlementCheck, SeatType};
 
+// Runtime loading: `Engine::start` fails with `BlpAsyncError::SdkNotLoaded` until `load` or
+// `load_system` has loaded the Bloomberg runtime.
+pub use xbbg_core::{SdkLoadError, load, load_system, loaded_sdk_path};
+
 // Request building and validation
 pub use request_builder::{RequestBuilder, RoutedParams};
 
@@ -40,3 +44,16 @@ pub use schema::{ElementInfo, OperationSchema, SchemaCache, ServiceSchema};
 
 #[cfg(test)]
 mod tests;
+
+// The unit tests drive BLPAPI directly (SDK-built fixtures), so they need the runtime loaded
+// before the first one runs.
+#[cfg(test)]
+#[ctor::ctor(unsafe)]
+fn load_sdk_for_tests() {
+    let path = xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+        .into_first_path()
+        .expect("unit tests need a Bloomberg runtime: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
+    if let Err(error) = xbbg_core::load(path) {
+        panic!("unit tests need a Bloomberg runtime: {error}");
+    }
+}

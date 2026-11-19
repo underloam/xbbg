@@ -4,12 +4,13 @@ use std::sync::{Arc, Mutex, Weak};
 
 use napi::bindgen_prelude::{ClassInstance, Error, Status};
 use napi_derive::napi;
+use xbbg_async::SubscribeRequest;
+use xbbg_async::engine::{EngineConfig, OverflowPolicy, SubscriptionDeliveryMode};
 use xbbg_async::testing::SubscriptionFixture;
+use xbbg_host::subscription::PublicationPause;
 
-use crate::{
-    EngineConfig, JsSubscription, OverflowPolicy, SubscribeRequest, blp_async_error_to_napi, coded,
-    subscription_delivery_from_input,
-};
+use crate::errors::{blp_async_error_to_napi, coded, host_error_to_napi};
+use crate::subscriptions::JsSubscription;
 
 #[derive(Default)]
 #[napi(object)]
@@ -24,33 +25,21 @@ pub struct SubscriptionFixtureOptions {
     pub zero_as_null: Option<Vec<String>>,
 }
 
-pub(crate) struct SubscriptionPublicationPause {
-    ready: tokio::sync::Notify,
-    release: tokio::sync::Notify,
-}
-
-impl SubscriptionPublicationPause {
-    pub(crate) async fn hold(&self) {
-        self.ready.notify_one();
-        self.release.notified().await;
-    }
-}
-
 #[napi]
 pub struct JsSubscriptionPublicationPause {
-    pause: Arc<SubscriptionPublicationPause>,
+    pause: Arc<PublicationPause>,
 }
 
 #[napi]
 impl JsSubscriptionPublicationPause {
     #[napi]
     pub async fn ready(&self) {
-        self.pause.ready.notified().await;
+        self.pause.ready().await;
     }
 
     #[napi]
     pub fn release(&self) {
-        self.pause.release.notify_one();
+        self.pause.release();
     }
 }
 
@@ -58,7 +47,7 @@ impl JsSubscriptionPublicationPause {
 pub struct JsSubscriptionFixture {
     fixture: SubscriptionFixture,
     batch_items: usize,
-    pauses: Mutex<Vec<Weak<SubscriptionPublicationPause>>>,
+    pauses: Mutex<Vec<Weak<PublicationPause>>>,
 }
 
 /// Synthetic events enter the production shared feed and decoder. This factory
@@ -108,7 +97,13 @@ impl JsSubscriptionFixture {
                 "flushThreshold must be positive",
             ));
         }
-        let delivery = subscription_delivery_from_input(options.delivery.as_deref())?;
+        let delivery = options
+            .delivery
+            .as_deref()
+            .map(SubscriptionDeliveryMode::from_str)
+            .transpose()
+            .map_err(|error| coded(Status::InvalidArg, "VALIDATION", error.to_string()))?
+            .unwrap_or_default();
         let overflow_policy = options
             .overflow_policy
             .as_deref()
@@ -157,22 +152,10 @@ impl JsSubscriptionFixture {
         &self,
         subscription: ClassInstance<JsSubscription>,
     ) -> napi::Result<JsSubscriptionPublicationPause> {
-        let pause = Arc::new(SubscriptionPublicationPause {
-            ready: tokio::sync::Notify::new(),
-            release: tokio::sync::Notify::new(),
-        });
-        let mut slot = subscription
-            .publication_pause
-            .lock()
-            .expect("subscription publication pause poisoned");
-        if slot.is_some() {
-            return Err(coded(
-                Status::InvalidArg,
-                "VALIDATION",
-                "a delivery pause is already armed",
-            ));
-        }
-        *slot = Some(Arc::clone(&pause));
+        let pause = Arc::new(PublicationPause::default());
+        subscription
+            .arm_publication_pause(Arc::clone(&pause))
+            .map_err(host_error_to_napi)?;
         self.pauses
             .lock()
             .expect("fixture pauses poisoned")
@@ -194,7 +177,7 @@ impl JsSubscriptionFixture {
             .drain(..)
         {
             if let Some(pause) = pause.upgrade() {
-                pause.release.notify_one();
+                pause.release();
             }
         }
         self.fixture.terminate();

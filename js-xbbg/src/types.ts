@@ -180,6 +180,15 @@ export interface EngineConfig {
   requestTimeoutMs?: number;
   /** Warn threshold for streams staying deactivated, in ms. 0 disables. Default 30000. */
   streamsDeactivatedWarnMs?: number;
+  /**
+   * How long a request session may stay without a connection to any server
+   * before its in-flight requests fail with a transient error, in ms. One
+   * dropped connection fails nothing: the SDK carries requests over another
+   * connection or finishes them after it reconnects. 0 fails them as soon as
+   * the last connection drops. `requestTimeoutMs` still applies independently.
+   * Default 10000.
+   */
+  reconnectGraceMs?: number;
   /** Enable BLPAPI keep-alive pings. SDK default: true. */
   keepAliveEnabled?: boolean;
   /** Milliseconds of inactivity before keep-alive ping. SDK default: 20000. */
@@ -227,6 +236,11 @@ export interface RequestInput {
   interval?: number;
   options?: readonly StringPair[];
   fieldTypes?: readonly StringPair[];
+  /**
+   * Include Bloomberg `securityError` refusals in the result instead of failing when all
+   * securities are refused. `long` emits one `__SECURITY_ERROR__` row per refused security;
+   * `semi_long` / `wide` return an empty table carrying `xbbg.security_errors` metadata.
+   */
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
   onDelayed?: StreamOptions['onDelayed'];
@@ -282,6 +296,11 @@ export interface BdpOptions {
   kwargs?: OverridesMap;
   format?: RequestFormat;
   backend?: BackendKind;
+  /**
+   * Include Bloomberg `securityError` refusals in the result instead of failing when all
+   * securities are refused. `long` emits one `__SECURITY_ERROR__` row per refused security;
+   * `semi_long` / `wide` return an empty table carrying `xbbg.security_errors` metadata.
+   */
   includeSecurityErrors?: boolean;
   returnEids?: boolean;
   /**
@@ -529,6 +548,16 @@ export interface FeedInfo {
   state: string;
   isolated: boolean;
   fieldErrors: Record<string, string>;
+}
+
+/** The servers one Bloomberg session is currently connected to. */
+export interface SessionConnections {
+  /** Pool the session belongs to. */
+  pool: 'request' | 'subscription';
+  /** Worker id within its pool. */
+  worker: number;
+  /** `host:port` of every connected server, in the order they connected. */
+  servers: string[];
 }
 
 export interface ResolveVenuesOptions extends RecipeBackendOptions {

@@ -15,6 +15,16 @@ final class NativeXbbg {
 
   static native String nativeVersion();
 
+  /**
+   * Finds and loads the Bloomberg runtime ({@code xbbg_host::sdk}); the request is {@link
+   * BlpapiLocator#requestJson()}. Returns {@code {"loaded": {path, source, detail, version,
+   * rejected}}} or {@code {"error": {message, rejected}}}; already loaded is a success.
+   */
+  static native String loadSdk(String requestJson);
+
+  /**
+   * The loaded runtime's version; throws {@code BlpapiNotFoundException} before {@link #loadSdk}.
+   */
   static native String sdkVersion();
 
   static native void setLogLevel(String level);

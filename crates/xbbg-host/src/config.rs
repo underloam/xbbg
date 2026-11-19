@@ -66,6 +66,7 @@ pub struct EngineConfigSpec {
     pub retry_policy: Option<RetryPolicySpec>,
     pub request_timeout_ms: Option<i64>,
     pub streams_deactivated_warn_ms: Option<i64>,
+    pub reconnect_grace_ms: Option<i64>,
     pub keep_alive_enabled: Option<bool>,
     pub keep_alive_inactivity_ms: Option<i32>,
     pub keep_alive_response_timeout_ms: Option<i32>,
@@ -133,19 +134,27 @@ impl std::fmt::Debug for TlsConfigSpec {
 }
 
 /// A TLS file path or DER blob; exactly one member is set.
-#[derive(Clone, Deserialize, PartialEq, Eq)]
+///
+/// From JSON that is `path` or `bytes`. Rust callers that already hold the
+/// material build it with [`TlsMaterialSpec::ready`], which never touches
+/// base64; `ready` is not part of the JSON contract.
+#[derive(Clone, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct TlsMaterialSpec {
     pub path: Option<String>,
     /// Standard base64 (with padding) of the DER bytes.
     pub bytes: Option<String>,
+    /// Material the caller already holds (a path or an owned blob); skipped by serde.
+    #[serde(skip)]
+    pub ready: Option<TlsMaterial>,
 }
 
 impl std::fmt::Debug for TlsMaterialSpec {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let kind = match (&self.path, &self.bytes) {
-            (Some(_), None) => "path",
-            (None, Some(_)) => "bytes",
+        let kind = match (&self.path, &self.bytes, &self.ready) {
+            (Some(_), None, None) => "path",
+            (None, Some(_), None) => "bytes",
+            (None, None, Some(_)) => "ready",
             _ => "invalid",
         };
         write!(f, "TlsMaterialSpec({kind}, <redacted>)")
@@ -153,17 +162,27 @@ impl std::fmt::Debug for TlsMaterialSpec {
 }
 
 impl TlsMaterialSpec {
+    /// A spec for material the caller already holds, so a blob is shared as is
+    /// instead of being base64 encoded only to be decoded again.
+    pub fn ready(material: TlsMaterial) -> Self {
+        Self {
+            ready: Some(material),
+            ..Self::default()
+        }
+    }
+
     /// Own the material before any engine check; blobs are decoded once.
     fn into_material(self, label: &str) -> Result<TlsMaterial, HostError> {
-        match (self.path, self.bytes) {
-            (Some(path), None) => Ok(TlsMaterial::Path(path)),
-            (None, Some(encoded)) => base64::engine::general_purpose::STANDARD
+        match (self.path, self.bytes, self.ready) {
+            (Some(path), None, None) => Ok(TlsMaterial::Path(path)),
+            (None, Some(encoded), None) => base64::engine::general_purpose::STANDARD
                 .decode(encoded.as_bytes())
                 .map(|bytes| TlsMaterial::Blob(Arc::from(bytes)))
                 .map_err(|_| {
                     HostError::argument(format!("{label}.bytes must be standard base64"))
                         .with_element(label)
                 }),
+            (None, None, Some(material)) => Ok(material),
             _ => Err(HostError::argument(format!(
                 "{label} must set exactly one of 'path' or 'bytes'"
             ))
@@ -215,8 +234,34 @@ pub fn config_field_name(field: &str) -> &str {
         "keep_alive_response_timeout_ms" => "keepAliveResponseTimeoutMs",
         "slow_consumer_hi_water_mark" => "slowConsumerHiWaterMark",
         "slow_consumer_lo_water_mark" => "slowConsumerLoWaterMark",
+        "validation_mode" => "validationMode",
+        "overflow_policy" => "overflowPolicy",
+        "key_column" => "keyColumn",
+        "retry_policy.initial_delay_ms" => "retryPolicy.initialDelayMs",
+        "retry_policy.max_delay_ms" => "retryPolicy.maxDelayMs",
+        "request_timeout_ms" => "requestTimeoutMs",
+        "streams_deactivated_warn_ms" => "streamsDeactivatedWarnMs",
+        "reconnect_grace_ms" => "reconnectGraceMs",
+        "sdk_log_level" => "sdkLogLevel",
         other => other,
     }
+}
+
+/// Engine field identifiers as their own labels, for flat attribute-style
+/// configuration whose attributes carry the engine's snake_case names.
+fn engine_field_name(field: &str) -> &str {
+    field
+}
+
+/// Auth, TLS and SOCKS5 as a flat attribute set holds them (see
+/// [`EngineConfigSpec::into_engine_config_flat`]): each member settable on its
+/// own, TLS materials already in memory (no base64 round trip) and the SOCKS5
+/// host and port independent, so a half-set pair reaches the engine's own check.
+pub struct FlatConfigParts<'a> {
+    pub auth: AuthInput<'a>,
+    pub tls: TlsInput<'a>,
+    pub socks5_host: Option<&'a str>,
+    pub socks5_port: Option<u16>,
 }
 
 fn non_negative_duration(value: i64, label: &str) -> Result<u64, HostError> {
@@ -248,8 +293,10 @@ impl EngineConfigSpec {
     }
 
     /// Overlay on [`EngineConfig::default`] and normalize, in napi's check order.
-    pub fn into_engine_config(self) -> Result<EngineConfig, HostError> {
-        let mut tls = self.tls;
+    pub fn into_engine_config(mut self) -> Result<EngineConfig, HostError> {
+        let auth = self.auth.take();
+        let mut tls = self.tls.take();
+        let socks5 = self.socks5.take();
         let client_credentials = tls
             .as_mut()
             .and_then(|tls| tls.client_credentials.take())
@@ -261,23 +308,73 @@ impl EngineConfigSpec {
             .map(|material| material.into_material("tls.trustMaterial"))
             .transpose()?;
 
+        let auth = auth.as_ref();
+        let tls = tls.as_ref();
+        let nested = FlatConfigParts {
+            auth: AuthInput {
+                method: auth.map(|auth| auth.method.as_str()),
+                app_name: auth.and_then(|auth| auth.app_name.as_deref()),
+                dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
+                user_id: auth.and_then(|auth| auth.user_id.as_deref()),
+                ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
+                token: auth.and_then(|auth| auth.token.as_deref()),
+            },
+            tls: TlsInput {
+                client_credentials,
+                client_credentials_password: tls
+                    .and_then(|tls| tls.client_credentials_password.as_deref()),
+                trust_material,
+                handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
+                crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
+            },
+            socks5_host: socks5.as_ref().map(|proxy| proxy.host.as_str()),
+            socks5_port: socks5.as_ref().map(|proxy| proxy.port),
+        };
+        self.convert(nested, config_field_name)
+    }
+
+    /// Like [`Self::into_engine_config`] for a flat attribute set, where auth,
+    /// TLS and SOCKS5 members are set one by one (Python's `EngineConfig`):
+    /// `parts` carries them instead of the spec's `auth`, `tls` and `socks5`,
+    /// which must be absent. Messages name engine fields by their own
+    /// snake_case identifiers (`request_pool_size`, `auth_method`,
+    /// `socks5_host/socks5_port`) rather than the JSON members.
+    pub fn into_engine_config_flat(
+        self,
+        parts: FlatConfigParts<'_>,
+    ) -> Result<EngineConfig, HostError> {
+        if self.auth.is_some() || self.tls.is_some() || self.socks5.is_some() {
+            return Err(HostError::internal(
+                "flat configuration carries auth, tls and socks5 in its parts, not in the spec",
+            ));
+        }
+        self.convert(parts, engine_field_name)
+    }
+
+    /// The overlay and normalization shared by both entry points; `self` has
+    /// no `auth`, `tls` or `socks5` left, `nested` holds them.
+    fn convert(
+        self,
+        nested: FlatConfigParts<'_>,
+        field_name: fn(&str) -> &str,
+    ) -> Result<EngineConfig, HostError> {
         let mut config = EngineConfig::default();
         let validation_mode = parse_member(
             self.validation_mode,
             config.validation_mode,
-            "validationMode",
+            field_name("validation_mode"),
             ValidationMode::from_str,
         )?;
         let overflow_policy = parse_member(
             self.overflow_policy,
             config.overflow_policy,
-            "overflowPolicy",
+            field_name("overflow_policy"),
             OverflowPolicy::from_str,
         )?;
         let key_column = parse_member(
             self.key_column,
             config.key_column,
-            "keyColumn",
+            field_name("key_column"),
             KeyColumn::from_str,
         )?;
 
@@ -334,22 +431,27 @@ impl EngineConfigSpec {
             }
             if let Some(delay) = retry.initial_delay_ms {
                 config.retry_policy.initial_delay_ms =
-                    non_negative_duration(delay, "retryPolicy.initialDelayMs")?;
+                    non_negative_duration(delay, field_name("retry_policy.initial_delay_ms"))?;
             }
             if let Some(factor) = retry.backoff_factor {
                 config.retry_policy.backoff_factor = factor;
             }
             if let Some(delay) = retry.max_delay_ms {
                 config.retry_policy.max_delay_ms =
-                    non_negative_duration(delay, "retryPolicy.maxDelayMs")?;
+                    non_negative_duration(delay, field_name("retry_policy.max_delay_ms"))?;
             }
         }
         if let Some(timeout) = self.request_timeout_ms {
-            config.request_timeout_ms = non_negative_duration(timeout, "requestTimeoutMs")?;
+            config.request_timeout_ms =
+                non_negative_duration(timeout, field_name("request_timeout_ms"))?;
         }
         if let Some(warn) = self.streams_deactivated_warn_ms {
             config.streams_deactivated_warn_ms =
-                non_negative_duration(warn, "streamsDeactivatedWarnMs")?;
+                non_negative_duration(warn, field_name("streams_deactivated_warn_ms"))?;
+        }
+        if let Some(grace) = self.reconnect_grace_ms {
+            config.reconnect_grace_ms =
+                non_negative_duration(grace, field_name("reconnect_grace_ms"))?;
         }
         if let Some(enabled) = self.keep_alive_enabled {
             config.keep_alive_enabled = enabled;
@@ -363,50 +465,35 @@ impl EngineConfigSpec {
         config.sdk_log_level = parse_member(
             self.sdk_log_level,
             config.sdk_log_level,
-            "sdkLogLevel",
+            field_name("sdk_log_level"),
             SdkLogLevel::from_str,
         )?;
         config.validation_mode = validation_mode;
         config.overflow_policy = overflow_policy;
         config.key_column = key_column;
 
-        let auth = self.auth.as_ref();
-        let tls = tls.as_ref();
-        let servers = self.servers.as_deref().unwrap_or_default();
         xbbg_async::config::normalize(
             config,
             ConfigInput {
-                auth: AuthInput {
-                    method: auth.map(|auth| auth.method.as_str()),
-                    app_name: auth.and_then(|auth| auth.app_name.as_deref()),
-                    dir_property: auth.and_then(|auth| auth.dir_property.as_deref()),
-                    user_id: auth.and_then(|auth| auth.user_id.as_deref()),
-                    ip_address: auth.and_then(|auth| auth.ip_address.as_deref()),
-                    token: auth.and_then(|auth| auth.token.as_deref()),
-                },
-                tls: TlsInput {
-                    client_credentials,
-                    client_credentials_password: tls
-                        .and_then(|tls| tls.client_credentials_password.as_deref()),
-                    trust_material,
-                    handshake_timeout_ms: tls.and_then(|tls| tls.handshake_timeout_ms),
-                    crl_fetch_timeout_ms: tls.and_then(|tls| tls.crl_fetch_timeout_ms),
-                },
+                auth: nested.auth,
+                tls: nested.tls,
                 transport: TransportInput {
                     host: self.host.as_deref().unwrap_or("localhost"),
                     port: self.port.unwrap_or(8194),
                     explicit_host_port: self.host.is_some() || self.port.is_some(),
                     zfp_remote: self.zfp_remote.as_deref(),
-                    socks5_host: self.socks5.as_ref().map(|proxy| proxy.host.as_str()),
-                    socks5_port: self.socks5.as_ref().map(|proxy| proxy.port),
+                    socks5_host: nested.socks5_host,
+                    socks5_port: nested.socks5_port,
                 },
                 slow_consumer_hi_water_mark: self.slow_consumer_hi_water_mark,
                 slow_consumer_lo_water_mark: self.slow_consumer_lo_water_mark,
             },
-            servers
+            self.servers
+                .as_deref()
+                .unwrap_or_default()
                 .iter()
                 .map(|server| (server.host.as_str(), server.port)),
-            config_field_name,
+            field_name,
         )
         .map_err(|error| match error {
             BlpAsyncError::ConfigError { detail } => HostError::validation(detail),
@@ -485,6 +572,7 @@ mod tests {
         assert_eq!(config.retry_policy.max_delay_ms, 30_000);
         assert_eq!(config.request_timeout_ms, 0);
         assert_eq!(config.streams_deactivated_warn_ms, 30_000);
+        assert_eq!(config.reconnect_grace_ms, 10_000);
         assert!(config.keep_alive_enabled);
         assert!(config.auto_restart_on_disconnection);
         assert_eq!(config.num_start_attempts, 3);
@@ -510,7 +598,7 @@ mod tests {
                 "bqlAppName": "bql-app", "numStartAttempts": 5,
                 "autoRestartOnDisconnection": false,
                 "retryPolicy": {"maxRetries": 2, "backoffFactor": 1.5},
-                "requestTimeoutMs": 9000, "streamsDeactivatedWarnMs": 0,
+                "requestTimeoutMs": 9000, "streamsDeactivatedWarnMs": 0, "reconnectGraceMs": 2500,
                 "keepAliveEnabled": false, "keepAliveInactivityMs": 40000,
                 "keepAliveResponseTimeoutMs": 15000, "slowConsumerHiWaterMark": 0.9,
                 "slowConsumerLoWaterMark": 0.25, "sdkLogLevel": "warning",
@@ -548,6 +636,7 @@ mod tests {
         assert_eq!(config.retry_policy.max_delay_ms, 30_000);
         assert_eq!(config.request_timeout_ms, 9000);
         assert_eq!(config.streams_deactivated_warn_ms, 0);
+        assert_eq!(config.reconnect_grace_ms, 2500);
         assert!(!config.keep_alive_enabled);
         assert_eq!(config.keep_alive_inactivity_ms, Some(40_000));
         assert_eq!(config.keep_alive_response_timeout_ms, Some(15_000));
@@ -781,6 +870,11 @@ mod tests {
                 "streamsDeactivatedWarnMs",
             ),
             (
+                r#"{"reconnectGraceMs": -1}"#,
+                "reconnectGraceMs must be a non-negative integer number of milliseconds",
+                "reconnectGraceMs",
+            ),
+            (
                 r#"{"sdkLogLevel": "verbose"}"#,
                 "invalid SDK log level: verbose (expected off/fatal/error/warn/info/debug/trace)",
                 "sdkLogLevel",
@@ -904,5 +998,156 @@ mod tests {
         assert!(!debug.contains("secret"), "{debug}");
         assert!(!debug.contains("hunter2"), "{debug}");
         assert!(!debug.contains("c2VjcmV0"), "{debug}");
+    }
+
+    fn flat(spec: EngineConfigSpec, parts: FlatConfigParts<'_>) -> Result<EngineConfig, HostError> {
+        spec.into_engine_config_flat(parts)
+    }
+
+    fn empty_parts<'a>() -> FlatConfigParts<'a> {
+        FlatConfigParts {
+            auth: AuthInput::default(),
+            tls: TlsInput::default(),
+            socks5_host: None,
+            socks5_port: None,
+        }
+    }
+
+    #[test]
+    fn flat_configuration_labels_engine_fields_by_their_own_names() {
+        let error = flat(
+            EngineConfigSpec {
+                request_pool_size: Some(0),
+                ..Default::default()
+            },
+            empty_parts(),
+        )
+        .err()
+        .expect("rejected");
+        assert_eq!(error.kind, HostErrorKind::Validation);
+        assert!(error.message.contains("request_pool_size"), "{error:?}");
+
+        let message = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                socks5_host: Some("proxy.invalid"),
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(message, "socks5_host set without socks5_port");
+
+        let message = flat(
+            EngineConfigSpec {
+                zfp_remote: Some("8194".into()),
+                ..Default::default()
+            },
+            FlatConfigParts {
+                socks5_host: Some("proxy.invalid"),
+                socks5_port: Some(1080),
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(
+            message,
+            "zfp_remote cannot be combined with socks5_host/socks5_port"
+        );
+
+        let message = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                auth: AuthInput {
+                    app_name: Some("my-app"),
+                    ..AuthInput::default()
+                },
+                ..empty_parts()
+            },
+        )
+        .err()
+        .expect("rejected")
+        .message;
+        assert_eq!(
+            message,
+            "auth_method is required when auth-specific fields are provided"
+        );
+    }
+
+    #[test]
+    fn flat_configuration_takes_tls_materials_without_encoding() {
+        let config = flat(
+            EngineConfigSpec::default(),
+            FlatConfigParts {
+                tls: TlsInput {
+                    client_credentials: Some(TlsMaterial::Blob(Arc::from([0_u8, 1, 2].as_slice()))),
+                    trust_material: Some(TlsMaterial::Blob(Arc::from([3_u8, 4].as_slice()))),
+                    ..TlsInput::default()
+                },
+                ..empty_parts()
+            },
+        )
+        .unwrap();
+        let tls = config.tls.expect("tls normalized");
+        assert!(
+            matches!(&tls.client_credentials, TlsMaterial::Blob(bytes) if bytes[..] == [0, 1, 2])
+        );
+    }
+
+    #[test]
+    fn flat_configuration_rejects_nested_members_on_the_spec() {
+        let error = flat(
+            EngineConfigSpec {
+                socks5: Some(Socks5Spec {
+                    host: "p".into(),
+                    port: 1,
+                }),
+                ..Default::default()
+            },
+            empty_parts(),
+        )
+        .err()
+        .expect("rejected");
+        assert_eq!(error.kind, HostErrorKind::Internal);
+    }
+
+    #[test]
+    fn ready_tls_material_is_used_as_is_and_stays_out_of_json() {
+        let spec = EngineConfigSpec {
+            tls: Some(TlsConfigSpec {
+                client_credentials: Some(TlsMaterialSpec::ready(TlsMaterial::Blob(Arc::from(
+                    [0_u8, 1, 2].as_slice(),
+                )))),
+                client_credentials_password: None,
+                trust_material: Some(TlsMaterialSpec::ready(TlsMaterial::Blob(Arc::from(
+                    [3_u8, 4].as_slice(),
+                )))),
+                handshake_timeout_ms: None,
+                crl_fetch_timeout_ms: None,
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            format!("{:?}", spec.tls.as_ref().unwrap().trust_material),
+            "Some(TlsMaterialSpec(ready, <redacted>))"
+        );
+        let tls = spec.into_engine_config().unwrap().tls.expect("tls");
+        assert!(
+            matches!(&tls.client_credentials, TlsMaterial::Blob(bytes) if bytes[..] == [0, 1, 2])
+        );
+        assert!(matches!(&tls.trust_material, TlsMaterial::Blob(bytes) if bytes[..] == [3, 4]));
+
+        let both = TlsMaterialSpec {
+            path: Some("p".into()),
+            ..TlsMaterialSpec::ready(TlsMaterial::Path("q".into()))
+        };
+        let error = both.into_material("tls.trustMaterial").unwrap_err();
+        assert_eq!(error.kind, HostErrorKind::Argument);
+
+        let error = rejected(r#"{"tls": {"trustMaterial": {"ready": {}}}}"#);
+        assert_eq!(error.kind, HostErrorKind::Argument);
     }
 }

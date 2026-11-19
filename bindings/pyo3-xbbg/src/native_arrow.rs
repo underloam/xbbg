@@ -1831,7 +1831,7 @@ impl ArrowTable {
     }
 
     #[getter]
-    fn eid_data(&self) -> PyResult<Option<HashMap<String, Vec<i32>>>> {
+    fn eid_data(&self) -> PyResult<Option<HashMap<String, Vec<i64>>>> {
         self.data
             .schema
             .metadata()

@@ -12,7 +12,37 @@ Detailed behavior, options, and examples for `@xbbg/core`. Start with the [READM
 
 If no packaged addon is available for your platform, build from source locally instead.
 
-On Windows, `@xbbg/core` prepends the first detected Bloomberg runtime DLL directory before loading the native addon. Explicit `BLPAPI_LIB_DIR` / `BLPAPI_ROOT` values win; otherwise it probes local SDK roots plus standard Terminal DAPI installs including `C:\blp\DAPI` and `C:\Program Files (x86)\Bloomberg\Blp\DAPI`.
+The engine addon links no Bloomberg library, so it loads on any machine. Right after it loads, `@xbbg/core` finds and loads Bloomberg's runtime library; every Bloomberg call needs it. The Rust crates `xbbg-sdk` and `xbbg-host` own the search, the same one the Python, Java and MCP packages use, tried in this order (the first library that opens wins):
+
+1. `BLPAPI_LIB_DIR`: a directory holding the library.
+2. `BLPAPI_ROOT`: an SDK root; the library is looked for in the SDK's own layouts (`lib`, `Linux`, `Darwin`, `bin`, and versioned subdirectories).
+3. `XBBG_DEV_SDK_ROOT`: the same layouts; a relative value is resolved against the repository checkout (development only).
+4. `vendor/blpapi-sdk/<newest>` inside the repository checkout (development only; a package installed from npm has none).
+5. The Bloomberg Terminal folders: `C:\blp\DAPI` and the other standard Windows locations, `~/blp/DAPI` and `/opt/bloomberg/DAPI` elsewhere.
+6. The operating system's library search variables: `PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS.
+7. The operating system's own library search, where a system-wide install lives: the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the application and system directories on Windows.
+8. The xbbg install cache (`XBBG_CACHE_DIR`; otherwise `%LOCALAPPDATA%\xbbg` on Windows, `~/Library/Caches/xbbg` on macOS, `$XDG_CACHE_HOME/xbbg` or `~/.cache/xbbg` elsewhere), the same cache the Java and Python packages use. Only installs whose library matches the SHA-256 in their `provenance.json` are loaded, and the cache is only read when nothing before it loaded.
+
+The environment variables are read from `process.env` when the module is imported and handed to the search, so a value your own code assigned before the first `import` of `@xbbg/core` takes effect under Node, Bun and worker threads alike. The runtime is loaded once per process; assignments made after that do not move it.
+
+A candidate that does not open (not a library, too old for the functions this package calls) is skipped and the search goes on, so one stale `BLPAPI_ROOT` does not hide a good Terminal install. When nothing opens, importing `@xbbg/core` throws one error that lists every place that was refused, in order, with the reason:
+
+```text
+@xbbg/core could not load the Bloomberg runtime.
+no Bloomberg runtime library could be found or loaded:
+  <source> (<detail>): <path>: <reason>
+Set BLPAPI_LIB_DIR to the folder that holds Bloomberg's blpapi runtime (BLPAPI_ROOT also works).
+```
+
+`@xbbg/core` can also provision the shared xbbg cache itself before any Bloomberg runtime exists on the machine:
+
+- Programmatically from `@xbbg/core/sdk`: `provisionSdk({ source, version, cacheDir })`, `installedSdks()`, and `defaultSdkCacheDir()`.
+- From the CLI: `npx xbbg-sdk --source <spec>` (or `--installed`).
+- Automatically on first import when no local or cached runtime is found: set `XBBG_SDK_SOURCE` (and optionally `XBBG_SDK_VERSION`). An explicit runtime path is never replaced by a download.
+
+Because Python, Node, Java and `xbbg-mcp` share `<cache>/sdk/<version>/<platform>/`, a runtime provisioned once with any of them serves all four.
+
+Compared with earlier releases, the search is the same on every platform: the Terminal folders, the library search variables and the cache are tried on Linux and macOS as well as Windows, and `@xbbg/core` no longer prepends a directory to `PATH`. The cache is simply the last rule, not a retry after a failed addon load.
 
 ## Local Development
 
@@ -150,7 +180,7 @@ For a polling auction board, use `await engine.subscribeAuction(['IBM US Equity'
 
 On Bloomberg `DATALOSS`, delta consumers fail closed. If polling or state consumers remain, the shared feed resubscribes automatically. The `live` column in `latest()` becomes false immediately; the old polling image remains until recovery paint arrives, then is cleared and rebuilt so missing recovery fields are null. State delivery explicitly emits invalid/null images before valid recovery images, even when both transitions are unread at drain time. The first ordinary update makes the image live again. `sub.events` records `DataLoss` and `FeedRecovered`; these recovery notices are not emitted as field/delayed warnings. Session termination still ends subscriptions without automatic recovery.
 
-Read `status` for a combined snapshot (`events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `session`, `services`, `admin`), or use the individual getters `events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `sessionStatus`, `serviceStatus` and `adminStatus`. Topic states include `feedTopic` (upstream identity) and `delayed`. Field errors map consumer label → field → category. `engine.subscriptionFeeds()` returns current `FeedInfo[]`: service, topic, options, union fields, consumer count, delayed flag, state, isolation flag and field errors. It contains no authentication or connection identity information.
+Read `status` for a combined snapshot (`events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `session`, `services`, `admin`), or use the individual getters `events`, `failures`, `failedTickers`, `topicStates`, `fieldErrors`, `sessionStatus`, `serviceStatus` and `adminStatus`. Topic states include `feedTopic` (upstream identity) and `delayed`. Field errors map consumer label → field → category. `engine.subscriptionFeeds()` returns current `FeedInfo[]`: service, topic, options, union fields, consumer count, delayed flag, state, isolation flag and field errors. It contains no authentication or connection identity information. `engine.connections()` returns `SessionConnections[]`, one entry per Bloomberg session (request workers first, then subscription workers) with `pool` (`'request'` or `'subscription'`), `worker` and `servers`: the `host:port` of every server whose connection is up, in the order the connections came up. It contains no credentials.
 
 Warnings are drained once from the shared scalar/Arrow lifecycle, including initial attach, reads, close and calls to `add`, `remove`, `addFields` and `latest`. They use Node's standard `process.emitWarning(message, { type, code, detail })`:
 
@@ -480,7 +510,7 @@ try {
 }
 ```
 
-`subscribeAuction` and `streamAuction` perform atomic preflight: every distinct input must resolve before any subscription opens. Identical input strings collapse; distinct inputs resolving to the same venue raise `BlpValidationError` naming the conflicting inputs. Any unresolved, unsupported or mismatched input also fails preflight. Venue topics are automatically aliased to the original security strings; caller-supplied aliases are rejected before resolution. Dynamic `add()` takes already-resolved venue topics with aliases; `remove()` takes original security labels.
+`subscribeAuction` and `streamAuction` perform atomic preflight: every distinct input must resolve before any subscription opens. Identical input strings collapse; distinct inputs resolving to the same venue raise `BlpValidationError` naming the conflicting inputs. Any unresolved, unsupported or mismatched input also fails preflight. Venue topics are automatically aliased to the original security strings; caller-supplied aliases are rejected before resolution. Dynamic `add()` takes already-resolved venue topics with aliases; `remove()` takes original security labels. The auction and iNAV preflights run in the shared xbbg host layer and validate stream options before any Bloomberg request is sent.
 
 `AuctionFields` exposes readonly `imbalance`, `indicative`, `state`, `halts`, `results`, `composite`, `quotes` and `default` arrays sourced from Rust. `default` concatenates the first five groups (39 fields), excluding composite prices and quotes. Missing or empty snapshot/auction-stream fields select that default. These are stream-valid names (`THEO_PRICE`, `BID`, `ASK`), not static aliases such as `PX_THEO` or `PX_BID`.
 
@@ -502,13 +532,14 @@ Preferred `pcsOverrides` map exchange names to pricing sources, for example `{ '
 - `zfpRemote` (`'8194'` or `'8196'`) for Bloomberg-assigned ZFP endpoints in an entitled environment; do not combine it with `host`/`port`/`servers`/`socks5`
 - `socks5` for proxied access to already-provisioned direct Bloomberg endpoints
 - `retryPolicy`, `numStartAttempts`, and recovery settings for reconnect behavior
+- `reconnectGraceMs`: how long a request session may stay without a connection to any server before its in-flight requests fail with a transient error, default **10000**; `0` fails them as soon as the last connection drops. One dropped connection fails nothing, because the SDK carries requests over another connection or finishes them after it reconnects. `requestTimeoutMs` still applies independently
 - `shardRequests`, `shardThreshold`, `shardChunkSize`, and `shardMaxConcurrent` for opt-in sharding of wide multi-security `bdp`/`bdh` requests
 - `runtimeWorkerThreads`: shared Tokio runtime threads, default **2**, minimum **1**; this is not the total process thread count
 - `subscriptionPoolSize`: pre-warmed subscription sessions, default **1**, minimum **0**
 - `maxSubscriptionSessions`: concurrent subscription-session cap, default **32**, minimum **1**, and at least `subscriptionPoolSize`; native admission waits for capacity instead of allocating unbounded sessions
 - `subscriptionFlushThreshold`: default per-subscription `flushThreshold`, **16**, minimum **1**; the maximum number of already-queued updates combined into one read batch, never a wait for more
 
-The JS binding forwards these fields directly to the Rust engine, so Node can configure the same auth and transport features already available in the core runtime. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`.
+The JS binding forwards these fields to the shared xbbg host layer, which parses them with the same rules as the Java binding. Invalid transport combinations such as `zfpRemote` plus direct hosts fail during configuration instead of silently connecting to `localhost:8194`. Configuration failures reject with `BlpValidationError`; when one member is at fault before the engine's own checks (for example `validationMode` or `requestTimeoutMs`), its name is in `element`.
 
 ```typescript
 xbbg.configure({ bqlAppName: 'example-bql-app' });

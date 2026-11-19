@@ -1,0 +1,123 @@
+//! `locate_and_load` against a real Bloomberg runtime named by `BLPAPI_LIB_DIR` / `BLPAPI_ROOT`.
+//!
+//! The runtime is process-wide and never unloaded, so one test walks the whole story in order.
+
+use std::collections::BTreeMap;
+
+use xbbg_host::sdk::{
+    Hint, LocateRequest, SourceKind, locate, locate_and_load, locate_and_load_json,
+};
+use xbbg_sdk::Platform;
+
+#[test]
+fn a_bogus_first_candidate_is_rejected_and_the_real_runtime_loads_once() {
+    let real = locate(&LocateRequest::default())
+        .into_first_path()
+        .expect("this test needs a Bloomberg runtime: set BLPAPI_LIB_DIR or BLPAPI_ROOT");
+
+    // A file named like the library that is not one, found by the first rule that looks.
+    let platform = Platform::host().expect("a supported test platform");
+    let bogus_dir = tempfile::tempdir().expect("temp dir");
+    let bogus = bogus_dir.path().join(platform.library_names()[0]);
+    std::fs::write(&bogus, b"this is not a shared library").expect("write bogus library");
+
+    let mut env: BTreeMap<String, String> = std::env::vars().collect();
+    env.insert(
+        "BLPAPI_LIB_DIR".to_owned(),
+        bogus_dir.path().display().to_string(),
+    );
+    let request = LocateRequest {
+        env: Some(env),
+        // The real runtime stays reachable whichever variable named it in the process.
+        hints: vec![Hint {
+            label: "real".to_owned(),
+            dir: real.parent().expect("a library has a directory").to_owned(),
+        }],
+        ..LocateRequest::default()
+    };
+    let loaded = locate_and_load(&request).expect("the real runtime loads after the bogus one");
+
+    assert_eq!(
+        loaded.path.canonicalize().expect("loaded path"),
+        real.canonicalize().expect("real path")
+    );
+    assert_ne!(loaded.source, SourceKind::BlpapiLibDir);
+    let (major, minor, patch, build) = xbbg_core::sdk_version();
+    assert_eq!(loaded.version, format!("{major}.{minor}.{patch}.{build}"));
+    assert!(major >= 3, "{}", loaded.version);
+    assert_eq!(xbbg_core::loaded_sdk_path(), Some(loaded.path.as_path()));
+
+    let refused = loaded
+        .rejected
+        .iter()
+        .find(|refused| refused.path == bogus)
+        .expect("the bogus library is reported");
+    assert_eq!(refused.source, SourceKind::BlpapiLibDir);
+    assert_eq!(refused.detail, "BLPAPI_LIB_DIR");
+    assert!(
+        !refused.reason.is_empty() && !refused.reason.starts_with("cannot open"),
+        "the loader's own message, not a repeat of the path: {}",
+        refused.reason
+    );
+
+    // A second call is idempotent, whatever else it asks for.
+    assert_eq!(locate_and_load(&request).expect("second call"), loaded);
+    assert_eq!(
+        locate_and_load(&LocateRequest::default()).expect("third call"),
+        loaded
+    );
+
+    // So is one that names the loaded file, or its directory, explicitly.
+    for same in [
+        loaded.path.clone(),
+        loaded.path.parent().expect("a directory").to_owned(),
+    ] {
+        let explicit = LocateRequest {
+            explicit: Some(same),
+            ..LocateRequest::default()
+        };
+        assert_eq!(
+            locate_and_load(&explicit).expect("explicit loaded file"),
+            loaded
+        );
+    }
+
+    // An explicit path that is not the loaded file cannot replace it.
+    let elsewhere = LocateRequest {
+        explicit: Some(bogus.clone()),
+        ..LocateRequest::default()
+    };
+    let error = locate_and_load(&elsewhere).expect_err("a loaded runtime is not replaced");
+    assert_eq!(error.rejected.len(), 1, "{:?}", error.rejected);
+    assert_eq!(error.rejected[0].source, SourceKind::Explicit);
+    assert_eq!(error.rejected[0].path, bogus);
+    assert_eq!(
+        error.rejected[0].reason,
+        format!(
+            "a Bloomberg runtime is already loaded from {}; it cannot be replaced by {} in the \
+             same process",
+            loaded.path.display(),
+            bogus.display()
+        )
+    );
+    assert!(error.to_string().contains("already loaded"));
+    assert_eq!(xbbg_core::loaded_sdk_path(), Some(loaded.path.as_path()));
+
+    // The JSON surface reports the same runtime.
+    let json = locate_and_load_json("{}").expect("json call");
+    let value: serde_json::Value = serde_json::from_str(&json).expect("json result");
+    assert_eq!(value["version"], loaded.version.as_str());
+    assert_eq!(value["source"], loaded.source.as_str());
+    assert_eq!(value["path"], loaded.path.to_string_lossy().as_ref());
+    assert!(value["rejected"].is_array());
+
+    // A malformed request is an Err with the same shape, whether or not a runtime is loaded.
+    let failure = locate_and_load_json(r#"{"cacheDir": "x"}"#).expect_err("unknown field");
+    let value: serde_json::Value = serde_json::from_str(&failure).expect("json failure");
+    assert!(
+        value["message"]
+            .as_str()
+            .is_some_and(|text| text.contains("invalid locate request"))
+    );
+    assert_eq!(value["rejected"], serde_json::json!([]));
+}

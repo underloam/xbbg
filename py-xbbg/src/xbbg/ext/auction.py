@@ -10,7 +10,13 @@ from __future__ import annotations
 from collections.abc import AsyncGenerator, Generator, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
-from xbbg._core import ext_auction_field_groups, ext_auction_zero_price_fields, ext_imbalance_side
+from xbbg._core import (
+    ext_auction_field_groups,
+    ext_auction_zero_price_fields,
+    ext_imbalance_side,
+    ext_plan_auction,
+    ext_validated_auction_venues,
+)
 from xbbg.exceptions import BlpValidationError
 from xbbg.ext._utils import _call_native_recipe, _syncify
 
@@ -98,41 +104,19 @@ async def aauction_snapshot(
 
 
 def _subscription_inputs(securities: str | Sequence[str], kwargs: Mapping[str, Any]) -> list[str]:
-    inputs = list(dict.fromkeys(_as_list(securities)))
-    if not inputs:
-        raise BlpValidationError("securities must not be empty")
-    if "aliases" in kwargs:
-        raise BlpValidationError("auction subscriptions set aliases from resolved venues to input securities")
-    return inputs
+    """Plan the venue lookup: unique inputs in first-seen order, checked natively."""
+    try:
+        return ext_plan_auction(_as_list(securities), "aliases" in kwargs)
+    except ValueError as exc:
+        raise BlpValidationError(str(exc)) from None
 
 
-def _validated_venues(inputs: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
-    by_order = {row["input_order"]: row for row in rows}
-    if (
-        len(rows) != len(inputs)
-        or len(by_order) != len(inputs)
-        or any(
-            index not in by_order or by_order[index].get("security") != security
-            for index, security in enumerate(inputs)
-        )
-    ):
-        raise BlpValidationError(f"Venue resolution is not one-to-one with inputs: {', '.join(inputs)}")
-
-    failures = []
-    owners: dict[str, list[str]] = {}
-    for index, security in enumerate(inputs):
-        row = by_order[index]
-        topic = row.get("venue_topic")
-        if row.get("status") != "resolved" or not isinstance(topic, str) or not topic.strip():
-            failures.append(f"{security}: {row.get('error') or row.get('status') or 'missing venue'}")
-        else:
-            owners.setdefault(topic, []).append(security)
-    failures.extend(
-        f"ambiguous venue {topic}: {', '.join(labels)}" for topic, labels in owners.items() if len(labels) > 1
-    )
-    if failures:
-        raise BlpValidationError("Auction preflight failed: " + "; ".join(failures))
-    return {topic: labels[0] for topic, labels in owners.items()}
+def _validated_venues(inputs: list[str], table: Any) -> dict[str, str]:
+    """Validate the resolution table natively; map each venue topic to its input."""
+    try:
+        return ext_validated_auction_venues(inputs, table)
+    except ValueError as exc:
+        raise BlpValidationError(str(exc)) from None
 
 
 async def asubscribe_auction(
@@ -161,7 +145,7 @@ async def asubscribe_auction(
 
     inputs = _subscription_inputs(securities, subscribe_kwargs)
     table = await aresolve_venues(inputs, pcs_overrides=pcs_overrides, backend="native")
-    aliases = _validated_venues(inputs, table.to_pylist())
+    aliases = _validated_venues(inputs, table)
     requested = _as_list(fields)
     return await blp.asubscribe(
         list(aliases),
@@ -194,7 +178,7 @@ async def astream_auction(
 
     inputs = _subscription_inputs(securities, stream_kwargs)
     table = await aresolve_venues(inputs, pcs_overrides=pcs_overrides, backend="native")
-    aliases = _validated_venues(inputs, table.to_pylist())
+    aliases = _validated_venues(inputs, table)
     requested = _as_list(fields)
     source = blp.astream(
         list(aliases),
@@ -234,7 +218,7 @@ def stream_auction(
 
     inputs = _subscription_inputs(securities, stream_kwargs)
     table = resolve_venues(inputs, pcs_overrides=pcs_overrides, backend="native")
-    aliases = _validated_venues(inputs, table.to_pylist())
+    aliases = _validated_venues(inputs, table)
     requested = _as_list(fields)
     yield from blp.stream(
         list(aliases),

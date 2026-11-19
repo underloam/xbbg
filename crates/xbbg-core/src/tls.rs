@@ -2,6 +2,7 @@ use std::ffi::CString;
 
 use crate::errors::{BlpError, Result};
 use crate::ffi;
+use crate::sdk;
 
 pub struct TlsOptions {
     ptr: *mut ffi::blpapi_TlsOptions_t,
@@ -18,7 +19,7 @@ impl TlsOptions {
         let trust = cstring(trust_material_path, "trust material path")?;
 
         let ptr = unsafe {
-            ffi::blpapi_TlsOptions_createFromFiles(
+            sdk().blpapi_TlsOptions_createFromFiles(
                 creds.as_ptr(),
                 password.as_ptr(),
                 trust.as_ptr(),
@@ -46,7 +47,7 @@ impl TlsOptions {
         let password = cstring(client_credentials_password, "client credentials password")?;
 
         let ptr = unsafe {
-            ffi::blpapi_TlsOptions_createFromBlobs(
+            sdk().blpapi_TlsOptions_createFromBlobs(
                 client_credentials.as_ptr() as *const i8,
                 credentials_len,
                 password.as_ptr(),
@@ -65,11 +66,11 @@ impl TlsOptions {
     }
 
     pub fn set_tls_handshake_timeout_ms(&mut self, timeout_ms: i32) {
-        unsafe { ffi::blpapi_TlsOptions_setTlsHandshakeTimeoutMs(self.ptr, timeout_ms) };
+        unsafe { sdk().blpapi_TlsOptions_setTlsHandshakeTimeoutMs(self.ptr, timeout_ms) };
     }
 
     pub fn set_crl_fetch_timeout_ms(&mut self, timeout_ms: i32) {
-        unsafe { ffi::blpapi_TlsOptions_setCrlFetchTimeoutMs(self.ptr, timeout_ms) };
+        unsafe { sdk().blpapi_TlsOptions_setCrlFetchTimeoutMs(self.ptr, timeout_ms) };
     }
 
     pub(crate) fn as_ptr(&self) -> *const ffi::blpapi_TlsOptions_t {
@@ -80,7 +81,7 @@ impl TlsOptions {
 impl Drop for TlsOptions {
     fn drop(&mut self) {
         if !self.ptr.is_null() {
-            unsafe { ffi::blpapi_TlsOptions_destroy(self.ptr) };
+            unsafe { sdk().blpapi_TlsOptions_destroy(self.ptr) };
             self.ptr = std::ptr::null_mut();
         }
     }

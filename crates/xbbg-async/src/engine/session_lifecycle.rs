@@ -237,9 +237,145 @@ impl<F: Fn()> Drop for PendingWaiter<F> {
     }
 }
 
+/// Which pool a session belongs to.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum SessionPool {
+    /// A request worker session.
+    Request,
+    /// A subscription worker session.
+    Subscription,
+}
+
+impl SessionPool {
+    /// Stable lowercase name: `"request"` or `"subscription"`.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Subscription => "subscription",
+        }
+    }
+}
+
+/// The servers one Bloomberg session currently holds a connection to.
+///
+/// Contains no credentials. A session started with several servers can hold a
+/// connection to each of them at once; `servers` lists the connected ones in
+/// the order their connections came up.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct SessionConnections {
+    /// Pool the session belongs to.
+    pub pool: SessionPool,
+    /// Worker id within its pool.
+    pub worker_id: usize,
+    /// `host:port` of every connected server, in the order they connected.
+    /// A connection whose status message named no server is not listed.
+    pub servers: Vec<String>,
+}
+
+/// Connections of one session, fed by its `SessionConnectionUp` /
+/// `SessionConnectionDown` messages.
+///
+/// A message without a `server` element stands for one unnamed connection: it
+/// keeps the session counted as connected but is not reported by name.
+#[derive(Default)]
+pub(super) struct ConnectionSet {
+    servers: Vec<String>,
+    unnamed: bool,
+}
+
+impl ConnectionSet {
+    /// Record a connection; one already present keeps its position.
+    pub(super) fn up(&mut self, server: Option<&str>) {
+        match server {
+            Some(server) if !self.servers.iter().any(|known| known == server) => {
+                self.servers.push(server.to_owned());
+            }
+            Some(_) => {}
+            None => self.unnamed = true,
+        }
+    }
+
+    pub(super) fn down(&mut self, server: Option<&str>) {
+        match server {
+            Some(server) => self.servers.retain(|known| known != server),
+            None => self.unnamed = false,
+        }
+    }
+
+    pub(super) fn clear(&mut self) {
+        self.servers.clear();
+        self.unnamed = false;
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.servers.is_empty() && !self.unnamed
+    }
+
+    /// Connections held, named or not.
+    pub(super) fn len(&self) -> usize {
+        self.servers.len() + usize::from(self.unnamed)
+    }
+
+    pub(super) fn servers(&self) -> Vec<String> {
+        self.servers.clone()
+    }
+}
+
+/// The `server` (`host:port`) a `SessionConnectionUp` / `SessionConnectionDown`
+/// message names, if any.
+pub(super) fn connection_server(msg: &xbbg_core::Message<'_>) -> Option<String> {
+    msg.elements()
+        .get_by_str("server")
+        .and_then(|element| element.get_str(0))
+        .filter(|server| !server.is_empty())
+        .map(str::to_owned)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_set_keeps_arrival_order_and_ignores_duplicates() {
+        let mut set = ConnectionSet::default();
+        assert!(set.is_empty());
+        set.up(Some("b.example.com:8194"));
+        set.up(Some("a.example.com:8194"));
+        set.up(Some("b.example.com:8194"));
+        assert_eq!(set.servers(), ["b.example.com:8194", "a.example.com:8194"]);
+        assert_eq!(set.len(), 2);
+
+        set.down(Some("b.example.com:8194"));
+        set.down(Some("unknown.example.com:8194"));
+        assert_eq!(set.servers(), ["a.example.com:8194"]);
+        set.up(Some("b.example.com:8194"));
+        assert_eq!(set.servers(), ["a.example.com:8194", "b.example.com:8194"]);
+    }
+
+    #[test]
+    fn connection_set_counts_an_unnamed_connection_without_reporting_it() {
+        let mut set = ConnectionSet::default();
+        set.up(None);
+        set.up(None);
+        assert!(!set.is_empty());
+        assert_eq!(set.len(), 1);
+        assert!(set.servers().is_empty());
+
+        set.up(Some("a.example.com:8194"));
+        set.down(None);
+        assert_eq!(set.servers(), ["a.example.com:8194"]);
+        assert_eq!(set.len(), 1);
+        set.clear();
+        assert!(set.is_empty());
+    }
+
+    #[test]
+    fn session_pool_names_are_stable() {
+        assert_eq!(SessionPool::Request.as_str(), "request");
+        assert_eq!(SessionPool::Subscription.as_str(), "subscription");
+    }
 
     #[test]
     fn worker_start_failures_keep_session_kind_and_sdk_label() {

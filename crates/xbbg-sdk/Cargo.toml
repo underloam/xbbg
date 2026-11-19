@@ -8,45 +8,115 @@ repository.workspace = true
 description = "Locate and provision the Bloomberg BLPAPI runtime from PyPI indexes, conda channels or artifacts; never links blpapi"
 publish = false
 
+[features]
+# The default build is the resolver only: platform names, cache layout, `provenance.json` and
+# install verification. It needs `serde`, `serde_json`, `sha2` and `hex`, makes no network call
+# and keeps a resolver-only binding at a few hundred kilobytes.
+default = []
+# The downloader: PyPI/conda/archive provisioning with its networking and extraction stack.
+# Bindings that only resolve the cache must not enable it; CI enforces a size budget on them.
+provision = [
+    "dep:uv-cache",
+    "dep:uv-client",
+    "dep:uv-distribution-filename",
+    "dep:uv-distribution-types",
+    "dep:uv-normalize",
+    "dep:uv-pep440",
+    "dep:uv-platform-tags",
+    "dep:rattler_conda_types",
+    "dep:rattler_digest",
+    "dep:rattler_networking",
+    "dep:rattler_package_streaming",
+    "dep:rattler_redaction",
+    "dep:rattler_repodata_gateway",
+    "dep:reqwest",
+    "dep:reqwest-middleware",
+    "dep:reqwest-retry",
+    "dep:async-trait",
+    "dep:http",
+    "dep:futures-util",
+    "dep:tokio",
+    "dep:url",
+    "dep:base64",
+    "dep:csv",
+    "dep:flate2",
+    "dep:tar",
+    "dep:zip",
+    "dep:tempfile",
+    "dep:thiserror",
+]
+
 [dependencies]
-# PyPI simple indexes (PEP 503 HTML and PEP 691 JSON, including Bloomberg's HTML-only index)
-# through uv's registry client; wheel-name, platform-tag and version semantics from uv.
-uv-cache = { workspace = true }
-uv-client = { workspace = true }
-uv-distribution-filename = { workspace = true }
-uv-distribution-types = { workspace = true }
-uv-normalize = { workspace = true }
-uv-pep440 = { workspace = true }
-uv-platform-tags = { workspace = true }
-# conda channels: gateway with sharded repodata, package extraction, explicit credential storage.
-# Never enable rattler_networking's `keyring`/`system-integration` (implicit OS credential stores).
-rattler_conda_types = { workspace = true }
-rattler_digest = { workspace = true }
-rattler_networking = { workspace = true, features = ["rustls", "netrc-rs", "dirs"] }
-rattler_package_streaming = { workspace = true, features = ["rustls"] }
-# Masks conda `/t/<token>/` channel tokens in every URL the crate reports.
-rattler_redaction = { workspace = true }
-rattler_repodata_gateway = { workspace = true, features = ["rustls", "gateway"] }
-# One HTTP stack for both ecosystems: rustls with the operating system's trust store.
-reqwest = { workspace = true, features = ["rustls", "stream", "http2", "system-proxy", "socks"] }
-reqwest-middleware = { workspace = true }
-reqwest-retry = { workspace = true }
-async-trait = { workspace = true }
-http = { workspace = true }
-futures-util = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "fs", "io-util", "time", "macros"] }
-url = { workspace = true }
-base64 = { workspace = true }
-csv = { workspace = true }
+# Resolver (always built): cache listing and `provenance.json`.
 hex = { workspace = true }
-zip = { workspace = true, features = ["deflate"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tempfile = { workspace = true }
-thiserror = { workspace = true }
+sha2 = { workspace = true }
+
+# Provisioner (feature `provision`).
+# PyPI simple indexes (PEP 503 HTML and PEP 691 JSON, including Bloomberg's HTML-only index)
+# through uv's registry client; wheel-name, platform-tag and version semantics from uv.
+uv-cache = { workspace = true, optional = true }
+uv-client = { workspace = true, optional = true }
+uv-distribution-filename = { workspace = true, optional = true }
+uv-distribution-types = { workspace = true, optional = true }
+uv-normalize = { workspace = true, optional = true }
+uv-pep440 = { workspace = true, optional = true }
+uv-platform-tags = { workspace = true, optional = true }
+# conda channels: gateway with sharded repodata, package extraction, explicit credential storage.
+# Never enable rattler_networking's `keyring`/`system-integration` (implicit OS credential stores).
+rattler_conda_types = { workspace = true, optional = true }
+rattler_digest = { workspace = true, optional = true }
+rattler_networking = { workspace = true, features = ["rustls", "netrc-rs", "dirs"], optional = true }
+rattler_package_streaming = { workspace = true, features = ["rustls"], optional = true }
+# Masks conda `/t/<token>/` channel tokens in every URL the crate reports.
+rattler_redaction = { workspace = true, optional = true }
+rattler_repodata_gateway = { workspace = true, features = ["rustls", "gateway"], optional = true }
+# One HTTP stack for both ecosystems: rustls with the operating system's trust store.
+reqwest = { workspace = true, features = ["rustls", "stream", "http2", "system-proxy", "socks"], optional = true }
+reqwest-middleware = { workspace = true, optional = true }
+reqwest-retry = { workspace = true, optional = true }
+async-trait = { workspace = true, optional = true }
+http = { workspace = true, optional = true }
+futures-util = { workspace = true, optional = true }
+tokio = { workspace = true, features = ["rt", "sync", "fs", "io-util", "time", "macros"], optional = true }
+url = { workspace = true, optional = true }
+base64 = { workspace = true, optional = true }
+csv = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
+zip = { workspace = true, features = ["deflate"], optional = true }
+tempfile = { workspace = true, optional = true }
+thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "xbbg-sdk"
+path = "src/bin/xbbg_sdk.rs"
+required-features = ["provision"]
+
+[[test]]
+name = "artifact"
+required-features = ["provision"]
+
+[[test]]
+name = "conda"
+required-features = ["provision"]
+
+[[test]]
+name = "install"
+required-features = ["provision"]
+
+[[test]]
+name = "online"
+required-features = ["provision"]
+
+[[test]]
+name = "pypi"
+required-features = ["provision"]

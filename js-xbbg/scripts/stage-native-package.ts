@@ -85,23 +85,27 @@ function tempPathFor(destPath: string, suffix: string): string {
   );
 }
 
+function prepareBinary(sourcePath: string, tempPath: string): void {
+  fs.copyFileSync(sourcePath, tempPath);
+  fs.chmodSync(tempPath, 0o755);
+  const stat = fs.statSync(tempPath);
+  if (!stat.isFile() || stat.size === 0) {
+    fail(`prepared native addon is empty: ${tempPath}`);
+  }
+}
+
+// The addon is verified against the build provenance before it replaces the staged file.
 function copyBinarySafely(
-  sourcePath: string,
-  destPath: string,
+  destBinary: string,
   key: NativePackageSpec['key'],
   release: boolean,
 ): void {
-  const tempPath = tempPathFor(destPath, 'binary');
+  const tempPath = tempPathFor(destBinary, 'binary');
   try {
     const provenance = readNativeBuildInfo(path.join(packageDir, '.native-build-info.json'));
-    fs.copyFileSync(sourcePath, tempPath);
-    fs.chmodSync(tempPath, 0o755);
-    const stat = fs.statSync(tempPath);
-    if (!stat.isFile() || stat.size === 0) {
-      fail(`prepared native addon is empty: ${tempPath}`);
-    }
+    prepareBinary(sourceBinary, tempPath);
     assertNativeBuildArtifact(provenance, tempPath, key, release);
-    fs.renameSync(tempPath, destPath);
+    fs.renameSync(tempPath, destBinary);
   } finally {
     fs.rmSync(tempPath, { force: true });
   }
@@ -142,7 +146,7 @@ function stagePackage(release: boolean, version: string | null = null): StagePac
   }
 
   const destBinary = path.join(localPackageDir, spec.binaryName);
-  copyBinarySafely(sourceBinary, destBinary, spec.key, release);
+  copyBinarySafely(destBinary, spec.key, release);
 
   if (version !== null) {
     const normalizedVersion = version.replace(/^v/u, '');

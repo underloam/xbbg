@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 SDK_EXPORTS = (
+    "BLOOMBERG_PYPI_INDEX",
     "get_sdk_info",
     "set_sdk_path",
     "clear_sdk_path",
+    "set_sdk_source",
+    "get_sdk_source",
+    "provision_sdk",
+    "installed_sdks",
+    "default_sdk_cache_dir",
 )
 
 CORE_EXPORTS = (
@@ -14,6 +20,12 @@ CORE_EXPORTS = (
     "set_log_level",
     "get_log_level",
     "enable_sdk_logging",
+)
+
+PYTHON_LOGGING_EXPORTS = (
+    "enable_python_logging",
+    "disable_python_logging",
+    "python_logging_dropped",
 )
 
 SERVICE_EXPORTS = (
@@ -228,6 +240,7 @@ PACKAGE_EXPORTS = (
     *PACKAGE_MIDDLEWARE_EXPORTS,
     *PACKAGE_LIFECYCLE_EXPORTS,
     *CORE_EXPORTS,
+    *PYTHON_LOGGING_EXPORTS,
     *PACKAGE_BLP_SCHEMA_EXPORTS,
     *SDK_EXPORTS,
     *FIELD_CACHE_EXPORTS,

@@ -467,6 +467,7 @@ fn phase(name: &'static str, elapsed: Duration) -> PhaseMetric {
 }
 
 fn main() {
+    xbbg_bench::load_sdk();
     let config = SuiteConfig::from_env();
     let profile = config.profile;
     let shape = profile.synthetic_shape();
@@ -604,7 +605,7 @@ fn main() {
 
 fn suppress_blpapi_warnings() {
     unsafe {
-        let _ = xbbg_core::ffi::blpapi_Logging_registerCallback(
+        let _ = xbbg_core::sdk().blpapi_Logging_registerCallback(
             None,
             xbbg_core::ffi::blpapi_Logging_Severity_t_blpapi_Logging_SEVERITY_ERROR
                 as xbbg_core::ffi::blpapi_Logging_Severity_t,

@@ -303,6 +303,10 @@ describe('platform map packaging metadata', () => {
       expect(path.basename(spec.packageDir)).toBe(spec.dirName);
       expect(spec.binaryName).toBe(nativeBinaryName);
       expect(spec.expectedFiles).toContain(nativeBinaryName);
+      // The engine addon is the only native file: Bloomberg is loaded by path at run time.
+      expect(spec.expectedFiles.filter((file) => file.endsWith('.node'))).toStrictEqual([
+        nativeBinaryName,
+      ]);
     }
   });
 

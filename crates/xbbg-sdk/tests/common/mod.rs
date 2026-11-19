@@ -121,8 +121,11 @@ impl Wheel {
         record.push_str(&format!("{dist_info}/RECORD,,\n"));
 
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        // A fixed timestamp keeps the archive, and so its hash, the same on every call: with
+        // zip's `time` feature (enabled by rattler) the default is the current time.
         let options = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
+            .compression_method(zip::CompressionMethod::Deflated)
+            .last_modified_time(zip::DateTime::default());
         for (name, data) in members
             .iter()
             .chain([(format!("{dist_info}/RECORD"), record.into_bytes())].iter())

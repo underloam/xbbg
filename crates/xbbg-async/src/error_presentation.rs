@@ -257,6 +257,9 @@ impl ErrorPresentation {
                 ErrorKind::Validation,
                 format!("Configuration error: {detail}"),
             ),
+            BlpAsyncError::SdkNotLoaded => {
+                (ErrorKind::Session, BlpAsyncError::SdkNotLoaded.to_string())
+            }
             BlpAsyncError::ChannelClosed => {
                 (ErrorKind::Internal, "Channel closed unexpectedly".into())
             }

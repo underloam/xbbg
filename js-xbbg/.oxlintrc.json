@@ -177,7 +177,7 @@
       }
     },
     {
-      "files": ["src/native/resolve-native.ts", "src/index.ts", "src/runtime-search-path.ts"],
+      "files": ["src/native/resolve-native.ts", "src/index.ts"],
       "rules": {
         "node/no-sync": "off"
       }

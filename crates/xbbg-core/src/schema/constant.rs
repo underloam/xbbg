@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::ffi;
 use crate::name::Name;
+use crate::sdk;
 
 /// A list of enumeration constants.
 ///
@@ -35,7 +36,7 @@ impl<'owner> ConstantList<'owner> {
 
     /// Get the number of constants in this list.
     pub fn len(&self) -> usize {
-        let count = unsafe { ffi::blpapi_ConstantList_numConstants(self.ptr) };
+        let count = unsafe { sdk().blpapi_ConstantList_numConstants(self.ptr) };
         count.max(0) as usize
     }
 
@@ -51,7 +52,7 @@ impl<'owner> ConstantList<'owner> {
         }
 
         unsafe {
-            let const_ptr = ffi::blpapi_ConstantList_getConstantAt(self.ptr, index);
+            let const_ptr = sdk().blpapi_ConstantList_getConstantAt(self.ptr, index);
             Constant::from_raw(const_ptr)
         }
     }
@@ -111,7 +112,7 @@ impl<'owner> Constant<'owner> {
     /// Get the constant's symbolic name.
     pub fn name(&self) -> Option<Name> {
         unsafe {
-            let name_ptr = ffi::blpapi_Constant_name(self.ptr);
+            let name_ptr = sdk().blpapi_Constant_name(self.ptr);
             NonNull::new(name_ptr).map(|ptr| Name::from_raw(ptr))
         }
     }
@@ -119,11 +120,11 @@ impl<'owner> Constant<'owner> {
     /// Get the constant's name as a string.
     pub fn name_str(&self) -> &str {
         unsafe {
-            let name_ptr = ffi::blpapi_Constant_name(self.ptr);
+            let name_ptr = sdk().blpapi_Constant_name(self.ptr);
             if name_ptr.is_null() {
                 return "";
             }
-            let str_ptr = ffi::blpapi_Name_string(name_ptr);
+            let str_ptr = sdk().blpapi_Name_string(name_ptr);
             if str_ptr.is_null() {
                 return "";
             }
@@ -134,7 +135,7 @@ impl<'owner> Constant<'owner> {
     /// Get a human-readable description of this constant.
     pub fn description(&self) -> &str {
         unsafe {
-            let desc_ptr = ffi::blpapi_Constant_description(self.ptr);
+            let desc_ptr = sdk().blpapi_Constant_description(self.ptr);
             if desc_ptr.is_null() {
                 return "";
             }

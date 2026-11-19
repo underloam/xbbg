@@ -53,6 +53,21 @@ def test_ticker_keyed_results_warn_once_per_process_at_the_callers_line(monkeypa
         _request(monkeypatch, _keyed("ticker"))
 
 
+def test_ticker_warning_raised_as_an_error_raises_on_every_call(monkeypatch):
+    _configure(monkeypatch, None)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", FutureWarning)
+        for _ in range(2):
+            with pytest.raises(FutureWarning, match="key_column='security'"):
+                _request(monkeypatch, _keyed("ticker"))
+
+    # Once a warning is issued, the process has been told.
+    with pytest.warns(FutureWarning, match="key_column='security'") as caught:
+        _request(monkeypatch, _keyed("ticker"))
+        _request(monkeypatch, _keyed("ticker"))
+    assert len(caught) == 1
+
+
 def test_security_engines_never_warn_even_for_bloomberg_ticker_columns(monkeypatch):
     _configure(monkeypatch, "SECURITY")
     with warnings.catch_warnings():

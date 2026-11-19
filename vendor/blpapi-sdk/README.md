@@ -4,35 +4,29 @@ This directory is a local-development location only. The repository does not ven
 
 ## Quick Start
 
+Use the cross-platform `xbbg-sdk` CLI (works identically on macOS, Linux and Windows without pre-installed Bloomberg headers):
+
 ```bash
 # Add the latest SDK version (auto-detected)
-bash ./scripts/sdktool.sh
+cargo run -p xbbg-sdk --features provision -- cpp
 
 # Add a specific version
-bash ./scripts/sdktool.sh --version <version>
+cargo run -p xbbg-sdk --features provision -- cpp --version <version>
 
 # List installed versions
-bash ./scripts/sdktool.sh --list
+cargo run -p xbbg-sdk --features provision -- cpp --list
 
 # Remove a version
-bash ./scripts/sdktool.sh --remove <version>
+cargo run -p xbbg-sdk --features provision -- cpp --remove <version>
 
 # Re-download and re-extract
-bash ./scripts/sdktool.sh --version <version> --force
+cargo run -p xbbg-sdk --features provision -- cpp --version <version> --force
 
 # Free disk space by clearing cached archives
-bash ./scripts/sdktool.sh --clean-cache
+cargo run -p xbbg-sdk --features provision -- cpp --clean-cache
 ```
 
-```powershell
-# Windows PowerShell equivalents
-.\scripts\sdktool.ps1
-.\scripts\sdktool.ps1 -Version <version>
-.\scripts\sdktool.ps1 -List
-.\scripts\sdktool.ps1 -Remove <version>
-.\scripts\sdktool.ps1 -Version <version> -Force
-.\scripts\sdktool.ps1 -CleanCache
-```
+Once a package is installed, `xbbg-sdk cpp ...` (Python), `npx xbbg-sdk cpp ...` (Node), and `xbbg-mcp sdk cpp ...` expose the exact same subcommand.
 
 ## Layout
 

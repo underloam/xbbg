@@ -21,6 +21,7 @@
 //! ```
 
 use crate::ffi;
+use crate::sdk;
 use rustc_hash::FxHashMap;
 use std::cell::UnsafeCell;
 use std::ffi::{CStr, CString};
@@ -130,7 +131,7 @@ impl Name {
         let c = CString::new(s).ok()?;
         // SAFETY: blpapi_Name_create returns a valid pointer or null.
         // NonNull::new handles the null case.
-        let ptr = unsafe { ffi::blpapi_Name_create(c.as_ptr()) };
+        let ptr = unsafe { sdk().blpapi_Name_create(c.as_ptr()) };
         NonNull::new(ptr).map(Self)
     }
 
@@ -138,7 +139,7 @@ impl Name {
     pub fn find(s: &str) -> Option<Self> {
         let c = CString::new(s).ok()?;
         // SAFETY: blpapi_Name_findName returns a valid pointer or null.
-        let ptr = unsafe { ffi::blpapi_Name_findName(c.as_ptr()) };
+        let ptr = unsafe { sdk().blpapi_Name_findName(c.as_ptr()) };
         NonNull::new(ptr).map(Self)
     }
 
@@ -189,7 +190,7 @@ impl Name {
     pub fn as_str(&self) -> &str {
         // SAFETY: blpapi_Name_string returns a pointer to a null-terminated C string
         // that lives as long as the Name object.
-        let ptr = unsafe { ffi::blpapi_Name_string(self.0.as_ptr()) };
+        let ptr = unsafe { sdk().blpapi_Name_string(self.0.as_ptr()) };
         // Bloomberg names are ASCII identifiers, but we use checked conversion for safety.
         // This should never fail in practice.
         unsafe { CStr::from_ptr(ptr) }
@@ -217,7 +218,7 @@ impl Clone for Name {
     fn clone(&self) -> Self {
         // SAFETY: blpapi_Name_duplicate increments the reference count and returns
         // a valid pointer to the same interned name.
-        let ptr = unsafe { ffi::blpapi_Name_duplicate(self.0.as_ptr()) };
+        let ptr = unsafe { sdk().blpapi_Name_duplicate(self.0.as_ptr()) };
         Self(NonNull::new(ptr).expect("blpapi_Name_duplicate returned null"))
     }
 }
@@ -226,7 +227,7 @@ impl Drop for Name {
     fn drop(&mut self) {
         // SAFETY: We own this pointer and it's valid. blpapi_Name_destroy decrements
         // the reference count and frees if this was the last reference.
-        unsafe { ffi::blpapi_Name_destroy(self.0.as_ptr()) }
+        unsafe { sdk().blpapi_Name_destroy(self.0.as_ptr()) }
     }
 }
 

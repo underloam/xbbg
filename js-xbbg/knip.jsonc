@@ -1,7 +1,6 @@
 {
   "$schema": "https://unpkg.com/knip/schema.json",
   "entry": [
-    "src/index.ts",
     "scripts/*.ts",
     "benchmarks/*.ts",
     "test/**/*.test.ts",
@@ -21,8 +20,10 @@
   // Native ABI and public option types used in their own declarations remain meaningful.
   "ignoreExportsUsedInFile": { "interface": true, "type": true },
   "ignoreIssues": {
-    // The published entry exposes APIs for external consumers, not just this repository.
+    // The published entries expose APIs for external consumers, not just this repository.
     "src/index.ts": ["exports", "types"],
+    "src/sdk.ts": ["exports", "types"],
+    "src/sdk-cli.ts": ["exports"],
     // The native resolver loads binaryPath from these generated platform packages dynamically.
     "packages/*/index.{ts,d.ts}": ["exports"],
     // Shared vocabulary is generated for multiple language bindings, not only JS consumers.

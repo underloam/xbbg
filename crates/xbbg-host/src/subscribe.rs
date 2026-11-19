@@ -39,6 +39,7 @@ use xbbg_async::{
 };
 
 use crate::errors::HostError;
+use crate::style::{Style, python_str_repr};
 
 /// Default Bloomberg market-data service.
 pub const MKTDATA_SERVICE: &str = "//blp/mktdata";
@@ -138,16 +139,23 @@ fn aliases_error() -> HostError {
     invalid("aliases", "aliases must map topic strings to label strings")
 }
 
-fn policy(value: Option<&Value>, element: &str) -> Result<Option<String>, HostError> {
+fn policy(value: Option<&Value>, name: &str, style: Style) -> Result<Option<String>, HostError> {
+    let rejected = || invalid(name, format!("{name} must be warn, raise, or ignore"));
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::String(text)) if matches!(text.as_str(), "warn" | "raise" | "ignore") => {
-            Ok(Some(text.clone()))
+        Some(Value::String(text)) => {
+            let text = if style.lenient_values() {
+                text.trim().to_ascii_lowercase()
+            } else {
+                text.clone()
+            };
+            if matches!(text.as_str(), "warn" | "raise" | "ignore") {
+                Ok(Some(text))
+            } else {
+                Err(rejected())
+            }
         }
-        Some(_) => Err(invalid(
-            element,
-            format!("{element} must be warn, raise, or ignore"),
-        )),
+        Some(_) => Err(rejected()),
     }
 }
 
@@ -159,40 +167,94 @@ fn boolean(value: Option<&Value>, element: &str) -> Result<Option<bool>, HostErr
     }
 }
 
+/// The delivery mode `text` names, in its canonical spelling.
+fn delivery_mode(text: &str, style: Style) -> Option<&'static str> {
+    ["deltas", "state"].into_iter().find(|mode| {
+        if style.lenient_values() {
+            text.trim().eq_ignore_ascii_case(mode)
+        } else {
+            text == *mode
+        }
+    })
+}
+
+fn delivery_error(value: &Value, style: Style) -> HostError {
+    match (style, value) {
+        (Style::Python, Value::String(text)) => invalid(
+            "delivery",
+            format!(
+                "delivery must be one of deltas, state, got {}",
+                python_str_repr(text)
+            ),
+        ),
+        (Style::Python, _) => invalid("delivery", "delivery must be one of deltas, state"),
+        (Style::JavaScript, _) => invalid("delivery", "delivery must be deltas or state"),
+    }
+}
+
 /// The JavaScript `validateStreamControls` checks, in the same order.
 pub fn validate_stream_controls(options: &StreamOptionsSpec) -> Result<StreamControls, HostError> {
+    validate_stream_controls_as(options, Style::JavaScript)
+}
+
+/// [`validate_stream_controls`] with the wording and strictness of `style`.
+///
+/// [`Style::Python`] names members by their snake_case parameters, accepts
+/// `onDelayed`, `onFieldError` and `delivery` in any case and with surrounding
+/// white space (returned in canonical lower case), and words the `delivery=state`
+/// conflicts the way Python callers read them.
+pub fn validate_stream_controls_as(
+    options: &StreamOptionsSpec,
+    style: Style,
+) -> Result<StreamControls, HostError> {
+    let on_delayed_name = style.name("onDelayed", "on_delayed");
+    let on_field_error_name = style.name("onFieldError", "on_field_error");
+    let overflow_policy_name = style.name("overflowPolicy", "overflow_policy");
+    let stream_capacity_name = style.name("streamCapacity", "stream_capacity");
+    let zero_as_null_name = style.name("zeroAsNull", "zero_as_null");
+
     let aliases = validate_aliases(options.aliases.as_ref())?;
-    let on_delayed = policy(options.on_delayed.as_ref(), "onDelayed")?;
+    let on_delayed = policy(options.on_delayed.as_ref(), on_delayed_name, style)?;
     let isolated = boolean(options.isolated.as_ref(), "isolated")?;
     let rows = boolean(options.rows.as_ref(), "rows")?;
     let delivery = match options.delivery.as_ref() {
         None | Some(Value::Null) => None,
-        Some(Value::String(mode)) if matches!(mode.as_str(), "deltas" | "state") => {
-            Some(mode.clone())
+        Some(value @ Value::String(mode)) => {
+            Some(delivery_mode(mode, style).ok_or_else(|| delivery_error(value, style))?)
         }
-        Some(_) => return Err(invalid("delivery", "delivery must be deltas or state")),
+        Some(value) => return Err(delivery_error(value, style)),
     };
-    if delivery.as_deref() == Some("state") {
+    if delivery == Some("state") {
         if rows == Some(false) {
             return Err(invalid(
                 "rows",
-                "delivery=state cannot be combined with rows=false",
+                match style {
+                    Style::JavaScript => "delivery=state cannot be combined with rows=false",
+                    Style::Python => {
+                        "delivery='state' cannot be combined with rows=False; use latest() instead"
+                    }
+                },
             ));
         }
-        if options.overflow_policy.is_some() {
-            return Err(invalid(
-                "overflowPolicy",
-                "delivery=state does not accept overflowPolicy",
-            ));
-        }
-        if options.stream_capacity.is_some() {
-            return Err(invalid(
-                "streamCapacity",
-                "delivery=state does not accept streamCapacity",
-            ));
+        for (given, name) in [
+            (options.overflow_policy.is_some(), overflow_policy_name),
+            (options.stream_capacity.is_some(), stream_capacity_name),
+        ] {
+            if given {
+                return Err(invalid(
+                    name,
+                    match style {
+                        Style::JavaScript => format!("delivery=state does not accept {name}"),
+                        Style::Python => {
+                            "delivery='state' cannot be combined with explicit raw queue controls"
+                                .to_owned()
+                        }
+                    },
+                ));
+            }
         }
     }
-    let on_field_error = policy(options.on_field_error.as_ref(), "onFieldError")?;
+    let on_field_error = policy(options.on_field_error.as_ref(), on_field_error_name, style)?;
     let zero_as_null = match options.zero_as_null.as_ref() {
         None | Some(Value::Null) => None,
         Some(Value::Array(items)) => Some(
@@ -200,25 +262,25 @@ pub fn validate_stream_controls(options: &StreamOptionsSpec) -> Result<StreamCon
                 .iter()
                 .map(|item| match item {
                     Value::String(field) => Ok(field.clone()),
-                    _ => Err(zero_as_null_error()),
+                    _ => Err(zero_as_null_error(zero_as_null_name)),
                 })
                 .collect::<Result<Vec<_>, _>>()?,
         ),
-        Some(_) => return Err(zero_as_null_error()),
+        Some(_) => return Err(zero_as_null_error(zero_as_null_name)),
     };
     Ok(StreamControls {
         aliases,
         on_delayed,
         isolated,
         rows,
-        delivery,
+        delivery: delivery.map(str::to_owned),
         on_field_error,
         zero_as_null,
     })
 }
 
-fn zero_as_null_error() -> HostError {
-    invalid("zeroAsNull", "zeroAsNull must be an array of field names")
+fn zero_as_null_error(name: &str) -> HostError {
+    invalid(name, format!("{name} must be an array of field names"))
 }
 
 /// Trim and strip leading `&` separators, as JavaScript does for named options.
@@ -243,6 +305,16 @@ pub fn build_stream_subscription_options(
     options: Option<&[String]>,
     conflate: Option<bool>,
 ) -> Result<Option<Vec<String>>, HostError> {
+    build_stream_subscription_options_as(service, options, conflate, Style::JavaScript)
+}
+
+/// [`build_stream_subscription_options`] with the wording of `style`.
+pub fn build_stream_subscription_options_as(
+    service: &str,
+    options: Option<&[String]>,
+    conflate: Option<bool>,
+    style: Style,
+) -> Result<Option<Vec<String>>, HostError> {
     let conflate = conflate == Some(true);
     if options.is_none() && !conflate {
         return Ok(None);
@@ -255,10 +327,11 @@ pub fn build_stream_subscription_options(
         .map(str::to_string)
         .collect();
     if conflate {
+        let literal = style.flag(true);
         if service != MKTDATA_SERVICE {
             return Err(invalid(
                 "conflate",
-                "conflate=true is only supported for //blp/mktdata subscriptions",
+                format!("conflate={literal} is only supported for //blp/mktdata subscriptions"),
             ));
         }
         if subscription_options
@@ -267,7 +340,9 @@ pub fn build_stream_subscription_options(
         {
             return Err(invalid(
                 "conflate",
-                "conflate=true cannot be combined with interval options; intervalization overrides conflation",
+                format!(
+                    "conflate={literal} cannot be combined with interval options; intervalization overrides conflation"
+                ),
             ));
         }
         if !subscription_options
@@ -284,16 +359,19 @@ pub fn build_stream_subscription_options(
     }
 }
 
-fn positive(value: Option<i64>, element: &str) -> Result<Option<usize>, HostError> {
+fn positive(value: Option<i64>, name: &str, style: Style) -> Result<Option<usize>, HostError> {
     match value {
         None => Ok(None),
         Some(value) if value <= 0 => Err(invalid(
-            element,
-            format!("{element} must be greater than zero"),
+            name,
+            match style {
+                Style::JavaScript => format!("{name} must be greater than zero"),
+                Style::Python => format!("{name} must be >= 1"),
+            },
         )),
         Some(value) => usize::try_from(value)
             .map(Some)
-            .map_err(|_| HostError::argument(format!("{element} {value} is out of range"))),
+            .map_err(|_| HostError::argument(format!("{name} {value} is out of range"))),
     }
 }
 
@@ -303,32 +381,59 @@ pub fn prepare_subscribe(
     args: SubscribeArgs,
     engine_batch_items: usize,
 ) -> Result<PreparedSubscribe, HostError> {
+    prepare_subscribe_as(args, engine_batch_items, Style::JavaScript)
+}
+
+/// [`prepare_subscribe`] with the wording and strictness of `style`.
+pub fn prepare_subscribe_as(
+    args: SubscribeArgs,
+    engine_batch_items: usize,
+    style: Style,
+) -> Result<PreparedSubscribe, HostError> {
     let SubscribeArgs {
         service,
         tickers,
         fields,
         raw_options,
-        options,
+        mut options,
     } = args;
-    let controls = validate_stream_controls(&options)?;
+    let controls = validate_stream_controls_as(&options, style)?;
     let service = service.unwrap_or_else(|| MKTDATA_SERVICE.to_string());
     let subscription_options = if raw_options {
         if options.conflate == Some(true) {
             return Err(invalid(
                 "conflate",
-                "conflate=true is not supported with raw subscription options; use subscribe or stream",
+                format!(
+                    "conflate={} is not supported with raw subscription options; use subscribe or stream",
+                    style.flag(true)
+                ),
             ));
         }
-        options.options.clone()
+        options.options.take()
     } else {
-        build_stream_subscription_options(&service, options.options.as_deref(), options.conflate)?
+        build_stream_subscription_options_as(
+            &service,
+            options.options.as_deref(),
+            options.conflate,
+            style,
+        )?
     };
     let overflow_policy = options
         .overflow_policy
         .as_deref()
-        .map(OverflowPolicy::from_str)
-        .transpose()
-        .map_err(|message| invalid("overflowPolicy", message))?;
+        .map(|text| {
+            OverflowPolicy::from_str(text).map_err(|message| match style {
+                Style::JavaScript => invalid("overflowPolicy", message),
+                Style::Python => invalid(
+                    "overflow_policy",
+                    format!(
+                        "overflow_policy must be one of block, drop_newest, drop_oldest, got {}",
+                        python_str_repr(text)
+                    ),
+                ),
+            })
+        })
+        .transpose()?;
     let delayed_policy = controls
         .on_delayed
         .as_deref()
@@ -350,8 +455,16 @@ pub fn prepare_subscribe(
         .transpose()
         .map_err(HostError::from_async)?
         .unwrap_or_default();
-    let stream_capacity = positive(options.stream_capacity, "streamCapacity")?;
-    let flush_threshold = positive(options.flush_threshold, "flushThreshold")?;
+    let stream_capacity = positive(
+        options.stream_capacity,
+        style.name("streamCapacity", "stream_capacity"),
+        style,
+    )?;
+    let flush_threshold = positive(
+        options.flush_threshold,
+        style.name("flushThreshold", "flush_threshold"),
+        style,
+    )?;
     let batch_items = flush_threshold.unwrap_or(engine_batch_items);
     Ok(PreparedSubscribe {
         request: SubscribeRequest {
@@ -735,5 +848,142 @@ mod tests {
         }))
         .expect_err("unknown option");
         assert!(error.to_string().contains("unknown field `conflated`"));
+    }
+
+    fn python_rejected(value: Value) -> HostError {
+        validate_stream_controls_as(&options(value), Style::Python).expect_err("rejected")
+    }
+
+    #[test]
+    fn python_style_names_members_by_parameter_and_words_conflicts_for_python() {
+        let cases = [
+            (
+                json!({"onDelayed": "x"}),
+                "on_delayed",
+                "on_delayed must be warn, raise, or ignore",
+            ),
+            (
+                json!({"onFieldError": 1}),
+                "on_field_error",
+                "on_field_error must be warn, raise, or ignore",
+            ),
+            (
+                json!({"delivery": "fast"}),
+                "delivery",
+                "delivery must be one of deltas, state, got 'fast'",
+            ),
+            (
+                json!({"delivery": "it's"}),
+                "delivery",
+                "delivery must be one of deltas, state, got \"it's\"",
+            ),
+            (
+                json!({"delivery": "state", "rows": false}),
+                "rows",
+                "delivery='state' cannot be combined with rows=False; use latest() instead",
+            ),
+            (
+                json!({"delivery": "state", "overflowPolicy": "block"}),
+                "overflow_policy",
+                "delivery='state' cannot be combined with explicit raw queue controls",
+            ),
+            (
+                json!({"delivery": "state", "streamCapacity": 4}),
+                "stream_capacity",
+                "delivery='state' cannot be combined with explicit raw queue controls",
+            ),
+            (
+                json!({"zeroAsNull": "BID"}),
+                "zero_as_null",
+                "zero_as_null must be an array of field names",
+            ),
+        ];
+        for (input, element, message) in cases {
+            assert_validation(&python_rejected(input), element, message);
+        }
+    }
+
+    #[test]
+    fn python_style_accepts_the_engines_spellings_in_canonical_form() {
+        let controls = validate_stream_controls_as(
+            &options(json!({
+                "onDelayed": " RAISE ", "onFieldError": "Ignore", "delivery": " State "
+            })),
+            Style::Python,
+        )
+        .expect("lenient");
+        assert_eq!(controls.on_delayed.as_deref(), Some("raise"));
+        assert_eq!(controls.on_field_error.as_deref(), Some("ignore"));
+        assert_eq!(controls.delivery.as_deref(), Some("state"));
+        // JavaScript stays exact.
+        for input in [
+            json!({"onDelayed": " RAISE "}),
+            json!({"onFieldError": "Ignore"}),
+            json!({"delivery": " State "}),
+        ] {
+            assert!(validate_stream_controls(&options(input)).is_err());
+        }
+    }
+
+    #[test]
+    fn python_style_spells_conflate_literals_the_python_way() {
+        assert_validation(
+            &build_stream_subscription_options_as("//blp/mktbar", None, Some(true), Style::Python)
+                .expect_err("service"),
+            "conflate",
+            "conflate=True is only supported for //blp/mktdata subscriptions",
+        );
+        assert_validation(
+            &build_stream_subscription_options_as(
+                MKTDATA_SERVICE,
+                Some(&["interval=5".into()]),
+                Some(true),
+                Style::Python,
+            )
+            .expect_err("interval"),
+            "conflate",
+            "conflate=True cannot be combined with interval options; intervalization overrides conflation",
+        );
+    }
+
+    #[test]
+    fn python_style_native_checks_use_parameter_names() {
+        let prepare = |value: Value| {
+            prepare_subscribe_as(args(value), 16, Style::Python).expect_err("rejected")
+        };
+        assert_validation(
+            &prepare(json!({
+                "tickers": [], "fields": [], "options": {"overflowPolicy": "fast"}
+            })),
+            "overflow_policy",
+            "overflow_policy must be one of block, drop_newest, drop_oldest, got 'fast'",
+        );
+        assert_validation(
+            &prepare(json!({
+                "tickers": [], "fields": [], "options": {"streamCapacity": 0}
+            })),
+            "stream_capacity",
+            "stream_capacity must be >= 1",
+        );
+        assert_validation(
+            &prepare(json!({
+                "tickers": [], "fields": [], "options": {"flushThreshold": -2}
+            })),
+            "flush_threshold",
+            "flush_threshold must be >= 1",
+        );
+        let prepared = prepare_subscribe_as(
+            args(json!({
+                "tickers": ["IBM US Equity"], "fields": [], "rawOptions": true,
+                "options": {"overflowPolicy": "DropOldest", "delivery": "Deltas"}
+            })),
+            16,
+            Style::Python,
+        )
+        .expect("engine spellings");
+        assert_eq!(
+            prepared.request.overflow_policy,
+            Some(OverflowPolicy::DropOldest)
+        );
     }
 }

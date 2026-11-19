@@ -731,6 +731,36 @@ class TestConflatedMarketDataContract:
         with pytest.raises(ValueError, match="interval"):
             asyncio.run(asubscribe("ES1 Index", ["BID", "ASK"], options=["interval=5"], conflate=True))
 
+    def test_options_are_trimmed_by_the_shared_javascript_rule(self, monkeypatch):
+        captured: dict[str, object] = {}
+        blp_module = self._install_fake_engine(monkeypatch, captured)
+
+        asyncio.run(
+            blp_module.asubscribe(
+                "ES1 Index",
+                "BID",
+                options=["&& interval=5 ", "\ufeffdelayed", "   ", "&"],
+            )
+        )
+
+        assert captured["options"] == ["interval=5", "delayed"]
+
+    def test_engine_spellings_of_enumerated_options_reach_the_native_layer(self, monkeypatch):
+        captured: dict[str, object] = {}
+        blp_module = self._install_fake_engine(monkeypatch, captured)
+
+        asyncio.run(
+            blp_module.asubscribe(
+                "ES1 Index",
+                "BID",
+                overflow_policy="DropOldest",
+                delivery="Deltas",
+            )
+        )
+
+        assert captured["overflow_policy"] == "DropOldest"
+        assert captured["delivery"] == "Deltas"
+
 
 class TestConfigValidation:
     """Verify ValueError raised for invalid config params.
@@ -764,6 +794,54 @@ class TestConfigValidation:
                     overflow_policy="invalid_policy",
                 )
             )
+
+    @pytest.mark.parametrize(
+        ("kwargs", "message"),
+        [
+            ({"flush_threshold": 0}, "flush_threshold must be >= 1"),
+            ({"flush_threshold": -3}, "flush_threshold must be >= 1"),
+            ({"stream_capacity": 0}, "stream_capacity must be >= 1"),
+            (
+                {"overflow_policy": "invalid_policy"},
+                "overflow_policy must be one of block, drop_newest, drop_oldest, got 'invalid_policy'",
+            ),
+            ({"delivery": "images"}, "delivery must be one of deltas, state, got 'images'"),
+            (
+                {"delivery": "state", "rows": False},
+                "delivery='state' cannot be combined with rows=False; use latest() instead",
+            ),
+            (
+                {"delivery": "state", "stream_capacity": 4},
+                "delivery='state' cannot be combined with explicit raw queue controls",
+            ),
+            (
+                {"delivery": "state", "overflow_policy": "block"},
+                "delivery='state' cannot be combined with explicit raw queue controls",
+            ),
+        ],
+    )
+    def test_config_validation_messages(self, kwargs, message):
+        """The shared host validators word each failure the way Python callers read it."""
+        from xbbg.blp import asubscribe
+
+        with pytest.raises(ValueError) as raised:
+            asyncio.run(asubscribe(["AAPL US Equity"], ["LAST_PRICE"], **kwargs))
+
+        assert str(raised.value) == message
+
+    def test_conflate_messages_use_python_literals(self):
+        from xbbg.blp import asubscribe
+        from xbbg.services import Service
+
+        with pytest.raises(ValueError) as service_error:
+            asyncio.run(asubscribe("IBM US Equity", "VWAP", service=Service.MKTVWAP, conflate=True))
+        assert str(service_error.value) == "conflate=True is only supported for //blp/mktdata subscriptions"
+
+        with pytest.raises(ValueError) as interval_error:
+            asyncio.run(asubscribe("ES1 Index", "BID", options=["interval=5"], conflate=True))
+        assert str(interval_error.value) == (
+            "conflate=True cannot be combined with interval options; intervalization overrides conflation"
+        )
 
 
 class TestExplicitOutputSelector:

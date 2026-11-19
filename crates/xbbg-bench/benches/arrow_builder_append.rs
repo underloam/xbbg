@@ -123,6 +123,7 @@ struct BenchResult {
 }
 
 fn main() {
+    xbbg_bench::load_sdk();
     let rows = env_usize("ARROW_BENCH_ROWS", DEFAULT_ROWS);
     let iterations = env_usize("ARROW_BENCH_ITERATIONS", DEFAULT_ITERATIONS);
     let warmup_iterations = env_usize("BENCH_WARMUP", DEFAULT_WARMUP);

@@ -35,7 +35,7 @@ podman run --rm \
   xbbg-ci:local \
   bash -lc '
     BLPAPI_VERSION=${BLPAPI_VERSION:-3.26.2.1}
-    bash ./scripts/sdktool.sh --version "$BLPAPI_VERSION" --no-set-active
+    cargo run -p xbbg-sdk --features provision -- cpp --version "$BLPAPI_VERSION" --no-set-active
     export BLPAPI_ROOT=/work/vendor/blpapi-sdk/$BLPAPI_VERSION
     export LD_LIBRARY_PATH=/work/vendor/blpapi-sdk/$BLPAPI_VERSION/Linux:$LD_LIBRARY_PATH
     cargo build -p xbbg-blpapi-sys
@@ -51,7 +51,7 @@ podman run --rm \
   xbbg-ci:local \
   bash -lc '
     BLPAPI_VERSION=${BLPAPI_VERSION:-3.26.2.1}
-    bash ./scripts/sdktool.sh --version "$BLPAPI_VERSION" --no-set-active
+    cargo run -p xbbg-sdk --features provision -- cpp --version "$BLPAPI_VERSION" --no-set-active
     export BLPAPI_ROOT=/work/vendor/blpapi-sdk/$BLPAPI_VERSION
     export LD_LIBRARY_PATH=/work/vendor/blpapi-sdk/$BLPAPI_VERSION/Linux:$LD_LIBRARY_PATH
     cargo clippy --workspace --all-targets -- -D warnings

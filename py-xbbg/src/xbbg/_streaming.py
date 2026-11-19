@@ -19,16 +19,10 @@ import threading
 from typing import Any, TypeAlias
 import warnings
 
-from . import _engine, _request_options, _sync, backend as _backend
+from . import _core, _engine, _request_options, _sync, backend as _backend
 from .backend import Backend
 from .exceptions import _warn_at_user_frame
-from .services import (
-    OVERFLOW_POLICIES,
-    OVERFLOW_POLICY_VALUES,
-    SUBSCRIPTION_DELIVERY_MODES,
-    SUBSCRIPTION_DELIVERY_VALUES,
-    Service,
-)
+from .services import Service
 
 DataFrameResult: TypeAlias = Any
 logger = logging.getLogger(__name__)
@@ -91,44 +85,6 @@ def _get_subscription_option(options: Sequence[str] | None, name: str) -> str | 
             raise ValueError(f"{name} option must be provided as {name}=<value>")
         return value.strip()
     return None
-
-
-def _subscription_option_key(option: str) -> str:
-    """Return the case-insensitive key for a Bloomberg subscription option."""
-    return option.strip().lstrip("&").partition("=")[0].strip().lower()
-
-
-def _normalize_subscription_options(
-    options: Sequence[str] | None,
-    *,
-    conflate: bool = False,
-    service: str | None = None,
-) -> list[str] | None:
-    """Normalize high-level subscription options before passing them to Bloomberg."""
-    if options is None and not conflate:
-        return None
-
-    normalized: list[str] = []
-    for option in options or []:
-        clean_option = option.strip()
-        if not clean_option:
-            continue
-        if clean_option.startswith("&"):
-            clean_option = clean_option[1:].strip()
-        normalized.append(clean_option)
-
-    if conflate:
-        effective_service = service or Service.MKTDATA.value
-        if effective_service != Service.MKTDATA.value:
-            raise ValueError("conflate=True is only supported for //blp/mktdata subscriptions")
-        if any(_subscription_option_key(option) == "interval" for option in normalized):
-            raise ValueError(
-                "conflate=True cannot be combined with interval options; intervalization overrides conflation"
-            )
-        if not any(_subscription_option_key(option) == "conflate" for option in normalized):
-            normalized.append("conflate")
-
-    return normalized
 
 
 def _validate_mktbar_bar_size(bar_size: int) -> None:
@@ -834,13 +790,14 @@ async def asubscribe(
         async for tick_dict in sub:
             print(tick_dict)  # {'ticker': 'AAPL US Equity', 'LAST_PRICE': 150.25, ...}
     """
-    if delivery not in SUBSCRIPTION_DELIVERY_MODES:
-        raise ValueError(f"delivery must be one of {SUBSCRIPTION_DELIVERY_VALUES}, got {delivery!r}")
-    if delivery == "state":
-        if not rows:
-            raise ValueError("delivery='state' cannot be combined with rows=False; use latest() instead")
-        if stream_capacity is not None or overflow_policy is not None:
-            raise ValueError("delivery='state' cannot be combined with explicit raw queue controls")
+    # Argument checks run in Rust (``xbbg-host``) and raise ValueError before any engine is needed.
+    _core.validate_subscription_controls(
+        delivery=delivery,
+        rows=rows,
+        flush_threshold=flush_threshold,
+        stream_capacity=stream_capacity,
+        overflow_policy=overflow_policy,
+    )
 
     if output is not None:
         normalized_output = output.lower()
@@ -856,16 +813,9 @@ async def asubscribe(
             raw = False
             tick_mode = False
 
-    if flush_threshold is not None and flush_threshold < 1:
-        raise ValueError("flush_threshold must be >= 1")
-    if stream_capacity is not None and stream_capacity < 1:
-        raise ValueError("stream_capacity must be >= 1")
-    if overflow_policy is not None and overflow_policy not in OVERFLOW_POLICIES:
-        raise ValueError(f"overflow_policy must be one of {OVERFLOW_POLICY_VALUES}, got {overflow_policy!r}")
-
     subscription_service = service.value if isinstance(service, Service) else service
     effective_subscription_service = subscription_service or Service.MKTDATA.value
-    subscription_options = _normalize_subscription_options(
+    subscription_options = _core.normalize_subscription_options(
         options,
         conflate=conflate,
         service=effective_subscription_service,
@@ -930,11 +880,12 @@ async def asubscribe(
         else:
             py_sub = await engine.subscribe(ticker_list, field_list, **native_kwargs)
     except Exception as exc:
-        if session_limit is not None:
-            from . import _core
-
-            if isinstance(exc, _core.BlpValidationError) and str(exc).startswith("Configuration error: session_wait:"):
-                raise RuntimeError(f"sync stream producer limit reached ({session_limit})") from exc
+        if (
+            session_limit is not None
+            and isinstance(exc, _core.BlpValidationError)
+            and str(exc).startswith("Configuration error: session_wait:")
+        ):
+            raise RuntimeError(f"sync stream producer limit reached ({session_limit})") from exc
         raise
 
     if tick_mode and flush_threshold is not None and flush_threshold > 1 and not py_sub.requires_deliveries:

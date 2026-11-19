@@ -2,7 +2,9 @@
 # abi-check.sh — Verify Bloomberg SDK ABI compatibility across versions.
 #
 # Downloads headers for each specified SDK version, runs bindgen, and checks
-# that every symbol xbbg-core depends on is present in the generated bindings.
+# that every symbol xbbg-core depends on is present in the generated bindings:
+# the functions in crates/blpapi-sys/functions.txt plus the types and constants
+# xbbg-core/src/ffi.rs names.
 #
 # Usage:
 #   ./scripts/abi-check.sh [--versions "3.24.6.1 3.25.11.1 3.26.2.1"]
@@ -16,6 +18,7 @@ set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FFI_RS="$REPO_ROOT/crates/xbbg-core/src/ffi.rs"
+FUNCTIONS_TXT="$REPO_ROOT/crates/blpapi-sys/functions.txt"
 DEFS_TOML="$REPO_ROOT/defs/bloomberg.toml"
 WORK_DIR=""
 VERSIONS=""
@@ -74,12 +77,15 @@ require_cmd bindgen
 require_cmd perl
 
 # --------------------------------------------------------------------------- #
-# Step 1: Extract required symbols from ffi.rs
+# Step 1: Extract required symbols
 # --------------------------------------------------------------------------- #
-info "Extracting required symbols from ffi.rs ..."
+info "Extracting required symbols from functions.txt and ffi.rs ..."
 
-# The file re-exports C symbols via `pub use blpapi_sys::{ ... }`, declares
-# FFI functions in `extern "C" { ... }`, and defines struct/const types.
+# The functions are the allowlist the sys crate generates its function table
+# from: one blpapi_* name per line, blank lines and `#` comments skipped.
+#
+# ffi.rs holds no function re-exports any more. It re-exports types and
+# constants via `pub use blpapi_sys::{ ... }` and defines struct/const types.
 #
 # Strategy:
 #   1. Strip line comments (// ...) to avoid matching header filenames etc.
@@ -118,13 +124,16 @@ extract_required_symbols() {
 }
 
 REQUIRED_SYMBOLS_FILE=$(mktemp)
-extract_required_symbols > "$REQUIRED_SYMBOLS_FILE"
+{
+    extract_required_symbols
+    grep -vE '^[[:space:]]*(#|$)' "$FUNCTIONS_TXT"
+} | sort -u > "$REQUIRED_SYMBOLS_FILE"
 
 required_count=$(wc -l < "$REQUIRED_SYMBOLS_FILE" | tr -d ' ')
 info "Found $required_count required symbols."
 
 if [ "$required_count" -eq 0 ]; then
-    die "No symbols extracted from ffi.rs — extraction logic is broken."
+    die "No symbols extracted from functions.txt and ffi.rs — extraction logic is broken."
 fi
 
 # --------------------------------------------------------------------------- #

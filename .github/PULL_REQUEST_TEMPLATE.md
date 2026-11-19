@@ -41,6 +41,8 @@ Closes #<!-- issue number -->
 
 ### Test Results
 
+<!-- Redact local paths, host names, user and account identifiers, and Bloomberg data values. -->
+
 ```text
 Paste test output here if applicable
 ```
@@ -65,6 +67,8 @@ Paste test output here if applicable
 - [ ] I have added tests that prove my fix is effective or that my feature works
 - [ ] New and existing unit tests pass locally with my changes
 - [ ] Any dependent changes have been merged and published
+- [ ] Commits, code, tests, docs and this description contain no personal data, credentials, local paths, host names, Bloomberg identifiers or Bloomberg data ([RELEASE_RULES.md](https://github.com/underloam/xbbg/blob/main/RELEASE_RULES.md)), and `python scripts/check_release_privacy.py --range origin/main..HEAD` reports nothing
+- [ ] Breaking changes, including fixes that change an Arrow type, `xbbg.*` metadata or what a call raises, are marked `BREAKING` in `CHANGELOG.md`
 
 ## Additional Notes
 

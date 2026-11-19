@@ -1,12 +1,9 @@
-//! Target platforms and version requests.
+//! Target platforms.
 
 use std::fmt;
 use std::str::FromStr;
 
-use rattler_conda_types::Subdir;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
-
-use crate::error::Error;
 
 /// A platform the xbbg native bindings ship for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -45,29 +42,31 @@ impl Platform {
         }
     }
 
-    /// File names of the Bloomberg library, most preferred first. Bloomberg ships the macOS
-    /// library with a `.so` suffix.
+    /// File names of the Bloomberg library, most preferred first.
+    ///
+    /// This is the union of what the xbbg hosts accepted before they shared one search. Bloomberg
+    /// ships the macOS library with a `.so` suffix; `libblpapi3.*` are the unversioned-name
+    /// spellings of packaged SDKs. `blpapi3_32.dll` is absent: a 32-bit library cannot load into
+    /// the 64-bit processes xbbg ships for.
     pub fn library_names(self) -> &'static [&'static str] {
         match self {
             Self::WindowsX86_64 => &["blpapi3_64.dll"],
-            Self::LinuxX86_64 => &["libblpapi3_64.so"],
-            Self::MacosAarch64 => &["libblpapi3_64.so", "libblpapi3_64.dylib"],
+            Self::LinuxX86_64 => &["libblpapi3_64.so", "libblpapi3.so"],
+            Self::MacosAarch64 => &[
+                "libblpapi3_64.so",
+                "libblpapi3_64.dylib",
+                "libblpapi3.so",
+                "libblpapi3.dylib",
+            ],
         }
     }
 
-    pub(crate) fn conda_subdir(self) -> Subdir {
+    /// The name Bloomberg's SDK ships the library under: the first of [`Self::library_names`],
+    /// and the name the operating system's own search is asked for.
+    pub fn library_name(self) -> &'static str {
         match self {
-            Self::WindowsX86_64 => Subdir::Win64,
-            Self::LinuxX86_64 => Subdir::Linux64,
-            Self::MacosAarch64 => Subdir::OsxArm64,
-        }
-    }
-
-    /// Directories, relative to a conda package root, that hold shared libraries.
-    pub(crate) fn conda_library_dirs(self) -> &'static [&'static str] {
-        match self {
-            Self::WindowsX86_64 => &["Library/bin"],
-            Self::LinuxX86_64 | Self::MacosAarch64 => &["lib"],
+            Self::WindowsX86_64 => "blpapi3_64.dll",
+            Self::LinuxX86_64 | Self::MacosAarch64 => "libblpapi3_64.so",
         }
     }
 }
@@ -78,14 +77,40 @@ impl fmt::Display for Platform {
     }
 }
 
-impl FromStr for Platform {
-    type Err = Error;
+/// The text is not the canonical name of a [`Platform`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ParsePlatformError(String);
 
-    fn from_str(s: &str) -> Result<Self, Error> {
+impl ParsePlatformError {
+    /// The rejected text.
+    pub fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for ParsePlatformError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "unsupported platform `{}` (supported: ", self.0)?;
+        for (index, platform) in Platform::ALL.into_iter().enumerate() {
+            if index > 0 {
+                f.write_str(", ")?;
+            }
+            f.write_str(platform.as_str())?;
+        }
+        f.write_str(")")
+    }
+}
+
+impl std::error::Error for ParsePlatformError {}
+
+impl FromStr for Platform {
+    type Err = ParsePlatformError;
+
+    fn from_str(s: &str) -> Result<Self, ParsePlatformError> {
         Self::ALL
             .into_iter()
             .find(|platform| platform.as_str() == s)
-            .ok_or_else(|| Error::UnsupportedPlatform(s.to_string()))
+            .ok_or_else(|| ParsePlatformError(s.to_string()))
     }
 }
 
@@ -102,32 +127,6 @@ impl<'de> Deserialize<'de> for Platform {
     }
 }
 
-/// Which version to provision.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub enum VersionSpec {
-    /// The newest stable release the source offers for the platform.
-    #[default]
-    Latest,
-    /// Exactly this version: PEP 440 for PyPI and wheels, a conda version for channels.
-    Exact(String),
-}
-
-impl VersionSpec {
-    /// An exact pin.
-    pub fn exact(version: impl Into<String>) -> Self {
-        Self::Exact(version.into())
-    }
-}
-
-impl fmt::Display for VersionSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Latest => f.write_str("latest"),
-            Self::Exact(version) => f.write_str(version),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -136,10 +135,15 @@ mod tests {
     fn names_round_trip_and_unknown_names_are_rejected() {
         for platform in Platform::ALL {
             assert_eq!(platform.as_str().parse::<Platform>().unwrap(), platform);
+            assert_eq!(platform.to_string(), platform.as_str());
         }
         let err = "linux-aarch64".parse::<Platform>().unwrap_err();
-        assert_eq!(err.code(), "UNSUPPORTED_PLATFORM");
-        assert!(err.to_string().contains("linux-aarch64"));
+        assert_eq!(err.name(), "linux-aarch64");
+        assert_eq!(
+            err.to_string(),
+            "unsupported platform `linux-aarch64` (supported: windows-x86_64, linux-x86_64, \
+             macos-aarch64)"
+        );
     }
 
     #[test]
@@ -149,5 +153,26 @@ mod tests {
         let back: Platform = serde_json::from_str(&json).unwrap();
         assert_eq!(back, Platform::MacosAarch64);
         assert!(serde_json::from_str::<Platform>("\"MacosAarch64\"").is_err());
+    }
+
+    #[test]
+    fn libraries_are_named_per_platform() {
+        assert_eq!(Platform::WindowsX86_64.library_names(), ["blpapi3_64.dll"]);
+        assert_eq!(
+            Platform::LinuxX86_64.library_names(),
+            ["libblpapi3_64.so", "libblpapi3.so"]
+        );
+        assert_eq!(
+            Platform::MacosAarch64.library_names(),
+            [
+                "libblpapi3_64.so",
+                "libblpapi3_64.dylib",
+                "libblpapi3.so",
+                "libblpapi3.dylib"
+            ]
+        );
+        for platform in Platform::ALL {
+            assert_eq!(platform.library_name(), platform.library_names()[0]);
+        }
     }
 }

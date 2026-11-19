@@ -21,7 +21,7 @@ use tokio::sync::{mpsc, oneshot};
 use xbbg_core::BlpError;
 
 use super::key_column::{self, KeyColumn};
-use super::session_lifecycle::{start_concurrently, worker_start_error};
+use super::session_lifecycle::{SessionConnections, start_concurrently, worker_start_error};
 use super::state::ResponseMetadata;
 use super::worker::{AsyncRequestWorker, RequestTicket};
 use super::{BlpAsyncError, EngineConfig, PreparedRequest, WorkerHealth};
@@ -89,6 +89,25 @@ impl Drop for RequestCancelGuard {
     fn drop(&mut self) {
         self.cancel();
     }
+}
+
+/// Name the service a request was sent to in the failure its response state
+/// raised.
+///
+/// Response states know only their operation, so the service in a
+/// `RequestFailure` they raise is the operation's default. Apply this where a
+/// state's reply for *this* request arrives, never to an error that may belong to
+/// another contributor (a sharded sibling, the delayed-status lookup), which
+/// already names its own service.
+fn stamp_request_service(mut error: BlpError, service: &str) -> BlpError {
+    if let BlpError::RequestFailure {
+        service: failed_service,
+        ..
+    } = &mut error
+    {
+        service.clone_into(failed_service);
+    }
+    error
 }
 
 /// Enrich only data-request outcomes; pre-dispatch failures have no SDK ID.
@@ -266,7 +285,7 @@ impl RequestStream {
             }
             Err(error) => match &self.request_context {
                 Some((service, operation, label)) => Err(enrich_request_error(
-                    error,
+                    stamp_request_service(error, service),
                     service,
                     operation,
                     label.as_deref(),
@@ -326,7 +345,8 @@ impl Stream for RequestStream {
     }
 }
 
-/// Background thread enforcing slow-request warnings and hard timeouts.
+/// Background thread enforcing slow-request warnings, hard timeouts and the
+/// reconnect grace (`EngineConfig::reconnect_grace_ms`).
 struct TimeoutScanner {
     stop: Arc<AtomicBool>,
     thread: Mutex<Option<JoinHandle<()>>>,
@@ -360,6 +380,7 @@ impl TimeoutScanner {
                         for ticket in worker.scan_timeouts(hard_timeout) {
                             worker.timeout_request(ticket, request_timeout_ms);
                         }
+                        worker.fail_if_disconnected_past_grace();
                     }
                 }
             })
@@ -461,6 +482,8 @@ impl RequestWorkerPool {
         })
     }
 
+    /// Round-robin worker selection that prefers a worker with a connection
+    /// up; see [`select_worker`].
     fn next_healthy_worker(&self) -> Result<&Arc<AsyncRequestWorker>, BlpAsyncError> {
         if self.shutting_down.load(Ordering::Acquire) {
             return Err(BlpAsyncError::ConfigError {
@@ -470,15 +493,9 @@ impl RequestWorkerPool {
         let len = self.workers.len();
         let start = self.next_worker.fetch_add(1, Ordering::Relaxed) % len;
 
-        for offset in 0..len {
-            let idx = (start + offset) % len;
-            let worker = &self.workers[idx];
-            if worker.health() != WorkerHealth::Dead {
-                return Ok(worker);
-            }
-        }
-
-        Err(BlpAsyncError::AllWorkersDown { pool_size: len })
+        select_worker(len, start, |idx| self.workers[idx].health())
+            .map(|idx| &self.workers[idx])
+            .ok_or(BlpAsyncError::AllWorkersDown { pool_size: len })
     }
 
     /// A healthy worker for out-of-band session operations (identity /
@@ -581,7 +598,7 @@ impl RequestWorkerPool {
                 }
                 Ok(Err(error)) => {
                     return Err(BlpAsyncError::Blp(enrich_request_error(
-                        error,
+                        stamp_request_service(error, &params.service),
                         &params.service,
                         request.effective_operation(),
                         params.request_id.as_deref(),
@@ -653,6 +670,15 @@ impl RequestWorkerPool {
             .collect()
     }
 
+    /// Servers each request worker's session is connected to, one entry per
+    /// worker in id order.
+    pub fn connections(&self) -> Vec<SessionConnections> {
+        self.workers
+            .iter()
+            .map(|worker| worker.connections())
+            .collect()
+    }
+
     /// Introspect a service's schema via a worker.
     pub async fn introspect_schema(
         &self,
@@ -702,6 +728,32 @@ impl RequestWorkerPool {
             worker.shutdown_blocking();
         }
     }
+}
+
+/// Pick a worker index, scanning round-robin from `start`: the first healthy
+/// worker, else the first degraded one, never a dead one.
+///
+/// A degraded worker has no Bloomberg connection up. Its session may still
+/// reconnect within `reconnect_grace_ms`, so it serves only when no worker has
+/// a connection; otherwise a request sent there would wait for the reconnect
+/// while a connected worker sits idle.
+fn select_worker(
+    len: usize,
+    start: usize,
+    health: impl Fn(usize) -> WorkerHealth,
+) -> Option<usize> {
+    let mut degraded = None;
+    for offset in 0..len {
+        let idx = (start + offset) % len;
+        match health(idx) {
+            WorkerHealth::Healthy => return Some(idx),
+            WorkerHealth::Degraded => {
+                degraded.get_or_insert(idx);
+            }
+            WorkerHealth::Dead => {}
+        }
+    }
+    degraded
 }
 
 impl Drop for RequestWorkerPool {
@@ -1067,6 +1119,124 @@ mod tests {
     }
 
     #[test]
+    fn request_failures_name_the_service_the_request_was_sent_to() {
+        let state_error = || BlpError::RequestFailure {
+            service: "//blp/refdata".into(),
+            operation: Some("ReferenceDataRequest".into()),
+            cid: None,
+            label: Some("Bloomberg responseError: category=BAD_ARGS; code=6".into()),
+            request_id: None,
+            bloomberg_request_ids: Vec::new(),
+            source: None,
+        };
+        let error = enrich_request_error(
+            stamp_request_service(state_error(), "//blp/staticmktdata"),
+            "//blp/staticmktdata",
+            "ReferenceDataRequest",
+            Some("req-label"),
+            &[Arc::from("sdk-synthetic-a")],
+        );
+        match &error {
+            BlpError::RequestFailure {
+                service,
+                operation,
+                label,
+                request_id,
+                ..
+            } => {
+                assert_eq!(service, "//blp/staticmktdata");
+                assert_eq!(operation.as_deref(), Some("ReferenceDataRequest"));
+                assert_eq!(
+                    label.as_deref(),
+                    Some("Bloomberg responseError: category=BAD_ARGS; code=6")
+                );
+                assert_eq!(request_id.as_deref(), Some("req-label"));
+            }
+            other => panic!("expected request failure, got {other:?}"),
+        }
+        assert_eq!(
+            crate::error_presentation::blp_error_display(&error).to_string(),
+            "Request failed on //blp/staticmktdata::ReferenceDataRequest [request_id=req-label] \
+             - Bloomberg responseError: category=BAD_ARGS; code=6"
+        );
+
+        // Streamed state errors take the same path through the stream's request context.
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(Err(state_error())).unwrap();
+        let mut stream = RequestStream::new(rx, None);
+        stream.request_context = Some((
+            "//blp/staticmktdata".into(),
+            "ReferenceDataRequest".into(),
+            None,
+        ));
+        match stream.try_recv().unwrap() {
+            Err(BlpError::RequestFailure { service, .. }) => {
+                assert_eq!(service, "//blp/staticmktdata");
+            }
+            other => panic!("expected request failure, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn delayed_combine_keeps_each_contributors_service() {
+        use super::super::delayed::{DelayedPolicy, combine};
+        use super::super::state::ResponseMetadata;
+        use std::future::ready;
+
+        let failure = |service: &str| BlpError::RequestFailure {
+            service: service.into(),
+            operation: Some("ReferenceDataRequest".into()),
+            cid: None,
+            label: Some("Bloomberg responseError: category=BAD_ARGS; code=6".into()),
+            request_id: None,
+            bloomberg_request_ids: Vec::new(),
+            source: None,
+        };
+        let params = super::super::RequestParams {
+            service: "//blp/staticmktdata".into(),
+            operation: "ReferenceDataRequest".into(),
+            request_id: Some("req-label".into()),
+            on_delayed: Some(DelayedPolicy::Warn),
+            ..Default::default()
+        };
+        let service_of = |error: BlpAsyncError| match error {
+            BlpAsyncError::Blp(BlpError::RequestFailure { service, .. }) => service,
+            other => panic!("expected request failure, got {other:?}"),
+        };
+        let empty = || RecordBatch::new_empty(Arc::new(arrow_schema::Schema::empty()));
+
+        // The status lookup is its own //blp/refdata request, already enriched.
+        let lookup_error = enrich_request_error(
+            stamp_request_service(failure("//blp/refdata"), "//blp/refdata"),
+            "//blp/refdata",
+            "ReferenceDataRequest",
+            None,
+            &[],
+        );
+        let error = combine(&params, ready(Ok(empty())), ready(Err(lookup_error.into())))
+            .await
+            .unwrap_err();
+        assert_eq!(service_of(error), "//blp/refdata");
+
+        // A failing main response names the service the request was sent to.
+        let response_error = enrich_request_error(
+            stamp_request_service(failure("//blp/refdata"), &params.service),
+            &params.service,
+            "ReferenceDataRequest",
+            Some("req-label"),
+            &[],
+        );
+        let error = combine(
+            &params,
+            ready(Err(response_error.into())),
+            ready(Ok(ResponseMetadata::default())),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(service_of(error), "//blp/staticmktdata");
+    }
+
+    #[test]
     fn lifecycle_timeout_keeps_its_classification_with_other_sdk_ids() {
         let error = enrich_request_error(
             BlpError::Timeout,
@@ -1248,5 +1418,22 @@ mod tests {
             Err(error) => error,
         };
         assert!(error.to_string().contains("pool is shut down"));
+    }
+
+    #[test]
+    fn selection_prefers_connected_workers_and_falls_back_to_degraded() {
+        use WorkerHealth::{Dead, Degraded, Healthy};
+        let pick = |healths: &[WorkerHealth], start: usize| {
+            select_worker(healths.len(), start, |idx| healths[idx])
+        };
+
+        // A healthy worker wins over a degraded one earlier in the rotation.
+        assert_eq!(pick(&[Degraded, Healthy, Dead], 0), Some(1));
+        // Round-robin among healthy workers follows the start position.
+        assert_eq!(pick(&[Healthy, Healthy], 0), Some(0));
+        assert_eq!(pick(&[Healthy, Healthy], 1), Some(1));
+        // Without a connected worker, the first degraded one in rotation serves.
+        assert_eq!(pick(&[Degraded, Dead, Degraded], 1), Some(2));
+        assert_eq!(pick(&[Dead, Dead], 0), None);
     }
 }

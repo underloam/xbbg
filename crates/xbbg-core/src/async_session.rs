@@ -35,6 +35,7 @@ use crate::errors::{BlpError, Result};
 use crate::event::Event;
 use crate::options::SessionOptions;
 use crate::request::Request;
+use crate::sdk;
 use crate::service::Service;
 use crate::session_operations::SessionOperations;
 
@@ -113,7 +114,7 @@ impl AsyncSession {
         // + Drop impl below). Null dispatcher = SDK-owned single dispatcher
         // thread for this session.
         let ptr = unsafe {
-            crate::ffi::blpapi_Session_create(
+            sdk().blpapi_Session_create(
                 options.as_raw(),
                 Some(event_trampoline),
                 std::ptr::null_mut(),
@@ -142,7 +143,7 @@ impl AsyncSession {
     /// startup detail there if needed.
     pub fn start(&self) -> Result<()> {
         // SAFETY: valid session pointer.
-        let rc = unsafe { crate::ffi::blpapi_Session_start(self.ptr) };
+        let rc = unsafe { sdk().blpapi_Session_start(self.ptr) };
         if rc != 0 {
             return Err(BlpError::SessionStart {
                 source: None,
@@ -160,7 +161,7 @@ impl AsyncSession {
     pub fn stop(&self) {
         // SAFETY: valid session pointer.
         unsafe {
-            crate::ffi::blpapi_Session_stop(self.ptr);
+            sdk().blpapi_Session_stop(self.ptr);
         }
     }
 
@@ -168,7 +169,7 @@ impl AsyncSession {
     pub fn stop_async(&self) {
         // SAFETY: valid session pointer.
         unsafe {
-            crate::ffi::blpapi_Session_stopAsync(self.ptr);
+            sdk().blpapi_Session_stopAsync(self.ptr);
         }
     }
 
@@ -266,8 +267,8 @@ impl AsyncSession {
         // handle projection, never null for a live session —
         // blpapi_session.h:1197); auth options pointer is valid for the call.
         let rc = unsafe {
-            let abstract_session = crate::ffi::blpapi_Session_getAbstractSession(self.ptr);
-            crate::ffi::blpapi_AbstractSession_generateAuthorizedIdentityAsync(
+            let abstract_session = sdk().blpapi_Session_getAbstractSession(self.ptr);
+            sdk().blpapi_AbstractSession_generateAuthorizedIdentityAsync(
                 abstract_session,
                 auth_options.as_ptr(),
                 &mut cid_ffi,
@@ -296,8 +297,8 @@ impl AsyncSession {
         // call; the returned handle is owned by the new `Identity` (released
         // exactly once in its Drop).
         let rc = unsafe {
-            let abstract_session = crate::ffi::blpapi_Session_getAbstractSession(self.ptr);
-            crate::ffi::blpapi_AbstractSession_getAuthorizedIdentity(
+            let abstract_session = sdk().blpapi_Session_getAbstractSession(self.ptr);
+            sdk().blpapi_AbstractSession_getAuthorizedIdentity(
                 abstract_session,
                 &cid_ffi,
                 &mut identity_ptr,
@@ -349,8 +350,8 @@ impl Drop for AsyncSession {
             // destroying the session and then freeing the handler box (field
             // drop after this body) cannot race the trampoline.
             unsafe {
-                crate::ffi::blpapi_Session_stop(self.ptr);
-                crate::ffi::blpapi_Session_destroy(self.ptr);
+                sdk().blpapi_Session_stop(self.ptr);
+                sdk().blpapi_Session_destroy(self.ptr);
             }
             self.ptr = std::ptr::null_mut();
         }

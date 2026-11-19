@@ -45,7 +45,7 @@ function exists(target: string): boolean {
   }
 }
 
-function isResolutionObject(value: unknown): value is NativePackageResolution {
+function isResolutionObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
@@ -59,7 +59,7 @@ function validateNativePackage(packageName: string, resolved: unknown): NativePa
   if (typeof resolved.binaryPath !== 'string') {
     throw new TypeError(`Invalid native package ${packageName}: binaryPath must be a string`);
   }
-  return resolved;
+  return { binaryPath: resolved.binaryPath };
 }
 
 function localPackageIndex(repoRoot: string, packageDir: string): string {

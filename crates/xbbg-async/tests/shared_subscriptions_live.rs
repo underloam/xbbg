@@ -13,6 +13,16 @@ use xbbg_async::engine::state::{SubscriptionUpdate, UpdateValue};
 use xbbg_async::engine::{Engine, EngineConfig, ServerAddr, SubscriptionStream, Transport};
 use xbbg_async::{BlpAsyncError, FieldErrorPolicy, SubscribeRequest};
 
+#[ctor::ctor(unsafe)]
+fn load_sdk() {
+    xbbg_core::load(
+        xbbg_sdk::locate::locate(&xbbg_sdk::locate::LocateRequest::default())
+            .into_first_path()
+            .expect("set BLPAPI_LIB_DIR or BLPAPI_ROOT to a Bloomberg runtime"),
+    )
+    .expect("tests need a Bloomberg runtime");
+}
+
 const TOPIC: &str = "IBM US Equity";
 const WAIT: Duration = Duration::from_secs(15);
 

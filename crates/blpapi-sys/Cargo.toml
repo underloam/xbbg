@@ -7,12 +7,11 @@ license.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "README.md"
-links = "blpapi"
-description = "Unsafe, zero-policy FFI bindings to the BLPAPI C API (blpapi_*) generated at build time."
+description = "Unsafe, zero-policy FFI bindings to the BLPAPI C API (blpapi_*), resolved from a runtime-loaded library."
 keywords = ["blpapi", "bloomberg", "ffi", "bindings"]
 categories = ["external-ffi-bindings", "finance"]
 publish = ["crates-io"]
-include = ["src/**/*.rs", "build.rs", "libclang.rs", "Cargo.toml", "README.md"]
+include = ["src/**/*.rs", "build.rs", "libclang.rs", "functions.txt", "Cargo.toml", "README.md"]
 
 # The registry name is `xbbg-blpapi-sys` because the bare `blpapi-sys` name is
 # taken on crates.io, but the lib name stays `blpapi_sys` so downstream Rust code
@@ -21,33 +20,23 @@ include = ["src/**/*.rs", "build.rs", "libclang.rs", "Cargo.toml", "README.md"]
 [lib]
 name = "blpapi_sys"
 
-[features]
-default = ["dynamic"]
-static = []
-dynamic = []
-
 [dependencies]
 cty = { workspace = true }
+libloading = { workspace = true }
 
 [build-dependencies]
 bindgen = { workspace = true, features = ["runtime"] }
 
-# `static` and `dynamic` select the blpapi linkage and are mutually exclusive:
-# build.rs panics when both are set. `--all-features` is therefore unsupported
-# for this crate by design, which is why docs.rs is given the default linkage
-# explicitly instead of `all-features = true`.
-#
 # docs.rs cannot build this crate at all: the BLPAPI SDK is proprietary and the
 # docs.rs sandbox has no network to fetch it, so bindgen has no headers. build.rs
 # detects `DOCS_RS` and panics with that explanation rather than a confusing
 # path-resolution error. Making docs.rs green would require committing a
 # pregenerated binding surface, which the SDK license does not clearly permit.
-[package.metadata.docs.rs]
-features = ["dynamic"]
+# The crate has no features, so no `[package.metadata.docs.rs]` selection is needed.
 
 [package.metadata.cargo-shear]
-# bindgen emits cty references into OUT_DIR/bindings.rs, outside the source tree.
-ignored = ["cty"]
+# bindgen emits cty and libloading references into OUT_DIR/bindings.rs, outside the source tree.
+ignored = ["cty", "libloading"]
 
 [lints]
 workspace = true

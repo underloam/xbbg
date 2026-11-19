@@ -21,8 +21,9 @@ Async functions (primary implementation):
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
+from xbbg._core import ext_plan_etf_inav, ext_validated_inav_tickers
 from xbbg._dates import DateLike, _fmt_date
 from xbbg.ext._utils import _call_native_recipe, _syncify
 
@@ -31,8 +32,6 @@ if TYPE_CHECKING:
 
     from xbbg.backend import Backend
     from xbbg.blp import Subscription
-
-_RELATIONSHIP_NOT_ONE_TO_ONE = "ETF NAV relationship result is not one-to-one with requested ETFs"
 
 
 def _normalize_etfs(values: str | Sequence[str]) -> list[str]:
@@ -101,72 +100,6 @@ async def aetf_nav_history(
     )
 
 
-def _first_seen_duplicates(values: list[str]) -> list[str]:
-    """Return duplicated entries in first-seen order."""
-    seen: set[str] = set()
-    duplicates: list[str] = []
-    for value in values:
-        if value in seen:
-            if value not in duplicates:
-                duplicates.append(value)
-        else:
-            seen.add(value)
-    return duplicates
-
-
-def _validated_inav_tickers(etf_list: list[str], rows: list[dict[str, Any]]) -> list[str]:
-    """Validate the relationship rows and return one iNAV ticker per ETF.
-
-    Enforces one row per ``input_order`` with exact ordered ``etf_ticker``
-    identity, no iNAV validation errors, no missing iNAV relationships, and
-    an unambiguous iNAV reverse mapping.
-    """
-    if len(rows) != len(etf_list):
-        raise ValueError(_RELATIONSHIP_NOT_ONE_TO_ONE)
-    by_order: dict[int, dict[str, Any]] = {}
-    for row in rows:
-        order = row.get("input_order")
-        if not isinstance(order, int) or order in by_order:
-            raise ValueError(_RELATIONSHIP_NOT_ONE_TO_ONE)
-        by_order[order] = row
-    ordered_rows: list[dict[str, Any]] = []
-    for index, etf in enumerate(etf_list):
-        row = by_order.get(index)
-        if row is None or row.get("etf_ticker") != etf:
-            raise ValueError(_RELATIONSHIP_NOT_ONE_TO_ONE)
-        ordered_rows.append(row)
-
-    for etf, row in zip(etf_list, ordered_rows, strict=True):
-        error = row.get("inav_validation_error")
-        if isinstance(error, str) and error.strip():
-            raise ValueError(f"Invalid iNAV relationship for ETF {etf}: {error}")
-
-    inav_by_etf: list[tuple[str, str | None]] = []
-    for etf, row in zip(etf_list, ordered_rows, strict=True):
-        inav = row.get("inav_ticker")
-        inav = inav.strip() if isinstance(inav, str) else None
-        inav_by_etf.append((etf, inav or None))
-
-    missing = [etf for etf, inav in inav_by_etf if inav is None]
-    if missing:
-        raise ValueError(f"Missing valid iNAV relationship for ETFs: {', '.join(missing)}")
-
-    resolved: list[tuple[str, str]] = []
-    for etf, inav in inav_by_etf:
-        if inav is not None:
-            resolved.append((etf, inav))
-
-    reverse: dict[str, list[str]] = {}
-    for etf, inav in resolved:
-        reverse.setdefault(inav, []).append(etf)
-    for _, inav in resolved:
-        owners = reverse[inav]
-        if len(owners) > 1:
-            raise ValueError(f"Ambiguous iNAV reverse mapping for {inav}: {', '.join(owners)}")
-
-    return [inav for _, inav in resolved]
-
-
 async def asubscribe_etf_inav(
     etfs: str | Sequence[str],
     fields: str | list[str] = "LAST_PRICE",
@@ -201,19 +134,16 @@ async def asubscribe_etf_inav(
             or ``"tick"`` (case-insensitive). ``None`` (default) retains the
             behavior selected by ``raw`` and ``tick_mode``.
     """
-    etf_list = _normalize_etfs(etfs)
-    if not etf_list:
-        raise ValueError("etfs must not be empty")
-    duplicates = _first_seen_duplicates(etf_list)
-    if duplicates:
-        raise ValueError(f"Duplicate ETF inputs are not allowed: {', '.join(duplicates)}")
+    # Trimming, emptiness and duplicate checks run natively on the raw inputs.
+    raw_etfs = [etfs] if isinstance(etfs, str) else [str(value) for value in etfs]
+    etf_list = ext_plan_etf_inav(raw_etfs)
 
     table = await _call_native_recipe(
         "recipe_etf_nav_relationships",
         etf_list,
         backend="native",
     )
-    inav_tickers = _validated_inav_tickers(etf_list, table.to_pylist())
+    inav_tickers = ext_validated_inav_tickers(etf_list, table)
 
     from xbbg import blp
 

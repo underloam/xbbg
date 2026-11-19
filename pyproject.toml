@@ -93,6 +93,9 @@ Documentation = "https://xbbg.org/"
 Source = "https://github.com/underloam/xbbg"
 Issues = "https://github.com/underloam/xbbg/issues"
 
+[project.scripts]
+xbbg-sdk = "xbbg.sdk:main"
+
 [project.entry-points."narwhals.plugins"]
 xbbg = "xbbg._narwhals_plugin"
 
@@ -282,6 +285,7 @@ type = "forbidden"
 source_modules = [
   "xbbg._core_guard",
   "xbbg._sdk",
+  "xbbg.sdk",
   "xbbg._exports",
   "xbbg._services_gen",
   "xbbg._arrow",

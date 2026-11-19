@@ -7,6 +7,7 @@ use std::rc::Rc;
 
 use crate::ffi;
 use crate::name::Name;
+use crate::sdk;
 
 use super::SchemaStatus;
 use super::type_def::SchemaTypeDefinition;
@@ -54,7 +55,7 @@ impl<'owner> SchemaElementDefinition<'owner> {
     /// Get the element name.
     pub fn name(&self) -> Option<Name> {
         unsafe {
-            let name_ptr = ffi::blpapi_SchemaElementDefinition_name(self.ptr);
+            let name_ptr = sdk().blpapi_SchemaElementDefinition_name(self.ptr);
             NonNull::new(name_ptr).map(|ptr| Name::from_raw(ptr))
         }
     }
@@ -62,11 +63,11 @@ impl<'owner> SchemaElementDefinition<'owner> {
     /// Get the element name as a string.
     pub fn name_str(&self) -> &str {
         unsafe {
-            let name_ptr = ffi::blpapi_SchemaElementDefinition_name(self.ptr);
+            let name_ptr = sdk().blpapi_SchemaElementDefinition_name(self.ptr);
             if name_ptr.is_null() {
                 return "";
             }
-            let str_ptr = ffi::blpapi_Name_string(name_ptr);
+            let str_ptr = sdk().blpapi_Name_string(name_ptr);
             if str_ptr.is_null() {
                 return "";
             }
@@ -77,7 +78,7 @@ impl<'owner> SchemaElementDefinition<'owner> {
     /// Get a human-readable description of this element.
     pub fn description(&self) -> &str {
         unsafe {
-            let desc_ptr = ffi::blpapi_SchemaElementDefinition_description(self.ptr);
+            let desc_ptr = sdk().blpapi_SchemaElementDefinition_description(self.ptr);
             if desc_ptr.is_null() {
                 return "";
             }
@@ -88,19 +89,19 @@ impl<'owner> SchemaElementDefinition<'owner> {
     /// Get the type definition for this element's values.
     pub fn type_definition(&self) -> SchemaTypeDefinition<'owner> {
         unsafe {
-            let type_ptr = ffi::blpapi_SchemaElementDefinition_type(self.ptr);
+            let type_ptr = sdk().blpapi_SchemaElementDefinition_type(self.ptr);
             SchemaTypeDefinition::from_raw_unchecked(type_ptr)
         }
     }
 
     /// Get the minimum number of values for this element.
     pub fn min_values(&self) -> usize {
-        unsafe { ffi::blpapi_SchemaElementDefinition_minValues(self.ptr) }
+        unsafe { sdk().blpapi_SchemaElementDefinition_minValues(self.ptr) }
     }
 
     /// Get the maximum number of values for this element.
     pub fn max_values(&self) -> usize {
-        unsafe { ffi::blpapi_SchemaElementDefinition_maxValues(self.ptr) }
+        unsafe { sdk().blpapi_SchemaElementDefinition_maxValues(self.ptr) }
     }
 
     /// Check if this element is optional (min_values == 0).
@@ -126,7 +127,7 @@ impl<'owner> SchemaElementDefinition<'owner> {
     /// Get the deprecation status of this element.
     pub fn status(&self) -> SchemaStatus {
         unsafe {
-            let status = ffi::blpapi_SchemaElementDefinition_status(self.ptr);
+            let status = sdk().blpapi_SchemaElementDefinition_status(self.ptr);
             SchemaStatus::from_raw(status)
         }
     }

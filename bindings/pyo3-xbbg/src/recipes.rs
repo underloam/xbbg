@@ -63,7 +63,7 @@ fn arrow_value_error(error: xbbg_arrow::ArrowCoreError) -> PyErr {
 /// run in one detach on this thread. Producer callbacks and foreign buffer
 /// releases, which may reacquire the interpreter, therefore never run on async
 /// workers, and recipe futures hold no producer memory.
-fn recipe_arrow_batch(data: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
+pub(crate) fn recipe_arrow_batch(data: &Bound<'_, PyAny>) -> PyResult<RecordBatch> {
     let py = data.py();
     if let Ok(batch) = data.cast::<ArrowRecordBatch>() {
         return Ok(batch.get().batch().clone());
