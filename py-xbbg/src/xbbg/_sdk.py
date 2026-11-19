@@ -46,6 +46,7 @@ _SOURCE_NAMES = {
     "vendored": "vendored",
     "terminal": "dapi",
     "search_path": "search_path",
+    "system": "system",
     "cache": "xbbg_cache",
 }
 
@@ -112,7 +113,10 @@ def _not_found_help(error: BaseException) -> str:
         "  6. Bloomberg Terminal (DAPI) - automatically detected if installed\n"
         "  7. the operating system's library search path (PATH on Windows, LD_LIBRARY_PATH on Linux, "
         "DYLD_LIBRARY_PATH and DYLD_FALLBACK_LIBRARY_PATH on macOS)\n"
-        "  8. the xbbg runtime cache: a Bloomberg runtime provisioned into XBBG_CACHE_DIR "
+        "  8. the operating system's own library search: the ldconfig and default library directories "
+        "on Linux, /usr/local/lib and /usr/lib on macOS, the application and system directories on "
+        "Windows\n"
+        "  9. the xbbg runtime cache: a Bloomberg runtime provisioned into XBBG_CACHE_DIR "
         "(default: the per-user xbbg cache directory) is used last, after its hash is verified"
     )
 
@@ -176,7 +180,9 @@ def get_sdk_info() -> dict:
         - name: ``"manual"`` (``set_sdk_path``), ``"sdk_lib_dir"`` (``BLPAPI_LIB_DIR``),
           ``"sdk_env"`` (``BLPAPI_ROOT``), ``"dev_sdk_root"`` (``XBBG_DEV_SDK_ROOT``),
           ``"blpapi_python"``, ``"dapi"`` (Bloomberg Terminal), ``"search_path"`` (the operating
-          system's library search path) or ``"xbbg_cache"``
+          system's library search path), ``"system"`` (the operating system's own library search;
+          listed only when its runtime is the loaded one, since only loading finds it) or
+          ``"xbbg_cache"``
         - version: version string if known
         - path: Path to the runtime library (for ``"xbbg_cache"``: the verified library; ``None``
           if none verified)
@@ -266,9 +272,21 @@ def _detect_sdk_info() -> dict:
             if _same_file(candidate["path"], loaded["path"]):
                 active = _source_name(candidate["source"], candidate["detail"])
                 break
-    for source in sources:
-        if source["name"] == active and source["version"] is None:
-            source["version"] = loaded["version"]
+    if active is not None:
+        entry = (
+            _cache_entry(loaded, cache_rejected)
+            if active == "xbbg_cache"
+            else {"name": active, "version": loaded["version"], "path": Path(loaded["path"])}
+        )
+        for source in sources:
+            if source["name"] == active:
+                # A source can yield several libraries, or change after the runtime loaded.
+                source.update(entry)
+                break
+        else:
+            # The operating system's own search has no candidate before it loads one.
+            cache_at = next((i for i, source in enumerate(sources) if source["name"] == "xbbg_cache"), len(sources))
+            sources.insert(cache_at, entry)
     return {"sources": _with_hint_versions(sources), "active": active, "runtime_version": loaded["version"]}
 
 
@@ -286,7 +304,8 @@ def set_sdk_path(path: str | Path) -> None:
     This takes precedence over every other source (``BLPAPI_LIB_DIR``, ``BLPAPI_ROOT``,
     ``XBBG_DEV_SDK_ROOT``, the blpapi Python package, Bloomberg Terminal, the library search
     path and the xbbg cache). The path should point to a directory containing the Bloomberg SDK
-    shared library. The runtime is loaded immediately.
+    shared library. The runtime is loaded immediately, and the path is authoritative: when its
+    library cannot be loaded, no other source is tried in its place.
 
     A process loads one Bloomberg runtime for its lifetime: once it is loaded, a different path
     raises ``RuntimeError``. Call this before anything else uses xbbg.
@@ -296,9 +315,9 @@ def set_sdk_path(path: str | Path) -> None:
 
     Raises:
         ValueError: The path is not a directory, holds no Bloomberg library, or its library
-            cannot be loaded.
+            cannot be loaded (the message says why).
         RuntimeError: A Bloomberg runtime from another location is already loaded.
-        ImportError: No Bloomberg runtime can be loaded at all.
+        ImportError: The xbbg native extension itself cannot be imported.
 
     Example:
         >>> import xbbg
@@ -320,13 +339,16 @@ def set_sdk_path(path: str | Path) -> None:
             _core_guard.forget_core(core)
         raise ValueError(f"Could not find Bloomberg SDK library in: {sdk_path}")
 
-    loaded = core.loaded_sdk()
-    if loaded is not None and not any(_same_file(loaded["path"], library) for library in explicit):
-        raise RuntimeError(
+    def already_loaded(loaded: dict) -> RuntimeError:
+        return RuntimeError(
             f"The Bloomberg runtime is already loaded from {loaded['path']} and cannot be replaced "
             f"by the one in {sdk_path}. Call xbbg.set_sdk_path() before anything else uses xbbg, "
             "or restart Python."
         )
+
+    loaded = core.loaded_sdk()
+    if loaded is not None and not any(_same_file(loaded["path"], library) for library in explicit):
+        raise already_loaded(loaded)
 
     with _sdk_lock:
         previous = _manual_sdk_path
@@ -334,25 +356,21 @@ def set_sdk_path(path: str | Path) -> None:
         _sdk_info = None  # Refresh on next get_sdk_info() call
         _sdk_generation += 1
     try:
-        loaded = load_runtime(core)
-        if not any(_same_file(loaded["path"], library) for library in explicit):
-            reasons = "; ".join(
-                f"{entry['path']}: {entry['reason']}"
-                for entry in loaded["rejected"]
-                if any(_same_file(entry["path"], library) for library in explicit)
-            )
-            raise ValueError(
-                f"The Bloomberg runtime in {sdk_path} could not be loaded ({reasons or 'unknown reason'}); "
-                f"xbbg loaded {loaded['path']} instead."
-            )
-    except (ImportError, ValueError):
+        # An explicit path is authoritative: only its libraries are tried.
+        with _load_lock:
+            core.load_sdk(_locate_request(sdk_path))
+    except ImportError as error:
         with _sdk_lock:
             _manual_sdk_path = previous
             _sdk_info = None
             _sdk_generation += 1
-        if core.loaded_sdk() is None:
-            _core_guard.forget_core(core)
-        raise
+        loaded = core.loaded_sdk()
+        if loaded is not None:  # another thread loaded a different runtime meanwhile
+            raise already_loaded(loaded) from error
+        _core_guard.forget_core(core)
+        # The first line only says that nothing loaded; the rest names each library and why.
+        reasons = str(error).partition("\n")[2].strip() or str(error)
+        raise ValueError(f"The Bloomberg runtime in {sdk_path} could not be loaded:\n  {reasons}") from error
 
 
 def clear_sdk_path() -> None:

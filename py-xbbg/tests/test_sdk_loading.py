@@ -152,6 +152,7 @@ def test_load_runtime_failure_raises_the_help_with_every_rejection(sdk):
             "blpapi Python package",
             "Bloomberg Terminal (DAPI)",
             "library search path",
+            "own library search",
             "xbbg runtime cache",
         )
     ]
@@ -251,33 +252,51 @@ def test_set_sdk_path_failure_to_load_restores_the_previous_path(sdk, install_co
     )
     forgotten = install_core(core)
 
-    with pytest.raises(ImportError, match="BLPAPI_LIB_DIR"):
+    with pytest.raises(ValueError, match="could not be loaded"):
         sdk.set_sdk_path(sdk_dir)
 
     assert sdk._manual_sdk_path == previous
     assert forgotten == [core]
 
 
-def test_set_sdk_path_names_why_its_runtime_was_refused(sdk, install_core, tmp_path):
+def test_set_sdk_path_names_why_its_runtime_was_refused_and_tries_nothing_else(sdk, install_core, tmp_path):
     sdk_dir = _sdk_dir(tmp_path, "old")
-    other = _sdk_dir(tmp_path, "other")
     explicit = sdk_dir / LIBRARY_NAME
-    refused = {
-        "path": str(explicit),
-        "source": "explicit",
-        "detail": str(sdk_dir),
-        "reason": "lacks a required function: blpapi_Old",
-    }
+    refusal = f"explicit ({sdk_dir}): {explicit}: lacks blpapi_Old (1 of the 157 BLPAPI functions this build calls)"
     core = FakeCore(
         candidates=[_candidate(explicit, "explicit", sdk_dir)],
-        load_result=_loaded(other / LIBRARY_NAME, "blpapi_root", "BLPAPI_ROOT", rejected=[refused]),
+        load_error=f"no Bloomberg runtime library could be found or loaded:\n  {refusal}",
     )
     install_core(core)
 
-    with pytest.raises(ValueError, match=r"could not be loaded \(.*lacks a required function: blpapi_Old\)"):
+    with pytest.raises(ValueError) as raised:
+        sdk.set_sdk_path(sdk_dir)
+
+    message = str(raised.value)
+    assert message == f"The Bloomberg runtime in {sdk_dir} could not be loaded:\n  {refusal}"
+    # The path is authoritative: the search order that was not walked is not advertised.
+    assert "BLPAPI_LIB_DIR" not in message
+    assert core.load_requests == [{"explicit": str(sdk_dir)}]
+    assert sdk._manual_sdk_path is None
+
+
+def test_set_sdk_path_reports_a_runtime_loaded_meanwhile(sdk, install_core, tmp_path):
+    sdk_dir = _sdk_dir(tmp_path, "new")
+    other = _sdk_dir(tmp_path, "other") / LIBRARY_NAME
+
+    class RacingCore(FakeCore):
+        def load_sdk(self, request=None):
+            # Another thread's import loaded a different runtime first.
+            self.loaded = _loaded(other, "blpapi_root", "BLPAPI_ROOT")
+            raise ImportError("a Bloomberg runtime is already loaded")
+
+    forgotten = install_core(RacingCore(candidates=[_candidate(sdk_dir / LIBRARY_NAME, "explicit", sdk_dir)]))
+
+    with pytest.raises(RuntimeError, match=r"already loaded from .*other.* cannot be replaced"):
         sdk.set_sdk_path(sdk_dir)
 
     assert sdk._manual_sdk_path is None
+    assert forgotten == []  # a runtime is loaded: the imported extension stays
 
 
 def test_clear_sdk_path_forgets_the_path_and_the_cached_report(sdk, monkeypatch, tmp_path):
@@ -380,6 +399,55 @@ def test_get_sdk_info_names_a_runtime_loaded_outside_the_locator_by_its_file(sdk
     )
 
     assert sdk.get_sdk_info()["active"] == "sdk_env"
+
+
+@pytest.mark.parametrize(("kind", "name"), [("terminal", "dapi"), ("cache", "xbbg_cache")])
+def test_get_sdk_info_active_source_names_the_loaded_file_not_its_first_candidate(
+    sdk, install_core, tmp_path, kind, name
+):
+    refused = _sdk_dir(tmp_path, "old") / LIBRARY_NAME
+    loaded = _sdk_dir(tmp_path, "current") / LIBRARY_NAME
+    install_core(
+        FakeCore(
+            candidates=[
+                _candidate(refused, kind, refused.parent, version="3.1.0.0"),
+                _candidate(loaded, kind, loaded.parent, version="3.26.5.1"),
+            ],
+            load_result=_loaded(loaded, kind, loaded.parent),
+        ),
+    )
+
+    info = sdk.get_sdk_info()
+
+    assert info["active"] == name
+    [active] = info["sources"]
+    assert active["path"] == loaded
+    assert active["version"] == info["runtime_version"] == "3.26.5.1"
+    if kind == "cache":
+        assert active["install_dir"] == loaded.parent
+
+
+def test_get_sdk_info_lists_a_runtime_only_the_operating_system_found(sdk, install_core, tmp_path):
+    # The operating system's own search has no candidate before it loads one: the search lists a
+    # runtime that was refused and the cache, the load reports where the runtime came from.
+    refused = _sdk_dir(tmp_path, "old") / LIBRARY_NAME
+    cached = _sdk_dir(tmp_path, "install") / LIBRARY_NAME
+    system = _sdk_dir(tmp_path, "system") / LIBRARY_NAME
+    install_core(
+        FakeCore(
+            candidates=[
+                _candidate(refused, "blpapi_root", "BLPAPI_ROOT"),
+                _candidate(cached, "cache", cached.parent, "3.26.9.1"),
+            ],
+            load_result=_loaded(system, "system", "the operating system's library search"),
+        ),
+    )
+
+    info = sdk.get_sdk_info()
+
+    assert info["active"] == "system"
+    assert [source["name"] for source in info["sources"]] == ["sdk_env", "system", "xbbg_cache"]
+    assert info["sources"][1] == {"name": "system", "version": "3.26.5.1", "path": system}
 
 
 def test_get_sdk_info_without_a_runtime_reports_the_sources_and_no_active_one(sdk, install_core, tmp_path):
@@ -488,10 +556,12 @@ def test_blpapi_wheel_entry_takes_the_distribution_version_when_the_search_has_n
     )
     monkeypatch.setattr(sdk, "_blpapi_distribution_version", lambda: "3.25.11.1")
 
-    [source] = sdk.get_sdk_info()["sources"]
+    info = sdk.get_sdk_info()
 
-    assert source["name"] == "blpapi_python"
-    assert source["version"] == "3.25.11.1"
+    # The loaded runtime is always listed, so ``active`` names an entry of ``sources``.
+    assert [source["name"] for source in info["sources"]] == ["blpapi_python", "sdk_env"]
+    assert info["sources"][0]["version"] == "3.25.11.1"
+    assert info["active"] == "sdk_env"
 
 
 # --- the import guard ----------------------------------------------------------------------------
