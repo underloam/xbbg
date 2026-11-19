@@ -16,7 +16,6 @@ crate-type = ["cdylib"]
 jni = { workspace = true }
 # The provisioner (downloader) and the cache resolver it shares.
 xbbg-sdk = { workspace = true, features = ["provision"] }
-serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread"] }
 

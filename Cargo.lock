@@ -2837,7 +2837,6 @@ name = "jni-xbbg-sdk"
 version = "1.8.1"
 dependencies = [
  "jni",
- "serde",
  "serde_json",
  "tokio",
  "xbbg-sdk",
