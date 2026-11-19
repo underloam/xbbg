@@ -173,7 +173,8 @@ The `xbbg-mcp` binary finds and loads the Bloomberg runtime itself, at startup, 
 6. hint directories: `XBBG_MCP_HINT_DIRS`, an OS path list the launcher sets to the official Python `blpapi` package directory
 7. a Bloomberg Terminal install (`~/blp/DAPI`, `/opt/bloomberg/DAPI`; the usual `DAPI` directories on Windows)
 8. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS)
-9. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`)
+9. the operating system's own library search, where a system-wide install lives (the `ldconfig` cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the directory of `xbbg-mcp.exe` and the system directory on Windows)
+10. runtimes provisioned into the xbbg cache (`XBBG_CACHE_DIR`), read only when nothing before them loaded
 
 A candidate that cannot be opened, or that is too old to export a function the binary calls, is skipped and the next one is tried; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried. If none loads, the binary exits with status 1 and lists every candidate it refused and why. Set `RUST_LOG=info` to log which runtime was loaded and by which rule. The launcher no longer sets `DYLD_LIBRARY_PATH`, `LD_LIBRARY_PATH` or `PATH`.
 

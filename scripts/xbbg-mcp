@@ -4,7 +4,8 @@ set -eu
 # The launcher does not search for the Bloomberg runtime. xbbg-mcp finds and loads it itself
 # (explicit XBBG_MCP_LIB_DIR, BLPAPI_LIB_DIR, BLPAPI_ROOT, XBBG_DEV_SDK_ROOT, the vendored SDK of a
 # checkout, hint directories, a Bloomberg Terminal install, the library search path variables, the
-# xbbg cache). It only passes what the binary cannot know:
+# operating system's own library search, the xbbg cache). It only passes what the binary cannot
+# know:
 #
 #   XBBG_MCP_HINT_DIRS  the directory of the Python `blpapi` package, when one is installed
 #   XBBG_MCP_REPO_ROOT  this checkout, when the launcher runs from one

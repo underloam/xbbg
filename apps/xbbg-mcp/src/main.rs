@@ -685,10 +685,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // The runtime must be loaded before anything touches the engine: nothing links Bloomberg.
     let sdk = match runtime::load() {
         Ok(sdk) => sdk,
-        Err(error) => {
+        Err(message) => {
             // Printed, not returned: `main`'s error is shown with `Debug`, which would flatten the
             // rejection list onto one line.
-            eprintln!("{}", runtime::startup_error(&error));
+            eprintln!("{message}");
             std::process::exit(1);
         }
     };

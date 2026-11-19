@@ -98,6 +98,11 @@ public final class NativeLibraries {
           finishLoad(blpapi);
           return;
         }
+        if (locator.explicitLabel() != null) {
+          // An explicit location names the runtime to use: nothing replaces it, a download
+          // included.
+          throw locator.notFound(rejected);
+        }
         download = download(locator, cache, rejected);
       }
       Path provisioned = null;

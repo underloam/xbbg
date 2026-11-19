@@ -2,8 +2,8 @@
 //!
 //! The search order lives in `xbbg_host::sdk` (explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`,
 //! `XBBG_DEV_SDK_ROOT`, the vendored SDK, hint directories, the Bloomberg Terminal, the operating
-//! system's library search path variables, then the xbbg cache). The binary passes only what the
-//! launcher knows and the library cannot:
+//! system's library search path variables, the operating system's own library search, then the
+//! xbbg cache). The binary passes only what the launcher knows and the library cannot:
 //!
 //! | variable | meaning |
 //! |---|---|
@@ -41,13 +41,23 @@ pub(crate) fn locate_request(get: impl Fn(&str) -> Option<OsString>) -> LocateRe
     }
 }
 
-/// Finds and loads the runtime for this process.
-pub(crate) fn load() -> Result<LoadedSdk, SdkNotFound> {
-    locate_and_load(&locate_request(|name| std::env::var_os(name)))
+/// Finds and loads the runtime for this process; the error is the startup failure text.
+pub(crate) fn load() -> Result<LoadedSdk, String> {
+    let request = locate_request(|name| std::env::var_os(name));
+    locate_and_load(&request).map_err(|error| startup_error(&error, request.explicit.is_some()))
 }
 
-/// The startup failure text: every refusal, then every way to supply a runtime.
-pub(crate) fn startup_error(error: &SdkNotFound) -> String {
+/// The startup failure text: every refusal, then how to supply a runtime. `explicit` says that
+/// [`LIB_DIR_VAR`] named the runtime, in which case nothing else was searched.
+pub(crate) fn startup_error(error: &SdkNotFound, explicit: bool) -> String {
+    if explicit {
+        return format!(
+            "xbbg-mcp: {error}\nxbbg-mcp: {LIB_DIR_VAR} names the runtime to use, so nothing else \
+             was tried; correct it, or unset it to search BLPAPI_LIB_DIR, BLPAPI_ROOT, the Python \
+             blpapi package, a Bloomberg Terminal (DAPI) install and the system's library \
+             directories"
+        );
+    }
     format!(
         "xbbg-mcp: {error}\nxbbg-mcp: set {LIB_DIR_VAR}, BLPAPI_LIB_DIR or BLPAPI_ROOT, install \
          Bloomberg's blpapi package for the Python the launcher finds, or use a Bloomberg Terminal \
@@ -86,7 +96,7 @@ mod tests {
         let error = SdkNotFound {
             rejected: Vec::new(),
         };
-        let text = startup_error(&error);
+        let text = startup_error(&error, false);
         assert!(
             text.starts_with("xbbg-mcp: no Bloomberg runtime library"),
             "{text}"
@@ -94,6 +104,12 @@ mod tests {
         assert!(
             text.contains(LIB_DIR_VAR) && text.contains("BLPAPI_ROOT"),
             "{text}"
+        );
+        // An explicit directory is authoritative: the text must not suggest the rest was searched.
+        let explicit = startup_error(&error, true);
+        assert!(
+            explicit.contains("nothing else was tried") && explicit.contains(LIB_DIR_VAR),
+            "{explicit}"
         );
     }
 

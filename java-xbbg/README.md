@@ -206,13 +206,17 @@ function xbbg calls) is skipped and the next candidate is tried:
    and `/opt/bloomberg/DAPI` elsewhere);
 6. the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on
    Linux, `DYLD_LIBRARY_PATH` then `DYLD_FALLBACK_LIBRARY_PATH` on macOS);
-7. a runtime xbbg provisioned earlier into its cache (`xbbg.cache.dir`, `XBBG_CACHE_DIR`, or the
-   platform cache directory);
-8. provisioning from a configured source, then step 7 again.
+7. the operating system's own library search, where a system-wide install lives (the `ldconfig`
+   cache and default library directories on Linux, `/usr/local/lib` and `/usr/lib` on macOS, the
+   application and system directories on Windows);
+8. a runtime xbbg provisioned earlier into its cache (`xbbg.cache.dir`, `XBBG_CACHE_DIR`, or the
+   platform cache directory), read only when nothing before it loaded;
+9. provisioning from a configured source, then step 8 again.
 
-An explicit path (step 1) is authoritative: when it holds no usable runtime, nothing else is tried
-and `BlpapiNotFoundException` names it and why. Otherwise, when nothing loads,
-`BlpapiNotFoundException` lists every candidate that was refused and why.
+An explicit path (step 1) is authoritative: when it holds no usable runtime, nothing else is tried,
+nothing is downloaded, and `BlpapiNotFoundException` names it and why. Otherwise, when nothing
+loads, `BlpapiNotFoundException` lists every candidate that was refused and why, naming the
+functions an old runtime lacks.
 
 Provisioning only happens when a source is configured, and only when nothing local was found. A
 source is a Python package index, a conda channel, or one package file:

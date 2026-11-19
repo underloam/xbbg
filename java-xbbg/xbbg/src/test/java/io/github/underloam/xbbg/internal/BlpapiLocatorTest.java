@@ -152,20 +152,41 @@ class BlpapiLocatorTest {
 
   @Test
   void theNotFoundMessageListsEveryRejectionAndEveryWayToSupplyARuntime() {
-    BlpapiLocator locator = locator(temp.resolve("runtime"));
+    BlpapiLocator locator = locator(null);
     List<BlpapiLocator.Rejection> rejected =
         Arrays.asList(
-            new BlpapiLocator.Rejection("/a/lib.so", "explicit", "", "does not exist"),
+            new BlpapiLocator.Rejection("/a/lib.so", "blpapi_root", "BLPAPI_ROOT", "too old"),
             new BlpapiLocator.Rejection("/b/lib.so", "search_path", "PATH", "cannot be opened"));
     BlpapiNotFoundException error = locator.notFound(rejected);
     String message = error.getMessage();
     assertTrue(message.startsWith("Bloomberg runtime library not found."), message);
-    assertTrue(message.contains("\n  - /a/lib.so (explicit): does not exist"), message);
+    assertTrue(message.contains("\n  - /a/lib.so (blpapi_root: BLPAPI_ROOT): too old"), message);
     assertTrue(message.contains("\n  - /b/lib.so (search_path: PATH): cannot be opened"), message);
-    assertTrue(message.contains("Xbbg.setSdkPath, BLPAPI_LIB_DIR, BLPAPI_ROOT"), message);
+    assertTrue(message.contains("Searched, in order: BLPAPI_LIB_DIR, BLPAPI_ROOT"), message);
+    assertTrue(message.contains("its own library search"), message);
     assertTrue(message.contains(temp.resolve("cache").resolve("sdk").toString()), message);
     assertTrue(message.contains("Xbbg.setSdkSource"), message);
     assertTrue(message.contains(BlpapiLocator.SOURCE_ENV), message);
+  }
+
+  @Test
+  void anExplicitPathThatFailsIsReportedAsAllThatWasSearched() {
+    List<BlpapiLocator.Rejection> rejected =
+        Collections.singletonList(
+            new BlpapiLocator.Rejection("/a/lib.so", "explicit", "", "does not exist"));
+
+    String message = locator(temp.resolve("runtime")).notFound(rejected).getMessage();
+    assertTrue(message.contains("\n  - /a/lib.so (explicit): does not exist"), message);
+    assertTrue(
+        message.contains("Xbbg.setSdkPath names the runtime to use, so nothing else was searched"),
+        message);
+    // The order that was not walked is offered as what clearing the path would search.
+    assertFalse(message.contains("Searched, in order"), message);
+    assertTrue(message.contains("clear it to search, in order: BLPAPI_LIB_DIR"), message);
+
+    properties.put(BlpapiLocator.PATH_PROPERTY, "runtime");
+    String byProperty = locator(null).notFound(rejected).getMessage();
+    assertTrue(byProperty.contains("-Dxbbg.blpapi.path names the runtime to use"), byProperty);
   }
 
   @Test
@@ -174,11 +195,5 @@ class BlpapiLocatorTest {
         locator(null).notFound(Collections.<BlpapiLocator.Rejection>emptyList()).getMessage();
     assertFalse(message.contains("Rejected:"), message);
     assertTrue(message.contains("Searched, in order: BLPAPI_LIB_DIR"), message);
-  }
-
-  @Test
-  void anInvalidPropertyPathIsReported() {
-    properties.put(BlpapiLocator.PATH_PROPERTY, "bad\0path");
-    assertThrows(IllegalArgumentException.class, () -> locator(null).requestJson());
   }
 }

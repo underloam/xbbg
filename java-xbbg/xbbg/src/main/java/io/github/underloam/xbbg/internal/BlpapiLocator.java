@@ -13,9 +13,10 @@ import java.util.function.Function;
 /**
  * What Java alone knows about where the Bloomberg runtime (blpapi) is, and how to report that none
  * was found. The search itself lives in Rust ({@code xbbg_host::sdk}, reached through {@link
- * NativeXbbg#loadSdk}), the same code every other xbbg host uses, in one order: the explicit path,
- * {@code BLPAPI_LIB_DIR}, {@code BLPAPI_ROOT}, {@code XBBG_DEV_SDK_ROOT}, the Bloomberg Terminal,
- * the operating system's library search path variables, and the verified installs of the xbbg
+ * NativeXbbg#loadSdk}), the same code every other xbbg host uses, in one order: the explicit path
+ * (which is authoritative: when it does not load, nothing else is tried), {@code BLPAPI_LIB_DIR},
+ * {@code BLPAPI_ROOT}, {@code XBBG_DEV_SDK_ROOT}, the Bloomberg Terminal, the operating system's
+ * library search path variables and its own library search, and the verified installs of the xbbg
  * cache.
  *
  * <p>Java contributes:
@@ -159,8 +160,11 @@ public final class BlpapiLocator {
    * Builds the error raised when no runtime could be loaded and none is configured for
    * provisioning.
    *
+   * <p>An explicit location is authoritative: when one is set, it is all that was searched, and the
+   * message says so instead of listing an order that was not walked.
+   *
    * @param rejected every candidate the search tried and why it was refused
-   * @return the exception, listing what was rejected and every way to supply a runtime
+   * @return the exception, listing what was rejected and how to supply a runtime
    */
   public BlpapiNotFoundException notFound(List<Rejection> rejected) {
     StringBuilder out = new StringBuilder("Bloomberg runtime library not found.");
@@ -170,15 +174,22 @@ public final class BlpapiLocator {
         out.append("\n  - ").append(entry);
       }
     }
+    String rest =
+        "BLPAPI_LIB_DIR, BLPAPI_ROOT, XBBG_DEV_SDK_ROOT, the Bloomberg Terminal, the operating"
+            + " system's library search path and its own library search, and the verified runtimes"
+            + " under "
+            + cacheRoot.resolve("sdk");
     String label = explicitLabel();
-    out.append("\nSearched, in order: ");
     if (label != null) {
-      out.append(label).append(", ");
+      out.append("\n")
+          .append(label)
+          .append(" names the runtime to use, so nothing else was searched. Correct it, or clear")
+          .append(" it to search, in order: ")
+          .append(rest)
+          .append(".");
+      return new BlpapiNotFoundException(out.toString());
     }
-    out.append("BLPAPI_LIB_DIR, BLPAPI_ROOT, XBBG_DEV_SDK_ROOT, the Bloomberg Terminal,")
-        .append(" the operating system's library search path, and the verified runtimes under ")
-        .append(cacheRoot.resolve("sdk"))
-        .append(".");
+    out.append("\nSearched, in order: ").append(rest).append(".");
     out.append("\nProvide the runtime with any of these:")
         .append("\n  1. Xbbg.setSdkPath(path) or -D")
         .append(PATH_PROPERTY)

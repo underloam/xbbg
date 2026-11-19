@@ -29,7 +29,7 @@ Version: {version}
 
 This MCPB bundles the xbbg MCP launchers and prebuilt xbbg MCP binaries for macOS arm64, Linux amd64, and Windows amd64. It does not bundle Bloomberg SDK files, Bloomberg runtime libraries, Bloomberg credentials, or market data. You must provide Bloomberg runtime access locally through your own Bloomberg agreements and entitlements.
 
-The launchers do not search for the Bloomberg runtime; `xbbg-mcp` finds and loads it at startup, in this order: `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, the official Python `blpapi` package (the launchers pass its directory), a Bloomberg Terminal install, the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS), then runtimes provisioned into the xbbg cache. A runtime that cannot be opened or is too old is skipped, and the startup error lists every one that was refused and why.
+The launchers do not search for the Bloomberg runtime; `xbbg-mcp` finds and loads it at startup, in this order: `XBBG_MCP_LIB_DIR`, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, the official Python `blpapi` package (the launchers pass its directory), a Bloomberg Terminal install, the operating system's library search path variables (`PATH` on Windows, `LD_LIBRARY_PATH` on Linux, `DYLD_LIBRARY_PATH` on macOS), the operating system's own library search (a system-wide install), then runtimes provisioned into the xbbg cache. A runtime that cannot be opened or is too old is skipped, and the startup error lists every one that was refused and why; `XBBG_MCP_LIB_DIR` is the exception, because it names the runtime to use: when it does not load, nothing else is tried.
 
 Documentation: https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp
 Privacy policy: https://github.com/underloam/xbbg/tree/main/apps/xbbg-mcp#privacy-policy
@@ -70,9 +70,11 @@ WINDOWS_LAUNCHER_TEMPLATE = r"""$ErrorActionPreference = "Stop"
 
 # This launcher does not search for the Bloomberg runtime: xbbg-mcp.exe finds and loads it itself
 # (XBBG_MCP_LIB_DIR, BLPAPI_LIB_DIR, BLPAPI_ROOT, XBBG_DEV_SDK_ROOT, the hint directories below,
-# a Bloomberg Terminal install, PATH, the xbbg cache), skipping any runtime it cannot open or that
-# is too old, and listing each skipped one if none loads. The launcher only passes what the binary
-# cannot know: the directory of the Python blpapi package, as XBBG_MCP_HINT_DIRS.
+# a Bloomberg Terminal install, PATH, the directory of xbbg-mcp.exe and the system directory, the
+# xbbg cache), skipping any runtime it cannot open or that is too old, and listing each skipped
+# one if none loads. XBBG_MCP_LIB_DIR names the runtime to use: when it does not load, nothing
+# else is tried. The launcher only passes what the binary cannot know: the directory of the
+# Python blpapi package, as XBBG_MCP_HINT_DIRS.
 
 function Warn($message) {
     [Console]::Error.WriteLine("xbbg-mcp: $message")
