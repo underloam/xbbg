@@ -130,7 +130,7 @@ fn main() {
         .header_contents("wrapper.h", &wrapper)
         .clang_arg(format!("-I{}", include_dir.display()))
         .allowlist_type("^blpapi_.*")
-        .allowlist_var("^(BLPAPI_.*|BLPAPI_SDK_VERSION.*|g_blpapi.*)")
+        .allowlist_var("^(BLPAPI_.*|BLPAPI_SDK_VERSION.*)")
         // One struct of function pointers, resolved from a library opened at run
         // time. `require_all` makes the constructor fail at load for a function the
         // library lacks, instead of panicking at the first call; the allowlist

@@ -217,6 +217,14 @@ impl Walk {
             }
             match xbbg_core::load(&candidate.path) {
                 Ok(()) => return Some(candidate),
+                Err(SdkLoadError::AlreadyLoaded { loaded, .. }) if stage != Stage::Explicit => {
+                    return Some(Candidate {
+                        path: loaded,
+                        source: SourceKind::Explicit,
+                        detail: "loaded before the search".to_owned(),
+                        version: None,
+                    });
+                }
                 Err(error) => self.rejected.push(Rejected {
                     path: candidate.path,
                     source: candidate.source,

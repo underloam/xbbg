@@ -71,12 +71,13 @@ pub enum SdkLoadError {
         /// The library that was requested.
         requested: PathBuf,
     },
-    /// The dynamic loader mapped a different file than the one opened. macOS's dyld looks in the
-    /// `DYLD_LIBRARY_PATH` directories by file name before it uses an absolute path, so the library
-    /// that was chosen (and, for the xbbg cache, verified) would not be the one in use.
+    /// The dynamic loader mapped a different file than the one opened (for example, macOS's dyld
+    /// matched `DYLD_LIBRARY_PATH` by file name before using an absolute path, or Windows returned
+    /// a DLL with the same file name already loaded from another directory), so the library that
+    /// was chosen (and, for the xbbg cache, verified) would not be the one in use.
     #[error(
-        "the dynamic loader mapped {} instead of the Bloomberg runtime {} (on macOS, \
-         DYLD_LIBRARY_PATH is searched by file name first)",
+        "the dynamic loader mapped {} instead of the Bloomberg runtime {} (for example, a runtime \
+         with the same file name was already loaded or matched by DYLD_LIBRARY_PATH)",
         mapped.display(),
         path.display()
     )]
@@ -189,13 +190,32 @@ fn same_runtime(loaded: &Loaded, requested: &Path) -> Result<(), SdkLoadError> {
     }
 }
 
-/// Same path, or two spellings (a symlink, `..` components) of one file.
+/// Same path, or two spellings (a symlink, hardlink, `..` components, or Windows letter case) of
+/// one file.
 fn is_same_file(a: &Path, b: &Path) -> bool {
-    a == b
-        || matches!(
-            (a.canonicalize(), b.canonicalize()),
-            (Ok(a), Ok(b)) if a == b
-        )
+    let same_path = |a: &Path, b: &Path| {
+        a == b
+            || (cfg!(windows)
+                && a.to_string_lossy()
+                    .eq_ignore_ascii_case(&b.to_string_lossy()))
+    };
+    if same_path(a, b) {
+        return true;
+    }
+    if matches!((a.canonicalize(), b.canonicalize()), (Ok(ca), Ok(cb)) if same_path(&ca, &cb)) {
+        return true;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b))
+            && ma.dev() == mb.dev()
+            && ma.ino() == mb.ino()
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Opens the library at the absolute `path` and resolves the function table from it.
@@ -209,10 +229,17 @@ fn open(path: &Path) -> Result<Blpapi, SdkLoadError> {
             libloading::os::unix::RTLD_NOW | libloading::os::unix::RTLD_LOCAL,
         )
     };
-    // SAFETY: as above.
+    // SAFETY: as above. `LOAD_WITH_ALTERED_SEARCH_PATH` requires backslash separators on Windows,
+    // which `std::path::absolute` normalizes.
     #[cfg(windows)]
-    let library = unsafe {
-        Library::load_with_flags(path, libloading::os::windows::LOAD_WITH_ALTERED_SEARCH_PATH)
+    let library = {
+        let normalized = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+        unsafe {
+            Library::load_with_flags(
+                &normalized,
+                libloading::os::windows::LOAD_WITH_ALTERED_SEARCH_PATH,
+            )
+        }
     };
     let library = library.map_err(|error| SdkLoadError::Open {
         path: path.to_path_buf(),
@@ -229,6 +256,21 @@ fn open(path: &Path) -> Result<Blpapi, SdkLoadError> {
             mapped,
         });
     }
+
+    #[cfg(windows)]
+    let library = {
+        let (library, mapped) = module_path(library);
+        if let Some(mapped) = mapped
+            && !is_same_file(&mapped, path)
+        {
+            // Dropping the library releases the module reference this call acquired.
+            return Err(SdkLoadError::Substituted {
+                path: path.to_path_buf(),
+                mapped,
+            });
+        }
+        library
+    };
 
     into_table(library, path)
 }
@@ -594,5 +636,19 @@ mod tests {
             "{}",
             path.display()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hardlinks_to_one_file_count_as_the_same_file() {
+        let dir = std::env::temp_dir().join(format!("xbbg-loader-hardlink-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let original = dir.join("orig");
+        let linked = dir.join("link");
+        std::fs::write(&original, b"runtime").unwrap();
+        std::fs::hard_link(&original, &linked).unwrap();
+        assert!(is_same_file(&original, &linked));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

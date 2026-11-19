@@ -74,20 +74,34 @@ pub fn default_cache_root() -> Option<PathBuf> {
 }
 
 pub(crate) fn cache_root_from(var: impl Fn(&str) -> Option<PathBuf>) -> Option<PathBuf> {
+    let platform = if cfg!(windows) {
+        Platform::WindowsX86_64
+    } else if cfg!(target_os = "macos") {
+        Platform::MacosAarch64
+    } else {
+        Platform::LinuxX86_64
+    };
+    cache_root_for_platform(platform, var)
+}
+
+pub(crate) fn cache_root_for_platform(
+    platform: Platform,
+    var: impl Fn(&str) -> Option<PathBuf>,
+) -> Option<PathBuf> {
     if let Some(dir) = var("XBBG_CACHE_DIR") {
         return Some(dir);
     }
-    if cfg!(windows) {
-        var("LOCALAPPDATA")
+    match platform {
+        Platform::WindowsX86_64 => var("LOCALAPPDATA")
             .or_else(|| var("USERPROFILE").map(|home| home.join("AppData").join("Local")))
-            .map(|base| base.join("xbbg"))
-    } else if cfg!(target_os = "macos") {
-        var("HOME").map(|home| home.join("Library").join("Caches").join("xbbg"))
-    } else {
-        var("XDG_CACHE_HOME")
+            .map(|base| base.join("xbbg")),
+        Platform::MacosAarch64 => {
+            var("HOME").map(|home| home.join("Library").join("Caches").join("xbbg"))
+        }
+        Platform::LinuxX86_64 => var("XDG_CACHE_HOME")
             .filter(|dir| dir.is_absolute())
             .or_else(|| var("HOME").map(|home| home.join(".cache")))
-            .map(|base| base.join("xbbg"))
+            .map(|base| base.join("xbbg")),
     }
 }
 

@@ -71,7 +71,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::cache::{cache_root_from, compare_versions, scan_cache};
+use crate::cache::{cache_root_for_platform, compare_versions, scan_cache};
 use crate::platform::Platform;
 
 /// Directories inside an SDK root that hold the runtime, in the order they are tried: the root
@@ -301,11 +301,11 @@ fn search(request: &LocateRequest, stages: &[Stage]) -> Located {
 
     // 10. The cache. (9, the operating system's own search, is a loader's step.)
     if stages.contains(&Stage::Cache) {
-        let cache_root = request
-            .cache_root
-            .as_deref()
-            .map(absolute)
-            .or_else(|| cache_root_from(|name| env.get(name).map(PathBuf::from)));
+        let host_matches = cfg!(windows) == (platform == Platform::WindowsX86_64);
+        let cache_root = request.cache_root.as_deref().map(absolute).or_else(|| {
+            cache_root_for_platform(platform, |name| env.get(name).map(PathBuf::from))
+                .map(|path| if host_matches { absolute(&path) } else { path })
+        });
         if let Some(root) = cache_root {
             search.cache(&root);
         }
@@ -414,7 +414,7 @@ impl Search {
         ] {
             let Some(value) = env.get(var) else { continue };
             let dir = match (&repo_root, source) {
-                (Some(base), SourceKind::DevSdkRoot) => base.join(value),
+                (Some(base), SourceKind::DevSdkRoot) => absolute(&base.join(value)),
                 _ => absolute(Path::new(&value)),
             };
             self.directory(&dir, layout, source, var, true);
@@ -444,7 +444,9 @@ impl Search {
         }
 
         // 7. Terminal roots.
+        let host_matches = cfg!(windows) == (self.platform == Platform::WindowsX86_64);
         for root in terminal_roots(env, self.platform) {
+            let root = if host_matches { absolute(&root) } else { root };
             let detail = root.display().to_string();
             self.directory(&root, Layout::Sdk, SourceKind::Terminal, &detail, false);
         }
