@@ -47,15 +47,20 @@ Nothing links `libblpapi3_64`. The Bloomberg runtime is opened by absolute path 
 
 ```rust
 xbbg_core::load("/path/to/libblpapi3_64.so")?; // once, before any other call
+// or, to let the operating system find it as it did when the runtime was linked:
+xbbg_core::load_system("libblpapi3_64.so")?;   // "blpapi3_64.dll" on Windows
 ```
 
 | Function | |
 |----------|---|
 | `load(path)` | Opens the library (`RTLD_NOW \| RTLD_LOCAL`; on Windows `LOAD_WITH_ALTERED_SEARCH_PATH`) and resolves the function table. The path must be absolute. The same path again is a no-op; another path is `SdkLoadError::AlreadyLoaded`. The library is never unloaded |
+| `load_system(name)` | Loads the library the operating system finds for a bare file name and returns its path: the dynamic loader's search on Linux (`LD_LIBRARY_PATH`, the `ldconfig` cache, the default directories), `/usr/local/lib` then `/usr/lib` on macOS, the application, system and `AddDllDirectory` directories on Windows. Returns the loaded runtime's path when one is already loaded |
 | `sdk()` | The loaded table; panics, saying so, if nothing is loaded. One atomic load on the hot path |
 | `loaded_sdk_path()` | The path that was loaded, or `None` |
 
-Choosing the library path is the caller's job. Hosts call `xbbg_host::sdk::locate_and_load`, which runs the shared search order in `xbbg_sdk::locate` (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, the xbbg cache). Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::locate`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
+A library that cannot be used is refused with the reason: `SdkLoadError::Open` carries the operating system's message, and `SdkLoadError::MissingSymbol` names the functions the library lacks (a runtime older than this build needs, or no Bloomberg runtime at all).
+
+Choosing the library path is the caller's job. Hosts call `xbbg_host::sdk::locate_and_load`, which runs the shared search order in `xbbg_sdk::locate` (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, `load_system`, the xbbg cache). Test binaries load the runtime before `main` (a `ctor` using `xbbg_sdk::locate::locate`, a dev-dependency), so `BLPAPI_ROOT` or `BLPAPI_LIB_DIR` must point at a Bloomberg runtime when running `cargo test` or `cargo bench`.
 
 ## Features
 

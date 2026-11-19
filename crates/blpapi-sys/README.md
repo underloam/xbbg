@@ -4,6 +4,7 @@ Unsafe, zero-policy FFI bindings to Bloomberg's C API (`blpapi_*`), generated at
 
 - **Nothing links the Bloomberg runtime.** The build needs the SDK *headers*; the runtime library (`blpapi3_64.dll`, `libblpapi3_64.so`) is opened by absolute path while the process runs
 - `Blpapi`: a struct of the C function pointers, built by `Blpapi::from_library`; call a function as `table.blpapi_Name_create(…)`
+- `FUNCTION_NAMES`: the same function names as C strings, so the loader can name every function a runtime lacks
 - Bindings are generated via bindgen from the SDK headers; nothing generated is checked in. The one checked-in input is `functions.txt`, the list of functions to generate
 - Exposes raw types, constants and functions only: no wrappers, no ownership logic, no loader. `xbbg_core::load` opens the library and owns the process-wide table
 
@@ -22,7 +23,7 @@ blpapi-sys/
 
 `functions.txt` names exactly the `blpapi_*` functions the workspace calls. `build.rs` allowlists those and nothing else, and generates the table with `dynamic_link_require_all`: `Blpapi::from_library` fails on the first function the library lacks. Listing only what is used means a runtime older than the headers this crate was built against still loads, as long as it has every function in use.
 
-Adding a call to a new function means adding its name to `functions.txt`. `build.rs` fails, naming it, when a listed function is absent from the SDK headers, which catches typos and functions an SDK removed. (A build from `BLPAPI_PREGENERATED_BINDINGS` skips generation and this check.)
+Adding a call to a new function means adding its name to `functions.txt`. `build.rs` fails, naming it, when a listed function is absent from the SDK headers or pregenerated bindings, which catches typos, stale bindings and functions an SDK removed. It also emits `FUNCTION_NAMES`, the names as `&CStr` values, for the loader's missing-function diagnostics.
 
 ## SDK discovery (precedence)
 
@@ -31,7 +32,7 @@ Adding a call to a new function means adding its name to `functions.txt`. `build
 | 1 | `BLPAPI_INCLUDE_DIR` | The directory holding the `blpapi_*.h` headers |
 | 2 | `BLPAPI_ROOT` | Finds `include/` (or `Include/`) in the root, then in each versioned subdirectory one or two levels down, newest first |
 
-The runtime library is never needed to build. Tests, benchmarks and Rust applications find it at run time with `xbbg_sdk::locate::locate`, the one search order every xbbg host shares (an explicit path, `BLPAPI_LIB_DIR`, `BLPAPI_ROOT`, `XBBG_DEV_SDK_ROOT`, a vendored SDK, the Terminal, the OS library path, then the xbbg cache), and open it with `xbbg_core::load`; `xbbg_host::sdk::locate_and_load` does both.
+The runtime library is never needed to build. Tests and benchmarks find it at run time with `xbbg_sdk::locate::locate` and open it with `xbbg_core::load`. Hosts use `xbbg_host::sdk::locate_and_load`, which also tries the operating system's own library search (`xbbg_core::load_system`) before the cache.
 
 ## Binding generation controls
 

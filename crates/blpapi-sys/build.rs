@@ -61,6 +61,12 @@ fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR not set"));
     let bindings_out = out_dir.join("bindings.rs");
 
+    // The allowlist is also compiled in as `FUNCTION_NAMES`, so a loader can say which
+    // functions a runtime lacks: the generated `from_library` only reports that one is missing.
+    let functions = read_function_allowlist().unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
+    write_function_names(&functions, &out_dir.join("function_names.rs"))
+        .unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
+
     // Track SDK headers so an in-place SDK replacement rebuilds dependent
     // artifacts rather than stamping new provenance onto old bytes.
     println!("cargo:rerun-if-changed={}", include_dir.display());
@@ -74,6 +80,24 @@ fn main() {
             );
         }
         println!("cargo:rerun-if-changed={}", pregenerated_bindings.display());
+
+        // Bindings generated for another allowlist would compile until the first call of a
+        // function they lack; say so here instead.
+        let pregenerated = fs::read_to_string(&pregenerated_bindings).unwrap_or_else(|e| {
+            panic!(
+                "blpapi-sys: Failed to read {}: {}",
+                pregenerated_bindings.display(),
+                e
+            )
+        });
+        let missing = functions_missing_from(&pregenerated, &functions);
+        if !missing.is_empty() {
+            panic!(
+                "blpapi-sys: BLPAPI_PREGENERATED_BINDINGS ({}) was generated for another {FUNCTIONS_FILE}; it lacks: {}",
+                pregenerated_bindings.display(),
+                missing.join(", ")
+            );
+        }
 
         copy_bindings(&pregenerated_bindings, &bindings_out)
             .unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
@@ -91,8 +115,6 @@ fn main() {
     // Build bindgen wrapper that includes all blpapi_*.h headers found
     let wrapper =
         generate_wrapper_header(&include_dir).unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
-
-    let functions = read_function_allowlist().unwrap_or_else(|e| panic!("blpapi-sys: {}", e));
 
     // Pin the generated code to this crate's MSRV and edition rather than to the
     // rustc running the build script: edition 2024 requires `unsafe extern "C"`
@@ -133,14 +155,7 @@ fn main() {
     // bindgen drops an allowlisted name the headers do not declare without a word.
     // Left alone, a typo or a function an SDK removed would only surface as a
     // missing method at the first call site, or never.
-    // Compare without whitespace: without rustfmt (CI containers may lack it) bindgen
-    // writes `pub blpapi_X :` rather than `pub blpapi_X:`.
-    let generated: String = bindings.to_string().split_whitespace().collect();
-    let missing: Vec<&str> = functions
-        .iter()
-        .map(String::as_str)
-        .filter(|function| !generated.contains(&format!("pub{function}:")))
-        .collect();
+    let missing = functions_missing_from(&bindings.to_string(), &functions);
     if !missing.is_empty() {
         panic!(
             "blpapi-sys: {FUNCTIONS_FILE} names functions the SDK headers in {} do not declare: {}",
@@ -154,6 +169,33 @@ fn main() {
         .unwrap_or_else(|e| panic!("Failed to write bindings: {}", e));
 
     export_bindings_if_requested(&bindings_out);
+}
+
+/// The names in `functions` that `bindings` does not declare as a field of the function table.
+///
+/// Compared without whitespace: without rustfmt (CI containers may lack it) bindgen writes
+/// `pub blpapi_X :` rather than `pub blpapi_X:`.
+fn functions_missing_from<'a>(bindings: &str, functions: &'a [String]) -> Vec<&'a str> {
+    let generated: String = bindings.split_whitespace().collect();
+    functions
+        .iter()
+        .map(String::as_str)
+        .filter(|function| !generated.contains(&format!("pub{function}:")))
+        .collect()
+}
+
+/// Writes `FUNCTION_NAMES`, the allowlist as C strings, for `src/lib.rs` to include.
+fn write_function_names(functions: &[String], path: &Path) -> Result<(), String> {
+    let mut source = String::from(
+        "/// The BLPAPI C functions the function table [`Blpapi`] resolves, as listed in\n\
+         /// `functions.txt`: every one must exist in a runtime for it to load.\n\
+         pub const FUNCTION_NAMES: &[&::core::ffi::CStr] = &[\n",
+    );
+    for function in functions {
+        source.push_str(&format!("    c\"{function}\",\n"));
+    }
+    source.push_str("];\n");
+    fs::write(path, source).map_err(|e| format!("Failed to write {}: {}", path.display(), e))
 }
 
 /// The function names in [`FUNCTIONS_FILE`]: one per line, blank lines and `#` comments skipped.

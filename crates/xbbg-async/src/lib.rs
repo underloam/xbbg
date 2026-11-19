@@ -32,9 +32,9 @@ pub use engine::testing;
 // Engine::check_entitlements.
 pub use xbbg_core::{EntitlementCheck, SeatType};
 
-// Runtime loading: `Engine::start` fails with `BlpAsyncError::SdkNotLoaded` until `load` has
-// loaded the Bloomberg runtime.
-pub use xbbg_core::{SdkLoadError, load, loaded_sdk_path};
+// Runtime loading: `Engine::start` fails with `BlpAsyncError::SdkNotLoaded` until `load` or
+// `load_system` has loaded the Bloomberg runtime.
+pub use xbbg_core::{SdkLoadError, load, load_system, loaded_sdk_path};
 
 // Request building and validation
 pub use request_builder::{RequestBuilder, RoutedParams};

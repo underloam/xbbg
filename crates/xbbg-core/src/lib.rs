@@ -10,7 +10,8 @@
 //!
 //! Nothing links the Bloomberg runtime. Call [`load`] with the absolute path of the BLPAPI library
 //! before any other call into this crate; until then they panic with a message saying so. Choosing
-//! the path (the search order) is the caller's job.
+//! the path (the search order) is the caller's job; [`load_system`] instead lets the operating
+//! system find the library by its file name, which is where it looked when the runtime was linked.
 
 #![allow(clippy::result_large_err)]
 
@@ -27,7 +28,7 @@ pub fn version() -> &'static str {
 
 // Runtime loading
 mod loader;
-pub use loader::{SdkLoadError, load, loaded_sdk_path, sdk};
+pub use loader::{SdkLoadError, load, load_system, loaded_sdk_path, sdk};
 
 // The unit tests call BLPAPI directly, so they need the runtime before the first one runs.
 #[cfg(test)]

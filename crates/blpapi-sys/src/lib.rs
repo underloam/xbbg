@@ -10,3 +10,7 @@
 // `functions.txt` that `Blpapi::from_library` resolves from a library opened at run
 // time. Nothing here links the Bloomberg runtime.
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
+
+// `FUNCTION_NAMES`: the same list as C strings, so a loader can name the functions a runtime
+// lacks (`Blpapi::from_library` only reports that one is missing).
+include!(concat!(env!("OUT_DIR"), "/function_names.rs"));
