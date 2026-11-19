@@ -76,6 +76,8 @@ def child() -> None:
 
     info = xbbg.get_sdk_info()
     assert info["active"] is None and info["runtime_version"] is None, info
+    assert xbbg.installed_sdks() == [], "expected empty cache in scrubbed environment"
+    assert xbbg.default_sdk_cache_dir() is not None, "default_sdk_cache_dir should answer without a runtime"
     print("xbbg._core imports without a Bloomberg runtime; xbbg reports where it looked")
 
 

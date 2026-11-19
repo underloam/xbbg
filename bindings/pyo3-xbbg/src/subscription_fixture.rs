@@ -1,16 +1,26 @@
 //! Private offline drivers, compiled only with `test-support`: a synthetic
 //! subscription engine, a request-completion driver and async-bridge probes.
 
-use std::sync::Once;
-use std::sync::atomic::AtomicU64;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Once};
 use std::time::{Duration, Instant};
 
-use arrow_array::{ArrayRef, Int64Array, StringArray};
+use arrow_array::{ArrayRef, Int64Array, RecordBatch, StringArray};
 use arrow_schema::{DataType, Field, Schema};
-use xbbg_async::error_presentation::RequestErrorContext;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::prelude::*;
+use tokio::sync::watch;
+use xbbg_async::engine::EngineConfig;
+use xbbg_async::error_presentation::{ErrorKind, ErrorPresentation, RequestErrorContext};
 use xbbg_async::testing::SubscriptionFixture;
+use xbbg_host::subscribe::PreparedSubscribe;
 
-use super::*;
+use crate::completion::{record_batch_future, shutdown_safe_future};
+use crate::config::PyEngineConfig;
+use crate::errors::{blp_async_error_to_pyerr, error_presentation_to_pyerr};
+use crate::subscribe::{SubscribeParams, prepare as prepare_subscribe_params};
+use crate::subscriptions::PySubscription;
 
 /// Ticks of the bridge probe task; advances only while a bridge worker is free.
 static BRIDGE_TICKS: AtomicU64 = AtomicU64::new(0);
@@ -40,22 +50,12 @@ impl PySubscriptionFixture {
                 .subscribe(request)
                 .await
                 .map_err(blp_async_error_to_pyerr)?;
-            let (rx, handle) = stream.into_parts();
-            Ok(PySubscription {
-                legacy_arrow: (!rx.requires_deliveries())
-                    .then(|| Arc::new(LegacySubscriptionArrow::new(batch_items))),
+            Ok(PySubscription::from_test_stream(
+                stream,
                 batch_items,
-                status: handle.status(),
-                deliver_rows: handle.delivers_rows(),
-                overflow_policy: handle.overflow_policy(),
-                consumer: Arc::new(SubscriptionOwner::unhosted(SubscriptionConsumer::new(
-                    rx, handle,
-                ))),
-                engine_shutdown: watch::channel(false).1,
-                tick_dict_keys: Arc::default(),
-                _test_fixture: Some(fixture),
-                _test_legacy_read_started: Some(legacy_read_started),
-            })
+                fixture,
+                legacy_read_started,
+            ))
         })
     }
 }

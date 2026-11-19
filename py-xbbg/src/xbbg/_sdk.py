@@ -1,29 +1,35 @@
-"""Bloomberg runtime loading and reporting.
+"""Bloomberg runtime loading, provisioning and reporting.
 
 ``xbbg._core`` links no Bloomberg code, so it always imports. Right after it does, xbbg loads the
 Bloomberg C++ SDK runtime with :func:`load_runtime`. The search order, the verification of cached
-runtimes and the load itself live in Rust (``xbbg-sdk`` and ``xbbg-host``) and are shared with the
-Node, Java and MCP hosts; this module only passes what Python alone knows:
+runtimes, cache provisioning and the load itself live in Rust (``xbbg-sdk`` and ``xbbg-host``) and
+are shared with the Node, Java and MCP hosts; this module only passes what Python alone knows:
 
-- the directory given to :func:`set_sdk_path`, and
+- the directory given to :func:`set_sdk_path`,
+- an optional provisioning source given to :func:`set_sdk_source`, and
 - the directory of Bloomberg's ``blpapi`` wheel, which it finds without importing the package.
 """
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import importlib.util
+import json
 import logging
 import os
 from pathlib import Path
+import sys
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypeVar
 
 from . import _core_guard
 
 if TYPE_CHECKING:
     from types import ModuleType
 
-# ``_sdk_lock`` guards ``_sdk_info``, ``_manual_sdk_path`` and ``_sdk_generation``.
+_T = TypeVar("_T")
+
+# ``_sdk_lock`` guards ``_sdk_info``, ``_manual_sdk_path``, ``_sdk_source`` and ``_sdk_generation``.
 # It is never held while probing the filesystem or importing the native module;
 # the generation lets ``get_sdk_info`` drop results computed before a path change.
 _sdk_lock = threading.Lock()
@@ -32,10 +38,14 @@ _load_lock = threading.Lock()
 _sdk_generation = 0
 _sdk_info: dict | None = None
 _manual_sdk_path: Path | None = None
+_sdk_source: str | None = None
 logger = logging.getLogger(__name__)
 
 #: Label of the host hint that carries the directory of Bloomberg's ``blpapi`` Python package.
 BLPAPI_PYTHON_HINT = "blpapi_python"
+
+#: Bloomberg's public PyPI simple index hosting official ``blpapi`` wheels.
+BLOOMBERG_PYPI_INDEX = "https://blpapi.bloomberg.com/repository/releases/python/simple/"
 
 # ``get_sdk_info`` source names by the locator's ``SourceKind``; a hint is named by its label.
 _SOURCE_NAMES = {
@@ -49,6 +59,16 @@ _SOURCE_NAMES = {
     "system": "system",
     "cache": "xbbg_cache",
 }
+
+
+def _with_core_without_runtime(fn: Callable[[ModuleType], _T]) -> _T:
+    """Run ``fn(core)`` without loading a Bloomberg runtime, forgetting ``_core`` if still unloaded."""
+    core = _core_guard.import_without_runtime()
+    try:
+        return fn(core)
+    finally:
+        if core.loaded_sdk() is None:
+            _core_guard.forget_core(core)
 
 
 def _blpapi_package_init() -> Path | None:
@@ -109,7 +129,7 @@ def _not_found_help(error: BaseException) -> str:
         "  3. BLPAPI_ROOT - an environment variable naming the root of a Bloomberg C++ SDK\n"
         "  4. XBBG_DEV_SDK_ROOT - an absolute SDK root, for development checkouts\n"
         "  5. the blpapi Python package: pip install blpapi --index-url "
-        "https://blpapi.bloomberg.com/repository/releases/python/simple/\n"
+        f"{BLOOMBERG_PYPI_INDEX}\n"
         "  6. Bloomberg Terminal (DAPI) - automatically detected if installed\n"
         "  7. the operating system's library search path (PATH on Windows, LD_LIBRARY_PATH on Linux, "
         "DYLD_LIBRARY_PATH and DYLD_FALLBACK_LIBRARY_PATH on macOS)\n"
@@ -117,7 +137,10 @@ def _not_found_help(error: BaseException) -> str:
         "on Linux, /usr/local/lib and /usr/lib on macOS, the application and system directories on "
         "Windows\n"
         "  9. the xbbg runtime cache: a Bloomberg runtime provisioned into XBBG_CACHE_DIR "
-        "(default: the per-user xbbg cache directory) is used last, after its hash is verified"
+        "(default: the per-user xbbg cache directory) is used last, after its hash is verified.\n"
+        "     Provision it with `xbbg-sdk --source ...` (or `python -m xbbg.sdk` / "
+        "`xbbg.provision_sdk(...)`), or set XBBG_SDK_SOURCE / `xbbg.set_sdk_source(...)` "
+        "to provision automatically on first load."
     )
 
 
@@ -135,8 +158,13 @@ def load_runtime(core: ModuleType) -> dict[str, Any]:
         loaded = core.loaded_sdk()
         if loaded is not None:
             return loaded
+        request = _locate_request()
+        with _sdk_lock:
+            sdk_source = _sdk_source if "explicit" not in request else None
         try:
-            return core.load_sdk(_locate_request())
+            if sdk_source is not None:
+                return core.load_sdk(request, sdk_source=sdk_source)
+            return core.load_sdk(request)
         except ImportError as error:
             raise ImportError(_not_found_help(error), name=_core_guard.CORE_MODULE) from error
 
@@ -163,6 +191,31 @@ def _copy_source(source: dict) -> dict:
 def _copy_sdk_info(info: dict) -> dict:
     """Return a caller-owned copy of an SDK info dict."""
     return {**info, "sources": [_copy_source(source) for source in info["sources"]]}
+
+
+def _provisioned_from_wire(raw: dict[str, Any]) -> dict[str, Any]:
+    """Convert a camelCase ``xbbg-sdk`` JSON result into Pythonic keys and ``Path`` values."""
+    library_path = Path(raw["libraryPath"])
+    install_dir = library_path.parent.parent if library_path.parent.name == "lib" else library_path.parent
+    return {
+        "version": raw["version"],
+        "platform": raw["platform"],
+        "install_dir": install_dir,
+        "library_path": library_path,
+        "license_paths": [Path(entry) for entry in raw.get("licensePaths", [])],
+        "source": raw["source"],
+        "artifact_url": raw["artifactUrl"],
+        "artifact_sha256": raw["artifactSha256"],
+        "lib_sha256": raw["libSha256"],
+        "cache_hit": bool(raw["cacheHit"]),
+    }
+
+
+def _invalidate_sdk_info_cache() -> None:
+    global _sdk_info, _sdk_generation
+    with _sdk_lock:
+        _sdk_info = None
+        _sdk_generation += 1
 
 
 def get_sdk_info() -> dict:
@@ -388,3 +441,171 @@ def clear_sdk_path() -> None:
         _manual_sdk_path = None
         _sdk_info = None  # Refresh on next get_sdk_info() call
         _sdk_generation += 1
+
+
+def set_sdk_source(source: str | None) -> None:
+    """Configure a Bloomberg SDK provisioning source for automatic cache fallback.
+
+    When no local or cached Bloomberg runtime is found during load (and :func:`set_sdk_path`
+    was not called), xbbg provisions a runtime from ``source`` into the shared xbbg cache
+    (``XBBG_CACHE_DIR`` or the per-user xbbg cache directory) and loads it.
+
+    Pass ``None`` to clear a previously configured source. Accepted specs match
+    ``XBBG_SDK_SOURCE`` and the ``xbbg-sdk`` CLI:
+
+    - ``"pypi:<url>"`` (for example ``f"pypi:{xbbg.BLOOMBERG_PYPI_INDEX}"``)
+    - ``"conda:<channel-url>"``
+    - ``"artifact:<url-or-path>"`` (optionally with ``#sha256=<64-hex>``)
+    - a bare ``http(s)://`` URL or local archive path (auto-detected)
+
+    Raises:
+        ValueError: ``source`` is blank.
+        RuntimeError: A Bloomberg runtime is already loaded in this process.
+    """
+    global _sdk_source, _sdk_info, _sdk_generation
+
+    if source is not None:
+        normalized = source.strip()
+        if not normalized:
+            raise ValueError("SDK source must not be blank")
+        core = sys.modules.get(_core_guard.CORE_MODULE)
+        if core is not None:
+            loaded_sdk = getattr(core, "loaded_sdk", None)
+            loaded = loaded_sdk() if callable(loaded_sdk) else None
+            if loaded is not None:
+                raise RuntimeError(
+                    f"The Bloomberg runtime is already loaded from {loaded['path']} and cannot be "
+                    "replaced by provisioning. Call xbbg.set_sdk_source() before anything else "
+                    "uses xbbg, or restart Python."
+                )
+    else:
+        normalized = None
+
+    with _sdk_lock:
+        _sdk_source = normalized
+        _sdk_info = None
+        _sdk_generation += 1
+
+
+def get_sdk_source() -> str | None:
+    """Return the Bloomberg SDK provisioning source set with :func:`set_sdk_source`, if any."""
+    with _sdk_lock:
+        return _sdk_source
+
+
+def default_sdk_cache_dir() -> Path | None:
+    """Return the default shared xbbg cache root (``XBBG_CACHE_DIR`` or user cache directory).
+
+    Works before any Bloomberg runtime is installed or loaded.
+    """
+    raw = _with_core_without_runtime(lambda core: core.default_sdk_cache_dir())
+    return Path(raw) if raw is not None else None
+
+
+def installed_sdks(
+    cache_dir: str | os.PathLike[str] | None = None,
+    *,
+    platform: str | None = None,
+) -> list[dict[str, Any]]:
+    """List verified Bloomberg SDK runtimes installed in the shared xbbg cache.
+
+    Works before any Bloomberg runtime is installed or loaded.
+
+    Args:
+        cache_dir: Optional cache root overriding ``XBBG_CACHE_DIR`` / default cache directory.
+        platform: Optional platform filter (for example ``"linux-x86_64"`` or ``"macos-aarch64"``).
+
+    Returns:
+        List of dicts with ``version``, ``platform``, ``install_dir``, ``library_path``,
+        ``license_paths``, ``source``, ``artifact_url``, ``artifact_sha256``, ``lib_sha256``
+        and ``cache_hit``.
+    """
+    cache_arg = os.fspath(cache_dir) if cache_dir is not None else None
+    raw = _with_core_without_runtime(lambda core: core.installed_sdks(cache_arg, platform))
+    return [_provisioned_from_wire(entry) for entry in raw]
+
+
+def provision_sdk(
+    source: str | dict[str, Any] | None = None,
+    *,
+    version: str | None = None,
+    platform: str | None = None,
+    cache_dir: str | os.PathLike[str] | None = None,
+    offline: bool = False,
+    proxy: str | dict[str, Any] | None = None,
+    credentials: list[dict[str, Any]] | None = None,
+    netrc: str | os.PathLike[str] | None = None,
+    extra_ca_pem: str | os.PathLike[str] | None = None,
+    connect_timeout_ms: int | None = None,
+    read_timeout_ms: int | None = None,
+    retries: int | None = None,
+    require_artifact_hash: bool | None = None,
+) -> dict[str, Any]:
+    """Provision a Bloomberg C++ SDK runtime into the shared xbbg cache.
+
+    This runs before any Bloomberg runtime is installed or loaded, using the shared Rust
+    provisioner (``xbbg-sdk``) and the same ``<cache>/sdk/<version>/<platform>/`` layout used
+    by Python, Node/JS, Java and ``xbbg-mcp``.
+
+    Args:
+        source: Source specification string (``"pypi:<url>"``, ``"conda:<url>"``,
+            ``"artifact:<url-or-path>"``, or bare URL/path) or structured source dict.
+            When ``None``, falls back to :func:`get_sdk_source` and then ``XBBG_SDK_SOURCE``.
+        version: Exact SDK version (for example ``"3.26.5.1"``) or ``"latest"``.
+            When ``None``, falls back to ``XBBG_SDK_VERSION`` or latest.
+        platform: Target platform (defaults to the current host platform).
+        cache_dir: Cache root (defaults to ``XBBG_CACHE_DIR`` or the per-user xbbg cache).
+        offline: Only use already-cached installations without network access.
+        proxy: Optional proxy URL string or proxy config dict.
+        credentials: Optional list of per-host credential dicts
+            (``[{"host": "...", "username": "...", "password": "..."}]`` or
+            ``[{"host": "...", "token": "..."}]``).
+        netrc: Optional path to a ``.netrc`` file.
+        extra_ca_pem: Optional path to an extra CA certificate bundle in PEM format.
+        connect_timeout_ms: HTTP connect timeout in milliseconds.
+        read_timeout_ms: HTTP read timeout in milliseconds.
+        retries: Retry count for transient HTTP failures.
+        require_artifact_hash: Require a SHA-256 hash when fetching direct artifacts.
+
+    Returns:
+        Dict with ``version``, ``platform``, ``install_dir``, ``library_path``,
+        ``license_paths``, ``source``, ``artifact_url``, ``artifact_sha256``, ``lib_sha256``
+        and ``cache_hit``.
+    """
+    resolved_source: str | dict[str, Any] | None = source
+    if resolved_source is None:
+        resolved_source = get_sdk_source() or (os.environ.get("XBBG_SDK_SOURCE") or "").strip() or None
+    if resolved_source is None:
+        raise ValueError("source is required (pass source=..., call xbbg.set_sdk_source(...), or set XBBG_SDK_SOURCE)")
+
+    payload: dict[str, Any] = {"source": resolved_source}
+    resolved_version = version if version is not None else ((os.environ.get("XBBG_SDK_VERSION") or "").strip() or None)
+    if resolved_version is not None:
+        payload["version"] = resolved_version
+    if platform is not None:
+        payload["platform"] = platform
+    if cache_dir is not None:
+        payload["cacheDir"] = os.fspath(cache_dir)
+    if offline:
+        payload["offline"] = True
+    if proxy is not None:
+        payload["proxy"] = proxy
+    if credentials is not None:
+        payload["credentials"] = credentials
+    if netrc is not None:
+        payload["netrc"] = os.fspath(netrc)
+    if extra_ca_pem is not None:
+        payload["extraCaPem"] = os.fspath(extra_ca_pem)
+    if connect_timeout_ms is not None:
+        payload["connectTimeoutMillis"] = connect_timeout_ms
+    if read_timeout_ms is not None:
+        payload["readTimeoutMillis"] = read_timeout_ms
+    if retries is not None:
+        payload["retries"] = retries
+    if require_artifact_hash is not None:
+        payload["requireArtifactHash"] = require_artifact_hash
+
+    encoded = json.dumps(payload)
+    raw = _with_core_without_runtime(lambda core: core.provision_sdk(encoded))
+    _invalidate_sdk_info_cache()
+    return _provisioned_from_wire(raw)

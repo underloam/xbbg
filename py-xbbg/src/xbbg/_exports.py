@@ -1,9 +1,15 @@
 from __future__ import annotations
 
 SDK_EXPORTS = (
+    "BLOOMBERG_PYPI_INDEX",
     "get_sdk_info",
     "set_sdk_path",
     "clear_sdk_path",
+    "set_sdk_source",
+    "get_sdk_source",
+    "provision_sdk",
+    "installed_sdks",
+    "default_sdk_cache_dir",
 )
 
 CORE_EXPORTS = (

@@ -41,7 +41,17 @@ from ._python_logging import (
     python_logging_dropped as python_logging_dropped,
 )
 from ._request_options import OverrideSpec as OverrideSpec, ovr as ovr
-from ._sdk import clear_sdk_path as clear_sdk_path, get_sdk_info as get_sdk_info, set_sdk_path as set_sdk_path
+from ._sdk import (
+    BLOOMBERG_PYPI_INDEX as BLOOMBERG_PYPI_INDEX,
+    clear_sdk_path as clear_sdk_path,
+    default_sdk_cache_dir as default_sdk_cache_dir,
+    get_sdk_info as get_sdk_info,
+    get_sdk_source as get_sdk_source,
+    installed_sdks as installed_sdks,
+    provision_sdk as provision_sdk,
+    set_sdk_path as set_sdk_path,
+    set_sdk_source as set_sdk_source,
+)
 from ._services_gen import (
     ExtractorHint as ExtractorHint,
     Operation as Operation,
@@ -269,9 +279,15 @@ __all__ = [
     "abops",
     "bschema",
     "abschema",
+    "BLOOMBERG_PYPI_INDEX",
     "get_sdk_info",
     "set_sdk_path",
     "clear_sdk_path",
+    "set_sdk_source",
+    "get_sdk_source",
+    "provision_sdk",
+    "installed_sdks",
+    "default_sdk_cache_dir",
     "FieldTypeCache",
     "FieldInfo",
     "resolve_field_types",

@@ -27,6 +27,7 @@ __all__ = [
     "PySubscription",
     "apresent_historical",
     "ashape_bqr",
+    "default_sdk_cache_dir",
     "enable_sdk_logging",
     "ext_auction_field_groups",
     "ext_auction_zero_price_fields",
@@ -79,10 +80,12 @@ __all__ = [
     "ext_validated_auction_venues",
     "ext_validated_inav_tickers",
     "get_log_level",
+    "installed_sdks",
     "load_sdk",
     "loaded_sdk",
     "locate_sdk",
     "normalize_subscription_options",
+    "provision_sdk",
     "recipe_active_cdx",
     "recipe_active_futures",
     "recipe_adjust_ccy",
@@ -109,6 +112,8 @@ __all__ = [
     "recipe_turnover",
     "recipe_vol_surface",
     "recipe_yas",
+    "run_sdk_cli",
+    "sdk_bloomberg_pypi_index",
     "sdk_version",
     "set_log_level",
     "validate_subscription_controls",
@@ -498,8 +503,8 @@ class PyEngine:
         r"""
         Get service schema (from cache or introspect).
         
-        Returns a dictionary with schema information including operations.
-        First checks disk cache; if not cached, introspects the service.
+        Returns a JSON string with schema information including operations.
+        First checks memory/disk cache; if not cached, introspects the service.
         """
     def get_operation(self, service: builtins.str, operation: builtins.str) -> typing.Any:
         r"""
@@ -1431,6 +1436,11 @@ def ashape_bqr(data: typing.Any, ticker: builtins.str, key_column: builtins.str,
         An awaitable resolving to an ArrowTable.
     """
 
+def default_sdk_cache_dir() -> typing.Optional[builtins.str]:
+    r"""
+    Default shared xbbg cache root (`XBBG_CACHE_DIR` or platform user cache).
+    """
+
 def enable_sdk_logging(level: builtins.str) -> None: ...
 
 def ext_auction_field_groups() -> dict:
@@ -1783,15 +1793,22 @@ def get_log_level() -> builtins.str:
     Get the current Rust log level as a string.
     """
 
-def load_sdk(request: typing.Optional[dict] = None) -> dict:
+def installed_sdks(cache_dir: typing.Optional[builtins.str] = None, platform: typing.Optional[builtins.str] = None) -> list:
+    r"""
+    List valid Bloomberg SDK runtimes installed in the shared xbbg cache.
+    """
+
+def load_sdk(request: typing.Optional[dict] = None, sdk_source: typing.Optional[builtins.str] = None) -> dict:
     r"""
     Load the Bloomberg runtime into this process and describe it.
     
     `request` holds the optional keys of `LocateRequest` (`explicit`, `hints`, `env`,
     `cacheRoot`, `repoRoot`, `platform`); `None` searches everything with the process
     environment. Candidates are tried in the single search order; one that fails to load
-    (including a runtime too old for xbbg) is reported and the next is tried. A runtime that is
-    already loaded is returned unchanged.
+    (including a runtime too old for xbbg) is reported and the next is tried. When no
+    explicit path is set and no local or cached runtime loads, `sdk_source` (or
+    `XBBG_SDK_SOURCE`) provisions one into the shared xbbg cache and loads it. A runtime
+    that is already loaded is returned unchanged.
     
     Returns `{"path", "source", "detail", "version", "rejected"}`. Raises `ImportError`
     listing every rejected candidate when no runtime loads.
@@ -1822,6 +1839,16 @@ def normalize_subscription_options(options: typing.Optional[typing.Sequence[buil
     `conflate`, `conflate` is appended once; that is rejected for any service but
     `//blp/mktdata` and when an `interval` option is present. Returns `None` when
     no options were given and `conflate` is false.
+    """
+
+def provision_sdk(options_json: builtins.str) -> dict:
+    r"""
+    Provision a Bloomberg C++ SDK runtime into the shared xbbg cache without requiring
+    any Bloomberg runtime to be loaded first.
+    
+    `options_json` is a camelCase JSON object matching `xbbg_sdk::request::ProvisionRequest`.
+    Returns a dict with `version`, `platform`, `libraryPath`, `licensePaths`, `source`,
+    `artifactUrl`, `artifactSha256`, `libSha256`, and `cacheHit`.
     """
 
 def recipe_active_cdx(engine: PyEngine, gen_ticker: builtins.str, dt: builtins.str, lookback_days: typing.Optional[builtins.int] = None, versionless: builtins.bool = False) -> typing.Any:
@@ -2106,6 +2133,18 @@ def recipe_yas(engine: PyEngine, tickers: typing.Sequence[builtins.str], fields:
         price: Price override
         benchmark: Benchmark security for spread calculation
         request_options: Normalized overrides, elements, options, types, format, timezones, EIDs, and validation controls
+    """
+
+def run_sdk_cli(prog: builtins.str, args: typing.Sequence[builtins.str], env: typing.Optional[typing.Mapping[builtins.str, builtins.str]] = None) -> tuple[builtins.int, builtins.str, builtins.str]:
+    r"""
+    Run the shared xbbg SDK cache provisioning CLI without requiring a Bloomberg runtime.
+    
+    Returns `(exit_code, stdout, stderr)`.
+    """
+
+def sdk_bloomberg_pypi_index() -> builtins.str:
+    r"""
+    Bloomberg's public PyPI simple index URL.
     """
 
 def sdk_version() -> tuple[builtins.int, builtins.int, builtins.int, builtins.int]:
