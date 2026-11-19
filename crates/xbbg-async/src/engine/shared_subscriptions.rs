@@ -1749,8 +1749,7 @@ impl FeedSession {
     fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
-            test.enable_all_fields(key);
-            return Ok(());
+            return test.enable_all_fields(key);
         }
         self.command()?.enable_all_fields(key)
     }
@@ -1762,8 +1761,7 @@ impl FeedSession {
     ) -> Result<(), BlpAsyncError> {
         #[cfg(any(test, feature = "test-support"))]
         if let Some(test) = &self.test {
-            test.seed_kinds(key, kinds);
-            return Ok(());
+            return test.seed_kinds(key, kinds);
         }
         self.command()?.seed_kinds(key, kinds)
     }
@@ -2823,6 +2821,12 @@ impl SharedSubscriptions {
                         (feed, true)
                     }
                 };
+                if !created && matches!(feed.state.lock().lifecycle, "failed" | "closed") {
+                    return Err(BlpAsyncError::Blp(BlpError::SubscriptionFailure {
+                        cid: None,
+                        label: Some("upstream feed ended while attaching".into()),
+                    }));
+                }
                 if !created && !kinds.is_empty() {
                     feed.session.seed_kinds(feed.upstream_key()?, &kinds)?;
                 }

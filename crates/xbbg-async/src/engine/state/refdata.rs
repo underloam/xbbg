@@ -124,8 +124,16 @@ impl RefDataState {
 
         // Fixed long output modes bypass ColumnSet entirely; keep ColumnSet hints only
         // for dynamic wide/metadata paths that actually append through ColumnSet.
-        let long_value_type = (format == OutputFormat::Long && long_mode == LongMode::String)
-            .then(|| common_value_type(&fields, &arrow_types));
+        // When `include_security_errors` is set, `__SECURITY_ERROR__` rows always write
+        // string messages into `value`, so a numeric field hint cannot narrow the column.
+        let long_value_type =
+            (format == OutputFormat::Long && long_mode == LongMode::String).then(|| {
+                if include_security_errors {
+                    ArrowType::String
+                } else {
+                    common_value_type(&fields, &arrow_types)
+                }
+            });
         let wide_columns =
             (format == OutputFormat::Wide).then(|| WideColumns::refdata(&fields, &arrow_types));
         let mut columns = ColumnSet::new();
@@ -363,6 +371,9 @@ impl RefDataState {
         subcategory: &str,
         message: &str,
     ) {
+        if self.format != OutputFormat::Long {
+            return;
+        }
         if let Some(long_columns) = self.long_columns.as_mut() {
             let detail = format!(
                 "code={code} category={category} subcategory={subcategory} message={message}"
@@ -1091,6 +1102,85 @@ mod tests {
                 refusal_result(&securities, OutputFormat::Wide, include_security_errors).unwrap();
             assert_eq!(strings(&batch, "ticker"), ["TEST Equity"]);
             assert_eq!(security_error_tickers(&batch), ["REFUSED1 Curncy"]);
+        }
+    }
+
+    #[test]
+    fn long_with_numeric_field_types_and_security_errors_keeps_refusal_text() {
+        use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
+
+        let event = refusal_response(&[("TEST Equity", false), ("REFUSED1 Curncy", true)]);
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        let (sender, mut receiver) = oneshot::channel();
+        let field_types = HashMap::from([("VALUE".to_string(), ArrowType::Float64)]);
+        RefDataState::with_format(
+            vec!["VALUE".into()],
+            OutputFormat::Long,
+            LongMode::String,
+            Some(field_types),
+            true,
+            sender,
+        )
+        .finish(&message);
+        let batch = receiver.try_recv().unwrap().unwrap();
+        assert_eq!(
+            strings(&batch, "ticker"),
+            ["TEST Equity", "REFUSED1 Curncy"]
+        );
+        assert_eq!(strings(&batch, "field"), ["VALUE", "__SECURITY_ERROR__"]);
+        assert_eq!(
+            strings(&batch, "value"),
+            [
+                "1.5",
+                "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
+            ]
+        );
+        assert!(
+            !batch
+                .schema_ref()
+                .metadata()
+                .contains_key(METADATA_KEY_TYPE_MISSES),
+            "security error rows must not record type misses"
+        );
+    }
+
+    #[test]
+    fn all_refused_long_typed_and_metadata_with_security_errors_keep_refusal_rows() {
+        for (long_mode, value_col) in [
+            (LongMode::Typed, "value_str"),
+            (LongMode::WithMetadata, "value"),
+        ] {
+            let event = refusal_response(&REFUSED_TWICE);
+            let mut messages = event.event().messages();
+            let message = messages.next().unwrap();
+            let (sender, mut receiver) = oneshot::channel();
+            RefDataState::with_format(
+                vec!["VALUE".into()],
+                OutputFormat::Long,
+                long_mode,
+                Some(HashMap::from([("VALUE".to_string(), ArrowType::Float64)])),
+                true,
+                sender,
+            )
+            .finish(&message);
+            let batch = receiver.try_recv().unwrap().unwrap();
+            assert_eq!(
+                strings(&batch, "ticker"),
+                ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+            );
+            assert_eq!(
+                strings(&batch, "field"),
+                ["__SECURITY_ERROR__", "__SECURITY_ERROR__"]
+            );
+            assert_eq!(
+                strings(&batch, value_col)[0],
+                "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
+            );
+            assert_eq!(
+                security_error_tickers(&batch),
+                ["REFUSED1 Curncy", "REFUSED2 Curncy"]
+            );
         }
     }
 }

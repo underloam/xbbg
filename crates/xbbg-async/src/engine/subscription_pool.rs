@@ -1154,6 +1154,7 @@ impl SubscriptionWorkerState {
                 // re-auth flow, so drain subs, mark Dead, and let the pool spawn
                 // a fresh worker that re-auths during startup.
                 let reason = extract_reason_description(msg);
+                self.connections.clear();
                 xbbg_log::error!(
                     worker_id = self.id,
                     active_subs = self.subs.len(),
@@ -2635,17 +2636,28 @@ impl TestSubscriptionSession {
             });
         }
         let mut worker = self.shared.state.lock();
-        worker.subs[key].add_fields(fields);
-        worker.subs[key].seed_kinds(kinds);
+        let sub = worker.subs.get_mut(key).ok_or_else(Self::unregistered)?;
+        sub.add_fields(fields);
+        sub.seed_kinds(kinds);
         Ok(())
     }
 
-    pub(super) fn enable_all_fields(&self, key: SlabKey) {
-        self.shared.state.lock().subs[key].enable_all_fields();
+    pub(super) fn enable_all_fields(&self, key: SlabKey) -> Result<(), BlpAsyncError> {
+        let mut worker = self.shared.state.lock();
+        let sub = worker.subs.get_mut(key).ok_or_else(Self::unregistered)?;
+        sub.enable_all_fields();
+        Ok(())
     }
 
-    pub(super) fn seed_kinds(&self, key: SlabKey, kinds: &HashMap<String, FieldKind>) {
-        self.shared.state.lock().subs[key].seed_kinds(kinds);
+    pub(super) fn seed_kinds(
+        &self,
+        key: SlabKey,
+        kinds: &HashMap<String, FieldKind>,
+    ) -> Result<(), BlpAsyncError> {
+        let mut worker = self.shared.state.lock();
+        let sub = worker.subs.get_mut(key).ok_or_else(Self::unregistered)?;
+        sub.seed_kinds(kinds);
+        Ok(())
     }
 
     pub(super) fn unsubscribe(
@@ -3234,6 +3246,33 @@ mod tests {
 
         status("SessionConnectionUp", Some("a.example.com:8194"));
         status("SessionTerminated", None);
+        assert!(connections().servers.is_empty());
+
+        status("SessionConnectionUp", Some("a.example.com:8194"));
+        let auth_schema = r#"<ServiceDefinition name="xbbg.test.auth" version="1.0.0.0">
+            <service name="//xbbg/test/auth" version="1.0.0.0">
+                <event name="AuthorizationRevoked" eventType="AuthorizationRevoked"/>
+            </service>
+            <schema>
+                <sequenceType name="AuthorizationRevoked">
+                    <element name="reason" type="Reason" minOccurs="0"/>
+                </sequenceType>
+                <sequenceType name="Reason">
+                    <element name="description" type="String" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let auth_event = TestEvent::with_schema(
+            auth_schema,
+            EventType::AuthorizationStatus,
+            "AuthorizationRevoked",
+            &[],
+            |formatter| formatter.json("{}"),
+        );
+        shared
+            .state
+            .lock()
+            .dispatch_event(auth_event.event(), &shared);
         assert!(connections().servers.is_empty());
     }
 

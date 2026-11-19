@@ -429,9 +429,12 @@ pub(super) struct WorkerShared {
     /// In-flight classic `AuthorizationRequest` waiter.
     pending_identity_auth: Mutex<Option<std::sync::mpsc::SyncSender<Result<(), BlpError>>>>,
     health: Arc<AtomicU8>,
-    /// Connections the SDK reports up. Held while failing requests on a
-    /// connectivity loss so a reconnect cannot interleave with the drain.
+    /// Connections the SDK reports up. Held while taking in-flight requests on
+    /// a connectivity loss so a reconnect cannot interleave with the drain.
     connectivity: Mutex<ConnectivityState>,
+    /// Requests failed on the SDK callback thread (zero reconnect grace) that
+    /// still need `session.cancel` from the timeout scanner thread.
+    pending_cancels: Mutex<Vec<RequestTicket>>,
     /// How long the session may stay without any connection before its
     /// requests are failed (`EngineConfig::reconnect_grace_ms`); zero fails
     /// them when the last connection drops.
@@ -458,9 +461,27 @@ impl WorkerShared {
             pending_identity_auth: Mutex::new(None),
             health,
             connectivity: Mutex::new(ConnectivityState::default()),
+            pending_cancels: Mutex::new(Vec::new()),
             reconnect_grace,
             shutting_down: AtomicBool::new(false),
             lifecycle: RwLock::new(()),
+        }
+    }
+
+    /// Transition between `Healthy` (0) and `Degraded` (1) without ever
+    /// overwriting terminal `Dead` (2) set by quarantine or shutdown.
+    fn set_non_terminal_health(&self, value: u8) {
+        let mut current = self.health.load(Ordering::Acquire);
+        while current != 2 {
+            match self.health.compare_exchange_weak(
+                current,
+                value,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            ) {
+                Ok(_) => return,
+                Err(observed) => current = observed,
+            }
         }
     }
 
@@ -538,16 +559,29 @@ impl WorkerShared {
         expired
     }
 
-    fn drain_in_flight(&self, reason: &str) {
-        let drained: Vec<RequestSlot> = {
-            let mut requests = self.requests.lock();
-            requests.drain().collect()
-        };
+    fn take_in_flight(&self) -> Vec<(SlabKey, RequestSlot)> {
+        let mut requests = self.requests.lock();
+        let keys: Vec<SlabKey> = requests.iter().map(|(key, _)| key).collect();
+        keys.into_iter()
+            .map(|key| (key, requests.remove(key)))
+            .collect()
+    }
+
+    fn fail_drained(
+        &self,
+        drained: Vec<(SlabKey, RequestSlot)>,
+        reason: &str,
+    ) -> Vec<RequestTicket> {
         if drained.is_empty() {
-            return;
+            return Vec::new();
         }
         let count = drained.len();
-        for slot in drained {
+        let mut tickets = Vec::with_capacity(count);
+        for (key, slot) in drained {
+            tickets.push(RequestTicket {
+                key,
+                generation: slot.cell.generation,
+            });
             slot.cell.fail(BlpError::Internal {
                 detail: format!("{} (worker={})", reason, self.id),
             });
@@ -558,31 +592,42 @@ impl WorkerShared {
             reason = reason,
             "drained in-flight requests"
         );
+        tickets
+    }
+
+    fn drain_in_flight(&self, reason: &str) -> Vec<RequestTicket> {
+        self.fail_drained(self.take_in_flight(), reason)
     }
 
     /// Fail every in-flight request if the session has had no connection for
-    /// at least the reconnect grace as of `now`; returns whether it did.
+    /// at least the reconnect grace as of `now`, returning the drained tickets
+    /// so the caller can cancel them in the Bloomberg SDK.
     ///
     /// The SDK finishes requests across a reconnect, so a lost connection
     /// alone fails nothing. This is the backstop for a session that does not
     /// come back: without it a request would wait for `request_timeout_ms`,
     /// which is off by default. A zero grace is handled when the last
     /// connection drops, so it never expires here.
-    fn fail_if_disconnected_past_grace(&self, now: Instant) -> bool {
+    fn drain_disconnected_past_grace(&self, now: Instant) -> Option<Vec<RequestTicket>> {
         if self.reconnect_grace.is_zero() || self.shutting_down.load(Ordering::Acquire) {
-            return false;
+            return None;
         }
-        let connectivity = self.connectivity.lock();
-        let Some(lost_at) = connectivity.lost_at else {
-            return false;
+        let drained = {
+            let connectivity = self.connectivity.lock();
+            let lost_at = connectivity.lost_at?;
+            if !connectivity.up.is_empty()
+                || now.saturating_duration_since(lost_at) < self.reconnect_grace
+            {
+                return None;
+            }
+            self.take_in_flight()
         };
-        if !connectivity.up.is_empty()
-            || now.saturating_duration_since(lost_at) < self.reconnect_grace
-        {
-            return false;
-        }
-        self.drain_in_flight(CONNECTION_LOST_REASON);
-        true
+        Some(self.fail_drained(drained, CONNECTION_LOST_REASON))
+    }
+
+    #[cfg(test)]
+    fn fail_if_disconnected_past_grace(&self, now: Instant) -> bool {
+        self.drain_disconnected_past_grace(now).is_some()
     }
 
     /// This session's connected servers, in the order they connected.
@@ -956,7 +1001,11 @@ impl WorkerShared {
                     reason.clone(),
                 )));
                 self.drain_in_flight(reason.as_deref().unwrap_or("Bloomberg session terminated"));
-                self.connectivity.lock().up.clear();
+                {
+                    let mut connectivity = self.connectivity.lock();
+                    connectivity.up.clear();
+                    connectivity.lost_at = None;
+                }
                 self.fail_pending_service_opens("Bloomberg session terminated");
                 self.fail_pending_identity("Bloomberg session terminated");
                 self.health.store(2, Ordering::Release);
@@ -996,6 +1045,11 @@ impl WorkerShared {
                         .as_deref()
                         .unwrap_or("Bloomberg session identity revoked"),
                 );
+                {
+                    let mut connectivity = self.connectivity.lock();
+                    connectivity.up.clear();
+                    connectivity.lost_at = None;
+                }
                 self.fail_pending_service_opens("Bloomberg session identity revoked");
                 self.fail_pending_identity("Bloomberg session identity revoked");
                 self.health.store(2, Ordering::Release);
@@ -1015,6 +1069,7 @@ impl WorkerShared {
                 let reason = extract_reason_description(msg);
                 let server = connection_server(msg);
                 let shutdown_requested = self.shutting_down.load(Ordering::Acquire);
+                let mut drained = Vec::new();
                 let mut connectivity = self.connectivity.lock();
                 connectivity.up.down(server.as_deref());
                 let connections_left = connectivity.up.len();
@@ -1022,12 +1077,16 @@ impl WorkerShared {
                 let lost = connectivity.up.is_empty() && !shutdown_requested;
                 if lost {
                     connectivity.lost_at.get_or_insert_with(Instant::now);
-                    self.health.store(1, Ordering::Release);
+                    self.set_non_terminal_health(1);
                     if self.reconnect_grace.is_zero() {
-                        self.drain_in_flight(CONNECTION_LOST_REASON);
+                        drained = self.take_in_flight();
                     }
                 }
                 drop(connectivity);
+                if !drained.is_empty() {
+                    let tickets = self.fail_drained(drained, CONNECTION_LOST_REASON);
+                    self.pending_cancels.lock().extend(tickets);
+                }
                 if shutdown_requested {
                     xbbg_log::info!(
                         worker_id = self.id,
@@ -1062,7 +1121,7 @@ impl WorkerShared {
                 connectivity.up.up(server.as_deref());
                 connectivity.lost_at = None;
                 if !shutdown_requested {
-                    self.health.store(0, Ordering::Release);
+                    self.set_non_terminal_health(0);
                 }
                 let connected = connectivity.up.servers();
                 drop(connectivity);
@@ -1779,9 +1838,36 @@ impl AsyncRequestWorker {
     }
 
     /// Fail in-flight requests if the session has been without any connection
-    /// for `reconnect_grace_ms`; see [`WorkerShared::fail_if_disconnected_past_grace`].
+    /// for `reconnect_grace_ms`, and cancel any drained requests in the SDK;
+    /// see [`WorkerShared::drain_disconnected_past_grace`].
     pub(crate) fn fail_if_disconnected_past_grace(&self) -> bool {
-        self.shared.fail_if_disconnected_past_grace(Instant::now())
+        let mut tickets: Vec<RequestTicket> = {
+            let mut pending = self.shared.pending_cancels.lock();
+            std::mem::take(&mut *pending)
+        };
+        let expired = self.shared.drain_disconnected_past_grace(Instant::now());
+        let failed = expired.is_some();
+        if let Some(drained) = expired {
+            tickets.extend(drained);
+        }
+        if !tickets.is_empty() {
+            let _lifecycle = self.shared.lifecycle.read();
+            if !self.is_shutting_down() {
+                for ticket in tickets {
+                    let cid = DispatchKey::with_generation(ticket.key, ticket.generation)
+                        .to_correlation_id();
+                    if let Err(error) = self.session.cancel(&cid) {
+                        xbbg_log::warn!(
+                            worker_id = self.id,
+                            key = ticket.key,
+                            error = %error,
+                            "failed to cancel disconnected Bloomberg request"
+                        );
+                    }
+                }
+            }
+        }
+        failed
     }
 
     /// Introspect a service's schema.
@@ -1821,6 +1907,7 @@ impl AsyncRequestWorker {
         self.shared
             .fail_pending_service_opens("request worker shutdown");
         self.shared.fail_pending_identity("request worker shutdown");
+        self.shared.pending_cancels.lock().clear();
         self.shared.drain_in_flight("request worker shutdown");
         self.session.stop_async();
     }
@@ -1836,6 +1923,7 @@ impl AsyncRequestWorker {
         self.session.stop();
         self.shared.fail_pending_service_opens("worker shutdown");
         self.shared.fail_pending_identity("worker shutdown");
+        self.shared.pending_cancels.lock().clear();
         self.shared.drain_in_flight("worker shutdown");
     }
 }
@@ -2655,5 +2743,75 @@ mod tests {
         assert!(connected(&shared).is_empty());
         assert!(matches!(rx.try_recv(), Ok(Err(BlpError::Internal { .. }))));
         assert_eq!(shared.health.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn authorization_revoked_clears_connections_and_marks_dead() {
+        let shared = shared();
+        session_status(&shared, "SessionConnectionUp", Some(SERVER_A));
+        let mut rx = pending_request(&shared);
+
+        let schema = r#"<ServiceDefinition name="xbbg.test.auth" version="1.0.0.0">
+            <service name="//xbbg/test/auth" version="1.0.0.0">
+                <event name="AuthorizationRevoked" eventType="AuthorizationRevoked"/>
+            </service>
+            <schema>
+                <sequenceType name="AuthorizationRevoked">
+                    <element name="reason" type="Reason" minOccurs="0"/>
+                </sequenceType>
+                <sequenceType name="Reason">
+                    <element name="description" type="String" minOccurs="0"/>
+                </sequenceType>
+            </schema>
+        </ServiceDefinition>"#;
+        let event = xbbg_core::test_support::TestEvent::with_schema(
+            schema,
+            EventType::AuthorizationStatus,
+            "AuthorizationRevoked",
+            &[],
+            |formatter| formatter.json("{}"),
+        );
+        let mut messages = event.event().messages();
+        let message = messages.next().unwrap();
+        shared.handle_session_status(&message);
+
+        assert!(connected(&shared).is_empty());
+        assert!(matches!(rx.try_recv(), Ok(Err(BlpError::Internal { .. }))));
+        assert_eq!(shared.health.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn dead_worker_health_is_never_overwritten_by_connection_status() {
+        let shared = shared();
+        shared.health.store(2, Ordering::Release);
+
+        // Even before `shutting_down` is observed, a quarantined/dead worker
+        // must never be resurrected to Healthy (0) or Degraded (1).
+        session_status(&shared, "SessionConnectionUp", Some(SERVER_A));
+        assert_eq!(shared.health.load(Ordering::Acquire), 2);
+        session_status(&shared, "SessionConnectionDown", Some(SERVER_A));
+        assert_eq!(shared.health.load(Ordering::Acquire), 2);
+    }
+
+    #[test]
+    fn disconnected_drains_return_and_queue_tickets_for_sdk_cancellation() {
+        let shared = shared();
+        session_status(&shared, "SessionConnectionUp", Some(SERVER_A));
+        let mut rx = pending_request(&shared);
+        session_status(&shared, "SessionConnectionDown", Some(SERVER_A));
+        let lost_at = shared.connectivity.lock().lost_at.expect("loss recorded");
+
+        let tickets = shared
+            .drain_disconnected_past_grace(lost_at + Duration::from_secs(10))
+            .expect("grace expired");
+        assert_eq!(tickets.len(), 1);
+        assert_connection_lost(&mut rx);
+
+        let zero = WorkerShared::new(0, Arc::new(AtomicU8::new(0)), Duration::ZERO);
+        session_status(&zero, "SessionConnectionUp", Some(SERVER_A));
+        let mut rx_zero = pending_request(&zero);
+        session_status(&zero, "SessionConnectionDown", Some(SERVER_A));
+        assert_connection_lost(&mut rx_zero);
+        assert_eq!(zero.pending_cancels.lock().len(), 1);
     }
 }
