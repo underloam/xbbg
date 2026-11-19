@@ -57,13 +57,57 @@ def _make_wheel(
     return wheel_path
 
 
+def _strip_blpapi_from_path(raw_path: str) -> str:
+    kept: list[str] = []
+    for entry in raw_path.split(os.pathsep):
+        if not entry:
+            continue
+        if "blpapi" in entry.lower():
+            continue
+        directory = Path(entry)
+        try:
+            if (
+                (directory / "blpapi3_64.dll").is_file()
+                or (directory / "blpapi3_32.dll").is_file()
+                or (directory / "libblpapi3_64.so").is_file()
+                or (directory / "libblpapi3_64.dylib").is_file()
+            ):
+                continue
+        except OSError:
+            pass
+        kept.append(entry)
+    return os.pathsep.join(kept)
+
+
 def _scrubbed_env(scratch: Path, **extra: str) -> dict[str, str]:
-    stripped = ("BLPAPI_", "XBBG_", "DYLD_", "LD_")
-    env = {k: v for k, v in os.environ.items() if not k.upper().startswith(stripped)}
+    scratch.mkdir(parents=True, exist_ok=True)
+    stripped_prefixes = ("BLPAPI_", "XBBG_", "DYLD_", "LD_")
+    overridden_keys = {
+        "HOME",
+        "USERPROFILE",
+        "LOCALAPPDATA",
+        "XDG_CACHE_HOME",
+        "PROGRAMFILES",
+        "PROGRAMFILES(X86)",
+        "XBBG_CACHE_DIR",
+        "PYTHONPATH",
+        *(k.upper() for k in extra),
+    }
+    env: dict[str, str] = {}
+    for k, v in os.environ.items():
+        upper = k.upper()
+        if upper.startswith(stripped_prefixes) or upper in overridden_keys:
+            continue
+        if upper == "PATH":
+            env[k] = _strip_blpapi_from_path(v)
+        else:
+            env[k] = v
     for key in ("HOME", "USERPROFILE", "LOCALAPPDATA", "XDG_CACHE_HOME", "PROGRAMFILES", "PROGRAMFILES(X86)"):
         env[key] = str(scratch / key.lower().replace("(", "_").replace(")", ""))
     env["XBBG_CACHE_DIR"] = str(scratch / "cache")
-    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    src_dir = Path(__file__).resolve().parents[1] / "src"
+    if (src_dir / "xbbg").is_dir():
+        env["PYTHONPATH"] = str(src_dir)
     env.update(extra)
     return env
 
@@ -282,32 +326,37 @@ def test_auto_provision_from_env_and_explicit_path_authority(tmp_path):
     )
 
     # 1. XBBG_SDK_SOURCE provisions and loads automatically when nothing else exists.
+    auto_scratch = tmp_path / "env_auto"
     auto_script = (
         "import json, xbbg\n"
         "info = xbbg.get_sdk_info()\n"
+        "cache_sources = [s for s in info['sources'] if s['name'] == 'xbbg_cache']\n"
         "print(json.dumps({\n"
         "  'active': info['active'],\n"
         "  'runtime_version': info['runtime_version'],\n"
-        "  'cache_sources': [s['name'] for s in info['sources'] if s['name'] == 'xbbg_cache'],\n"
-        "  'install_dir_exists': next(s['install_dir'] for s in info['sources'] if s['name'] == 'xbbg_cache').is_dir(),\n"
+        "  'source_names': [s['name'] for s in info['sources']],\n"
+        "  'cache_sources': [s['name'] for s in cache_sources],\n"
+        "  'install_dir_exists': bool(cache_sources) and cache_sources[0]['install_dir'].is_dir(),\n"
         "}))\n"
     )
     auto_run = subprocess.run(
         [sys.executable, "-c", auto_script],
         capture_output=True,
         text=True,
-        env=_scrubbed_env(tmp_path / "env_auto", XBBG_SDK_SOURCE=str(wheel)),
+        cwd=tmp_path,
+        env=_scrubbed_env(auto_scratch, XBBG_SDK_SOURCE=str(wheel)),
         timeout=120,
         check=False,
     )
     assert auto_run.returncode == 0, auto_run.stdout + auto_run.stderr
     auto_payload = json.loads(auto_run.stdout.strip().splitlines()[-1])
-    assert auto_payload["active"] == "xbbg_cache"
+    assert auto_payload["active"] == "xbbg_cache", auto_payload
     assert auto_payload["runtime_version"]
-    assert auto_payload["cache_sources"] == ["xbbg_cache"]
+    assert auto_payload["cache_sources"] == ["xbbg_cache"], auto_payload
     assert auto_payload["install_dir_exists"] is True
 
     # 2. xbbg.set_sdk_source(...) works before loading _core.
+    prog_scratch = tmp_path / "prog_auto"
     prog_script = (
         "import json, sys, xbbg\n"
         "xbbg.set_sdk_source(sys.argv[1])\n"
@@ -318,18 +367,20 @@ def test_auto_provision_from_env_and_explicit_path_authority(tmp_path):
         [sys.executable, "-c", prog_script, str(wheel), platform_name],
         capture_output=True,
         text=True,
-        env=_scrubbed_env(tmp_path / "prog_auto"),
+        cwd=tmp_path,
+        env=_scrubbed_env(prog_scratch),
         timeout=120,
         check=False,
     )
     assert prog_run.returncode == 0, prog_run.stdout + prog_run.stderr
     prog_payload = json.loads(prog_run.stdout.strip().splitlines()[-1])
-    assert prog_payload["active"] == "xbbg_cache"
+    assert prog_payload["active"] == "xbbg_cache", prog_payload
 
     # 3. set_sdk_path stays strictly authoritative even when XBBG_SDK_SOURCE is set.
     bad_dir = tmp_path / "bad_sdk"
     bad_dir.mkdir()
     (bad_dir / lib_name).write_bytes(b"not-a-valid-library")
+    explicit_scratch = tmp_path / "explicit_auth"
     explicit_script = (
         "import sys, xbbg\n"
         "try:\n"
@@ -343,7 +394,8 @@ def test_auto_provision_from_env_and_explicit_path_authority(tmp_path):
         [sys.executable, "-c", explicit_script, str(bad_dir)],
         capture_output=True,
         text=True,
-        env=_scrubbed_env(tmp_path / "explicit_auth", XBBG_SDK_SOURCE=str(wheel)),
+        cwd=tmp_path,
+        env=_scrubbed_env(explicit_scratch, XBBG_SDK_SOURCE=str(wheel)),
         timeout=120,
         check=False,
     )
