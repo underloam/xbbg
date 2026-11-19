@@ -297,6 +297,14 @@ jobs:
           cargo clippy -p xbbg-host --all-targets --features provision -- -D warnings
           cargo test -p xbbg-host --features provision
 
+      - name: Build and smoke-test standalone xbbg-sdk binary
+        run: |
+          cargo build -p xbbg-sdk --features provision --bin xbbg-sdk --locked
+          python3 scripts/check_native_links.py --executable target/debug/xbbg-sdk
+          ./target/debug/xbbg-sdk --help >/dev/null
+          ./target/debug/xbbg-sdk cpp --help >/dev/null
+          ./target/debug/xbbg-sdk --installed --cache-dir "${RUNNER_TEMP}/xbbg-sdk-empty" >/dev/null
+
       # Java keeps the provisioner in its separate xbbg_sdk_jni library, so jni-xbbg and the
       # default (resolver-only) xbbg-host/xbbg-sdk builds must stay free of downloader crates.
       # Python, Node and xbbg-mcp opt into xbbg-host/provision so they can fill the shared cache.

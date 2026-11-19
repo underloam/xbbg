@@ -119,7 +119,7 @@ Supported Python versions: **3.11 through 3.15**. Free-threaded CPython 3.14t/3.
 Requirements and notes:
 
 - You need an authorized Bloomberg environment: local Terminal/DAPI, SAPI/B-PIPE, or ZFP, depending on your setup.
-- If you build from source, stage the Bloomberg C++ SDK with `cargo run -p xbbg-sdk --features provision -- cpp` (works on macOS, Linux and Windows; installed packages also expose `xbbg-sdk cpp`, `python -m xbbg.sdk cpp`, `npx xbbg-sdk cpp`, and `xbbg-mcp sdk cpp`).
+- If you build from source, stage the Bloomberg C++ SDK with `cargo run -p xbbg-sdk --features provision -- cpp` (works on macOS, Linux and Windows; prebuilt standalone `xbbg-sdk` binaries for `linux-amd64`, `darwin-arm64` and `windows-amd64` are attached to GitHub Releases, and installed packages also expose `xbbg-sdk cpp`, `python -m xbbg.sdk cpp`, `npx xbbg-sdk cpp`, and `xbbg-mcp sdk cpp`).
 - xbbg loads the Bloomberg runtime when `xbbg._core` is first imported (the native extension itself links no Bloomberg code), using the first of these that loads. The same search order, written once in Rust, serves the Python, Node, Java and MCP packages:
   1. `xbbg.set_sdk_path(...)`: a directory holding the runtime library;
   2. `BLPAPI_LIB_DIR`: that directory, from the environment;

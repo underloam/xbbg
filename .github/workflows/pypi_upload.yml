@@ -514,6 +514,132 @@ jobs:
           retention-days: 7
 
   # ════════════════════════════════════════════════════════════════════════════
+  # Build standalone xbbg-sdk CLI release binaries
+  # ════════════════════════════════════════════════════════════════════════════
+  # xbbg-sdk never depends on xbbg-blpapi-sys, so it builds cleanly without
+  # Bloomberg SDK headers or pre-generated bindings.
+  sdk-cli-binary:
+    name: Build xbbg-sdk (${{ matrix.asset_target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset_target: linux-amd64
+            # Build against glibc 2.28 so the binary runs on RHEL 8-era distros.
+            container: ghcr.io/${{ github.repository_owner }}/xbbg-manylinux:latest
+          - os: macos-latest
+            asset_target: darwin-arm64
+          - os: windows-latest
+            asset_target: windows-amd64
+
+    runs-on: ${{ matrix.os }}
+    container: ${{ matrix.container }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+        with:
+          build-warnings: warn
+
+      # xbbg-sdk/provision uses rustls with aws-lc-rs, which compiles C code with CMake.
+      - name: Ensure CMake for aws-lc-sys (Linux container)
+        if: runner.os == 'Linux'
+        run: command -v cmake >/dev/null || dnf install -y cmake
+
+      - name: Build xbbg-sdk (Unix)
+        if: runner.os != 'Windows'
+        run: cargo build --release -p xbbg-sdk --features provision --bin xbbg-sdk --locked
+
+      - name: Enforce glibc 2.28 floor (Linux)
+        if: runner.os == 'Linux'
+        run: bash scripts/check-glibc-max.sh 2.28 target/release/xbbg-sdk
+
+      - name: Build xbbg-sdk (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: cargo build --release -p xbbg-sdk --features provision --bin xbbg-sdk --locked
+
+      - name: Package and smoke-test xbbg-sdk (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          case "$GITHUB_REF" in
+            refs/tags/v*) VERSION=${GITHUB_REF#refs/tags/v} ;;
+            *) VERSION="0.0.0-dev-$(printf '%.7s' "$GITHUB_SHA")" ;;
+          esac
+          DIST_DIR="$GITHUB_WORKSPACE/dist"
+          PACKAGE_DIR="$RUNNER_TEMP/xbbg-sdk-package"
+          EMPTY_CACHE="$RUNNER_TEMP/xbbg-sdk-empty-cache"
+          ASSET="xbbg-sdk-v${VERSION}-${{ matrix.asset_target }}.tar.gz"
+          rm -rf "$PACKAGE_DIR" "$EMPTY_CACHE"
+          mkdir -p "$DIST_DIR" "$PACKAGE_DIR" "$EMPTY_CACHE"
+          cp target/release/xbbg-sdk "$PACKAGE_DIR/xbbg-sdk"
+          chmod +x "$PACKAGE_DIR/xbbg-sdk"
+          python3 scripts/check_native_links.py --executable "$PACKAGE_DIR/xbbg-sdk"
+          "$PACKAGE_DIR/xbbg-sdk" --help >/dev/null
+          "$PACKAGE_DIR/xbbg-sdk" cpp --help >/dev/null
+          "$PACKAGE_DIR/xbbg-sdk" --installed --cache-dir "$EMPTY_CACHE" >/dev/null
+          if find "$PACKAGE_DIR" -type f \( -name 'libblpapi*' -o -name 'blpapi3*.dll' \) | grep -q .; then
+            echo "Unexpected Bloomberg SDK file detected in xbbg-sdk package payload" >&2
+            exit 1
+          fi
+          tar -czf "$DIST_DIR/$ASSET" -C "$PACKAGE_DIR" xbbg-sdk
+
+      - name: Package and smoke-test xbbg-sdk (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/v*') {
+            $version = $env:GITHUB_REF.Substring(11)
+          } else {
+            $version = "0.0.0-dev-$($env:GITHUB_SHA.Substring(0, 7))"
+          }
+          $distDir = Join-Path $env:GITHUB_WORKSPACE 'dist'
+          $packageDir = Join-Path $env:RUNNER_TEMP 'xbbg-sdk-package'
+          $emptyCache = Join-Path $env:RUNNER_TEMP 'xbbg-sdk-empty-cache'
+          $asset = "xbbg-sdk-v$version-${{ matrix.asset_target }}.zip"
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+          Remove-Item -Path $packageDir -Recurse -Force -ErrorAction SilentlyContinue
+          Remove-Item -Path $emptyCache -Recurse -Force -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $emptyCache -Force | Out-Null
+          $binPath = Join-Path $packageDir 'xbbg-sdk.exe'
+          Copy-Item target\release\xbbg-sdk.exe $binPath
+          python scripts/check_native_links.py --executable $binPath
+          if ($LASTEXITCODE -ne 0) {
+            throw "xbbg-sdk.exe linked a Bloomberg runtime library"
+          }
+          & $binPath --help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "xbbg-sdk.exe --help failed with exit code $LASTEXITCODE"
+          }
+          & $binPath cpp --help | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "xbbg-sdk.exe cpp --help failed with exit code $LASTEXITCODE"
+          }
+          & $binPath --installed --cache-dir $emptyCache | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "xbbg-sdk.exe --installed failed with exit code $LASTEXITCODE"
+          }
+          $sdkFiles = Get-ChildItem -Path $packageDir -Recurse -Include 'blpapi3*.dll','libblpapi*' -File
+          if ($sdkFiles.Count -gt 0) {
+            throw "Unexpected Bloomberg SDK file detected in xbbg-sdk package payload: $($sdkFiles[0].FullName)"
+          }
+          Compress-Archive -Path $binPath -DestinationPath (Join-Path $distDir $asset) -Force
+
+      - name: Upload xbbg-sdk asset
+        uses: actions/upload-artifact@v7
+        with:
+          name: sdk-cli-${{ matrix.asset_target }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 7
+
+  # ════════════════════════════════════════════════════════════════════════════
   # Build source distribution
   # ════════════════════════════════════════════════════════════════════════════
   sdist:
@@ -553,14 +679,14 @@ jobs:
   # ════════════════════════════════════════════════════════════════════════════
   validate-release-payload:
     name: Validate release payloads
-    needs: [build, mcp-binary, mcpb-bundle, sdist]
+    needs: [build, mcp-binary, mcpb-bundle, sdk-cli-binary, sdist]
     runs-on: ubuntu-latest
     steps:
-      - name: Download wheels, sdist, xbbg-mcp assets, and MCPB
+      - name: Download wheels, sdist, xbbg-mcp, MCPB, and xbbg-sdk assets
         uses: actions/download-artifact@v8
         with:
           path: dist
-          pattern: "{wheel-*,sdist,mcp-*,mcpb}"
+          pattern: "{wheel-*,sdist,mcp-*,mcpb,sdk-cli-*}"
           merge-multiple: true
 
       - name: Reject Bloomberg SDK files in release artifacts
@@ -641,22 +767,22 @@ jobs:
           packages-dir: dist/
 
   # ════════════════════════════════════════════════════════════════════════════
-  # Attach wheels, sdist, and xbbg-mcp binaries to GitHub Release
+  # Attach wheels, sdist, xbbg-mcp, MCPB, and xbbg-sdk binaries to GitHub Release
   # ════════════════════════════════════════════════════════════════════════════
   release-assets:
     name: Attach Release Assets
-    needs: [build, mcp-binary, mcpb-bundle, sdist, validate-release-payload, publish]
+    needs: [build, mcp-binary, mcpb-bundle, sdk-cli-binary, sdist, validate-release-payload, publish]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v') && !inputs.dry-run
     permissions:
       contents: write
 
     steps:
-      - name: Download wheels, sdist, xbbg-mcp assets, and MCPB
+      - name: Download wheels, sdist, xbbg-mcp, MCPB, and xbbg-sdk assets
         uses: actions/download-artifact@v8
         with:
           path: dist
-          pattern: "{wheel-*,sdist,mcp-*,mcpb}"
+          pattern: "{wheel-*,sdist,mcp-*,mcpb,sdk-cli-*}"
           merge-multiple: true
 
       - name: Upload to GitHub Release
