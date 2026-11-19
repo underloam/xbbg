@@ -14,7 +14,8 @@
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-use xbbg_host::sdk::{Hint, LoadedSdk, LocateRequest, SdkNotFound, locate_and_load};
+use xbbg_host::sdk::provision::{ProvisionFallback, SdkLoadFailure, locate_and_load_or_provision};
+use xbbg_host::sdk::{Hint, LoadedSdk, LocateRequest, SdkNotFound};
 
 pub(crate) const LIB_DIR_VAR: &str = "XBBG_MCP_LIB_DIR";
 pub(crate) const HINT_DIRS_VAR: &str = "XBBG_MCP_HINT_DIRS";
@@ -41,10 +42,20 @@ pub(crate) fn locate_request(get: impl Fn(&str) -> Option<OsString>) -> LocateRe
     }
 }
 
-/// Finds and loads the runtime for this process; the error is the startup failure text.
+/// Finds and loads the runtime for this process, provisioning into the shared xbbg cache
+/// when `XBBG_SDK_SOURCE` is set and no explicit `XBBG_MCP_LIB_DIR` was given.
 pub(crate) fn load() -> Result<LoadedSdk, String> {
     let request = locate_request(|name| std::env::var_os(name));
-    locate_and_load(&request).map_err(|error| startup_error(&error, request.explicit.is_some()))
+    locate_and_load_or_provision(&request, &ProvisionFallback::default()).map_err(|error| {
+        match error {
+            SdkLoadFailure::NotFound(not_found) => {
+                startup_error(&not_found, request.explicit.is_some())
+            }
+            SdkLoadFailure::Provision { code, message, .. } => {
+                format!("xbbg-mcp: failed to provision the Bloomberg runtime [{code}]: {message}")
+            }
+        }
+    })
 }
 
 /// The startup failure text: every refusal, then how to supply a runtime. `explicit` says that
@@ -59,9 +70,9 @@ pub(crate) fn startup_error(error: &SdkNotFound, explicit: bool) -> String {
         );
     }
     format!(
-        "xbbg-mcp: {error}\nxbbg-mcp: set {LIB_DIR_VAR}, BLPAPI_LIB_DIR or BLPAPI_ROOT, install \
-         Bloomberg's blpapi package for the Python the launcher finds, or use a Bloomberg Terminal \
-         (DAPI) install"
+        "xbbg-mcp: {error}\nxbbg-mcp: set {LIB_DIR_VAR}, BLPAPI_LIB_DIR, BLPAPI_ROOT or \
+         XBBG_SDK_SOURCE (or run `xbbg-mcp sdk --source <spec>`), install Bloomberg's blpapi \
+         package for the Python the launcher finds, or use a Bloomberg Terminal (DAPI) install"
     )
 }
 

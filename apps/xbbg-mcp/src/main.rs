@@ -678,6 +678,20 @@ fn bounded_validation_entry(
     (json_serialized_len(&entry).ok()? <= max_bytes).then_some((entry, entry_truncated))
 }
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let cli_args: Vec<String> = std::env::args().skip(1).collect();
+    if cli_args.first().map(String::as_str) == Some("sdk") {
+        let mut stdout = std::io::stdout().lock();
+        let mut stderr = std::io::stderr().lock();
+        let code = xbbg_host::sdk::provision::cli_run(
+            "xbbg-mcp sdk",
+            &cli_args[1..],
+            &|name| std::env::var(name).ok(),
+            &mut stdout,
+            &mut stderr,
+        );
+        std::process::exit(code);
+    }
+
     // Warnings and errors from rmcp and the engine go to stderr (RUST_LOG raises the level).
     // Without a subscriber a transport failure ends the process silently with status 0.
     xbbg_log::init();

@@ -73,13 +73,30 @@ pub struct ScalarBatch {
     pub updates: Vec<SubscriptionUpdate>,
 }
 
+/// Publication guard released once a host finishes converting a plain read.
+pub struct ReadGuard {
+    _receiver: Option<OwnedMutexGuard<Option<SubscriptionReceiver>>>,
+    _publication: Option<OwnedMutexGuard<()>>,
+}
+
+impl ReadGuard {
+    /// Whether this guard currently retains the receiver mutex (before any marked gate exists).
+    pub fn holds_receiver(&self) -> bool {
+        self._receiver.is_some()
+    }
+
+    /// Whether this guard currently retains the marked-read publication mutex.
+    pub fn holds_publication(&self) -> bool {
+        self._publication.is_some()
+    }
+}
+
 /// A plain read result that keeps the receiver (or an established marked-read
 /// guard) until the host finished converting it, so a first marked reader
 /// cannot overtake rows that are still being published.
 pub struct GuardedRead<T> {
     value: T,
-    _receiver: Option<OwnedMutexGuard<Option<SubscriptionReceiver>>>,
-    _publication: Option<OwnedMutexGuard<()>>,
+    guard: ReadGuard,
 }
 
 impl<T> GuardedRead<T> {
@@ -96,14 +113,22 @@ impl<T> GuardedRead<T> {
         };
         Self {
             value,
-            _receiver: receiver,
-            _publication: publication,
+            guard: ReadGuard {
+                _receiver: receiver,
+                _publication: publication,
+            },
         }
     }
 
     /// The value to convert; the guards are released when this read drops.
     pub fn value(&self) -> &T {
         &self.value
+    }
+
+    /// Split the value from its publication guard so the host can convert the
+    /// value while holding the guard until conversion completes.
+    pub fn into_parts(self) -> (T, ReadGuard) {
+        (self.value, self.guard)
     }
 }
 
@@ -325,9 +350,26 @@ impl HostSubscription {
         let (rx, handle) = stream.into_parts();
         let status = handle.status();
         let deliver_rows = handle.delivers_rows();
+        Self::from_consumer(
+            SubscriptionConsumer::new(rx, handle),
+            status,
+            deliver_rows,
+            batch_items,
+            engine_shutdown,
+        )
+    }
+
+    /// Construct from an existing consumer and status snapshot (used by unit tests and custom hosts).
+    pub fn from_consumer(
+        consumer: SubscriptionConsumer,
+        status: SharedSubscriptionStatus,
+        deliver_rows: bool,
+        batch_items: usize,
+        engine_shutdown: Option<watch::Receiver<bool>>,
+    ) -> Self {
         let batch_items = batch_items.max(1);
         Self {
-            consumer: SubscriptionConsumer::new(rx, handle),
+            consumer,
             status,
             deliver_rows,
             batch_items,
@@ -339,6 +381,11 @@ impl HostSubscription {
             publication_pause: Mutex::new(None),
             keep_alive: None,
         }
+    }
+
+    /// Underlying consumer state (for host diagnostics and unit tests).
+    pub fn consumer(&self) -> &SubscriptionConsumer {
+        &self.consumer
     }
 
     /// Keep `owner` alive until this subscription (and its consumer) is dropped.

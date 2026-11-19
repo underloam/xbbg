@@ -57,7 +57,11 @@ mod platform;
 mod provenance;
 
 #[cfg(feature = "provision")]
+pub mod cli;
+#[cfg(feature = "provision")]
 mod conda;
+#[cfg(feature = "provision")]
+pub mod cpp_sdk;
 #[cfg(feature = "provision")]
 mod error;
 #[cfg(feature = "provision")]
@@ -70,6 +74,8 @@ mod options;
 mod provisioner;
 #[cfg(feature = "provision")]
 mod pypi;
+#[cfg(feature = "provision")]
+pub mod request;
 #[cfg(feature = "provision")]
 mod source;
 #[cfg(feature = "provision")]
@@ -97,6 +103,6 @@ pub use options::{
 pub use provisioner::{Provisioner, Resolved};
 #[cfg(feature = "provision")]
 pub use source::{
-    BLOOMBERG_PYPI_INDEX, DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, MIN_PYPI_VERSION, Source,
-    SourceKind,
+    BLOOMBERG_PYPI_INDEX, DEFAULT_CONDA_PACKAGE, DEFAULT_PYPI_PROJECT, MIN_PYPI_VERSION,
+    SOURCE_ENV, Source, SourceKind, VERSION_ENV, redact_user_info, validate_sha256_hex,
 };

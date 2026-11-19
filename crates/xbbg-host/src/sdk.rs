@@ -26,6 +26,9 @@ use xbbg_sdk::Platform;
 pub use xbbg_sdk::locate::{Candidate, Hint, LocateRequest, Located, Rejected, SourceKind, locate};
 use xbbg_sdk::locate::{Stage, locate_stage, platform_of};
 
+#[cfg(feature = "provision")]
+pub mod provision;
+
 /// [`Candidate::detail`] and [`Rejected::detail`] of the operating system's own search.
 const SYSTEM_DETAIL: &str = "the operating system's library search";
 

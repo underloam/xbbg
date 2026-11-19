@@ -39,6 +39,8 @@ provision = [
     "dep:url",
     "dep:base64",
     "dep:csv",
+    "dep:flate2",
+    "dep:tar",
     "dep:zip",
     "dep:tempfile",
     "dep:thiserror",
@@ -81,6 +83,8 @@ tokio = { workspace = true, features = ["rt", "sync", "fs", "io-util", "time", "
 url = { workspace = true, optional = true }
 base64 = { workspace = true, optional = true }
 csv = { workspace = true, optional = true }
+flate2 = { workspace = true, optional = true }
+tar = { workspace = true, optional = true }
 zip = { workspace = true, features = ["deflate"], optional = true }
 tempfile = { workspace = true, optional = true }
 thiserror = { workspace = true, optional = true }
@@ -91,6 +95,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
 
 [lints]
 workspace = true
+
+[[bin]]
+name = "xbbg-sdk"
+path = "src/bin/xbbg_sdk.rs"
+required-features = ["provision"]
 
 [[test]]
 name = "artifact"
