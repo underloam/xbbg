@@ -1,15 +1,28 @@
 import { defineConfig } from 'tsup';
 
-export default defineConfig({
-  clean: true,
-  dts: true,
-  entry: ['src/index.ts'],
-  format: ['cjs'],
+const shared = {
+  format: ['cjs'] as ['cjs'],
   outDir: 'dist',
-  platform: 'node',
+  platform: 'node' as const,
   shims: false,
   sourcemap: true,
   splitting: false,
-  target: 'node24',
+  target: 'node24' as const,
   treeshake: true,
-});
+};
+
+export default defineConfig([
+  {
+    ...shared,
+    clean: true,
+    dts: true,
+    entry: ['src/index.ts', 'src/sdk.ts'],
+  },
+  {
+    ...shared,
+    banner: { js: '#!/usr/bin/env node' },
+    clean: false,
+    dts: false,
+    entry: ['src/sdk-cli.ts'],
+  },
+]);

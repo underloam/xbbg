@@ -98,6 +98,8 @@ function smokeMissingRuntime(appDir: string, runtime: string): void {
     const withheld = new Set([
       'BLPAPI_ROOT',
       'XBBG_DEV_SDK_ROOT',
+      'XBBG_SDK_SOURCE',
+      'XBBG_SDK_VERSION',
       'LD_LIBRARY_PATH',
       'DYLD_LIBRARY_PATH',
       'DYLD_FALLBACK_LIBRARY_PATH',

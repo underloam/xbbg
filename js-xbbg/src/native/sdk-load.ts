@@ -9,6 +9,8 @@ const SDK_ENV_KEYS = Object.freeze([
   'BLPAPI_ROOT',
   'XBBG_DEV_SDK_ROOT',
   'XBBG_CACHE_DIR',
+  'XBBG_SDK_SOURCE',
+  'XBBG_SDK_VERSION',
   'XDG_CACHE_HOME',
   'HOME',
   'USERPROFILE',
@@ -66,7 +68,7 @@ export function sdkLoadErrorMessage(error: unknown): string {
   return [
     '@xbbg/core could not load the Bloomberg runtime.',
     reason,
-    "Set BLPAPI_LIB_DIR to the folder that holds Bloomberg's blpapi runtime (BLPAPI_ROOT also works).",
+    "Set BLPAPI_LIB_DIR to the folder that holds Bloomberg's blpapi runtime (BLPAPI_ROOT also works), set XBBG_SDK_SOURCE to auto-provision, or run `npx xbbg-sdk --source <spec>`.",
   ].join('\n');
 }
 

@@ -1,7 +1,5 @@
 /* oxlint-disable import/max-dependencies -- public entry point intentionally consolidates native and helper modules. */
-import fs from 'node:fs';
 import { createRequire } from 'node:module';
-import path from 'node:path';
 
 import {
   CDX_INFO_FIELDS as GENERATED_CDX_INFO_FIELDS,
@@ -33,10 +31,20 @@ import {
   BlpValidationError,
   wrapError,
 } from './errors';
-import type { NativeAddon, NativeArrowZeroCopyBatch, NativeEngine } from './napi';
-import { resolveNativeAddon } from './native/resolve-native';
-import { loadBloombergRuntime } from './native/sdk-load';
+import { createExt } from './ext';
+import type { NativeArrowZeroCopyBatch, NativeEngine } from './napi';
+import { loadNativeAddon } from './native/load-addon';
 import { isPlainObject } from './objects';
+import { BLOOMBERG_PYPI_INDEX, defaultSdkCacheDir, installedSdks, provisionSdk } from './sdk';
+import type {
+  InstalledSdksOptions,
+  ProvisionSdkOptions,
+  ProvisionSdkResult,
+  SdkCredentialInput,
+  SdkPlatform,
+  SdkProxyInput,
+  SdkSourceInput,
+} from './sdk';
 import {
   createSubscription,
   MKTDATA_SERVICE,
@@ -146,39 +154,6 @@ function parsePackageJsonShape(value: unknown): PackageJsonShape {
   throw new TypeError('@xbbg/core package.json is missing a string version field');
 }
 
-function isNativeAddon(value: unknown): value is NativeAddon {
-  return (
-    isPlainObject(value) &&
-    typeof value.JsEngine === 'function' &&
-    typeof value.extAuctionFieldGroup === 'function' &&
-    typeof value.extAuctionZeroPriceFields === 'function' &&
-    typeof value.extImbalanceSide === 'function' &&
-    typeof value.getLogLevel === 'function' &&
-    typeof value.setLogLevel === 'function' &&
-    typeof value.loadSdk === 'function' &&
-    typeof value.planRequest === 'function'
-  );
-}
-
-function checkoutRepoRoot(): string | undefined {
-  const candidate = path.resolve(__dirname, '..', '..');
-  return fs.existsSync(path.join(candidate, 'vendor', 'blpapi-sdk')) ? candidate : undefined;
-}
-
-function requireNativeAddon(modulePath: string): NativeAddon {
-  // The engine addon links no Bloomberg library, so it loads on any machine.
-  // The runtime is found and opened right after, by the one search order in Rust.
-  const loaded: unknown = nodeRequire(modulePath);
-  if (!isNativeAddon(loaded)) {
-    throw new TypeError(
-      `Native addon ${modulePath} does not expose the expected @xbbg/core surface`,
-    );
-  }
-  const repoRoot = checkoutRepoRoot();
-  loadBloombergRuntime(loaded, repoRoot === undefined ? {} : { repoRoot });
-  return loaded;
-}
-
 function isBdhOptionsInput(value: DateLike | BdhOptions | undefined): value is BdhOptions {
   return isPlainObject(value) && !(value instanceof Date) && !hasToJSDate(value);
 }
@@ -191,37 +166,7 @@ function isBdibOptionsInput(
 
 const packageJson = parsePackageJsonShape(nodeRequire('../package.json'));
 
-function loadNative(): NativeAddon {
-  const root = path.resolve(__dirname, '..', '..');
-
-  const candidates = [
-    path.join(__dirname, 'napi_xbbg.node'),
-    path.join(__dirname, '..', 'napi_xbbg.node'),
-    path.join(__dirname, 'napi-xbbg.node'),
-  ];
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      return requireNativeAddon(candidate);
-    }
-  }
-
-  const { key, packageName, binaryPath } = resolveNativeAddon(root);
-  if (binaryPath !== null) {
-    return requireNativeAddon(binaryPath);
-  }
-  if (packageName === null) {
-    throw new Error(
-      `No packaged @xbbg/core native addon is available for ${key}. Build it locally with "npm run build" from js-xbbg.`,
-    );
-  }
-
-  throw new Error(
-    `Unable to load native napi-xbbg module for ${key}. Install ${packageName} via Bun/npm, or build it locally with "npm run build" from js-xbbg.`,
-  );
-}
-
-const native = loadNative();
+const native = loadNativeAddon();
 
 // ── Constants ───────────────────────────────────────────────────────────
 export { Backend, Format };
@@ -2022,71 +1967,22 @@ export const blp = Object.freeze({
   subscribe,
 });
 
-export const ext = Object.freeze({
-  buildCorporateBondsQuery: native.extBuildCorporateBondsQuery,
-
-  buildEarningHeaderRename: native.extBuildEarningHeaderRename,
-  buildEtfHoldingsQuery: native.extBuildEtfHoldingsQuery,
-
-  buildFuturesTicker: native.extBuildFuturesTicker,
-  buildFxPair: native.extBuildFxPair,
-
-  buildPreferredsQuery: native.extBuildPreferredsQuery,
-  buildYasOverrides: native.extBuildYasOverrides,
-  calculateLevelPercentages: native.extCalculateLevelPercentages,
-  cdx: Object.freeze({
-    acdx_info: acdxInfo,
-    acdx_pricing: acdxPricing,
-    acdx_risk: acdxRisk,
-  }),
-  cdxGenToSpecific: native.extCdxGenToSpecific,
-
-  clearExchangeOverride: native.extClearExchangeOverride,
-  contractIndex: native.extContractIndex,
-  currenciesNeedingConversion: native.extCurrenciesNeedingConversion,
-  defaultBqrDatetimes: native.extDefaultBqrDatetimes,
-  defaultTurnoverDates: native.extDefaultTurnoverDates,
-
-  deriveSessions: native.extDeriveSessions,
-  filterCandidatesByCycle: native.extFilterCandidatesByCycle,
-  filterEquityTickers: native.extFilterEquityTickers,
-
-  filterValidContracts: native.extFilterValidContracts,
-  fmtDate: native.extFmtDate,
-  generateFuturesCandidates: native.extGenerateFuturesCandidates,
-
-  getDvdCols: native.extGetDvdCols,
-  getDvdType: native.extGetDvdType,
-
-  getDvdTypes: native.extGetDvdTypes,
-  getEtfCols: native.extGetEtfCols,
-  getExchangeOverride: native.extGetExchangeOverride,
-  getFuturesMonths: native.extGetFuturesMonths,
-  getMarketRule: native.extGetMarketRule,
-  getMonthCode: native.extGetMonthCode,
-  getMonthName: native.extGetMonthName,
-
-  inferTimezone: native.extInferTimezone,
-
-  isLongFormat: native.extIsLongFormat,
-  isSpecificContract: native.extIsSpecificContract,
-
-  listExchangeOverrides: native.extListExchangeOverrides,
-  normalizeTickers: native.extNormalizeTickers,
-  parseCdxTicker: native.extParseCdxTicker,
-
-  parseDate: native.extParseDate,
-  parseTicker: native.extParseTicker,
-
-  pivotToWide: native.extPivotToWide,
-  previousCdxSeries: native.extPreviousCdxSeries,
-  renameDividendColumns: native.extRenameDividendColumns,
-  renameEtfColumns: native.extRenameEtfColumns,
-  sameCurrency: native.extSameCurrency,
-  sessionTimesToUtc: native.extSessionTimesToUtc,
-  setExchangeOverride: native.extSetExchangeOverride,
-  validateGenericTicker: native.extValidateGenericTicker,
+export const ext = createExt(native, {
+  acdx_info: acdxInfo,
+  acdx_pricing: acdxPricing,
+  acdx_risk: acdxRisk,
 });
+
+export { BLOOMBERG_PYPI_INDEX, defaultSdkCacheDir, installedSdks, provisionSdk };
+export type {
+  InstalledSdksOptions,
+  ProvisionSdkOptions,
+  ProvisionSdkResult,
+  SdkCredentialInput,
+  SdkPlatform,
+  SdkProxyInput,
+  SdkSourceInput,
+};
 
 export function version(): string {
   return packageJson.version;

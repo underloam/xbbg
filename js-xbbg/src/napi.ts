@@ -393,6 +393,30 @@ export interface SdkLocateRequest {
    * environment whatever `env` says.
    */
   skipSystem?: boolean;
+  /** Optional provisioning source spec (overrides `XBBG_SDK_SOURCE`). */
+  sdkSource?: string;
+  /** Optional provisioning version (overrides `XBBG_SDK_VERSION`). */
+  sdkVersion?: string;
+}
+
+/** One verified Bloomberg runtime installed in the shared xbbg cache. */
+export interface ProvisionSdkResult {
+  readonly version: string;
+  readonly platform: string;
+  readonly libraryPath: string;
+  readonly licensePaths: readonly string[];
+  readonly source: string;
+  readonly artifactUrl: string;
+  readonly artifactSha256: string;
+  readonly libSha256: string;
+  readonly cacheHit: boolean;
+}
+
+/** Output of the shared `xbbg-sdk` CLI runner. */
+export interface SdkCliOutput {
+  readonly exitCode: number;
+  readonly stdout: string;
+  readonly stderr: string;
 }
 
 /** A runtime the search order found. */
@@ -442,6 +466,16 @@ export interface NativeAddon {
   loadedSdk: () => LoadedSdk | null;
   /** The loaded runtime's `major.minor.patch.build`, or null before one is loaded. */
   sdkVersion: () => string | null;
+  /** Download, verify and install a Bloomberg runtime into the shared xbbg cache. */
+  provisionSdk?: (optionsJson: string) => Promise<ProvisionSdkResult>;
+  /** List verified Bloomberg runtime installs in the shared xbbg cache. */
+  installedSdks?: (cacheDir?: string, platform?: string) => ProvisionSdkResult[];
+  /** Default shared xbbg cache root directory, or null when no home directory is known. */
+  defaultSdkCacheDir?: () => string | null;
+  /** Bloomberg's public PyPI simple index URL. */
+  sdkBloombergPypiIndex?: () => string;
+  /** Run the shared `xbbg-sdk` CLI command. */
+  runSdkCli?: (prog: string, args: string[], env?: Record<string, string>) => SdkCliOutput;
 
   /**
    * Plan a typed request (`bdp`, `bdh`, `bta`, ...) with the host planner. `args` is the
