@@ -3,7 +3,7 @@ name: CI
 on:
   pull_request:
   push:
-    branches: [main, feat/**, fix/**]
+    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -18,6 +18,11 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   UV_VERSION: "0.13.0"
+  # Skip full LTO on PR runs to cut compile time; keep Cargo.toml's fat LTO + CGU=1 on main.
+  CARGO_PROFILE_RELEASE_LTO: ${{ github.ref == 'refs/heads/main' && 'fat' || 'off' }}
+  CARGO_PROFILE_RELEASE_CODEGEN_UNITS: ${{ github.ref == 'refs/heads/main' && '1' || '16' }}
+  CARGO_PROFILE_RELEASE_JNI_LTO: ${{ github.ref == 'refs/heads/main' && 'fat' || 'off' }}
+  CARGO_PROFILE_RELEASE_JNI_CODEGEN_UNITS: ${{ github.ref == 'refs/heads/main' && '1' || '16' }}
 
 jobs:
   # ════════════════════════════════════════════════════════════════════════════
@@ -28,6 +33,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.detect.outputs.version }}
+      build-matrix: ${{ steps.matrix.outputs.build-matrix }}
+      test-matrix: ${{ steps.matrix.outputs.test-matrix }}
+      freethreaded-matrix: ${{ steps.matrix.outputs.freethreaded-matrix }}
     steps:
       - uses: actions/checkout@v7
       - name: Detect latest downloadable Bloomberg C++ SDK version
@@ -35,6 +43,56 @@ jobs:
         uses: ./.github/actions/setup-blpapi-sdk
         with:
           detect-only: "true"
+
+      # PRs build/test a reduced macOS Python slice (3.11, 3.15, 3.15t) to stay within
+      # GitHub's 5-concurrent macOS runner limit; main runs every supported version.
+      - name: Compute Python build and test matrices
+        id: matrix
+        env:
+          FULL_MACOS: ${{ github.ref == 'refs/heads/main' && 'true' || 'false' }}
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          import os
+
+          full_macos = os.environ["FULL_MACOS"] == "true"
+          all_pythons = ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
+          all_regular = ["3.11", "3.12", "3.13", "3.14", "3.15"]
+          all_ft = ["3.14t", "3.15t"]
+
+          macos_build = all_pythons if full_macos else ["3.11", "3.15", "3.15t"]
+          macos_test = all_regular if full_macos else ["3.11", "3.15"]
+          macos_ft = all_ft if full_macos else ["3.15t"]
+
+          build_include = [
+              *[
+                  {"os": "ubuntu-latest", "target": "x86_64-unknown-linux-gnu", "python": p}
+                  for p in all_pythons
+              ],
+              *[
+                  {"os": "windows-latest", "target": "x86_64-pc-windows-msvc", "python": p}
+                  for p in all_pythons
+              ],
+              *[
+                  {"os": "macos-latest", "target": "aarch64-apple-darwin", "python": p}
+                  for p in macos_build
+              ],
+          ]
+          test_include = [
+              *[{"os": "ubuntu-latest", "python": p} for p in all_regular],
+              *[{"os": "windows-latest", "python": p} for p in all_regular],
+              *[{"os": "macos-latest", "python": p} for p in macos_test],
+          ]
+          ft_include = [
+              *[{"os": "ubuntu-latest", "python": p} for p in all_ft],
+              *[{"os": "windows-latest", "python": p} for p in all_ft],
+              *[{"os": "macos-latest", "python": p} for p in macos_ft],
+          ]
+
+          print(f"build-matrix={json.dumps({'include': build_include}, separators=(',', ':'))}")
+          print(f"test-matrix={json.dumps({'include': test_include}, separators=(',', ':'))}")
+          print(f"freethreaded-matrix={json.dumps({'include': ft_include}, separators=(',', ':'))}")
+          PY
 
   # ════════════════════════════════════════════════════════════════════════════
   # Generate bindings once on Linux, consume artifact on Windows jobs
@@ -275,6 +333,7 @@ jobs:
         with:
           target: x86_64-unknown-linux-gnu
           components: clippy
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Cargo clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
@@ -338,6 +397,7 @@ jobs:
         with:
           target: x86_64-pc-windows-msvc
           components: clippy
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -383,6 +443,7 @@ jobs:
         with:
           target: aarch64-apple-darwin
           components: clippy
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -437,6 +498,7 @@ jobs:
           # Leave build.warnings unset: older Cargo predates it, and older rustc
           # warns about lints added after it.
           build-warnings: ""
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -500,6 +562,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v7
@@ -610,17 +673,18 @@ jobs:
         run: npm --prefix js-xbbg run smoke:packaged-install -- --bun
 
       # The production package was staged and exercised above. Build the
-      # synthetic SDK driver separately; never copy it into a package artifact.
+      # synthetic SDK driver separately with --release so Cargo reuses the
+      # compiled dependencies; never copy it into a package artifact.
       - name: Build subscription native test driver
-        run: cargo build --locked -p napi-xbbg --features test-support
+        run: cargo build --release --locked -p napi-xbbg --features test-support
 
       - name: Stage subscription native test driver
         shell: bash
         run: |
           case "$RUNNER_OS" in
-            Linux) addon=target/debug/libnapi_xbbg.so ;;
-            macOS) addon=target/debug/libnapi_xbbg.dylib ;;
-            Windows) addon=target/debug/napi_xbbg.dll ;;
+            Linux) addon=target/release/libnapi_xbbg.so ;;
+            macOS) addon=target/release/libnapi_xbbg.dylib ;;
+            Windows) addon=target/release/napi_xbbg.dll ;;
             *) exit 1 ;;
           esac
           cp "$addon" js-xbbg/napi_xbbg.node
@@ -730,6 +794,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -786,12 +851,11 @@ jobs:
         run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --release --out "$GITHUB_WORKSPACE/java-natives/release"
 
       # Fixture driver for the Java test matrix; never copied into a jar artifact.
+      # Uses release-jni (without --release) so Cargo reuses dependencies built above
+      # instead of compiling a separate dev profile from scratch.
       - name: Stage test-support natives
         shell: bash
-        env:
-          # Line tables keep native backtraces readable at a fraction of full debug info's size.
-          CARGO_PROFILE_DEV_DEBUG: line-tables-only
-        run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --locked --features test-support --out "$GITHUB_WORKSPACE/java-natives/test"
+        run: ${{ matrix.python }} scripts/stage_jvm_natives.py stage --profile release-jni --locked --features test-support --out "$GITHUB_WORKSPACE/java-natives/test"
 
       - name: Verify staged natives
         shell: bash
@@ -875,23 +939,19 @@ jobs:
           retention-days: 7
 
   java-test:
-    name: Java Test (${{ matrix.platform }}, Java ${{ matrix.java }})
+    name: Java Test (${{ matrix.platform }})
     needs: [sdk-version, java-natives]
-    timeout-minutes: 30
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
-        platform: [linux-x86_64, windows-x86_64, macos-aarch64]
-        java: ["8", "11", "17", "21", "25"]
         include:
           - platform: linux-x86_64
             os: ubuntu-latest
+          # Exactly one configuration (windows-x86_64, Java 21) enforces the JaCoCo minimums
+          # (-Pcoverage); they were measured with the native and subscription fixture tests.
           - platform: windows-x86_64
             os: windows-latest
-          # Exactly one configuration enforces the JaCoCo minimums (-Pcoverage); they were
-          # measured on Java 21 with the native and subscription fixture tests.
-          - platform: windows-x86_64
-            java: "21"
             coverage: true
           - platform: macos-aarch64
             os: macos-15
@@ -925,95 +985,60 @@ jobs:
           name: java-natives-test-${{ matrix.platform }}
           path: java-xbbg/natives/${{ matrix.platform }}
 
-      - name: Setup test JDK
+      - name: Setup Java 8
         uses: actions/setup-java@v6
         with:
           # Temurin publishes no Java 8 build for macOS arm64.
-          distribution: ${{ (matrix.java == '8' && runner.os == 'macOS') && 'zulu' || 'temurin' }}
-          java-version: ${{ matrix.java }}
+          distribution: ${{ runner.os == 'macOS' && 'zulu' || 'temurin' }}
+          java-version: "8"
 
-      - name: Setup build JDK
-        uses: actions/setup-java@v6
-        with:
-          distribution: temurin
-          java-version: "21"
-          cache: maven
-
-      # Compiles on 21 (--release 8/17); surefire forks the tests on the matrix JDK through
-      # the toolchain setup-java registered. -Dxbbg.requireNatives=true fails instead of
-      # skipping when native tests cannot load the fixture natives.
-      - name: Unit and native tests
-        working-directory: java-xbbg
-        shell: bash
-        env:
-          COVERAGE: ${{ matrix.coverage && '-Pcoverage' || '' }}
-        run: ./mvnw -B -Dtest.jdk=${{ matrix.java }} -Dxbbg.requireNatives=true ${COVERAGE:+"$COVERAGE"} verify < /dev/null
-
-  # Newest GA JDK, advisory (not in ci-status): new releases can break before we adapt.
-  java-test-latest:
-    name: Java Test (${{ matrix.platform }}, latest GA Java)
-    needs: [sdk-version, java-natives]
-    timeout-minutes: 30
-    continue-on-error: true
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - platform: linux-x86_64
-            os: ubuntu-latest
-          - platform: windows-x86_64
-            os: windows-latest
-          - platform: macos-aarch64
-            os: macos-15
-    runs-on: ${{ matrix.os }}
-    env:
-      BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
-      XBBG_TEST_SUBSCRIPTIONS: "1"
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Setup Bloomberg SDK
-        id: sdk
-        uses: ./.github/actions/setup-blpapi-sdk
-        with:
-          version: ${{ env.BLPAPI_VERSION }}
-          os: ${{ runner.os }}
-
-      - name: Point the native loader at the Bloomberg runtime
-        shell: bash
-        env:
-          LIB_REL_DIR: ${{ steps.sdk.outputs.lib-rel-dir }}
-          BIN_REL_DIR: ${{ steps.sdk.outputs.bin-rel-dir }}
-        run: |
-          if [[ "$RUNNER_OS" == "Windows" ]]; then dir="$BIN_REL_DIR"; else dir="$LIB_REL_DIR"; fi
-          echo "BLPAPI_LIB_DIR=$GITHUB_WORKSPACE/$dir" >> "$GITHUB_ENV"
-
-      - name: Download test-support natives
-        uses: actions/download-artifact@v8
-        with:
-          name: java-natives-test-${{ matrix.platform }}
-          path: java-xbbg/natives/${{ matrix.platform }}
-
-      - name: Setup latest GA JDK
-        id: latest
+      # Newest GA JDK, advisory: new releases can break before we adapt.
+      - name: Setup latest GA JDK (advisory)
+        id: latest-jdk
+        continue-on-error: true
         uses: actions/setup-java@v6
         with:
           distribution: temurin
           java-version: latest
 
-      - name: Setup build JDK
+      - name: Setup Java 11, 17, 25 and 21 (default)
         uses: actions/setup-java@v6
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: |
+            11
+            17
+            25
+            21
           cache: maven
 
-      - name: Unit and native tests
+      # Compiles on 21 (--release 8/17); surefire forks the tests on each JDK through
+      # the toolchains setup-java registered. -Dxbbg.requireNatives=true fails instead of
+      # skipping when native tests cannot load the fixture natives.
+      - name: Unit and native tests (Java 8, 11, 17, 21, 25)
+        working-directory: java-xbbg
+        shell: bash
+        env:
+          RUN_COVERAGE: ${{ matrix.coverage && 'true' || 'false' }}
+        run: |
+          for jdk in 8 11 17 21 25; do
+            echo "::group::Java $jdk"
+            coverage=""
+            if [[ "$RUN_COVERAGE" == "true" && "$jdk" == "21" ]]; then
+              coverage="-Pcoverage"
+            fi
+            ./mvnw -B "-Dtest.jdk=$jdk" -Dxbbg.requireNatives=true ${coverage:+"$coverage"} verify < /dev/null
+            echo "::endgroup::"
+          done
+
+      - name: Unit and native tests (latest GA Java, advisory)
+        if: steps.latest-jdk.outcome == 'success'
+        continue-on-error: true
         working-directory: java-xbbg
         shell: bash
         env:
           # setup-java registers the resolved version (e.g. 27.0.1+8) as the toolchain version.
-          TEST_JDK: ${{ steps.latest.outputs.version }}
+          TEST_JDK: ${{ steps.latest-jdk.outputs.version }}
         run: ./mvnw -B "-Dtest.jdk=$TEST_JDK" -Dxbbg.requireNatives=true verify < /dev/null
 
   java-consumer-smoke:
@@ -1125,34 +1150,10 @@ jobs:
   # them stays advisory.
   build:
     name: Build (Python ${{ matrix.python }}, ${{ matrix.os }})
-    needs: [sdk-version, generate-bindings, check-linux, check-windows, check-macos]
+    needs: [sdk-version, generate-bindings]
     strategy:
       fail-fast: false
-      matrix:
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15", "3.14t", "3.15t"]
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        target: [x86_64-unknown-linux-gnu, x86_64-pc-windows-msvc, aarch64-apple-darwin]
-        exclude:
-          # Linux target only on ubuntu
-          - os: ubuntu-latest
-            target: x86_64-pc-windows-msvc
-          - os: ubuntu-latest
-            target: aarch64-apple-darwin
-          # Windows target only on windows
-          - os: windows-latest
-            target: x86_64-unknown-linux-gnu
-          - os: windows-latest
-            target: aarch64-apple-darwin
-          - os: macos-latest
-            target: x86_64-unknown-linux-gnu
-          - os: macos-latest
-            target: x86_64-pc-windows-msvc
-        include:
-          # Probe for the ubuntu-latest move to Ubuntu 26.04 (gradual rollout
-          # 2026-10-19 to 2026-11-19). Drop this leg once the rollout completes.
-          - os: ubuntu-26.04
-            target: x86_64-unknown-linux-gnu
-            python: "3.14"
+      matrix: ${{ fromJSON(needs.sdk-version.outputs.build-matrix) }}
 
     runs-on: ${{ matrix.os }}
     env:
@@ -1165,6 +1166,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download pre-generated bindings
         uses: actions/download-artifact@v8
@@ -1261,13 +1263,7 @@ jobs:
     needs: [sdk-version, build]
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.11", "3.12", "3.13", "3.14", "3.15"]
-        include:
-          # Tests the wheel from the Ubuntu 26.04 build probe leg.
-          - os: ubuntu-26.04
-            python: "3.14"
+      matrix: ${{ fromJSON(needs.sdk-version.outputs.test-matrix) }}
 
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
@@ -1361,6 +1357,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download bindings for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.12'
@@ -1418,9 +1415,7 @@ jobs:
     needs: [sdk-version, build]
     strategy:
       fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
-        python: ["3.14t", "3.15t"]
+      matrix: ${{ fromJSON(needs.sdk-version.outputs.freethreaded-matrix) }}
 
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
@@ -1511,6 +1506,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Download bindings for native test-support drivers
         if: matrix.os == 'ubuntu-latest' && matrix.python == '3.14t'
@@ -1693,6 +1689,7 @@ jobs:
         with:
           components: rust-src
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -1768,6 +1765,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Install cargo-binstall
         run: curl -L --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash
@@ -1788,7 +1786,8 @@ jobs:
   ci-status:
     name: CI Status
     runs-on: ubuntu-latest
-    # geiger, abi-compat, semver, test-freethreaded, and java-test-latest are intentionally advisory.
+    # geiger, abi-compat, semver, and test-freethreaded are intentionally advisory
+    # (the latest GA JDK step inside java-test is also advisory).
     needs: [sdk-version, generate-bindings, codegen, lint-rust, lint-python, lint-js, lint-js-langgraph, lint-java, audit, deny, check-linux, check-windows, check-macos, msrv, core-packages, pack-offline-bundles, java-natives, java-package, java-test, java-consumer-smoke, build, test, floors, dataframe-previous-majors]
     if: always()
     steps:
@@ -1809,7 +1808,11 @@ jobs:
   update-stubs:
     name: Update Type Stubs
     needs: [sdk-version, ci-status]
-    if: needs.ci-status.result == 'success' && github.event_name == 'push'
+    if: >-
+      needs.ci-status.result == 'success' && (
+        github.event_name == 'push' ||
+        (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+      )
     runs-on: ubuntu-latest
     container: ghcr.io/${{ github.repository_owner }}/xbbg-ci:latest
     continue-on-error: true
@@ -1818,10 +1821,11 @@ jobs:
       packages: read
     env:
       BLPAPI_VERSION: ${{ needs.sdk-version.outputs.version }}
+      TARGET_BRANCH: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref_name }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.ref }}
+          ref: ${{ github.event_name == 'pull_request' && github.head_ref || github.ref }}
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure git for container
@@ -1841,6 +1845,7 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v2
         with:
           build-warnings: warn
+          cache-save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build stub generator
         run: cargo build -p pyo3-xbbg --bin stub_gen --no-default-features --features live,stub-gen
@@ -1860,5 +1865,5 @@ jobs:
             echo "Type stubs are already up to date"
           else
             git commit -m "chore: regenerate type stubs [skip ci]"
-            git push
+            git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
           fi
