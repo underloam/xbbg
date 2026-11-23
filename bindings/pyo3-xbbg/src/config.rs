@@ -137,7 +137,8 @@ pub struct PyEngineConfig {
     /// Services to pre-warm on startup (default: ["//blp/refdata", "//blp/apiflds"])
     #[pyo3(get, set)]
     pub warmup_services: Vec<String>,
-    /// Custom path for field cache JSON file (default: ~/.xbbg/field_cache.json)
+    /// Custom path for field cache JSON file (default: `~/.xbbg/field_cache.v<N>.json`,
+    /// where `<N>` is the cache format version)
     /// Set to None to use the default path.
     #[pyo3(get, set)]
     pub field_cache_path: Option<String>,

@@ -685,7 +685,8 @@ pub struct EngineConfig {
     /// Name of the result column holding each row's security (default: the
     /// deprecated `ticker`). See [`KeyColumn`].
     pub key_column: KeyColumn,
-    /// Custom path for the field cache JSON file (default: ~/.xbbg/field_cache.json)
+    /// Custom path for the field cache JSON file (default: `~/.xbbg/field_cache.v<N>.json`,
+    /// where `<N>` is the cache format version)
     pub field_cache_path: Option<std::path::PathBuf>,
     /// Structured Bloomberg session auth configuration.
     pub auth: Option<AuthConfig>,

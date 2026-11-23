@@ -6,7 +6,7 @@ Python-friendly API that delegates every call to the Rust ``PyEngine``.
 
 Resolution hierarchy (implemented in Rust):
 1. Manual overrides (``field_types`` parameter)
-2. Disk cache (``~/.xbbg/field_cache.json``)
+2. Disk cache (``~/.xbbg/field_cache.v<N>.json``, named after the cache format version)
 3. Runtime API query (``//blp/apiflds``)
 4. Caller-supplied default type (e.g. ``"string"`` for BDP, ``"float64"`` for BDH)
 """

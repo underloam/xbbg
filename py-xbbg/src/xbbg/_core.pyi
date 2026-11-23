@@ -856,13 +856,15 @@ class PyEngineConfig:
     @property
     def field_cache_path(self) -> typing.Optional[builtins.str]:
         r"""
-        Custom path for field cache JSON file (default: ~/.xbbg/field_cache.json)
+        Custom path for field cache JSON file (default: `~/.xbbg/field_cache.v<N>.json`,
+        where `<N>` is the cache format version)
         Set to None to use the default path.
         """
     @field_cache_path.setter
     def field_cache_path(self, value: typing.Optional[builtins.str]) -> None:
         r"""
-        Custom path for field cache JSON file (default: ~/.xbbg/field_cache.json)
+        Custom path for field cache JSON file (default: `~/.xbbg/field_cache.v<N>.json`,
+        where `<N>` is the cache format version)
         Set to None to use the default path.
         """
     @property

@@ -2,7 +2,8 @@
 //!
 //! Provides automatic field type resolution using a hierarchy:
 //! 1. Manual Override (from Python)
-//! 2. Physical Cache (default: `~/.xbbg/field_cache.json`, configurable via `EngineConfig`)
+//! 2. Physical Cache (default: `~/.xbbg/field_cache.v<N>.json`, named after the cache format
+//!    version; configurable via `EngineConfig`)
 //! 3. API Query (//blp/apiflds service)
 //! 4. Defaults (bdp=String, bdh=Float64)
 //!
@@ -148,9 +149,11 @@ const DEFAULT_MAX_FIELD_CACHE_ENTRIES: usize = 65_536;
 const MAX_FIELD_CACHE_FILE_BYTES: u64 = 64 * 1024 * 1024;
 // Bump when metadata interpretation changes. Earlier snapshots can contain
 // Datetime -> string / Time -> timestamp mappings, or textual ftypes incorrectly
-// mapped to timestamp under the generic Datetime datatype (version 2). Any
-// non-current entry discards the whole snapshot. The next metadata query
-// atomically saves a current-version snapshot at the same configured path.
+// mapped to timestamp under the generic Datetime datatype (version 2). The default
+// file is named after this version, so releases that interpret metadata differently
+// never read each other's entries. A configured path holds one version at a time:
+// any non-current entry discards the whole snapshot, and the next metadata query
+// atomically saves a current-version snapshot at that path.
 const FIELD_CACHE_SCHEMA_VERSION: u32 = 3;
 
 /// Keep the public FieldInfo unchanged while versioning every persisted entry.
@@ -189,7 +192,7 @@ pub struct FieldTypeResolver {
 }
 
 impl FieldTypeResolver {
-    /// Create a new resolver with default cache path (~/.xbbg/field_cache.json).
+    /// Create a new resolver with the default cache path (`~/.xbbg/field_cache.v<N>.json`).
     pub fn new() -> Self {
         Self::with_cache_path(Self::default_cache_path())
     }
@@ -211,22 +214,23 @@ impl FieldTypeResolver {
         }
     }
 
-    /// Get the default cache path.
+    /// Get the default cache path, named after the cache format version.
     fn default_cache_path() -> PathBuf {
+        let file_name = format!("field_cache.v{FIELD_CACHE_SCHEMA_VERSION}.json");
         #[cfg(windows)]
         let home = std::env::var("USERPROFILE").ok().map(PathBuf::from);
         #[cfg(not(windows))]
         let home = std::env::var("HOME").ok().map(PathBuf::from);
 
         match home {
-            Some(h) => h.join(".xbbg").join("field_cache.json"),
+            Some(h) => h.join(".xbbg").join(file_name),
             None => {
                 warn!(
                     "Home directory not found (USERPROFILE/HOME not set). \
                      Field cache will use current directory. Set field_cache_path in \
                      EngineConfig to specify a persistent location."
                 );
-                PathBuf::from(".").join(".xbbg").join("field_cache.json")
+                PathBuf::from(".").join(".xbbg").join(file_name)
             }
         }
     }

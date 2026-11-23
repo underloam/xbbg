@@ -354,9 +354,9 @@ public final class EngineConfig {
   }
 
   /**
-   * Returns the field cache file, or empty for {@code ~/.xbbg/field_cache.json}.
+   * Returns the field cache file, or empty for {@code ~/.xbbg/field_cache.v<N>.json}.
    *
-   * @return the field cache file, or empty for {@code ~/.xbbg/field_cache.json}
+   * @return the field cache file, or empty for {@code ~/.xbbg/field_cache.v<N>.json}
    */
   public Optional<String> fieldCachePath() {
     return Optional.ofNullable(fieldCachePath);
@@ -903,8 +903,8 @@ public final class EngineConfig {
     }
 
     /**
-     * Sets the field cache file (default {@code ~/.xbbg/field_cache.json}; the first engine in the
-     * process wins).
+     * Sets the field cache file (default {@code ~/.xbbg/field_cache.v<N>.json}; the first engine in
+     * the process wins).
      *
      * @param value the file
      * @return this builder
