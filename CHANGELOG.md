@@ -89,6 +89,7 @@ and this project adheres to [Semantic Versioning 2.0.0](https://semver.org/spec/
 ### Security
 
 - **The Rust crates require Arrow 59.3.2 or newer (RUSTSEC-2026-0442).** The workspace lockfile already built with 59.3.2, but the published `xbbg-async`, `xbbg-ext` and `xbbg-recipes` crates accepted any Arrow `^59.2.0`, so a downstream lockfile could keep the affected 59.3.0 or 59.3.1: `RunEndEncoded` `ArrayData::validate_values` read out of bounds. Every Arrow requirement is now `^59.3.2`.
+- **Every package that can download a Bloomberg runtime builds with `url` 2.5.9 (RUSTSEC-2026-0592).** `url` 2.5.8 overflowed the stack in `Url::origin()` on nested `blob:` URLs. The `xbbg-sdk` downloader uses it, so it was in the Python wheels, the npm packages, the Java jar, `xbbg-mcp` and the `xbbg-sdk` binaries. No published crate depends on `url`.
 
 ## [1.8.1] - 2026-11-04
 
