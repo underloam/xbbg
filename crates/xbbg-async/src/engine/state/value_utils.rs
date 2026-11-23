@@ -882,6 +882,11 @@ impl LongStringColumns {
         self.row_count
     }
 
+    /// The Arrow type of the `value` column.
+    pub(crate) fn value_type(&self) -> ArrowType {
+        self.value.arrow_type()
+    }
+
     pub(crate) fn append_refdata_row(
         &mut self,
         ticker: &str,

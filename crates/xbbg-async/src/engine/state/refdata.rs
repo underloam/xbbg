@@ -124,16 +124,8 @@ impl RefDataState {
 
         // Fixed long output modes bypass ColumnSet entirely; keep ColumnSet hints only
         // for dynamic wide/metadata paths that actually append through ColumnSet.
-        // When `include_security_errors` is set, `__SECURITY_ERROR__` rows always write
-        // string messages into `value`, so a numeric field hint cannot narrow the column.
-        let long_value_type =
-            (format == OutputFormat::Long && long_mode == LongMode::String).then(|| {
-                if include_security_errors {
-                    ArrowType::String
-                } else {
-                    common_value_type(&fields, &arrow_types)
-                }
-            });
+        let long_value_type = (format == OutputFormat::Long && long_mode == LongMode::String)
+            .then(|| common_value_type(&fields, &arrow_types));
         let wide_columns =
             (format == OutputFormat::Wide).then(|| WideColumns::refdata(&fields, &arrow_types));
         let mut columns = ColumnSet::new();
@@ -378,11 +370,11 @@ impl RefDataState {
             let detail = format!(
                 "code={code} category={category} subcategory={subcategory} message={message}"
             );
-            long_columns.append_refdata_row(
-                ticker,
-                "__SECURITY_ERROR__",
-                Some(Value::String(detail.as_str())),
-            );
+            // `value` is numeric when every requested field is. The text cannot go there,
+            // so the row's `value` is null and the details stay in `xbbg.security_errors`.
+            let value = (long_columns.value_type() == ArrowType::String)
+                .then_some(Value::String(detail.as_str()));
+            long_columns.append_refdata_row(ticker, "__SECURITY_ERROR__", value);
             return;
         }
         if let Some(typed_columns) = self.typed_long_columns.as_mut() {
@@ -493,7 +485,8 @@ mod tests {
     use crate::engine::state::HistDataState;
     use crate::field_cache::BlpFieldType;
     use arrow_array::{
-        Array, Date32Array, StringArray, Time64MicrosecondArray, TimestampMicrosecondArray,
+        Array, Date32Array, Float64Array, StringArray, Time64MicrosecondArray,
+        TimestampMicrosecondArray,
     };
     use arrow_schema::{DataType, TimeUnit};
     use xbbg_core::EventType;
@@ -1106,7 +1099,7 @@ mod tests {
     }
 
     #[test]
-    fn long_with_numeric_field_types_and_security_errors_keeps_refusal_text() {
+    fn long_with_numeric_field_types_and_security_errors_keeps_a_numeric_value_column() {
         use super::super::value_utils::METADATA_KEY_TYPE_MISSES;
 
         let event = refusal_response(&[("TEST Equity", false), ("REFUSED1 Curncy", true)]);
@@ -1129,13 +1122,14 @@ mod tests {
             ["TEST Equity", "REFUSED1 Curncy"]
         );
         assert_eq!(strings(&batch, "field"), ["VALUE", "__SECURITY_ERROR__"]);
-        assert_eq!(
-            strings(&batch, "value"),
-            [
-                "1.5",
-                "code=9 category=TEST_ERROR subcategory=SYNTHETIC message=Synthetic refusal"
-            ]
-        );
+        let values = batch
+            .column_by_name("value")
+            .unwrap()
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .expect("numeric field types keep a Float64 value column");
+        assert_eq!(values.iter().collect::<Vec<_>>(), [Some(1.5), None]);
+        assert_eq!(security_error_tickers(&batch), ["REFUSED1 Curncy"]);
         assert!(
             !batch
                 .schema_ref()
