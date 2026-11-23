@@ -400,7 +400,8 @@ fn extract_tar_gz(archive_path: &Path, staging: &Path) -> Result<()> {
             .into_owned();
         let entry_type = entry.header().entry_type();
         let raw_str = raw_path.to_string_lossy();
-        let normalized = raw_str.trim_start_matches("./");
+        // Directory entries end with a slash, as in the zip path below.
+        let normalized = raw_str.trim_start_matches("./").trim_end_matches('/');
         if normalized.is_empty() || normalized == "." {
             continue;
         }
@@ -730,12 +731,20 @@ mod tests {
     fn extracts_tar_gz_and_zip_and_rejects_traversal() {
         let tmp = tempfile::tempdir().unwrap();
 
-        // Valid tar.gz with top-level directory unwrap
+        // Valid tar.gz with top-level directory unwrap. Real SDK archives list each
+        // directory as its own entry, named with a trailing slash.
         let tgz = tmp.path().join("sdk.tar.gz");
         {
             let file = File::create(&tgz).unwrap();
             let enc = GzEncoder::new(file, Compression::default());
             let mut builder = tar::Builder::new(enc);
+            for dir in ["blpapi_cpp_3.26.5.1/", "blpapi_cpp_3.26.5.1/include/"] {
+                let mut header = tar::Header::new_gnu();
+                header.set_entry_type(tar::EntryType::Directory);
+                header.set_size(0);
+                header.set_mode(0o755);
+                builder.append_data(&mut header, dir, io::empty()).unwrap();
+            }
             let data = b"/* header */";
             let mut header = tar::Header::new_gnu();
             header.set_size(data.len() as u64);
